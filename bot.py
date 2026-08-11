@@ -29,18 +29,19 @@ def run_flask():
 # ==========================================
 TELEGRAM_TOKEN = "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw"
 CHAT_ID = "1878257830"
+# حتما بررسی کنید که کلید در بخش Environment سایت Render وارد شده باشد
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
 def generate_gemini_response(prompt):
+    """تلاش برای اتصال به مدل‌های پایدار جمینای و نمایش خطای واقعی در صورت شکست"""
     models_to_try = [
-        'gemini-2.5-flash',
-        'gemini-2.0-flash',
-        'gemini-1.5-flash-latest',
         'gemini-1.5-flash',
-        'gemini-1.5-pro'
+        'gemini-1.5-pro',
+        'gemini-1.0-pro'
     ]
+    last_error = ""
     for model_name in models_to_try:
         try:
             m = genai.GenerativeModel(model_name)
@@ -48,8 +49,12 @@ def generate_gemini_response(prompt):
             if res and res.text:
                 return res.text.strip()
         except Exception as e:
+            last_error = str(e)
+            print(f"⚠️ Error with {model_name}: {e}")
             continue
-    return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
+            
+    # اگر هیچ‌کدام کار نکرد، خطای واقعی را برگردان تا بفهمیم مشکل چیست
+    return f"⚠️ ارتباط با جمینای برقرار نشد. جزئیات خطا:\n`{last_error}`"
 
 SYMBOLS = [
     'BTC', 'ETH', 'DEFI', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE',
@@ -77,6 +82,7 @@ def send_telegram_msg(message, chat_target=None):
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
     except Exception as e:
+        print(f"❌ خطا در ارسال پیام تلگرام: {e}")
         return False
 
 # ==========================================
@@ -294,7 +300,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🎯 *استراتژی سخت‌گیرانه (VIP / A+) با موفقیت فعال شد. از این لحظه فقط سیگنال‌های با احتمال برد بسیار بالا صادر می‌شوند.*")
+    send_telegram_msg("🎯 *استراتژی سخت‌گیرانه (VIP / A+) به همراه سیستم عیب‌یاب هوش مصنوعی با موفقیت فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
