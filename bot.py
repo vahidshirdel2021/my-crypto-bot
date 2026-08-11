@@ -29,17 +29,16 @@ def run_flask():
 # ==========================================
 TELEGRAM_TOKEN = "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw"
 CHAT_ID = "1878257830"
-# حتما بررسی کنید که کلید در بخش Environment سایت Render وارد شده باشد
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
 def generate_gemini_response(prompt):
-    """تلاش برای اتصال به مدل‌های پایدار جمینای و نمایش خطای واقعی در صورت شکست"""
+    """استفاده از مدل‌های کاملاً معتبر و فعال جمینای"""
     models_to_try = [
         'gemini-1.5-flash',
         'gemini-1.5-pro',
-        'gemini-1.0-pro'
+        'gemini-2.0-flash'
     ]
     last_error = ""
     for model_name in models_to_try:
@@ -53,7 +52,6 @@ def generate_gemini_response(prompt):
             print(f"⚠️ Error with {model_name}: {e}")
             continue
             
-    # اگر هیچ‌کدام کار نکرد، خطای واقعی را برگردان تا بفهمیم مشکل چیست
     return f"⚠️ ارتباط با جمینای برقرار نشد. جزئیات خطا:\n`{last_error}`"
 
 SYMBOLS = [
@@ -214,22 +212,18 @@ def check_symbol(coin_symbol):
     curr = df.iloc[-2]
     close_p = float(curr['close'])
     
-    # ۱. فیلتر فاصله بسیار نزدیک به حمایت/مقاومت (کاهش به ۱٪)
     near_support = (abs(close_p - lower_mid) / lower_mid < 0.01) or (abs(close_p - mid_price) / mid_price < 0.01)
     near_resistance = (abs(close_p - upper_mid) / upper_mid < 0.01) or (abs(close_p - mid_price) / mid_price < 0.01)
     
-    # ۲. فیلتر حجم سنگین (حداقل ۵۰٪ بیشتر از میانگین)
     volume_ok = float(curr['volume']) > (float(curr['vol_ma']) * 1.5)
     
     macd_long_ok = float(curr['macd']) > float(curr['macd_signal'])
     macd_short_ok = float(curr['macd']) < float(curr['macd_signal'])
     rsi_val = float(curr['rsi'])
     
-    # ۳. تایید هم‌زمان روند ۱ ساعته و ۴ ساعته
     trend_long_ok = (close_p > ema_1h_val) and (close_p > ema_4h_val)
     trend_short_ok = (close_p < ema_1h_val) and (close_p < ema_4h_val)
     
-    # ۴. محدوده RSI بهینه
     rsi_long_ok = 40 < rsi_val < 65
     rsi_short_ok = 35 < rsi_val < 60
     
@@ -300,7 +294,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🎯 *استراتژی سخت‌گیرانه (VIP / A+) به همراه سیستم عیب‌یاب هوش مصنوعی با موفقیت فعال شد.*")
+    send_telegram_msg("🤖 *ربات با مدل‌های آپدیت‌شده جمینای و اسکنر سخت‌گیرانه فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
