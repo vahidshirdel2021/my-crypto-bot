@@ -2,7 +2,7 @@ def get_bottom_menu_keyboard():
     return {
         "keyboard": [
             [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
-            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 انتخاب استراتژی"}]
+            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 مدیریت تنظیمات معامله"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
