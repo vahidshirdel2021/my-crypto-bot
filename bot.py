@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return f"OK - CoinEx High-Frequency Bot Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
+    return f"OK - CoinEx 5M Scalper Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
 
 @app.route('/health')
 def health():
@@ -48,8 +48,7 @@ if COINEX_API_KEY and COINEX_SECRET:
 ALL_SYMBOLS = [
     'BTC', 'ETH', 'SOL', 'AVAX', 'BNB', 'ADA', 'DOT', 'DOGE', 'LINK', 'XRP',
     'NEAR', 'INJ', 'TRX', 'MATIC', 'FTM', 'SAND', 'MANA', 'ATOM', 'LTC', 'BCH',
-    'APT', 'SUI', 'OP', 'ARB', 'RNDR', 'FET', 'PEPE', 'SHIB', 'GALA', 'DYDX',
-    'TIA', 'SEI', 'STX', 'FIL', 'ETC', 'XLM', 'UNI', 'AAVE', 'MKR', 'GRT'
+    'APT', 'SUI', 'OP', 'ARB', 'RNDR', 'FET', 'PEPE', 'SHIB', 'GALA', 'DYDX'
 ]
 
 ACTIVE_SYMBOLS = ALL_SYMBOLS.copy()
@@ -71,23 +70,23 @@ def send_main_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "📊 تحلیل BTC", "callback_data": "/analyze BTC"},
-                {"text": "⚡ تحلیل ETH", "callback_data": "/analyze ETH"},
-                {"text": "🚀 تحلیل SOL", "callback_data": "/analyze SOL"}
+                {"text": "⚡ اسکالپ BTC (5m)", "callback_data": "/analyze BTC"},
+                {"text": "⚡ اسکالپ ETH (5m)", "callback_data": "/analyze ETH"},
+                {"text": "⚡ اسکالپ SOL (5m)", "callback_data": "/analyze SOL"}
             ],
             [
-                {"text": "📋 واچ‌لیست فعال", "callback_data": "/active_coins"},
+                {"text": "📋 واچ‌لیست ۵ دقیقه‌ای", "callback_data": "/active_coins"},
                 {"text": "💼 استعلام حساب کوین‌اکس", "callback_data": "/balance"}
             ]
         ]
     }
-    msg = "🎛 *پنل مدیریت ربات سیگنال‌دهی سریع (تایم‌فریم ۱۵ دقیقه)*\n\nیکی از گزینه‌ها را انتخاب کنید:"
+    msg = "🎛 *پنل ربات اسکالپینگ پرسرعت (تایم‌فریم ۵ دقیقه)*\n\nیک گزینه را انتخاب کنید:"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۲. دریافت داده‌های ۱۵ دقیقه‌ای و ۱ ساعته
+# ۲. دریافت داده‌های ۵ دقیقه‌ای
 # ==========================================
-def get_crypto_klines(coin_symbol, interval_type="15min", limit=200):
+def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
     headers = {"User-Agent": "Mozilla/5.0"}
     
@@ -109,38 +108,41 @@ def get_crypto_klines(coin_symbol, interval_type="15min", limit=200):
     return pd.DataFrame()
 
 def calculate_indicators(df):
-    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
-    
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift()).abs()
-    low_close = (df['low'] - df['close'].shift()).abs()
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(window=14).mean()
-    
-    up = df['high'].diff()
-    down = -df['low'].diff()
-    pos_dm = up.where((up > down) & (up > 0), 0)
-    neg_dm = down.where((down > up) & (down > 0), 0)
-    
-    tr_smooth = tr.rolling(window=14).sum()
-    pos_dm_smooth = pos_dm.rolling(window=14).sum()
-    neg_dm_smooth = neg_dm.rolling(window=14).sum()
-    
-    pos_di = 100 * (pos_dm_smooth / tr_smooth)
-    neg_di = 100 * (neg_dm_smooth / tr_smooth)
-    dx = 100 * (pos_di - neg_di).abs() / (pos_di + neg_di)
-    df['adx'] = dx.rolling(window=14).mean()
+    try:
+        df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+        
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift()).abs()
+        low_close = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df['atr'] = tr.rolling(window=14).mean()
+        
+        up = df['high'].diff()
+        down = -df['low'].diff()
+        pos_dm = up.where((up > down) & (up > 0), 0)
+        neg_dm = down.where((down > up) & (down > 0), 0)
+        
+        tr_smooth = tr.rolling(window=14).sum()
+        pos_dm_smooth = pos_dm.rolling(window=14).sum()
+        neg_dm_smooth = neg_dm.rolling(window=14).sum()
+        
+        pos_di = 100 * (pos_dm_smooth / tr_smooth)
+        neg_di = 100 * (neg_dm_smooth / tr_smooth)
+        dx = 100 * (pos_di - neg_di).abs() / (pos_di + neg_di)
+        df['adx'] = dx.rolling(window=14).mean()
+    except Exception as e:
+        print(f"خطا در محاسبه اندیکاتورها: {e}")
     
     return df
 
 # ==========================================
-# ۳. ثبت معامله در صرافی CoinEx
+# ۳. ثبت معامله خودکار در CoinEx
 # ==========================================
 def execute_coinex_order(symbol, side, amount, sl_price, tp_price):
     if not exchange:
@@ -155,63 +157,65 @@ def execute_coinex_order(symbol, side, amount, sl_price, tp_price):
             side=side.lower(),
             amount=amount
         )
-        print(f"✅ معامله در CoinEx ثبت شد: {order.get('id')}")
-        send_telegram_msg(f"⚡ *معامله خودکار در CoinEx ثبت شد!*\n🔹 ارز: `{symbol}` | جهت: `{side}`")
+        print(f"✅ سفارش اسکالپ ۵m در CoinEx ثبت شد: {order.get('id')}")
+        send_telegram_msg(f"⚡ *معامله اسکالپ ۵ دقیقه در CoinEx ثبت شد!*\n🔹 ارز: `{symbol}` | جهت: `{side}`")
         return True
     except Exception as e:
         print(f"❌ خطا در ثبت معامله CoinEx: {e}")
         return False
 
 # ==========================================
-# ۴. اسکن زنده (تایم‌فریم ۱۵ دقیقه)
+# ۴. اسکن زنده اسکالپینگ (تایم‌فریم ۵ دقیقه)
 # ==========================================
 def check_symbol(coin_symbol):
-    df = get_crypto_klines(coin_symbol, interval_type="15min", limit=200)
-    if df.empty or len(df) < 30:
-        return
+    try:
+        df_5m = get_crypto_klines(coin_symbol, interval_type="5min", limit=200)
+        if df_5m.empty or len(df_5m) < 50:
+            return
+            
+        df_5m = calculate_indicators(df_5m)
+        curr, prev = df_5m.iloc[-2], df_5m.iloc[-3]
         
-    df = calculate_indicators(df)
-    curr, prev = df.iloc[-2], df.iloc[-3]
-    
-    close_p, open_p = float(curr['close']), float(curr['open'])
-    rsi_curr, rsi_prev = float(curr['rsi']), float(prev['rsi'])
-    adx_val, atr_val = float(curr['adx']), float(curr['atr'])
-    ema_val = float(curr['ema200'])
-    
-    trend_long = close_p > ema_val and adx_val > 15
-    trend_short = close_p < ema_val and adx_val > 15
-    
-    # شرط تعدیل‌شده: RSI کمتر از ۴۸ برای خرید و بیشتر از ۵۲ برای فروش
-    pullback_long = trend_long and (rsi_prev < 48) and (rsi_curr > rsi_prev) and (close_p > open_p)
-    pullback_short = trend_short and (rsi_prev > 52) and (rsi_curr < rsi_prev) and (close_p < open_p)
-    
-    if pullback_long:
-        sl = close_p - (atr_val * 1.8)
-        tp = close_p + (atr_val * 2.5)
-        msg = (
-            f"🚀 *سیگنال خرید ۱۵ دقیقه‌ای (Long)*\n\n"
-            f"🔹 *ارز:* `{coin_symbol}/USDT`\n"
-            f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
-            f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
-            f"🛑 *حد زیان (SL):* `{sl:.4f}`\n"
-            f"📈 *ADX:* `{adx_val:.1f}` | *RSI:* `{rsi_curr:.1f}`"
-        )
-        send_telegram_msg(msg)
-        execute_coinex_order(coin_symbol, 'BUY', 1, sl, tp)
+        close_p, open_p = float(curr['close']), float(curr['open'])
+        rsi_curr, rsi_prev = float(curr['rsi']), float(prev['rsi'])
+        adx_val, atr_val = float(curr['adx']), float(curr['atr'])
+        ema_val = float(curr['ema200'])
         
-    elif pullback_short:
-        sl = close_p + (atr_val * 1.8)
-        tp = close_p - (atr_val * 2.5)
-        msg = (
-            f"🔻 *سیگنال فروش ۱۵ دقیقه‌ای (Short)*\n\n"
-            f"🔹 *ارز:* `{coin_symbol}/USDT`\n"
-            f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
-            f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
-            f"🛑 *حد زیان (SL):* `{sl:.4f}`\n"
-            f"📈 *ADX:* `{adx_val:.1f}` | *RSI:* `{rsi_curr:.1f}`"
-        )
-        send_telegram_msg(msg)
-        execute_coinex_order(coin_symbol, 'SELL', 1, sl, tp)
+        trend_long = close_p > ema_val and adx_val > 14
+        trend_short = close_p < ema_val and adx_val > 14
+        
+        pullback_long = trend_long and (rsi_prev < 50) and (rsi_curr > rsi_prev) and (close_p > open_p)
+        pullback_short = trend_short and (rsi_prev > 50) and (rsi_curr < rsi_prev) and (close_p < open_p)
+        
+        if pullback_long:
+            sl = close_p - (atr_val * 1.2)
+            tp = close_p + (atr_val * 1.8)
+            msg = (
+                f"⚡ *سیگنال اسکالپ خرید ۵ دقیقه‌ای (Long)*\n\n"
+                f"🔹 *ارز:* `{coin_symbol}/USDT`\n"
+                f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
+                f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
+                f"🛑 *حد زیان (SL):* `{sl:.4f}`\n"
+                f"📈 *ADX:* `{adx_val:.1f}` | *RSI:* `{rsi_curr:.1f}`"
+            )
+            send_telegram_msg(msg)
+            execute_coinex_order(coin_symbol, 'BUY', 1, sl, tp)
+            
+        elif pullback_short:
+            sl = close_p + (atr_val * 1.2)
+            tp = close_p - (atr_val * 1.8)
+            msg = (
+                f"⚡ *سیگنال اسکالپ فروش ۵ دقیقه‌ای (Short)*\n\n"
+                f"🔹 *ارز:* `{coin_symbol}/USDT`\n"
+                f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
+                f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
+                f"🛑 *حد زیان (SL):* `{sl:.4f}`\n"
+                f"📈 *ADX:* `{adx_val:.1f}` | *RSI:* `{rsi_curr:.1f}`"
+            )
+            send_telegram_msg(msg)
+            execute_coinex_order(coin_symbol, 'SELL', 1, sl, tp)
+    except Exception as e:
+        print(f"خطا در اسکن {coin_symbol}: {e}")
 
 def process_command(text, chat_id):
     parts = text.strip().split()
@@ -221,7 +225,7 @@ def process_command(text, chat_id):
     if cmd in ["/start", "/menu", "/help"]:
         send_main_menu(chat_id)
     elif cmd in ["/active_coins", "/coins"]:
-        send_telegram_msg(f"📋 *تعداد ارزهای فعال در اسکن ۱۵دقیقه‌ای:* `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
+        send_telegram_msg(f"📋 *تعداد ارزهای فعال در اسکن ۵دقیقه‌ای:* `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
     elif cmd in ["/balance", "/bal"]:
         if exchange:
             try:
@@ -254,15 +258,15 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("⚡ *اسکنر ۱۵ دقیقه‌ای پرسرعت فعال شد.*")
+    send_telegram_msg("🚀 *اسکنر اسکالپینگ ۵ دقیقه‌ای پرسرعت فعال شد.*")
     while True:
         for sym in ACTIVE_SYMBOLS:
             try:
                 check_symbol(sym)
             except Exception:
                 pass
-            time.sleep(0.5)
-        time.sleep(180)  # تکرار اسکن هر ۳ دقیقه
+            time.sleep(0.3)
+        time.sleep(45)
 
 if __name__ == "__main__":
     Thread(target=telegram_listener, daemon=True).start()
