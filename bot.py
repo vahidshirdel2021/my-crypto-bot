@@ -1,22 +1,26 @@
 import os
+import time
+from datetime import datetime
 from threading import Thread
 from flask import Flask
 import requests
 import pandas as pd
-import time
-from datetime import datetime
 
 # ==========================================
-# ۰. وب‌سرور کوچک برای Render
+# ۰. وب‌سرور Flask برای Render و UptimeRobot
 # ==========================================
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running 24/7!"
+    return "OK - Bot is active and running 24/7!", 200
+
+@app.route('/health')
+def health():
+    return "OK", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
@@ -73,7 +77,7 @@ def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
     return pd.DataFrame()
 
 # ==========================================
-# ۲. محاسبات اندیکاتورها با پایتون خالص
+# ۲. محاسبات اندیکاتورها
 # ==========================================
 def calculate_indicators(df):
     df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -152,17 +156,11 @@ def check_symbol(coin_symbol):
         send_telegram_msg(msg)
         print(f"✅ سیگنال فروش فرستاده شد: {display_name}")
 
-# ==========================================
-# ۳. اجرای اصلی برنامه
-# ==========================================
-if __name__ == "__main__":
-    # روشن کردن وب‌سرور در پس‌زمینه
-    server_thread = Thread(target=run_flask)
-    server_thread.daemon = True
-    server_thread.start()
-    
-    print("🚀 در حال راه‌اندازی ربات روی Render...")
-    send_telegram_msg("🟢 *ربات سیگنال‌دهی با موفقیت روی سرور Render راه‌اندازی و روشن شد.*")
+def bot_loop():
+    """حلقه اسکن بازار در Thread مجزا"""
+    time.sleep(5)  # مهلت اولیه به سرور Flask برای بالامدن کامل
+    print("🚀 در حال راه‌اندازی ربات...")
+    send_telegram_msg("🟢 *ربات سیگنال‌دهی بر روی سرور Render به‌صورت ۲۴/۷ فعال گردید.*")
     
     while True:
         for sym in SYMBOLS:
@@ -174,3 +172,14 @@ if __name__ == "__main__":
         
         print("\n⏱️ اسکن ۱۳ ارز کامل شد. انتظار ۱ ساعته تا کندل بعدی...\n")
         time.sleep(3600)
+
+# ==========================================
+# ۳. اجرای اصلی
+# ==========================================
+if __name__ == "__main__":
+    # اجرای اسکریپت ربات در نخ پس‌زمینه
+    t = Thread(target=bot_loop, daemon=True)
+    t.start()
+    
+    # اجرای وب‌سرور روی نخ اصلی جهت پاسخ‌گویی به پینگ Render / UptimeRobot
+    run_flask()
