@@ -280,13 +280,16 @@ def send_full_performance(chat_id):
     send_telegram_msg(generate_report(24, "روزانه (۲۴ ساعت)"), chat_target=chat_id)
     send_telegram_msg(generate_report(720, "ماهانه (۳۰ روز)"), chat_target=chat_id)
 
-def process_command(data, chat_id):
-    global IS_BOT_ACTIVE
+def def process_command(data, chat_id):
+    global IS_BOT_ACTIVE, TRADING_MODE, INITIAL_BALANCE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME
+    
     cmd = data.strip().lower()
     
+    # اصلاح اصلی: دستور استارت باید حتماً ویزارد (انتخاب حساب واقعی یا کاغذی) را شروع کند
     if cmd in ["/start", "/wizard_start", "تنظیمات مجدد"]:
         IS_BOT_ACTIVE = False
-        send_main_menu(chat_id)
+        send_welcome_mode_menu(chat_id)
+        
     elif cmd in ["/menu", "/main_menu", "menu", "منوی اصلی"]:
         send_main_menu(chat_id)
     elif cmd in ["/performance", "گزارش عملکرد"]:
@@ -297,12 +300,56 @@ def process_command(data, chat_id):
     elif cmd == "/close_all":
         send_telegram_msg(close_all_open_positions(), chat_target=chat_id)
         send_main_menu(chat_id)
+    elif cmd == "/mode_real":
+        usdt_balance = 0.0
+        if exchange:
+            try:
+                bal = exchange.fetch_balance()
+                usdt_balance = float(bal.get('total', {}).get('USDT', 0.0))
+            except Exception as e:
+                send_telegram_msg(f"⚠️ خطا در صرافی: {e}", chat_target=chat_id)
+                return
+
+        if usdt_balance <= 0:
+            send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر (۰) است. امکان شروع معاملات واقعی وجود ندارد.", chat_target=chat_id)
+            send_welcome_mode_menu(chat_id)
+        else:
+            TRADING_MODE = "REAL"
+            PAPER_BALANCE = usdt_balance
+            DAILY_START_BALANCE = usdt_balance
+            send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`", chat_target=chat_id)
+            send_margin_menu(chat_id)
+    elif cmd == "/mode_paper":
+        TRADING_MODE = "PAPER"
+        send_capital_menu(chat_id)
+    elif cmd in ["/set_cap_500", "/set_cap_1000", "/set_cap_5000", "/set_cap_10000"]:
+        cap = float(cmd.replace("/set_cap_", ""))
+        INITIAL_BALANCE, PAPER_BALANCE, DAILY_START_BALANCE = cap, cap, cap
+        CLOSED_POSITIONS.clear()
+        PAPER_POSITIONS.clear()
+        send_margin_menu(chat_id)
+    elif cmd in ["/set_margin_10", "/set_margin_25", "/set_margin_50", "/set_margin_100"]:
+        TRADE_AMOUNT_USDT = float(cmd.replace("/set_margin_", ""))
+        send_leverage_menu(chat_id)
+    elif cmd in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
+        LEVERAGE = int(cmd.replace("/set_lev_", ""))
+        send_max_positions_menu(chat_id)
+    elif cmd.startswith("/set_max_"):
+        MAX_OPEN_POSITIONS = int(cmd.replace("/set_max_", ""))
+        send_timeframe_menu(chat_id)
     elif cmd in ["/open_positions", "پوزیشن‌های باز"]:
         txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n\n" + "".join([f"• `{p['symbol']}` ({p['side']})\n" for p in PAPER_POSITIONS]) if PAPER_POSITIONS else "پوزیشن بازی وجود ندارد."
         send_telegram_msg(txt, chat_target=chat_id)
     elif cmd in ["/closed_positions", "تاریخچه معاملات"]:
         txt = "📜 *آخرین معاملات بسته شده:*\n\n" + "".join([f"• `{p['symbol']}` - سود: `{p.get('pnl_usdt',0):+.2f} USDT`\n" for p in CLOSED_POSITIONS[-5:][::-1]]) if CLOSED_POSITIONS else "معامله بسته‌شده‌ای نیست."
         send_telegram_msg(txt, chat_target=chat_id)
+    elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
+        if cmd == "/set_tf_5m": TIMEFRAME = "5min"
+        elif cmd == "/set_tf_15m": TIMEFRAME = "15min"
+        elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
+        IS_BOT_ACTIVE = True
+        send_telegram_msg("🚀 تنظیمات ذخیره و اسکن زنده آغاز شد.", chat_target=chat_id)
+        send_main_menu(chat_id)
 
 def telegram_listener():
     last_id = None
