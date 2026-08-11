@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return f"OK - Advanced Interactive Scalper Active! TF: {TIMEFRAME} | Lev: {LEVERAGE}X", 200
+    return f"OK - Scalper Active! Open: {len(PAPER_POSITIONS)} | Closed: {len(CLOSED_POSITIONS)}", 200
 
 @app.route('/health')
 def health():
@@ -55,7 +55,6 @@ if COINEX_API_KEY and COINEX_SECRET:
     except Exception as e:
         print(f"⚠️ خطا در راه‌اندازی API: {e}")
 
-# لیست ۱۲۷ نماد استاندارد استخراج‌شده
 ALL_SYMBOLS = [
     'BTC', 'ETH', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC',
     'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL',
@@ -96,8 +95,12 @@ def send_main_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [
+                {"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"},
+                {"text": "📜 تاریخچه معاملات بسته", "callback_data": "/closed_positions"}
+            ],
+            [
                 {"text": "📋 واچ‌لیست ارزها", "callback_data": "/active_coins"},
-                {"text": "📈 گزارش PnL", "callback_data": "/pnl"}
+                {"text": "📈 گزارش کلی PnL", "callback_data": "/pnl"}
             ],
             [
                 {"text": "⏱ تغییر تایم‌فریم", "callback_data": "/menu_timeframe"},
@@ -115,7 +118,7 @@ def send_main_menu(chat_id):
         f"🔹 *سرمایه کل:* `${PAPER_BALANCE:.2f} USDT` (اولیه: `${INITIAL_BALANCE:.0f}`)\n"
         f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *مارجین معامله:* `${TRADE_AMOUNT_USDT:.0f}`\n"
         f"🔹 *تایم‌فریم اسکن:* `{tf_display}`\n"
-        f"🔹 *تعداد نمادها:* `{len(ACTIVE_SYMBOLS)} ارز`\n\n"
+        f"🔹 *پوزیشن‌های فعال:* `{len(PAPER_POSITIONS)}` | *بسته‌شده:* `{len(CLOSED_POSITIONS)}`\n\n"
         f"یک گزینه را جهت مدیریت انتخاب کنید:"
     )
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
@@ -163,7 +166,7 @@ def send_capital_menu(chat_id):
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۳. دریافت داده‌ها و محاسبه اندیکاتورها
+# ۳. دریافت داده‌ها و اندیکاتورها
 # ==========================================
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -356,6 +359,60 @@ def check_symbol(coin_symbol):
     except Exception as e:
         print(f"خطا در اسکن {coin_symbol}: {e}")
 
+# ==========================================
+# ۶. توابع تولید گزارش معاملات باز و بسته
+# ==========================================
+def get_open_positions_report():
+    if not PAPER_POSITIONS:
+        return "🔄 *در حال حاضر هیچ پوزیشن بازی وجود ندارد.*"
+    
+    text = f"🔄 *گزارش پوزیشن‌های باز ({len(PAPER_POSITIONS)} معامله):*\n\n"
+    for pos in PAPER_POSITIONS:
+        sym = pos['symbol']
+        df = get_crypto_klines(sym, interval_type=pos.get('timeframe', TIMEFRAME), limit=2)
+        curr_p = float(df.iloc[-1]['close']) if not df.empty else pos['entry_price']
+        
+        entry = pos['entry_price']
+        lev = pos['leverage']
+        margin = pos['margin']
+        
+        if "BUY" in pos['side']:
+            raw_pnl = ((curr_p - entry) / entry) * 100
+        else:
+            raw_pnl = ((entry - curr_p) / entry) * 100
+            
+        floating_pnl_pct = raw_pnl * lev
+        floating_pnl_usdt = (margin * floating_pnl_pct) / 100
+        pnl_icon = "🟢" if floating_pnl_usdt >= 0 else "🔴"
+        
+        text += (
+            f"🔹 *نماد:* `{sym}/USDT` | `{pos['side']}` ({lev}X)\n"
+            f"   • ورود: `{entry:.4f}` | قیمت فعلی: `{curr_p:.4f}`\n"
+            f"   • 🎯 TP: `{pos['tp']:.4f}` | 🛑 SL: `{pos['sl']:.4f}`\n"
+            f"   • {pnl_icon} سود/زیان شناور: `{floating_pnl_pct:+.2f}%` (`{floating_pnl_usdt:+.2f} USDT`)\n"
+            f"   • زمان ورود: `{pos['open_time']}`\n"
+            f"-----------------------------------\n"
+        )
+    return text
+
+def get_closed_positions_report():
+    if not CLOSED_POSITIONS:
+        return "📜 *هنوز هیچ معاملاتی بسته نشده است.*"
+    
+    text = f"📜 *تاریخچه ۱۰ معامله بسته شده اخیر ({len(CLOSED_POSITIONS)} کل):*\n\n"
+    recent_closed = CLOSED_POSITIONS[-10:][::-1] # ۱۰ معامله آخر
+    
+    for pos in recent_closed:
+        pnl_icon = "🟢" if pos['pnl_usdt'] >= 0 else "🔴"
+        text += (
+            f"{pnl_icon} *نماد:* `{pos['symbol']}/USDT` | `{pos['side']}` ({pos['leverage']}X)\n"
+            f"   • علت خروج: `{pos['exit_reason']}`\n"
+            f"   • ورود: `{pos['entry_price']:.4f}` | بسته‌شدن: `{pos['close_time']}`\n"
+            f"   • سود/زیان: `{pos['pnl_pct']:+.2f}%` (`{pos['pnl_usdt']:+.2f} USDT`)\n"
+            f"-----------------------------------\n"
+        )
+    return text
+
 def get_pnl_report():
     total_closed = len(CLOSED_POSITIONS)
     wins = sum(1 for p in CLOSED_POSITIONS if p['pnl_usdt'] > 0)
@@ -393,7 +450,7 @@ def get_strategy_info():
     return info
 
 # ==========================================
-# ۶. مدیریت دستورات و Callbackهای تلگرام
+# ۷. مدیریت دستورات و Callbackهای تلگرام
 # ==========================================
 def process_command(data, chat_id):
     global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS
@@ -402,6 +459,10 @@ def process_command(data, chat_id):
     
     if cmd in ["/start", "/menu", "/main_menu", "menu"]:
         send_main_menu(chat_id)
+    elif cmd in ["/open_positions", "/open"]:
+        send_telegram_msg(get_open_positions_report(), chat_target=chat_id)
+    elif cmd in ["/closed_positions", "/closed"]:
+        send_telegram_msg(get_closed_positions_report(), chat_target=chat_id)
     elif cmd in ["/active_coins", "/coins"]:
         send_telegram_msg(f"📋 *واچ‌لیست فعال ({len(ACTIVE_SYMBOLS)} ارز):*\n`{', '.join(ACTIVE_SYMBOLS[:30])}...`", chat_target=chat_id)
     elif cmd in ["/pnl", "/report", "/balance"]:
@@ -489,7 +550,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🚀 *ربات هوشمند معامله‌گر با پنل مدیریتی جدید فعال شد.*")
+    send_telegram_msg("🚀 *ربات معامله‌گر با دکمه‌های گزارش معاملات باز و بسته فعال شد.*")
     while True:
         try:
             update_open_positions()
