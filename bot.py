@@ -3,7 +3,6 @@ import time
 import requests
 import ccxt
 import pandas as pd
-from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
 
@@ -15,7 +14,7 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     status_str = "ACTIVE" if IS_BOT_ACTIVE else "PAUSED"
-    return f"OK - Mode: {TRADING_MODE} | Status: {status_str} | Active Coins: {len(ACTIVE_SYMBOLS)}", 200
+    return f"OK - Mode: {TRADING_MODE} | Status: {status_str} | TF: {TIMEFRAME} | Active Coins: {len(ACTIVE_SYMBOLS)}", 200
 
 @app.route('/health')
 def health():
@@ -26,21 +25,21 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات اولیه و متغیرها
+# ۱. تنظیمات اولیه و متغیرهای پویا
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
-TRADING_MODE = "PAPER"
-IS_BOT_ACTIVE = False
-INITIAL_BALANCE = 1000.0
+TRADING_MODE = "PAPER"      # "REAL" یا "PAPER"
+IS_BOT_ACTIVE = False       # وضعیت اسکن معاملات
+INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
 PAPER_BALANCE = INITIAL_BALANCE
-TRADE_AMOUNT_USDT = 50.0
-LEVERAGE = 10
-MAX_OPEN_POSITIONS = 3
-TIMEFRAME = "5min"
+TRADE_AMOUNT_USDT = 50.0   # مارجین هر معامله
+LEVERAGE = 10              # اهرم پیش‌فرض
+MAX_OPEN_POSITIONS = 3     # حداکثر معاملات هم‌زمان
+TIMEFRAME = "5min"         # تایم‌فریم پیش‌فرض
 
-MAX_DAILY_LOSS_PCT = 5.0
+MAX_DAILY_LOSS_PCT = 5.0   # سقف زیان روزانه ۵٪
 DAILY_START_BALANCE = INITIAL_BALANCE
 
 PAPER_POSITIONS = []
@@ -58,9 +57,9 @@ if COINEX_API_KEY and COINEX_SECRET:
             'enableRateLimit': True,
             'options': {'defaultType': 'swap'}
         })
-        print("✅ اتصال به صرافی برقرار شد.")
+        print("✅ اتصال به صرافی CoinEx برقرار شد.")
     except Exception as e:
-        print(f"⚠️ خطا در API: {e}")
+        print(f"⚠️ خطا در راه‌اندازی API: {e}")
 
 ALL_SYMBOLS = [
     'BTC', 'ETH', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC',
@@ -90,7 +89,7 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
     except Exception as e:
-        print(f"❌ خطا در ارسال پیام: {e}")
+        print(f"❌ خطا در ارسال پیام تلگرام: {e}")
         return False
 
 def send_persistent_keyboard(chat_id):
@@ -104,7 +103,7 @@ def send_persistent_keyboard(chat_id):
     send_telegram_msg("سیستم مدیریت آماده است.", chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۲. منوهای مرحله‌به‌مرحله و پنل اصلی
+# ۲. منوهای ویزارد و پنل اصلی
 # ==========================================
 def send_welcome_mode_menu(chat_id):
     send_persistent_keyboard(chat_id)
@@ -202,7 +201,7 @@ def send_main_menu(chat_id):
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۳. استراتژی پویا
+# ۳. پارامترهای استراتژی پویا
 # ==========================================
 def get_strategy_params(tf):
     if tf == "5min":
@@ -213,7 +212,7 @@ def get_strategy_params(tf):
         return {"adx_min": 18, "sl_atr": 1.5, "tp_atr": 2.5, "rsi_buy": 50, "rsi_sell": 50}
 
 # ==========================================
-# ۴. تحلیل و اندیکاتورها
+# ۴. دریافت داده‌ها و محاسبه اندیکاتورها
 # ==========================================
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -309,7 +308,7 @@ def analyze_single_coin(symbol, chat_id):
     send_telegram_msg(report, chat_target=chat_id)
 
 # ==========================================
-# ۵. اجرای معاملات
+# ۵. اجرای معاملات و مدیریت پوزیشن‌ها
 # ==========================================
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE
@@ -463,8 +462,24 @@ def process_command(data, chat_id):
     elif cmd.startswith("/analyze"):
         analyze_single_coin(data, chat_id)
     elif cmd == "/mode_real":
-        TRADING_MODE = "REAL"
-        send_margin_menu(chat_id)
+        usdt_balance = 0.0
+        if exchange:
+            try:
+                bal = exchange.fetch_balance()
+                usdt_balance = float(bal.get('total', {}).get('USDT', 0.0))
+            except Exception as e:
+                send_telegram_msg(f"⚠️ خطا در صرافی: {e}", chat_target=chat_id)
+                return
+
+        if usdt_balance <= 0:
+            send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر (۰) است. امکان شروع معاملات واقعی وجود ندارد.", chat_target=chat_id)
+            send_welcome_mode_menu(chat_id)
+        else:
+            TRADING_MODE = "REAL"
+            PAPER_BALANCE = usdt_balance
+            DAILY_START_BALANCE = usdt_balance
+            send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`", chat_target=chat_id)
+            send_margin_menu(chat_id)
     elif cmd == "/mode_paper":
         TRADING_MODE = "PAPER"
         send_capital_menu(chat_id)
