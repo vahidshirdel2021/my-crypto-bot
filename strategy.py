@@ -33,34 +33,43 @@ def get_strategy_params(timeframe):
         return {"adx": 20, "sl": 1.5, "tp": 2.0}
     elif timeframe == "15min":
         return {"adx": 22, "sl": 1.8, "tp": 2.5}
-    else:
+    elif timeframe == "1hour":
         return {"adx": 25, "sl": 2.0, "tp": 3.0}
+    else: # حالت مولتی تایم فریم آبشاری
+        return {"adx": 20, "sl": 1.5, "tp": 2.0}
 
-def get_signal(df_5m, df_1h=None):
-    if df_5m.empty or len(df_5m) < 50:
+def get_signal(df_primary, market_data_dict=None, timeframe_mode="5min"):
+    if df_primary.empty or len(df_primary) < 50:
         return None
     
-    curr = df_5m.iloc[-2]
-    prev = df_5m.iloc[-3]
+    curr = df_primary.iloc[-2]
+    prev = df_primary.iloc[-3]
     
-    higher_tf_bullish = True
-    higher_tf_bearish = True
-    
-    if df_1h is not None and not df_1h.empty and len(df_1h) > 20:
-        h_curr = df_1h.iloc[-2]
-        higher_tf_bullish = h_curr['close'] > h_curr['ema50']
-        higher_tf_bearish = h_curr['close'] < h_curr['ema50']
-
     adx_ok = curr.get('adx', 30) > 20
     is_uptrend = curr['close'] > curr['ema50'] and curr['ema20'] > curr['ema50']
     is_downtrend = curr['close'] < curr['ema50'] and curr['ema20'] < curr['ema50']
     
     pullback_buy = prev['low'] <= prev['ema20'] and curr['close'] > curr['ema20']
     pullback_sell = prev['high'] >= prev['ema20'] and curr['close'] < curr['ema20']
-    
-    if is_uptrend and pullback_buy and adx_ok and higher_tf_bullish:
+
+    # اگر حالت مولتی تایم‌فریم آبشاری انتخاب شده باشد
+    if timeframe_mode == "multi":
+        if market_data_dict:
+            # بررسی روند کلان از روزانه تا 15 دقیقه (Daily -> 4h -> 1h -> 15m)
+            for tf in ['1d', '4h', '1h', '15m']:
+                df_tf = market_data_dict.get(tf)
+                if df_tf is not None and not df_tf.empty and len(df_tf) > 20:
+                    h_curr = df_tf.iloc[-2]
+                    # اگر حتی در یک تایم‌فریم روند مخالف باشد، سیگنال تایید نمی‌شود
+                    if is_uptrend and h_curr['close'] < h_curr['ema50']:
+                        return None
+                    if is_downtrend and h_curr['close'] > h_curr['ema50']:
+                        return None
+
+    # بررسی نهایی سیگنال در تایم‌فریم پایه
+    if is_uptrend and pullback_buy and adx_ok:
         return "BUY"
-    elif is_downtrend and pullback_sell and adx_ok and higher_tf_bearish:
+    elif is_downtrend and pullback_sell and adx_ok:
         return "SELL"
         
     return None
