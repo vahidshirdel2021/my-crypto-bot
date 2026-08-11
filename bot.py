@@ -117,22 +117,19 @@ def send_main_menu(chat_id, message_id=None):
     keyboard = get_main_menu_keyboard(IS_BOT_ACTIVE)
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
-    coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
-    try:
-        url = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval_type}"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("code") == "200000" and data.get("data"):
-                df = pd.DataFrame(data["data"], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-                df = df.iloc[::-1].reset_index(drop=True)
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                if not df.empty and len(df) > 30:
-                    return df
-    except: pass
-    return pd.DataFrame()
+df = get_crypto_klines(text_val, interval_type="5min", limit=100)
+if not df.empty:
+    df = calculate_indicators(df)
+    signal, reason = get_signal_with_reason(df, timeframe=TIMEFRAME)
+    curr = df.iloc[-2]
+    send_telegram_msg(
+        f"🔍 *تحلیل آنی نماد `{text_val}`*\n\n"
+        f"• قیمت: `{curr['close']}`\n"
+        f"• EMA20: `{curr['ema20']:.2f}` | EMA50: `{curr['ema50']:.2f}`\n"
+        f"• ADX: `{curr['adx']:.2f}`\n\n"
+        f"📝 *نتیجه ارزیابی استراتژی:*\n`{reason}`",
+        chat_target=chat_id
+    )
 
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE, PAPER_BALANCE
