@@ -175,12 +175,10 @@ def send_timeframe_menu(chat_id, message_id=None):
     send_telegram_msg("⚙️ انتخاب تایم‌فریم معاملاتی جدید:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
 def send_main_menu(chat_id, message_id=None):
-    send_persistent_keyboard(chat_id)
     tf_display = "5m" if TIMEFRAME == "5min" else ("15m" if TIMEFRAME == "15min" else "1h")
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
     mode_str = "معامله واقعی" if TRADING_MODE == "REAL" else "معامله کاغذی"
     max_pos = f"{MAX_OPEN_POSITIONS}" if MAX_OPEN_POSITIONS > 0 else "نامحدود"
-    toggle_text = "توقف/شروع اسکن" if IS_BOT_ACTIVE else "توقف/شروع اسکن"
     active_btn_text = "🟢 روشن کردن اسکن" if not IS_BOT_ACTIVE else "🔴 متوقف کردن اسکن"
     
     keyboard = {
@@ -332,13 +330,13 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip().lower()
     
     if cmd in ["/start", "/menu", "/main_menu", "menu", "منوی اصلی"]:
+        send_persistent_keyboard(chat_id)
         send_main_menu(chat_id, message_id=message_id)
         
     elif cmd in ["/wizard_start", "تنظیمات مجدد"]:
         if IS_BOT_ACTIVE:
             send_telegram_msg("⚠️ ابتدا اسکن زنده را متوقف کنید، سپس تنظیمات را تغییر دهید.", chat_target=chat_id)
         else:
-            # مستقیماً به تنظیم مارجین می‌رود بدون دستکاری موجودی
             send_margin_menu(chat_id, message_id=message_id)
             
     elif cmd == "/analyze_single":
@@ -402,8 +400,14 @@ def telegram_listener():
                         m = r["message"]
                         chat_id = m["chat"]["id"]
                         text = m.get("text", "").strip()
-                        # اگر کاربر نام ارزی را فرستاد برای تحلیل تک‌ارز
-                        if text and not text.startswith("/"):
+                        
+                        # بررسی دستورات کیبورد ثابت
+                        persistent_commands = ["منوی اصلی", "گزارش عملکرد", "پوزیشن‌های باز", "تاریخچه معاملات"]
+                        
+                        if text in persistent_commands or text.startswith("/"):
+                            process_command(text, chat_id)
+                        elif text:
+                            # اگر کاربر نام ارزی را فرستاد برای تحلیل تک‌ارز
                             df = get_crypto_klines(text, interval_type=TIMEFRAME, limit=100)
                             if not df.empty:
                                 df = calculate_indicators(df)
@@ -411,8 +415,6 @@ def telegram_listener():
                                 send_telegram_msg(f"🔍 *تحلیل آنی نماد `{text.upper()}`*\n• قیمت فعلی: `{curr['close']}`\n• اندیکاتور EMA20: `{curr['ema20']:.2f}`\n• اندیکاتور ADX: `{curr['adx']:.2f}`", chat_target=chat_id)
                             else:
                                 send_telegram_msg(f"❌ اطلاعاتی برای نماد `{text}` یافت نشد.", chat_target=chat_id)
-                        else:
-                            process_command(text, chat_id)
         except Exception as e:
             print(f"❌ خطا در دریافت آپدیت‌ها: {e}")
         time.sleep(2)
