@@ -231,12 +231,22 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    # مدیریت دکمه‌های متنی ثابت پایین صفحه
-    if cmd in ["🏠 منوی اصلی", "/menu"]:
+    # مدیریت دکمه‌های متنی ثابت پایین صفحه (بر اساس کلمات کلیدی برای جلوگیری از خطای ایموجی)
+    if "منوی اصلی" in cmd or cmd_lower == "/menu":
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
         return
-    elif cmd in ["📈 گزارش عملکرد کلی", "/performance"]:
+    elif "پوزیشن‌های باز" in cmd or cmd_lower == "/open_positions":
+        if PAPER_POSITIONS:
+            txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n"
+            for p in PAPER_POSITIONS:
+                txt += f"• `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
+            txt += f"\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
+        else:
+            txt = f"پوزیشن بازی وجود ندارد.\n\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
+        send_telegram_msg(txt, chat_target=chat_id)
+        return
+    elif "گزارش عملکرد" in cmd or cmd_lower == "/performance":
         total_pnl = sum(p.get('pnl_usdt', 0) for p in CLOSED_POSITIONS)
         wins = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) > 0]
         losses = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) < 0]
@@ -249,11 +259,11 @@ def process_command(data, chat_id, message_id=None):
             chat_target=chat_id
         )
         return
-    elif cmd in ["📊 انتخاب استراتژی", "/strategies_list"]:
+    elif "انتخاب استراتژی" in cmd or cmd_lower == "/strategies_list":
         send_telegram_msg("📊 *انتخاب استراتژی برای تشریح کامل:* روی هر استراتژی کلیک کنید تا جزئیات و پارامترهای آن را مشاهده کنید:", chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
         return
 
-    # مدیریت دستورات و دکمه‌های شیشه‌ای
+    # مدیریت سایر دستورات و دکمه‌های شیشه‌ای
     if cmd_lower == "/start":
         IS_BOT_ACTIVE = False
         USER_STATE = None
@@ -347,16 +357,6 @@ def process_command(data, chat_id, message_id=None):
         
         send_telegram_msg("🚀 تنظیمات جدید با موفقیت اعمال شد. اکنون می‌توانید اسکن را روشن کنید.", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
-        
-    elif cmd_lower == "/open_positions":
-        if PAPER_POSITIONS:
-            txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n"
-            for p in PAPER_POSITIONS:
-                txt += f"• `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
-            txt += f"\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
-        else:
-            txt = f"پوزیشن بازی وجود ندارد.\n\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
-        send_telegram_msg(txt, chat_target=chat_id)
 
 def telegram_listener():
     global USER_STATE, ACTIVE_SYMBOLS
@@ -372,7 +372,8 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        if not data.startswith("/") and data not in ["🏠 منوی اصلی", "📈 گزارش عملکرد کلی", "📊 انتخاب استراتژی"]:
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "انتخاب استراتژی"])
+                        if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
                                 df = get_crypto_klines(text_val, interval_type="5min", limit=100)
