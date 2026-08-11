@@ -228,6 +228,7 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
+    # مدیریت دکمه‌های متنی ثابت پایین صفحه
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
@@ -255,8 +256,11 @@ def process_command(data, chat_id, message_id=None):
             chat_target=chat_id
         )
         return
-    elif "انتخاب استراتژی" in cmd or cmd_lower == "/strategies_list":
-        send_telegram_msg("📊 *انتخاب استراتژی برای تشریح کامل:* روی هر استراتژی کلیک کنید تا جزئیات و پارامترهای آن را مشاهده کنید:", chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
+    elif "مدیریت تنظیمات" in cmd or cmd_lower == "/check_wizard":
+        if IS_BOT_ACTIVE:
+            send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای محافظت از موجودی و جلوگیری از تداخل در معاملات، لطفا ابتدا اسکن را متوقف کنید.", chat_target=chat_id)
+        else:
+            send_telegram_msg("⚙️ *تغییر تنظیمات*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
         return
 
     if cmd_lower == "/start":
@@ -287,8 +291,6 @@ def process_command(data, chat_id, message_id=None):
             PAPER_BALANCE = usdt_balance
             DAILY_START_BALANCE = usdt_balance
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مقدار مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
-    elif cmd_lower == "/check_wizard":
-        send_telegram_msg("⚙️ تغییر تنظیمات - مقدار موجودی اولیه جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_balance_keyboard(), message_id=message_id)
     elif cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
@@ -349,7 +351,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "انتخاب استراتژی"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
