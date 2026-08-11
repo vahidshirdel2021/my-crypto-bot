@@ -34,11 +34,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dX
 genai.configure(api_key=GEMINI_API_KEY)
 
 def generate_gemini_response(prompt):
-    """استفاده از مدل‌های کاملاً معتبر و فعال جمینای"""
+    """استفاده اختصاصی از مدل‌های رسمی و کاملاً پایدار ۱.۵"""
     models_to_try = [
         'gemini-1.5-flash',
-        'gemini-1.5-pro',
-        'gemini-2.0-flash'
+        'gemini-1.5-pro'
     ]
     last_error = ""
     for model_name in models_to_try:
@@ -294,7 +293,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات با مدل‌های آپدیت‌شده جمینای و اسکنر سخت‌گیرانه فعال شد.*")
+    send_telegram_msg("🤖 *ربات با مدل‌های رسمی و پایدار جمینای فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
