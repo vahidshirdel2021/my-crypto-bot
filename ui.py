@@ -1,3 +1,12 @@
+def get_bottom_menu_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "🏠 منوی اصلی"}, {"text": "📈 گزارش عملکرد کلی"}],
+            [{"text": "📊 انتخاب استراتژی"}]
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False
+    }
 def get_start_keyboard():
     return {
         "inline_keyboard": [
