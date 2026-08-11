@@ -6,7 +6,7 @@ import ccxt
 import pandas as pd
 from threading import Thread
 from flask import Flask
-from strategy import calculate_indicators, get_signal, get_strategy_params
+from strategy import calculate_indicators, get_signal, get_strategy_params, get_strategy_description
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard
@@ -23,7 +23,7 @@ DAILY_START_BALANCE = 1000.0
 TRADE_AMOUNT_USDT = 50.0
 LEVERAGE = 10
 MAX_OPEN_POSITIONS = 3
-TIMEFRAME = "5min"
+TIMEFRAME = "5min" # گزینه‌ها: 5min, 15min, 1hour, multi
 
 PAPER_POSITIONS = []
 CLOSED_POSITIONS = []
@@ -90,11 +90,10 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=N
         return False
 
 def send_main_menu(chat_id, message_id=None):
-    tf_display = "5m" if TIMEFRAME == "5min" else ("15m" if TIMEFRAME == "15min" else "1h")
+    tf_display = "5م" if TIMEFRAME == "5min" else ("15م" if TIMEFRAME == "15min" else ("1س" if TIMEFRAME == "1hour" else "مولتی آبشاری"))
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
     mode_str = "معامله واقعی" if TRADING_MODE == "REAL" else "معامله کاغذی"
     max_pos = f"{MAX_OPEN_POSITIONS}" if MAX_OPEN_POSITIONS > 0 else "نامحدود"
-    p = get_strategy_params(TIMEFRAME)
     
     msg = (
         f"📊 *پنل مدیریت پیشرفته ربات معامله‌گر*\n\n"
@@ -103,7 +102,7 @@ def send_main_menu(chat_id, message_id=None):
         f"• موجودی حساب: `${PAPER_BALANCE:.2f} USDT`\n"
         f"• مارجین هر معامله: `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
         f"• اهرم: `{LEVERAGE}X` | پوزیشن: `{max_pos}`\n"
-        f"• تایم‌فریم: `{tf_display}` (ADX > {p['adx']})\n"
+        f"• تایم‌فریم: `{tf_display}`\n"
         f"• تعداد ارزهای واچ‌لیست: `{len(ACTIVE_SYMBOLS)}`"
     )
     keyboard = get_main_menu_keyboard(IS_BOT_ACTIVE)
@@ -150,7 +149,7 @@ def update_open_positions():
     if not PAPER_POSITIONS: return
 
     for pos in PAPER_POSITIONS[:]:
-        df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', TIMEFRAME), limit=5)
+        df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', TIMEFRAME) if pos.get('timeframe') != 'multi' else '5min', limit=5)
         if df.empty: continue
         high, low = float(df.iloc[-1]['high']), float(df.iloc[-1]['low'])
         
@@ -174,20 +173,28 @@ def update_open_positions():
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE: return
     try:
-        df_5m = get_crypto_klines(coin_symbol, interval_type="5min", limit=200)
-        if df_5m.empty or len(df_5m) < 50: return
-        df_5m = calculate_indicators(df_5m)
-        
-        df_1h = get_crypto_klines(coin_symbol, interval_type="1hour", limit=100)
-        if not df_1h.empty and len(df_1h) > 30:
-            df_1h = calculate_indicators(df_1h)
+        if TIMEFRAME == "multi":
+            market_data = {}
+            for tf_key, tf_val in [('1d', '1day'), ('4h', '4hour'), ('1h', '1hour'), ('15m', '15min'), ('5m', '5min')]:
+                df_t = get_crypto_klines(coin_symbol, interval_type=tf_val, limit=100)
+                if not df_t.empty:
+                    market_data[tf_key] = calculate_indicators(df_t)
+            df_5m = market_data.get('5m')
+            if df_5m is None or df_5m.empty or len(df_5m) < 50: return
+            signal = get_signal(df_5m, market_data_dict=market_data, timeframe_mode="multi")
+            primary_df = df_5m
         else:
-            df_1h = None
+            tf_api_map = {"5min": "5min", "15min": "15min", "1hour": "1hour"}
+            api_tf = tf_api_map.get(TIMEFRAME, "5min")
+            df_primary = get_crypto_klines(coin_symbol, interval_type=api_tf, limit=200)
+            if df_primary.empty or len(df_primary) < 50: return
+            df_primary = calculate_indicators(df_primary)
+            signal = get_signal(df_primary, timeframe_mode="single")
+            primary_df = df_primary
         
-        signal = get_signal(df_5m, df_1h)
         if not signal: return
         
-        curr = df_5m.iloc[-2]
+        curr = primary_df.iloc[-2]
         close_p = float(curr['close'])
         atr = float(curr['atr'])
         p = get_strategy_params(TIMEFRAME)
@@ -226,7 +233,7 @@ def process_command(data, chat_id, message_id=None):
                 send_telegram_msg(f"⚠️ خطا در ارتباط با صرافی: {e}", chat_target=chat_id)
                 return
         if usdt_balance <= 0:
-            send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر (یا عدم دسترسی به API) است.", chat_target=chat_id)
+            send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر است.", chat_target=chat_id)
         else:
             TRADING_MODE = "REAL"
             PAPER_BALANCE = usdt_balance
@@ -265,14 +272,20 @@ def process_command(data, chat_id, message_id=None):
         
     elif cmd.startswith("/set_max_"):
         MAX_OPEN_POSITIONS = int(cmd.replace("/set_max_", ""))
-        send_telegram_msg("⚙️ تایم‌فریم معاملاتی جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_timeframe_keyboard(), message_id=message_id)
+        send_telegram_msg("⚙️ تایم‌فریم معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=get_timeframe_keyboard(), message_id=message_id)
         
-    elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
+    elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h", "/set_tf_multi"]:
         if cmd == "/set_tf_5m": TIMEFRAME = "5min"
         elif cmd == "/set_tf_15m": TIMEFRAME = "15min"
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
+        elif cmd == "/set_tf_multi": TIMEFRAME = "multi"
+        
+        # ارسال تشریح پویای استراتژی بر اساس تایم‌فریم جدید
+        desc = get_strategy_description(TIMEFRAME)
+        send_telegram_msg(desc, chat_target=chat_id)
+        
         IS_BOT_ACTIVE = True
-        send_telegram_msg("🚀 تنظیمات ذخیره شد و اسکن زنده با پارامترهای جدید آغاز گردید.", chat_target=chat_id)
+        send_telegram_msg("🚀 تنظیمات ذخیره شد و اسکن زنده آغاز گردید.", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
         
     elif cmd == "/open_positions":
@@ -292,7 +305,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     if data:
                         if data and not data.startswith("/") and data not in ["منوی اصلی"]:
-                            df = get_crypto_klines(data, interval_type=TIMEFRAME, limit=100)
+                            df = get_crypto_klines(data, interval_type="5min", limit=100)
                             if not df.empty:
                                 df = calculate_indicators(df)
                                 curr = df.iloc[-2]
