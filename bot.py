@@ -89,10 +89,22 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
         print(f"❌ خطا در ارسال پیام تلگرام: {e}")
         return False
 
+def send_persistent_keyboard(chat_id):
+    # کیبورد ثابت در پایین صفحه
+    keyboard = {
+        "keyboard": [
+            [{"text": "🎛 منوی اصلی"}]
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True
+    }
+    send_telegram_msg("📍 *دکمه منوی اصلی در پایین صفحه فعال شد.*", chat_target=chat_id, reply_markup=keyboard)
+
 # ==========================================
 # ۲. منوهای راه‌اندازی و تعاملی
 # ==========================================
 def send_welcome_mode_menu(chat_id):
+    send_persistent_keyboard(chat_id)
     keyboard = {
         "inline_keyboard": [
             [{"text": "🔴 شروع معاملات با موجودی واقعی", "callback_data": "/mode_real"}],
@@ -164,8 +176,8 @@ def send_main_menu(chat_id):
                 {"text": "📜 تاریخچه معاملات بسته", "callback_data": "/closed_positions"}
             ],
             [
-                {"text": "📋 واچ‌لیست ارزها", "callback_data": "/active_coins"},
-                {"text": "🗑 مدیریت و حذف ارز", "callback_data": "/menu_manage_coins"}
+                {"text": "🔎 تحلیل ارز دلخواه", "callback_data": "/menu_analyze_coin"},
+                {"text": "📋 واچ‌لیست ارزها", "callback_data": "/active_coins"}
             ],
             [
                 {"text": "📈 گزارش کلی PnL", "callback_data": "/pnl"},
@@ -245,7 +257,56 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# ۴. سیستم معاملات واقعی و کاغذی
+# ۴. تحلیل تک‌ارز طبق استراتژی
+# ==========================================
+def analyze_single_coin(symbol, chat_id):
+    clean_sym = symbol.upper().replace("USDT", "").replace("/", "").replace("/ANALYZE", "").strip()
+    if not clean_sym:
+        send_telegram_msg("⚠️ لطفاً نماد ارز را وارد کنید (مثال: `/analyze BTC`).", chat_target=chat_id)
+        return
+
+    df = get_crypto_klines(clean_sym, interval_type=TIMEFRAME, limit=200)
+    if df.empty or len(df) < 50:
+        send_telegram_msg(f"❌ داده‌های قیمت برای ارز `{clean_sym}` دریافت نشد.", chat_target=chat_id)
+        return
+
+    df = calculate_indicators(df)
+    curr, prev = df.iloc[-2], df.iloc[-3]
+
+    close_p, open_p = float(curr['close']), float(curr['open'])
+    rsi_curr, rsi_prev = float(curr['rsi']), float(prev['rsi'])
+    adx_val, atr_val = float(curr['adx']), float(curr['atr'])
+    ema_val = float(curr['ema200'])
+
+    trend_long = close_p > ema_val and adx_val > 14
+    trend_short = close_p < ema_val and adx_val > 14
+
+    pullback_long = trend_long and (rsi_prev < 50) and (rsi_curr > rsi_prev) and (close_p > open_p)
+    pullback_short = trend_short and (rsi_prev > 50) and (rsi_curr < rsi_prev) and (close_p < open_p)
+
+    trend_str = "🟢 صعودی (بالای EMA200)" if close_p > ema_val else "🔴 نزولی (زیر EMA200)"
+    signal_str = "🟡 فاقد سیگنال ورود در این کندل"
+    if pullback_long:
+        signal_str = "🚀 *سیگنال ورود خرید (Long)*"
+    elif pullback_short:
+        signal_str = "🔻 *سیگنال ورود فروش (Short)*"
+
+    tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
+
+    report = (
+        f"🔎 *گزارش تحلیل فنی {clean_sym}/USDT*\n\n"
+        f"⏱ *تایم‌فریم:* `{tf_display}`\n"
+        f"💵 *قیمت فعلی:* `{close_p:.4f}`\n"
+        f"📈 *میانگین EMA200:* `{ema_val:.4f}` ({trend_str})\n"
+        f"📊 *شاخص RSI (14):* `{rsi_curr:.1f}` (کندل قبل: `{rsi_prev:.1f}`)\n"
+        f"⚡ *قدرت روند ADX:* `{adx_val:.1f}`\n"
+        f"📏 *نوسان ATR:* `{atr_val:.4f}`\n\n"
+        f"🎯 *وضعیت سیگنال:* {signal_str}"
+    )
+    send_telegram_msg(report, chat_target=chat_id)
+
+# ==========================================
+# ۵. سیستم معاملات واقعی و کاغذی
 # ==========================================
 def execute_trade(symbol, side, price, sl, tp):
     if not IS_BOT_ACTIVE:
@@ -409,7 +470,7 @@ def update_open_positions():
             send_telegram_msg(msg)
 
 # ==========================================
-# ۵. اسکن زنده
+# ۶. اسکن زنده
 # ==========================================
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE:
@@ -447,7 +508,7 @@ def check_symbol(coin_symbol):
         print(f"خطا در اسکن {coin_symbol}: {e}")
 
 # ==========================================
-# ۶. توابع گزارش‌گیری
+# ۷. توابع گزارش‌گیری
 # ==========================================
 def get_open_positions_report():
     if not PAPER_POSITIONS:
@@ -523,7 +584,7 @@ def get_pnl_report():
     return report
 
 # ==========================================
-# ۷. مدیریت دستورات و Callbackهای تلگرام
+# ۸. مدیریت دستورات و Callbackهای تلگرام
 # ==========================================
 def process_command(data, chat_id):
     global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE
@@ -531,9 +592,16 @@ def process_command(data, chat_id):
     text_raw = data.strip()
     cmd = text_raw.lower()
     
-    if cmd in ["/start", "/menu", "/main_menu", "menu"]:
+    if cmd in ["/start", "/menu", "/main_menu", "menu", "🎛 منوی اصلی"]:
         IS_BOT_ACTIVE = False  # خاموش کردن اسکن موقع شروع مجدد تنظیمات
         send_welcome_mode_menu(chat_id)
+
+    elif cmd == "/menu_analyze_coin":
+        msg = "🔎 *جهت تحلیل تک‌ارز طبق استراتژی، دستور زیر را ارسال فرمایید:*\n\n`/analyze BTC` یا `/analyze ETH`"
+        send_telegram_msg(msg, chat_target=chat_id)
+
+    elif cmd.startswith("/analyze"):
+        analyze_single_coin(text_raw, chat_id)
 
     # انتخاب حالت معامله واقعی
     elif cmd == "/mode_real":
@@ -603,32 +671,6 @@ def process_command(data, chat_id):
         
     elif cmd in ["/active_coins", "/coins"]:
         send_telegram_msg(f"📋 *واچ‌لیست فعال ({len(ACTIVE_SYMBOLS)} ارز):*\n`{', '.join(ACTIVE_SYMBOLS[:35])}...`", chat_target=chat_id)
-        
-    elif cmd == "/menu_manage_coins":
-        msg = (
-            f"🗑 *مدیریت واچ‌لیست ارزها:*\n\n"
-            f"برای حذف ارز از اسکن دستور زیر را بفرستید:\n"
-            f"`/del_BTC` یا `/del_ETH`\n\n"
-            f"برای اضافه کردن مجدد ارز دستور زیر را بفرستید:\n"
-            f"`/add_BTC` یا `/add_ETH`"
-        )
-        send_telegram_msg(msg, chat_target=chat_id)
-
-    elif cmd.startswith("/del_"):
-        sym_to_del = text_raw.replace("/del_", "").upper().replace("USDT", "").strip()
-        if sym_to_del in ACTIVE_SYMBOLS:
-            ACTIVE_SYMBOLS.remove(sym_to_del)
-            send_telegram_msg(f"✅ *ارز {sym_to_del} با موفقیت از واچ‌لیست حذف شد.*\nارزهای باقی‌مانده: `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
-        else:
-            send_telegram_msg(f"⚠️ *ارز {sym_to_del} در واچ‌لیست یافت نشد.*", chat_target=chat_id)
-
-    elif cmd.startswith("/add_"):
-        sym_to_add = text_raw.replace("/add_", "").upper().replace("USDT", "").strip()
-        if sym_to_add not in ACTIVE_SYMBOLS:
-            ACTIVE_SYMBOLS.append(sym_to_add)
-            send_telegram_msg(f"✅ *ارز {sym_to_add} به واچ‌لیست اضافه شد.*\nتعداد کل ارزها: `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
-        else:
-            send_telegram_msg(f"⚠️ *ارز {sym_to_add} قبلاً در واچ‌لیست وجود داشت.*", chat_target=chat_id)
 
     elif cmd in ["/pnl", "/report", "/balance"]:
         send_telegram_msg(get_pnl_report(), chat_target=chat_id)
