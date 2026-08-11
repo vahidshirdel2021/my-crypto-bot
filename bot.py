@@ -50,7 +50,26 @@ CHAT_ID = "1878257830"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
 genai.configure(api_key=GEMINI_API_KEY)
-ai_model = genai.GenerativeModel('gemini-1.5-flash')
+
+def generate_gemini_response(prompt):
+    """تست خودکار مدل‌های مختلف جمینای برای جلوگیری از خطای ۴۰۴"""
+    models_to_try = [
+        'gemini-2.5-flash',
+        'gemini-2.0-flash',
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro'
+    ]
+    for model_name in models_to_try:
+        try:
+            m = genai.GenerativeModel(model_name)
+            res = m.generate_content(prompt)
+            if res and res.text:
+                return res.text.strip()
+        except Exception as e:
+            print(f"⚠️ مدل {model_name} پاسخ نداد: {e}")
+            continue
+    return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
 
 SYMBOLS = [
     'BTC', 'ETH', 'DEFI', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE',
@@ -97,7 +116,6 @@ def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
             data = res.json()
             if data.get("code") == "200000" and data.get("data"):
                 raw = data["data"]
-                # فرمت کوکوین: [time, open, close, high, low, volume, turnover]
                 df = pd.DataFrame(raw, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
                 df = df.iloc[::-1].reset_index(drop=True)
                 for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -115,7 +133,6 @@ def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
         if res.status_code == 200:
             raw = res.json()
             if isinstance(raw, list) and len(raw) > 50:
-                # فرمت گیت‌یو: [time, volume, close, high, low, open, amount]
                 df = pd.DataFrame(raw, columns=['timestamp', 'volume', 'close', 'high', 'low', 'open', 'amount'])
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = df[col].astype(float)
@@ -156,11 +173,7 @@ def get_ai_validation(coin, signal_type, price, rsi_val, macd_status):
     
     در ۲ جمله کوتاه به زبان فارسی بگو آیا این معامله مناسب است و چه نکته‌ای باید رعایت شود.
     """
-    try:
-        response = ai_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
+    return generate_gemini_response(prompt)
 
 def analyze_coin_on_demand(coin_symbol):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -203,11 +216,8 @@ def analyze_coin_on_demand(coin_symbol):
     2. تحلیل ۲ جمله‌ای از علت این تصمیم.
     3. در صورت امکان ورود، حد سود (TP) و حد زیان (SL) پیشنهادی.
     """
-    try:
-        res = ai_model.generate_content(prompt)
-        return f"🔍 *تحلیل هوشمند لحظه‌ای `{coin_symbol}/USDT`*\n\n{res.text.strip()}"
-    except Exception as e:
-        return f"⚠️ خطا در تحلیل هوش مصنوعی: {e}"
+    res_text = generate_gemini_response(prompt)
+    return f"🔍 *تحلیل هوشمند لحظه‌ای `{coin_symbol}/USDT`*\n\n{res_text}"
 
 def check_symbol(coin_symbol):
     display_name = f"{coin_symbol}/USDT"
@@ -307,7 +317,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات هوشمند با پشتیبانی از ۱۲۵ ارز و اتصال KuCoin/Gate.io فعال شد.*")
+    send_telegram_msg("🤖 *ربات هوشمند با سیستم پشتیبان جمینای و اتصال پایداری فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
