@@ -31,23 +31,18 @@ CHAT_ID = "1878257830"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
 def generate_gemini_response(prompt):
-    """فراخوانی مستقیم و بدون واسطه REST API جمینای"""
-    # لیست آدرس‌های مستقیم API برای مدل‌های رسمی
-    api_endpoints = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
-    ]
-    
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-    headers = {'Content-Type': 'application/json'}
+    """ارسال مستقیم و گزارش شفاف خطای گوگل در صورت عدم پاسخ‌گویی"""
+    models = ["gemini-1.5-flash", "gemini-1.5-pro"]
+    last_error = ""
 
-    last_err = ""
-    for url in api_endpoints:
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
         try:
             res = requests.post(url, json=payload, headers=headers, timeout=12)
             if res.status_code == 200:
@@ -58,12 +53,12 @@ def generate_gemini_response(prompt):
                     if parts:
                         return parts[0].get("text", "").strip()
             else:
-                last_err = f"HTTP {res.status_code}: {res.text[:150]}"
+                last_error = f"کد {res.status_code}: {res.text[:250]}"
         except Exception as e:
-            last_err = str(e)
+            last_error = str(e)
             continue
 
-    return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
+    return f"⚠️ جمینای پاسخ نداد. علت دقیق:\n`{last_error}`"
 
 SYMBOLS = [
     'BTC', 'ETH', 'DEFI', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE',
@@ -305,7 +300,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات با سیستم جدید و مستقیم HTTP API جمینای فعال شد.*")
+    send_telegram_msg("🤖 *ربات با عیب‌یاب شفاف اجرا شد.*")
     while True:
         for sym in SYMBOLS:
             try:
