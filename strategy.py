@@ -5,11 +5,9 @@ def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return df
     
-    # میانگین‌های متحرک نمایی (EMA)
     df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
     
-    # محاسبه ATR برای حد سود و زیان
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift())
     low_close = np.abs(df['low'] - df['close'].shift())
@@ -17,7 +15,6 @@ def calculate_indicators(df):
     true_range = np.max(ranges, axis=1)
     df['atr'] = true_range.rolling(14).mean()
     
-    # محاسبه شاخص قدرت روند (ADX ساده‌شده)
     plus_dm = df['high'].diff()
     minus_dm = df['low'].diff()
     plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
@@ -46,27 +43,21 @@ def get_signal(df_5m, df_1h=None):
     curr = df_5m.iloc[-2]
     prev = df_5m.iloc[-3]
     
-    # ۱. فیلتر روند تایم‌فریم بالاتر (۱ ساعته)
     higher_tf_bullish = True
     higher_tf_bearish = True
     
     if df_1h is not None and not df_1h.empty and len(df_1h) > 20:
         h_curr = df_1h.iloc[-2]
-        # اگر در تایم بالا قیمت بالای EMA50 باشد یعنی روند کلان صعودی است
         higher_tf_bullish = h_curr['close'] > h_curr['ema50']
         higher_tf_bearish = h_curr['close'] < h_curr['ema50']
 
-    # ۲. بررسی شرایط تکنیکال در تایم‌فریم ۵ دقیقه
     adx_ok = curr.get('adx', 30) > 20
-    
     is_uptrend = curr['close'] > curr['ema50'] and curr['ema20'] > curr['ema50']
     is_downtrend = curr['close'] < curr['ema50'] and curr['ema20'] < curr['ema50']
     
-    # شرط پولبک به ناحیه EMA20
     pullback_buy = prev['low'] <= prev['ema20'] and curr['close'] > curr['ema20']
     pullback_sell = prev['high'] >= prev['ema20'] and curr['close'] < curr['ema20']
     
-    # اعمال تلاقی شرط‌ها (۵ دقیقه + تاییدیه ۱ ساعته)
     if is_uptrend and pullback_buy and adx_ok and higher_tf_bullish:
         return "BUY"
     elif is_downtrend and pullback_sell and adx_ok and higher_tf_bearish:
