@@ -3,6 +3,7 @@ import time
 import requests
 import ccxt
 import pandas as pd
+from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
 
@@ -25,24 +26,24 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات اولیه و متغیرهای مدیریت ریسک
+# ۱. تنظیمات اولیه و متغیرها
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
-# وضعیت‌های ربات
-TRADING_MODE = "PAPER"      # "REAL" یا "PAPER"
-IS_BOT_ACTIVE = False       # 🛑 اسکن تا زمان اتمام تنظیمات خاموش است
-INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
+TRADING_MODE = "PAPER"
+IS_BOT_ACTIVE = False
+INITIAL_BALANCE = 1000.0
 PAPER_BALANCE = INITIAL_BALANCE
-TRADE_AMOUNT_USDT = 50.0   # مارجین پیش‌فرض هر معامله (دلار)
-LEVERAGE = 10              # اهرم پیش‌فرض
-MAX_OPEN_POSITIONS = 3     # حداکثر معاملات هم‌زمان
-TIMEFRAME = "5min"         # تایم‌فریم پیش‌فرض
+TRADE_AMOUNT_USDT = 50.0
+LEVERAGE = 10
+MAX_OPEN_POSITIONS = 3
+TIMEFRAME = "5min"
 
-# 🛡 تنظیمات مدیریت ریسک
-RISK_PER_TRADE_PCT = 1.0   # ریسک ۱٪ از کل حساب در هر معامله
-MAX_DAILY_LOSS_PCT = 5.0   # سقف زیان روزانه ۵٪
+BOT_START_TIME = time.time()  # زمان شروع به کار ربات
+
+RISK_PER_TRADE_PCT = 1.0
+MAX_DAILY_LOSS_PCT = 5.0
 DAILY_START_BALANCE = INITIAL_BALANCE
 
 PAPER_POSITIONS = []
@@ -98,28 +99,68 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
 def send_persistent_keyboard(chat_id):
     keyboard = {
         "keyboard": [
-            [{"text": "🎛 منوی اصلی"}]
+            [{"text": "🎛 منوی اصلی"}, {"text": "📈 گزارش عملکرد کامل"}]
         ],
         "resize_keyboard": True,
         "is_persistent": True
     }
-    send_telegram_msg("📍 *دکمه منوی اصلی در پایین صفحه فعال شد.*", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("📍 *پنل مدیریتی و دکمه‌های ثابت فعال شدند.*", chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۲. منوهای راه‌اندازی و تعاملی
+# ۲. منوهای کامل مدیریتی
 # ==========================================
-def send_welcome_mode_menu(chat_id):
+def send_main_menu(chat_id):
     send_persistent_keyboard(chat_id)
+    tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
+    status_icon = "🟢 در حال اسکن" if IS_BOT_ACTIVE else "🔴 متوقف شده"
+    mode_icon = "🔴 واقعی (Real)" if TRADING_MODE == "REAL" else "🧪 کاغذی (Paper)"
+    max_pos_display = f"{MAX_OPEN_POSITIONS} معامله" if MAX_OPEN_POSITIONS > 0 else "بدون محدودیت"
+    toggle_button_text = "⏸ توقف اسکن" if IS_BOT_ACTIVE else "▶️ شروع اسکن"
+    
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": toggle_button_text, "callback_data": "/toggle_active"},
+                {"text": "❌ بستن کل معاملات باز", "callback_data": "/close_all"}
+            ],
+            [
+                {"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"},
+                {"text": "📜 تاریخچه معاملات بسته", "callback_data": "/closed_positions"}
+            ],
+            [
+                {"text": "🔎 تحلیل تک‌ارز", "callback_data": "/menu_analyze_coin"},
+                {"text": "📈 گزارش عملکرد", "callback_data": "/performance"}
+            ],
+            [
+                {"text": "📋 واچ‌لیست ارزها", "callback_data": "/active_coins"},
+                {"text": "⚙️ راه‌اندازی مجدد", "callback_data": "/wizard_start"}
+            ]
+        ]
+    }
+    
+    params = get_strategy_params(TIMEFRAME)
+    msg = (
+        f"🎛 *پنل مدیریت جامع ربات اسکالپر*\n\n"
+        f"🔹 *حالت معامله:* `{mode_icon}`\n"
+        f"🔹 *وضعیت اسکن:* `{status_icon}`\n"
+        f"🔹 *موجودی کل:* `${PAPER_BALANCE:.2f} USDT`\n"
+        f"🔹 *مارجین هر معامله:* `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
+        f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *سقف زیان روزانه:* `{MAX_DAILY_LOSS_PCT}%`\n"
+        f"🔹 *حداکثر پوزیشن هم‌زمان:* `{max_pos_display}`\n"
+        f"🔹 *تایم‌فریم و پارامترها:* `{tf_display}` (ADX> `{params['adx_min']}`)\n"
+        f"🔹 *ارزهای فعال:* `{len(ACTIVE_SYMBOLS)} ارز`\n"
+        f"🔹 *پوزیشن‌های باز:* `{len(PAPER_POSITIONS)}` | *بسته‌شده:* `{len(CLOSED_POSITIONS)}`"
+    )
+    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+
+def send_welcome_mode_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [{"text": "🔴 شروع معاملات با موجودی واقعی", "callback_data": "/mode_real"}],
             [{"text": "🧪 شروع معاملات با موجودی کاغذی", "callback_data": "/mode_paper"}]
         ]
     }
-    msg = (
-        f"👋 *به ربات معامله‌گر اتوماتیک خوش آمدید!*\n\n"
-        f"لطفاً جهت راه‌اندازی، نحوه فعالیت ربات را انتخاب کنید:"
-    )
+    msg = "⚙️ *راه‌اندازی گام‌به‌گام ربات:* لطفاً حالت معامله را انتخاب کنید:"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 def send_capital_menu(chat_id):
@@ -197,50 +238,19 @@ def send_timeframe_menu(chat_id):
     msg = f"⏱ *گام نهایی: تایم‌فریم معاملاتی خود را انتخاب کنید:*\n(با انتخاب این گزینه اسکن زنده فعال می‌شود)"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
-def send_main_menu(chat_id):
-    tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
-    status_icon = "🟢 در حال اسکن" if IS_BOT_ACTIVE else "🔴 متوقف شده"
-    mode_icon = "🔴 واقعی (Real)" if TRADING_MODE == "REAL" else "🧪 کاغذی (Paper)"
-    max_pos_display = f"{MAX_OPEN_POSITIONS} معامله" if MAX_OPEN_POSITIONS > 0 else "بدون محدودیت"
-    toggle_button_text = "⏸ توقف اسکن معاملات" if IS_BOT_ACTIVE else "▶️ شروع اسکن معاملات"
-    
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": toggle_button_text, "callback_data": "/toggle_active"},
-                {"text": "❌ بستن کل معاملات باز", "callback_data": "/close_all"}
-            ],
-            [
-                {"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"},
-                {"text": "📜 تاریخچه معاملات بسته", "callback_data": "/closed_positions"}
-            ],
-            [
-                {"text": "🔎 تحلیل ارز دلخواه", "callback_data": "/menu_analyze_coin"},
-                {"text": "📋 واچ‌لیست ارزها", "callback_data": "/active_coins"}
-            ],
-            [
-                {"text": "📈 گزارش کلی PnL", "callback_data": "/pnl"},
-                {"text": "⚙️ شروع مجدد تنظیمات", "callback_data": "/start"}
-            ]
-        ]
-    }
-    
-    msg = (
-        f"🎛 *پنل مدیریت اصلی ربات*\n\n"
-        f"🔹 *حالت معامله:* `{mode_icon}`\n"
-        f"🔹 *وضعیت اسکن:* `{status_icon}`\n"
-        f"🔹 *موجودی کل:* `${PAPER_BALANCE:.2f} USDT`\n"
-        f"🔹 *مارجین هر معامله:* `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
-        f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *سقف زیان روزانه:* `{MAX_DAILY_LOSS_PCT}%`\n"
-        f"🔹 *حداکثر پوزیشن هم‌زمان:* `{max_pos_display}`\n"
-        f"🔹 *تایم‌فریم اسکن:* `{tf_display}`\n"
-        f"🔹 *ارزهای فعال:* `{len(ACTIVE_SYMBOLS)} ارز`\n"
-        f"🔹 *پوزیشن‌های باز:* `{len(PAPER_POSITIONS)}` | *بسته‌شده:* `{len(CLOSED_POSITIONS)}`"
-    )
-    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+# ==========================================
+# ۳. پارامترهای پویا بر اساس تایم‌فریم
+# ==========================================
+def get_strategy_params(tf):
+    if tf == "5min":
+        return {"adx_min": 25, "sl_atr": 1.2, "tp_atr": 2.0, "rsi_buy": 45, "rsi_sell": 55}
+    elif tf == "15min":
+        return {"adx_min": 20, "sl_atr": 1.3, "tp_atr": 2.2, "rsi_buy": 48, "rsi_sell": 52}
+    else:
+        return {"adx_min": 18, "sl_atr": 1.5, "tp_atr": 2.5, "rsi_buy": 50, "rsi_sell": 50}
 
 # ==========================================
-# ۳. دریافت داده‌ها و اندیکاتورها
+# ۴. دریافت داده‌ها و محاسبه اندیکاتورها
 # ==========================================
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -265,6 +275,7 @@ def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
 
 def calculate_indicators(df):
     try:
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
         
         delta = df['close'].diff()
@@ -298,7 +309,7 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# ۴. تحلیل تک‌ارز طبق استراتژی
+# ۵. تحلیل تک‌ارز طبق استراتژی پویا
 # ==========================================
 def analyze_single_coin(symbol, chat_id):
     clean_sym = symbol.upper().replace("USDT", "").replace("/", "").replace("/ANALYZE", "").strip()
@@ -317,15 +328,17 @@ def analyze_single_coin(symbol, chat_id):
     close_p, open_p = float(curr['close']), float(curr['open'])
     rsi_curr, rsi_prev = float(curr['rsi']), float(prev['rsi'])
     adx_val, atr_val = float(curr['adx']), float(curr['atr'])
-    ema_val = float(curr['ema200'])
+    ema50_val, ema200_val = float(curr['ema50']), float(curr['ema200'])
 
-    trend_long = close_p > ema_val and adx_val > 14
-    trend_short = close_p < ema_val and adx_val > 14
+    params = get_strategy_params(TIMEFRAME)
 
-    pullback_long = trend_long and (rsi_prev < 50) and (rsi_curr > rsi_prev) and (close_p > open_p)
-    pullback_short = trend_short and (rsi_prev > 50) and (rsi_curr < rsi_prev) and (close_p < open_p)
+    trend_long = (close_p > ema200_val) and (ema50_val > ema200_val) and (adx_val > params["adx_min"])
+    trend_short = (close_p < ema200_val) and (ema50_val < ema200_val) and (adx_val > params["adx_min"])
 
-    trend_str = "🟢 صعودی (بالای EMA200)" if close_p > ema_val else "🔴 نزولی (زیر EMA200)"
+    pullback_long = trend_long and (rsi_prev < params["rsi_buy"]) and (rsi_curr > rsi_prev) and (close_p > open_p)
+    pullback_short = trend_short and (rsi_prev > params["rsi_sell"]) and (rsi_curr < rsi_prev) and (close_p < open_p)
+
+    trend_str = "🟢 صعودی قوی" if (close_p > ema200_val and ema50_val > ema200_val) else ("🔴 نزولی قوی" if (close_p < ema200_val and ema50_val < ema200_val) else "🟡 رنج / خنثی")
     signal_str = "🟡 فاقد سیگنال ورود در این کندل"
     if pullback_long:
         signal_str = "🚀 *سیگنال ورود خرید (Long)*"
@@ -336,25 +349,24 @@ def analyze_single_coin(symbol, chat_id):
 
     report = (
         f"🔎 *گزارش تحلیل فنی {clean_sym}/USDT*\n\n"
-        f"⏱ *تایم‌فریم:* `{tf_display}`\n"
+        f"⏱ *تایم‌فریم:* `{tf_display}` | *روند:* {trend_str}\n"
         f"💵 *قیمت فعلی:* `{close_p:.4f}`\n"
-        f"📈 *میانگین EMA200:* `{ema_val:.4f}` ({trend_str})\n"
-        f"📊 *شاخص RSI (14):* `{rsi_curr:.1f}` (کندل قبل: `{rsi_prev:.1f}`)\n"
-        f"⚡ *قدرت روند ADX:* `{adx_val:.1f}`\n"
-        f"📏 *نوسان ATR:* `{atr_val:.4f}`\n\n"
+        f"📈 *EMA50:* `{ema50_val:.4f}` | *EMA200:* `{ema200_val:.4f}`\n"
+        f"📊 *RSI (14):* `{rsi_curr:.1f}` (کندل قبل: `{rsi_prev:.1f}`)\n"
+        f"⚡ *قدرت روند ADX:* `{adx_val:.1f}` (حد نصاب `{params['adx_min']}`)\n"
+        f"📏 *نوسان ATR:* `{atr_val:.4f}` (SL: `{params['sl_atr']}x`, TP: `{params['tp_atr']}x`)\n\n"
         f"🎯 *وضعیت سیگنال:* {signal_str}"
     )
     send_telegram_msg(report, chat_target=chat_id)
 
 # ==========================================
-# ۵. سیستم معاملات با تنظیمات مارجین انتخابی
+# ۶. سیستم معاملات با استراتژی پویا
 # ==========================================
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE
     if not IS_BOT_ACTIVE:
         return
 
-    # چک کردن سقف تعداد پوزیشن‌های هم‌زمان
     if MAX_OPEN_POSITIONS > 0 and len(PAPER_POSITIONS) >= MAX_OPEN_POSITIONS:
         return
 
@@ -365,7 +377,6 @@ def execute_trade(symbol, side, price, sl, tp):
     margin_needed = TRADE_AMOUNT_USDT
     position_val = margin_needed * LEVERAGE
 
-    # اگر موجودی حساب کمتر از مارجین انتخاب شده باشد معامله باز نمی‌شود
     if PAPER_BALANCE < margin_needed:
         return
 
@@ -381,7 +392,8 @@ def execute_trade(symbol, side, price, sl, tp):
         "leverage": LEVERAGE,
         "timeframe": TIMEFRAME,
         "mode": TRADING_MODE,
-        "open_time": time.strftime("%H:%M:%S")
+        "timestamp": time.time(),
+        "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     PAPER_POSITIONS.append(trade)
     
@@ -427,7 +439,8 @@ def close_all_open_positions():
         pos['pnl_pct'] = leveraged_pnl_pct
         pos['pnl_usdt'] = pnl_usdt
         pos['exit_reason'] = "⚠️ خروج دستی یکباره"
-        pos['close_time'] = time.strftime("%H:%M:%S")
+        pos['close_timestamp'] = time.time()
+        pos['close_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         CLOSED_POSITIONS.append(pos)
         PAPER_POSITIONS.remove(pos)
@@ -492,7 +505,8 @@ def update_open_positions():
             pos['pnl_pct'] = leveraged_pnl_pct
             pos['pnl_usdt'] = pnl_usdt
             pos['exit_reason'] = exit_reason
-            pos['close_time'] = time.strftime("%H:%M:%S")
+            pos['close_timestamp'] = time.time()
+            pos['close_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
             
             CLOSED_POSITIONS.append(pos)
             PAPER_POSITIONS.remove(pos)
@@ -506,7 +520,6 @@ def update_open_positions():
             )
             send_telegram_msg(msg)
 
-            # 🛑 برسی سقف زیان روزانه ۵٪
             total_daily_loss = DAILY_START_BALANCE - PAPER_BALANCE
             daily_loss_pct = (total_daily_loss / DAILY_START_BALANCE) * 100.0
             if daily_loss_pct >= MAX_DAILY_LOSS_PCT:
@@ -519,7 +532,7 @@ def update_open_positions():
                 send_telegram_msg(alert_msg)
 
 # ==========================================
-# ۶. اسکن زنده
+# ۷. اسکن زنده (با پارامترهای پویا)
 # ==========================================
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE:
@@ -536,29 +549,92 @@ def check_symbol(coin_symbol):
         close_p, open_p = float(curr['close']), float(curr['open'])
         rsi_curr, rsi_prev = float(curr['rsi']), float(prev['rsi'])
         adx_val, atr_val = float(curr['adx']), float(curr['atr'])
-        ema_val = float(curr['ema200'])
+        ema50_val, ema200_val = float(curr['ema50']), float(curr['ema200'])
         
-        trend_long = close_p > ema_val and adx_val > 14
-        trend_short = close_p < ema_val and adx_val > 14
+        params = get_strategy_params(TIMEFRAME)
+
+        trend_long = (close_p > ema200_val) and (ema50_val > ema200_val) and (adx_val > params["adx_min"])
+        trend_short = (close_p < ema200_val) and (ema50_val < ema200_val) and (adx_val > params["adx_min"])
         
-        pullback_long = trend_long and (rsi_prev < 50) and (rsi_curr > rsi_prev) and (close_p > open_p)
-        pullback_short = trend_short and (rsi_prev > 50) and (rsi_curr < rsi_prev) and (close_p < open_p)
+        pullback_long = trend_long and (rsi_prev < params["rsi_buy"]) and (rsi_curr > rsi_prev) and (close_p > open_p)
+        pullback_short = trend_short and (rsi_prev > params["rsi_sell"]) and (rsi_curr < rsi_prev) and (close_p < open_p)
         
         if pullback_long:
-            sl = close_p - (atr_val * 1.2)
-            tp = close_p + (atr_val * 1.8)
+            sl = close_p - (atr_val * params["sl_atr"])
+            tp = close_p + (atr_val * params["tp_atr"])
             execute_trade(coin_symbol, 'BUY (Long)', close_p, sl, tp)
             
         elif pullback_short:
-            sl = close_p + (atr_val * 1.2)
-            tp = close_p - (atr_val * 1.8)
+            sl = close_p + (atr_val * params["sl_atr"])
+            tp = close_p - (atr_val * params["tp_atr"])
             execute_trade(coin_symbol, 'SELL (Short)', close_p, sl, tp)
     except Exception as e:
         print(f"خطا در اسکن {coin_symbol}: {e}")
 
 # ==========================================
-# ۷. توابع گزارش‌گیری
+# ۸. توابع تولید گزارش عملکرد زمانی
 # ==========================================
+def generate_performance_report_for_period(hours_ago=None, title=""):
+    now = time.time()
+    
+    # فیلتر معاملات بسته شده بر اساس بازه زمانی
+    if hours_ago is not None:
+        threshold = now - (hours_ago * 3600)
+        period_trades = [p for p in CLOSED_POSITIONS if p.get('close_timestamp', now) >= threshold]
+    else:
+        period_trades = CLOSED_POSITIONS # کل تاریخچه
+
+    total_trades = len(period_trades)
+    wins = [p for p in period_trades if p['pnl_usdt'] > 0]
+    losses = [p for p in period_trades if p['pnl_usdt'] < 0]
+    
+    num_wins = len(wins)
+    num_losses = len(losses)
+    
+    total_profit = sum(p['pnl_usdt'] for p in wins)
+    total_loss = sum(p['pnl_usdt'] for p in losses)
+    net_pnl = total_profit + total_loss
+    
+    # موجودی اولیه برای بازه: اگر کل باشدINITIAL_BALANCE، وگرنه تخمین بر اساس موجودی فعلی منهای سود این دوره
+    start_bal_period = INITIAL_BALANCE if hours_ago is None else (PAPER_BALANCE - net_pnl)
+    current_bal_period = PAPER_BALANCE
+
+    report = (
+        f"📊 *گزارش عملکرد ({title})*\n\n"
+        f"🔹 *موجودی اولیه دوره:* `${start_bal_period:.2f} USDT`\n"
+        f"🔹 *تعداد معاملات انجام شده:* `{total_trades}`\n"
+        f"🔹 *تعداد معاملات مثبت:* `{num_wins}` 🟢\n"
+        f"🔹 *تعداد معاملات منفی:* `{num_losses}` 🔴\n"
+        f"🔹 *کل سود:* `+{total_profit:.2f} USDT`\n"
+        f"🔹 *کل زیان:* `{total_loss:.2f} USDT`\n"
+        f"🔹 *سود/زیان خالص:* `{net_pnl:+.2f} USDT`\n"
+        f"🔹 *موجودی فعلی:* `${current_bal_period:.2f} USDT`\n"
+        f"-----------------------------------"
+    )
+    return report
+
+def send_full_performance_report(chat_id):
+    header = "📈 *گزارش جامع عملکرد ربات (از ابتدا تاکنون و تفکیک زمانی)*\n\n"
+    send_telegram_msg(header, chat_target=chat_id)
+    
+    # ۱. از شروع کار (کل)
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=None, title="کل دوره (از ابتدا)"), chat_target=chat_id)
+    
+    # ۲. ۴ ساعته اخیر
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=4, title="۴ ساعت گذشته"), chat_target=chat_id)
+    
+    # ۳. ۱۲ ساعته اخیر
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=12, title="۱۲ ساعت گذشته"), chat_target=chat_id)
+    
+    # ۴. روزانه (۲۴ ساعت گذشته)
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=24, title="روزانه (۲۴ ساعت گذشته)"), chat_target=chat_id)
+    
+    # ۵. ماهانه (۷۲۰ ساعت گذشته)
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=720, title="ماهانه (۳۰ روز گذشته)"), chat_target=chat_id)
+    
+    # ۶. سالانه (۸۷۶۰ ساعت گذشته)
+    send_telegram_msg(generate_performance_report_for_period(hours_ago=8760, title="سالانه (یک سال گذشته)"), chat_target=chat_id)
+
 def get_open_positions_report():
     if not PAPER_POSITIONS:
         return "🔄 *در حال حاضر هیچ پوزیشن بازی وجود ندارد.*"
@@ -610,30 +686,8 @@ def get_closed_positions_report():
         )
     return text
 
-def get_pnl_report():
-    total_closed = len(CLOSED_POSITIONS)
-    wins = sum(1 for p in CLOSED_POSITIONS if p['pnl_usdt'] > 0)
-    losses = sum(1 for p in CLOSED_POSITIONS if p['pnl_usdt'] < 0)
-    win_rate = (wins / total_closed * 100) if total_closed > 0 else 0.0
-    
-    total_pnl_usdt = PAPER_BALANCE - INITIAL_BALANCE
-    total_pnl_pct = (total_pnl_usdt / INITIAL_BALANCE) * 100
-
-    report = (
-        f"📊 *گزارش کامل PnL (اهرم {LEVERAGE}X | مارجین ${TRADE_AMOUNT_USDT:.0f})\n\n"
-        f"💵 *سرمایه اولیه:* `${INITIAL_BALANCE:.2f} USDT`\n"
-        f"💰 *موجودی فعلی:* `${PAPER_BALANCE:.2f} USDT`\n"
-        f"📈 *سود/زیان کل:* `{total_pnl_pct:+.2f}%` (`{total_pnl_usdt:+.2f} USDT`)\n\n"
-        f"📉 *تعداد کل معاملات:* `{total_closed}`\n"
-        f"🟢 *پوزیشن‌های برنده:* `{wins}`\n"
-        f"🔴 *پوزیشن‌های بازنده:* `{losses}`\n"
-        f"🎯 *وین‌ریت (Win Rate):* `{win_rate:.1f}%`\n"
-        f"⏳ *پوزیشن‌های فعال فعلی:* `{len(PAPER_POSITIONS)}`"
-    )
-    return report
-
 # ==========================================
-# ۸. مدیریت دستورات و Callbackهای تلگرام
+# ۹. مدیریت دستورات و Callbackهای تلگرام
 # ==========================================
 def process_command(data, chat_id):
     global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE, MAX_OPEN_POSITIONS, DAILY_START_BALANCE, TRADE_AMOUNT_USDT
@@ -642,6 +696,12 @@ def process_command(data, chat_id):
     cmd = text_raw.lower()
     
     if cmd in ["/start", "/menu", "/main_menu", "menu", "🎛 منوی اصلی"]:
+        send_main_menu(chat_id)
+
+    elif cmd in ["/performance", "📈 گزارش عملکرد", "📈 گزارش عملکرد کامل"]:
+        send_full_performance_report(chat_id)
+
+    elif cmd == "/wizard_start":
         IS_BOT_ACTIVE = False
         send_welcome_mode_menu(chat_id)
 
@@ -739,7 +799,7 @@ def process_command(data, chat_id):
         send_telegram_msg(f"📋 *واچ‌لیست فعال ({len(ACTIVE_SYMBOLS)} ارز):*\n`{', '.join(ACTIVE_SYMBOLS[:35])}...`", chat_target=chat_id)
 
     elif cmd in ["/pnl", "/report", "/balance"]:
-        send_telegram_msg(get_pnl_report(), chat_target=chat_id)
+        send_telegram_msg(generate_performance_report_for_period(hours_ago=None, title="گزارش PnL کلی"), chat_target=chat_id)
         
     elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
         if cmd == "/set_tf_5m": TIMEFRAME = "5min"
@@ -747,8 +807,9 @@ def process_command(data, chat_id):
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
         
         IS_BOT_ACTIVE = True
+        params = get_strategy_params(TIMEFRAME)
         tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
-        send_telegram_msg(f"🚀 *تنظیمات کامل شد! اسکن زنده روی تایم‌فریم {tf_display} با مارجین ${TRADE_AMOUNT_USDT:.0f} فعال گردید.*", chat_target=chat_id)
+        send_telegram_msg(f"🚀 *تنظیمات کامل شد! اسکن زنده روی تایم‌فریم {tf_display} با پارامترهای پویا (ADX>{params['adx_min']}) فعال گردید.*", chat_target=chat_id)
         send_main_menu(chat_id)
 
 def telegram_listener():
@@ -774,7 +835,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("⚡ *ربات آماده به کار است. جهت شروع تنظیمات دستور /start را ارسال کنید.*")
+    send_telegram_msg("⚡ *ربات آماده به کار است. جهت مشاهده پنل مدیریتی روی دکمه «🎛 منوی اصلی» یا «📈 گزارش عملکرد کامل» کلیک کنید.*")
     while True:
         try:
             update_open_positions()
