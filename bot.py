@@ -32,8 +32,8 @@ CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
 # وضعیت‌های ربات
 TRADING_MODE = "PAPER"      # "REAL" یا "PAPER"
-IS_BOT_ACTIVE = True        # وضعیت اسکن معاملات
-INITIAL_BALANCE = 500.0     # سرمایه اولیه مجازی پیش‌فرض
+IS_BOT_ACTIVE = False       # 🛑 اسکن تا زمان اتمام تنظیمات خاموش است
+INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
 PAPER_BALANCE = INITIAL_BALANCE
 TRADE_AMOUNT_USDT = 50.0   # مارجین هر معامله
 LEVERAGE = 10              # اهرم پیش‌فرض
@@ -101,21 +101,24 @@ def send_welcome_mode_menu(chat_id):
     }
     msg = (
         f"👋 *به ربات معامله‌گر اتوماتیک خوش آمدید!*\n\n"
-        f"لطفاً نحوه فعالیت ربات را انتخاب کنید:"
+        f"لطفاً جهت راه‌اندازی، نحوه فعالیت ربات را انتخاب کنید:"
     )
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
-def send_timeframe_menu(chat_id):
+def send_capital_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "⏱ 5 دقیقه", "callback_data": "/set_tf_5m"},
-                {"text": "⏱ 15 دقیقه", "callback_data": "/set_tf_15m"},
-                {"text": "⏱ 1 ساعته", "callback_data": "/set_tf_1h"}
+                {"text": "💵 $500", "callback_data": "/set_cap_500"},
+                {"text": "💵 $1,000", "callback_data": "/set_cap_1000"}
+            ],
+            [
+                {"text": "💵 $5,000", "callback_data": "/set_cap_5000"},
+                {"text": "💵 $10,000", "callback_data": "/set_cap_10000"}
             ]
         ]
     }
-    msg = f"⏱ *مرحله نهایی: تایم‌فریم معاملاتی خود را انتخاب کنید:*\nتایم‌فریم فعلی: `{TIMEFRAME}`"
+    msg = f"💰 *گام ۱: موجودی اولیه حساب کاغذی را انتخاب کنید:*"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 def send_leverage_menu(chat_id):
@@ -128,7 +131,20 @@ def send_leverage_menu(chat_id):
             ]
         ]
     }
-    msg = f"⚡ *اهرم معاملاتی (Leverage) خود را انتخاب کنید:*\nاهرم فعلی: `{LEVERAGE}X`"
+    msg = f"⚡ *گام ۲: اهرم معاملاتی (Leverage) خود را انتخاب کنید:*"
+    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+
+def send_timeframe_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "⏱ 5 دقیقه", "callback_data": "/set_tf_5m"},
+                {"text": "⏱ 15 دقیقه", "callback_data": "/set_tf_15m"},
+                {"text": "⏱ 1 ساعته", "callback_data": "/set_tf_1h"}
+            ]
+        ]
+    }
+    msg = f"⏱ *گام نهایی: تایم‌فریم معاملاتی خود را انتخاب کنید:*\n(با انتخاب این گزینه اسکن زنده فعال می‌شود)"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 def send_main_menu(chat_id):
@@ -153,7 +169,7 @@ def send_main_menu(chat_id):
             ],
             [
                 {"text": "📈 گزارش کلی PnL", "callback_data": "/pnl"},
-                {"text": "⚙️ تغییر حالت (واقعی/کاغذی)", "callback_data": "/start"}
+                {"text": "⚙️ شروع مجدد تنظیمات", "callback_data": "/start"}
             ]
         ]
     }
@@ -516,6 +532,7 @@ def process_command(data, chat_id):
     cmd = text_raw.lower()
     
     if cmd in ["/start", "/menu", "/main_menu", "menu"]:
+        IS_BOT_ACTIVE = False  # خاموش کردن اسکن موقع شروع مجدد تنظیمات
         send_welcome_mode_menu(chat_id)
 
     # انتخاب حالت معامله واقعی
@@ -543,20 +560,28 @@ def process_command(data, chat_id):
         else:
             TRADING_MODE = "REAL"
             PAPER_BALANCE = usdt_balance
-            msg = f"🔴 *حالت معامله واقعی فعال شد.* (موجودی: `{usdt_balance:.2f} USDT`)\n\n۱. اهرم معاملاتی خود را انتخاب کنید:"
+            msg = f"🔴 *حالت معامله واقعی انتخاب شد.* (موجودی: `{usdt_balance:.2f} USDT`)\n\n۱. اهرم معاملاتی خود را انتخاب کنید:"
             send_telegram_msg(msg, chat_target=chat_id)
             send_leverage_menu(chat_id)
 
-    # انتخاب حالت معامله کاغذی
+    # انتخاب حالت معامله کاغذی (پرسش سرمایه اولیه)
     elif cmd == "/mode_paper":
         TRADING_MODE = "PAPER"
-        PAPER_BALANCE = INITIAL_BALANCE
         msg = (
-            f"🧪 *حالت معامله کاغذی (Paper Trading) فعال شد.*\n\n"
-            f"📋 *تعداد ۱۲۸ ارز پیش‌فرض در لیست اسکن قرار گرفتند.*\n\n"
-            f"۱. اهرم معاملاتی خود را انتخاب کنید:"
+            f"🧪 *حالت معامله کاغذی (Paper Trading) انتخاب شد.*\n\n"
+            f"📋 *تعداد ۱۲۸ ارز پیش‌فرض در لیست اسکن قرار گرفتند.*"
         )
         send_telegram_msg(msg, chat_target=chat_id)
+        send_capital_menu(chat_id)
+
+    # تنظیم سرمایه اولیه و رفتن به گام بعدی (اهرم)
+    elif cmd in ["/set_cap_500", "/set_cap_1000", "/set_cap_5000", "/set_cap_10000"]:
+        cap_val = float(cmd.replace("/set_cap_", ""))
+        INITIAL_BALANCE = cap_val
+        PAPER_BALANCE = cap_val
+        CLOSED_POSITIONS = []
+        PAPER_POSITIONS = []
+        send_telegram_msg(f"✅ *موجودی اولیه روی ${cap_val:.0f} دلار تنظیم شد.*", chat_target=chat_id)
         send_leverage_menu(chat_id)
 
     elif cmd == "/toggle_active":
@@ -614,18 +639,15 @@ def process_command(data, chat_id):
         send_telegram_msg(f"✅ *اهرم روی {LEVERAGE}X تنظیم شد.*", chat_target=chat_id)
         send_timeframe_menu(chat_id)
         
-    # تنظیمات تایم‌فریم و باز شدن پنل اصلی
-    elif cmd == "/set_tf_5m":
-        TIMEFRAME = "5min"
-        send_telegram_msg("✅ *تایم‌فریم اسکن روی ۵ دقیقه تنظیم شد.*", chat_target=chat_id)
-        send_main_menu(chat_id)
-    elif cmd == "/set_tf_15m":
-        TIMEFRAME = "15min"
-        send_telegram_msg("✅ *تایم‌فریم اسکن روی ۱۵ دقیقه تنظیم شد.*", chat_target=chat_id)
-        send_main_menu(chat_id)
-    elif cmd == "/set_tf_1h":
-        TIMEFRAME = "1hour"
-        send_telegram_msg("✅ *تایم‌فریم اسکن روی ۱ ساعته تنظیم شد.*", chat_target=chat_id)
+    # تنظیمات تایم‌فریم و فعال‌سازی نهایی اسکن
+    elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
+        if cmd == "/set_tf_5m": TIMEFRAME = "5min"
+        elif cmd == "/set_tf_15m": TIMEFRAME = "15min"
+        elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
+        
+        IS_BOT_ACTIVE = True  # 🚀 شروع رسمی اسکن پس از اتمام آخرین مرحله تنظیمات
+        tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
+        send_telegram_msg(f"🚀 *تنظیمات با موفقیت تکمیل شد! اسکن زنده روی تایم‌فریم {tf_display} فعال گردید.*", chat_target=chat_id)
         send_main_menu(chat_id)
 
 def telegram_listener():
@@ -651,7 +673,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🚀 *ربات معامله‌گر فعال شد. جهت انتخاب حالت معامله دستور /start را ارسال کنید.*")
+    send_telegram_msg("⚡ *ربات آماده به کار است. جهت شروع تنظیمات دستور /start را ارسال کنید.*")
     while True:
         try:
             update_open_positions()
