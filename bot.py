@@ -315,14 +315,23 @@ def update_open_positions():
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE: return
     try:
-        df = get_crypto_klines(coin_symbol, interval_type=TIMEFRAME, limit=200)
-        if df.empty or len(df) < 50: return
-        df = calculate_indicators(df)
+        # دریافت کندل‌های ۵ دقیقه (برای ورود)
+        df_5m = get_crypto_klines(coin_symbol, interval_type="5min", limit=200)
+        if df_5m.empty or len(df_5m) < 50: return
+        df_5m = calculate_indicators(df_5m)
         
-        signal = get_signal(df, TIMEFRAME)
+        # دریافت کندل‌های ۱ ساعت (برای تایید روند کلان)
+        df_1h = get_crypto_klines(coin_symbol, interval_type="1hour", limit=100)
+        if not df_1h.empty and len(df_1h) > 30:
+            df_1h = calculate_indicators(df_1h)
+        else:
+            df_1h = None
+        
+        # گرفتن سیگنال با فیلتر مولتی تایم‌فریم
+        signal = get_signal(df_5m, df_1h)
         if not signal: return
         
-        curr = df.iloc[-2]
+        curr = df_5m.iloc[-2]
         close_p = float(curr['close'])
         atr = float(curr['atr'])
         p = get_strategy_params(TIMEFRAME)
