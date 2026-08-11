@@ -21,8 +21,10 @@ def get_leverage_keyboard():
     return {"inline_keyboard": [[{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}]]}
 
 def get_max_positions_keyboard():
-    return {"inline_keyboard": [[{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}, {"text": "5", "callback_data": "/set_max_5"}]]}
-
+    return {"inline_keyboard": [
+        [{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], 
+        [{"text": "5", "callback_data": "/set_max_5"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
+    ]}
 def get_timeframe_keyboard():
     return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "مولتی آبشاری", "callback_data": "/set_tf_multi"}]]}
 
