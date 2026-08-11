@@ -95,6 +95,23 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=N
     except:
         return False
 
+def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
+    coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
+    try:
+        url = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval_type}"
+        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("code") == "200000" and data.get("data"):
+                df = pd.DataFrame(data["data"], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
+                df = df.iloc[::-1].reset_index(drop=True)
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                if not df.empty and len(df) > 30:
+                    return df
+    except: pass
+    return pd.DataFrame()
+
 def send_main_menu(chat_id, message_id=None):
     tf_display = "5م" if TIMEFRAME == "5min" else ("15م" if TIMEFRAME == "15min" else ("1س" if TIMEFRAME == "1hour" else "مولتی آبشاری"))
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
@@ -113,23 +130,6 @@ def send_main_menu(chat_id, message_id=None):
     )
     keyboard = get_main_menu_keyboard(IS_BOT_ACTIVE)
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
-
-def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
-    coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
-    try:
-        url = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval_type}"
-        res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("code") == "200000" and data.get("data"):
-                df = pd.DataFrame(data["data"], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
-                df = df.iloc[::-1].reset_index(drop=True)
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                if not df.empty and len(df) > 30:
-                    return df
-    except: pass
-    return pd.DataFrame()
 
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE, PAPER_BALANCE
@@ -288,10 +288,7 @@ def process_command(data, chat_id, message_id=None):
             DAILY_START_BALANCE = usdt_balance
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مقدار مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
     elif cmd_lower == "/check_wizard":
-        if IS_BOT_ACTIVE:
-            send_telegram_msg("⚠️ برای تغییر تنظیمات، ابتدا باید اسکن را متوقف کنید!", chat_target=chat_id)
-        else:
-            send_telegram_msg("⚙️ تغییر تنظیمات - مقدار موجودی اولیه جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_balance_keyboard(), message_id=message_id)
+        send_telegram_msg("⚙️ تغییر تنظیمات - مقدار موجودی اولیه جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_balance_keyboard(), message_id=message_id)
     elif cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
@@ -328,7 +325,8 @@ def process_command(data, chat_id, message_id=None):
         send_telegram_msg("⚙️ حداکثر تعداد پوزیشن‌های هم‌زمان:", chat_target=chat_id, reply_markup=get_max_positions_keyboard(), message_id=message_id)
     elif cmd_lower.startswith("/set_max_"):
         MAX_OPEN_POSITIONS = int(cmd_lower.replace("/set_max_", ""))
-        send_telegram_msg("⚙️ تایم‌فریم معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=get_timeframe_keyboard(), message_id=message_id)
+        pos_text = "بدون محدودیت" if MAX_OPEN_POSITIONS == 0 else str(MAX_OPEN_POSITIONS)
+        send_telegram_msg(f"⚙️ حداکثر پوزیشن‌های هم‌زمان روی `{pos_text}` تنظیم شد.\n\nتایم‌فریم معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=get_timeframe_keyboard(), message_id=message_id)
     elif cmd_lower in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h", "/set_tf_multi"]:
         if cmd_lower == "/set_tf_5m": TIMEFRAME = "5min"
         elif cmd_lower == "/set_tf_15m": TIMEFRAME = "15min"
