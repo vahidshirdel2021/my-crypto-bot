@@ -6,6 +6,14 @@ def get_start_keyboard():
         ]
     }
 
+def get_balance_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "500 USDT", "callback_data": "/set_bal_500"}, {"text": "1000 USDT", "callback_data": "/set_bal_1000"}],
+            [{"text": "5000 USDT", "callback_data": "/set_bal_5000"}, {"text": "10000 USDT", "callback_data": "/set_bal_10000"}]
+        ]
+    }
+
 def get_margin_keyboard():
     return {
         "inline_keyboard": [
