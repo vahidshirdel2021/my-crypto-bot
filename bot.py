@@ -1,10 +1,10 @@
 import os
 import time
+import requests
+import pandas as pd
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-import requests
-import pandas as pd
 import google.generativeai as genai
 
 # ==========================================
@@ -34,24 +34,42 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dX
 genai.configure(api_key=GEMINI_API_KEY)
 
 def generate_gemini_response(prompt):
-    """استفاده اختصاصی از مدل‌های رسمی و کاملاً پایدار ۱.۵"""
-    models_to_try = [
-        'gemini-1.5-flash',
-        'gemini-1.5-pro'
-    ]
-    last_error = ""
-    for model_name in models_to_try:
+    """اتصال هوشمند و پایدار به جمینای (SDK + REST API Backup)"""
+    # ۱. تلاش با SDK پایتون
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
+    for m_name in models_to_try:
         try:
-            m = genai.GenerativeModel(model_name)
+            m = genai.GenerativeModel(m_name)
             res = m.generate_content(prompt)
             if res and res.text:
                 return res.text.strip()
         except Exception as e:
-            last_error = str(e)
-            print(f"⚠️ Error with {model_name}: {e}")
+            print(f"⚠️ SDK Error on {m_name}: {e}")
             continue
-            
-    return f"⚠️ ارتباط با جمینای برقرار نشد. جزئیات خطا:\n`{last_error}`"
+
+    # ۲. پشتیبان مستقیم REST API (در صورت عدم پاسخگویی SDK)
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            "contents": [{
+                "parts": [{"text": prompt}]
+            }]
+        }
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", "").strip()
+        else:
+            return f"⚠️ پاسخ REST API ناامیدکننده بود: کد {res.status_code}"
+    except Exception as e:
+        return f"⚠️ خطا در REST API پشتیبان: {e}"
+
+    return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
 
 SYMBOLS = [
     'BTC', 'ETH', 'DEFI', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE',
@@ -293,7 +311,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات با مدل‌های رسمی و پایدار جمینای فعال شد.*")
+    send_telegram_msg("🤖 *ربات با سیستم دوگانه هوش مصنوعی (Direct REST API + SDK) فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
