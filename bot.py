@@ -58,14 +58,20 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
 IS_BOT_ACTIVE = False
-PAPER_BALANCE = config["initial_balance"]
-DAILY_START_BALANCE = config["initial_balance"]
+TRADING_MODE = config["trading_mode"]
+INITIAL_BALANCE = config["initial_balance"]
+PAPER_BALANCE = INITIAL_BALANCE
+DAILY_START_BALANCE = INITIAL_BALANCE
+TRADE_AMOUNT_USDT = config["trade_amount_usdt"]
+LEVERAGE = config["leverage"]
+MAX_OPEN_POSITIONS = config["max_open_positions"]
+TIMEFRAME = config["timeframe"]
 
 PAPER_POSITIONS = []
 CLOSED_POSITIONS = []
 
-COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "D6A52010E5B846469B6EE3DB773B32B6")
-COINEX_SECRET = os.environ.get("COINEX_SECRET", "527FB6BC384FC302453676431692A8620F9A3E0F6A3D5D15")
+COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "")
+COINEX_SECRET = os.environ.get("COINEX_SECRET", "")
 
 exchange = None
 if COINEX_API_KEY and COINEX_SECRET:
@@ -76,8 +82,9 @@ if COINEX_API_KEY and COINEX_SECRET:
             'enableRateLimit': True,
             'options': {'defaultType': 'swap'}
         })
-    except Exception:
-        pass
+        print("✅ اتصال به صرافی CoinEx برقرار شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در راه‌اندازی API: {e}")
 
 ALL_SYMBOLS = [
     'BTC', 'ETH', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC',
@@ -103,9 +110,11 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception:
-        pass
+        res = requests.post(url, json=payload, timeout=10)
+        return res.status_code == 200
+    except Exception as e:
+        print(f"❌ خطا در ارسال پیام تلگرام: {e}")
+        return False
 
 def send_persistent_keyboard(chat_id):
     keyboard = {
@@ -117,9 +126,58 @@ def send_persistent_keyboard(chat_id):
     }
     send_telegram_msg("سیستم مدیریت آماده است.", chat_target=chat_id, reply_markup=keyboard)
 
+# ==========================================
+# ۳. منوهای ویزارد
+# ==========================================
+def send_capital_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "$500", "callback_data": "/set_cap_500"}, {"text": "$1,000", "callback_data": "/set_cap_1000"}],
+            [{"text": "$5,000", "callback_data": "/set_cap_5000"}, {"text": "$10,000", "callback_data": "/set_cap_10000"}]
+        ]
+    }
+    send_telegram_msg("موجودی اولیه حساب کاغذی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
+
+def send_margin_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}],
+            [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}]
+        ]
+    }
+    send_telegram_msg("مقدار مارجین (سرمایه درگیر) در هر معامله:", chat_target=chat_id, reply_markup=keyboard)
+
+def send_leverage_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}]
+        ]
+    }
+    send_telegram_msg("ضریب اهرم (Leverage) را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
+
+def send_max_positions_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "2 معامله", "callback_data": "/set_max_2"}, {"text": "3 معامله", "callback_data": "/set_max_3"}, {"text": "5 معامله", "callback_data": "/set_max_5"}],
+            [{"text": "10 معامله", "callback_data": "/set_max_10"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
+        ]
+    }
+    send_telegram_msg("حداکثر تعداد پوزیشن‌های هم‌زمان:", chat_target=chat_id, reply_markup=keyboard)
+
+def send_timeframe_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "5 دقیقه", "callback_data": "/set_tf_5m"}, {"text": "15 دقیقه", "callback_data": "/set_tf_15m"}, {"text": "1 ساعت", "callback_data": "/set_tf_1h"}]
+        ]
+    }
+    send_telegram_msg("انتخاب تایم‌فریم معاملاتی (شروع نهایی اسکن):", chat_target=chat_id, reply_markup=keyboard)
+
 def send_main_menu(chat_id):
     send_persistent_keyboard(chat_id)
+    tf_display = "5m" if TIMEFRAME == "5min" else ("15m" if TIMEFRAME == "15min" else "1h")
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
+    mode_str = "معامله واقعی" if TRADING_MODE == "REAL" else "معامله کاغذی"
+    max_pos = f"{MAX_OPEN_POSITIONS}" if MAX_OPEN_POSITIONS > 0 else "نامحدود"
     toggle_text = "توقف اسکن" if IS_BOT_ACTIVE else "شروع اسکن"
     
     keyboard = {
@@ -139,14 +197,15 @@ def send_main_menu(chat_id):
         ]
     }
     
+    p = get_strategy_params(TIMEFRAME)
     msg = (
         f"📊 *پنل مدیریت ربات معامله‌گر*\n\n"
-        f"• حالت: `{config['trading_mode']}`\n"
+        f"• حالت: `{mode_str}`\n"
         f"• وضعیت: `{status_str}`\n"
         f"• موجودی: `${PAPER_BALANCE:.2f} USDT`\n"
-        f"• مارجین هر معامله: `${config['trade_amount_usdt']:.0f} USDT`\n"
-        f"• اهرم: `{config['leverage']}X` | حداکثر پوزیشن: `{config['max_open_positions']}`\n"
-        f"• تایم‌فریم: `{config['timeframe']}`"
+        f"• مارجین هر معامله: `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
+        f"• اهرم: `{LEVERAGE}X` | حداکثر پوزیشن: `{max_pos}`\n"
+        f"• تایم‌فریم: `{tf_display}` (ADX > {p['adx']})"
     )
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
@@ -173,17 +232,17 @@ def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE
     if not IS_BOT_ACTIVE: return
-    if config["max_open_positions"] > 0 and len(PAPER_POSITIONS) >= config["max_open_positions"]: return
+    if MAX_OPEN_POSITIONS > 0 and len(PAPER_POSITIONS) >= MAX_OPEN_POSITIONS: return
     for pos in PAPER_POSITIONS:
         if pos['symbol'] == symbol: return
 
-    margin = config["trade_amount_usdt"]
+    margin = TRADE_AMOUNT_USDT
     if PAPER_BALANCE < margin: return
 
     trade = {
         "symbol": symbol, "side": side, "entry_price": price,
         "sl": sl, "tp": tp, "margin": margin,
-        "leverage": config["leverage"], "timeframe": config["timeframe"],
+        "leverage": LEVERAGE, "timeframe": TIMEFRAME,
         "close_timestamp": None, "pnl_usdt": 0.0
     }
     PAPER_POSITIONS.append(trade)
@@ -197,7 +256,7 @@ def close_all_open_positions():
 
     for pos in PAPER_POSITIONS[:]:
         sym = pos['symbol']
-        df = get_crypto_klines(sym, interval_type=pos.get('timeframe', config["timeframe"]), limit=2)
+        df = get_crypto_klines(sym, interval_type=pos.get('timeframe', TIMEFRAME), limit=2)
         curr_p = float(df.iloc[-1]['close']) if not df.empty else pos['entry_price']
         
         raw_pnl = ((curr_p - pos['entry_price']) / pos['entry_price']) * 100 if "BUY" in pos['side'] else ((pos['entry_price'] - curr_p) / pos['entry_price']) * 100
@@ -217,7 +276,7 @@ def update_open_positions():
     if not PAPER_POSITIONS: return
 
     for pos in PAPER_POSITIONS[:]:
-        df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', config["timeframe"]), limit=5)
+        df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', TIMEFRAME), limit=5)
         if df.empty: continue
         high, low = float(df.iloc[-1]['high']), float(df.iloc[-1]['low'])
         
@@ -245,17 +304,17 @@ def update_open_positions():
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE: return
     try:
-        df = get_crypto_klines(coin_symbol, interval_type=config["timeframe"], limit=200)
+        df = get_crypto_klines(coin_symbol, interval_type=TIMEFRAME, limit=200)
         if df.empty or len(df) < 50: return
         df = calculate_indicators(df)
         
-        signal = get_signal(df, config["timeframe"])
+        signal = get_signal(df, TIMEFRAME)
         if not signal: return
         
         curr = df.iloc[-2]
         close_p = float(curr['close'])
         atr = float(curr['atr'])
-        p = get_strategy_params(config["timeframe"])
+        p = get_strategy_params(TIMEFRAME)
         
         if signal == "BUY":
             execute_trade(coin_symbol, 'BUY (Long)', close_p, close_p - (atr * p["sl"]), close_p + (atr * p["tp"]))
@@ -285,10 +344,15 @@ def process_command(data, chat_id):
     
     cmd = data.strip().lower()
     
-    # اصلاح اصلی: دستور استارت باید حتماً ویزارد (انتخاب حساب واقعی یا کاغذی) را شروع کند
     if cmd in ["/start", "/wizard_start", "تنظیمات مجدد"]:
         IS_BOT_ACTIVE = False
-        send_welcome_mode_menu(chat_id)
+        keyboard = {
+            "inline_keyboard": [
+                [{"text": "شروع معاملات با موجودی واقعی", "callback_data": "/mode_real"}],
+                [{"text": "شروع معاملات با موجودی کاغذی", "callback_data": "/mode_paper"}]
+            ]
+        }
+        send_telegram_msg("به ربات معامله‌گر خوش آمدید.\nلطفاً نوع حساب معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
         
     elif cmd in ["/menu", "/main_menu", "menu", "منوی اصلی"]:
         send_main_menu(chat_id)
@@ -312,7 +376,6 @@ def process_command(data, chat_id):
 
         if usdt_balance <= 0:
             send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر (۰) است. امکان شروع معاملات واقعی وجود ندارد.", chat_target=chat_id)
-            send_welcome_mode_menu(chat_id)
         else:
             TRADING_MODE = "REAL"
             PAPER_BALANCE = usdt_balance
@@ -360,8 +423,6 @@ def telegram_listener():
             res = requests.get(url, params={"timeout": 10, "offset": last_id}, timeout=15)
             if res.status_code == 200:
                 data = res.json()
-                if not data.get("ok"):
-                    print(f"⚠️ خطای تلگرام: {data}")
                 for r in data.get("result", []):
                     last_id = r["update_id"] + 1
                     if "callback_query" in r:
@@ -371,8 +432,6 @@ def telegram_listener():
                     elif "message" in r:
                         m = r["message"]
                         process_command(m.get("text", ""), m["chat"]["id"])
-            else:
-                print(f"⚠️ وضعیت پاسخ تلگرام: {res.status_code}")
         except Exception as e:
             print(f"❌ خطا در دریافت آپدیت‌ها: {e}")
         time.sleep(2)
