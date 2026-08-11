@@ -25,21 +25,21 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات اولیه و متغیرهای پویا
+# ۱. تنظیمات اولیه و متغیرها
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
-TRADING_MODE = "PAPER"      # "REAL" یا "PAPER"
-IS_BOT_ACTIVE = False       # وضعیت اسکن معاملات
-INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
+TRADING_MODE = "PAPER"
+IS_BOT_ACTIVE = False
+INITIAL_BALANCE = 1000.0
 PAPER_BALANCE = INITIAL_BALANCE
-TRADE_AMOUNT_USDT = 50.0   # مارجین هر معامله
-LEVERAGE = 10              # اهرم پیش‌فرض
-MAX_OPEN_POSITIONS = 3     # حداکثر معاملات هم‌زمان
-TIMEFRAME = "5min"         # تایم‌فریم پیش‌فرض
+TRADE_AMOUNT_USDT = 50.0
+LEVERAGE = 10
+MAX_OPEN_POSITIONS = 3
+TIMEFRAME = "5min"
 
-MAX_DAILY_LOSS_PCT = 5.0   # سقف زیان روزانه ۵٪
+MAX_DAILY_LOSS_PCT = 5.0
 DAILY_START_BALANCE = INITIAL_BALANCE
 
 PAPER_POSITIONS = []
@@ -189,7 +189,7 @@ def send_main_menu(chat_id):
     
     params = get_strategy_params(TIMEFRAME)
     msg = (
-        f"*پنل مدیریت ربات معامله‌گر*\n\n"
+        f"📊 *پنل مدیریت ربات معامله‌گر*\n\n"
         f"• حالت: `{mode_str}`\n"
         f"• وضعیت: `{status_str}`\n"
         f"• موجودی: `${PAPER_BALANCE:.2f} USDT`\n"
@@ -268,8 +268,9 @@ def calculate_indicators(df):
         print(f"خطا در اندیکاتورها: {e}")
     return df
 
-def analyze_single_coin(symbol, chat_id):
-    clean_sym = symbol.upper().replace("USDT", "").replace("/", "").replace("/ANALYZE", "").strip()
+def analyze_single_coin(text_input, chat_id):
+    # پاکسازی دستورات /analyze یا analyze برای استخراج نام ارز
+    clean_sym = text_input.lower().replace("/analyze", "").replace("analyze", "").upper().replace("USDT", "").replace("/", "").strip()
     if not clean_sym:
         send_telegram_msg("نماد را وارد کنید (مثال: `/analyze BTC`).", chat_target=chat_id)
         return
@@ -299,11 +300,11 @@ def analyze_single_coin(symbol, chat_id):
     elif pullback_short: signal = "سیگنال فروش (Short)"
 
     report = (
-        f"تحلیل فنی: {clean_sym}/USDT\n\n"
-        f"• قیمت: {close_p:.4f}\n"
-        f"• RSI: {rsi_curr:.1f}\n"
-        f"• ADX: {adx_val:.1f}\n"
-        f"• وضعیت: {signal}"
+        f"🔍 *تحلیل فنی: {clean_sym}/USDT*\n\n"
+        f"• قیمت: `{close_p:.4f}`\n"
+        f"• RSI: `{rsi_curr:.1f}`\n"
+        f"• ADX: `{adx_val:.1f}`\n"
+        f"• وضعیت: *{signal}*"
     )
     send_telegram_msg(report, chat_target=chat_id)
 
@@ -328,7 +329,7 @@ def execute_trade(symbol, side, price, sl, tp):
         "timestamp": time.time(), "open_time": time.strftime("%Y-%m-%d %H:%M:%S")
     }
     PAPER_POSITIONS.append(trade)
-    msg = f"معامله جدید ({side})\n• نماد: {symbol}\n• ورود: {price:.4f}\n• TP: {tp:.4f} | SL: {sl:.4f}"
+    msg = f"📝 *معامله جدید ({side})*\n• نماد: `{symbol}`\n• ورود: `{price:.4f}`\n• TP: `{tp:.4f}` | SL: `{sl:.4f}`"
     send_telegram_msg(msg)
 
 def close_all_open_positions():
@@ -352,7 +353,7 @@ def close_all_open_positions():
         CLOSED_POSITIONS.append(pos)
         PAPER_POSITIONS.remove(pos)
 
-    return f"تعداد {count} پوزیشن بسته شد.\nسود/زیان کل: {total_change:+.2f} USDT"
+    return f"تعداد {count} پوزیشن بسته شد.\nسود/زیان کل: `{total_change:+.2f} USDT`"
 
 def update_open_positions():
     global PAPER_BALANCE, IS_BOT_ACTIVE
@@ -378,11 +379,11 @@ def update_open_positions():
             pos['close_timestamp'] = time.time()
             CLOSED_POSITIONS.append(pos)
             PAPER_POSITIONS.remove(pos)
-            send_telegram_msg(f"پوزیشن بسته شد.\n• نماد: {pos['symbol']}\n• سود/زیان: {pnl_usdt:+.2f} USDT")
+            send_telegram_msg(f"📌 *پوزیشن بسته شد.*\n• نماد: `{pos['symbol']}`\n• سود/زیان: `{pnl_usdt:+.2f} USDT`")
 
             if (INITIAL_BALANCE - PAPER_BALANCE) / INITIAL_BALANCE * 100 >= MAX_DAILY_LOSS_PCT:
                 IS_BOT_ACTIVE = False
-                send_telegram_msg("سقف زیان روزانه لمس شد. ربات متوقف گردید.")
+                send_telegram_msg("🛑 سقف زیان روزانه لمس شد. ربات متوقف گردید.")
 
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE: return
@@ -418,10 +419,10 @@ def generate_report(hours=None, title=""):
     losses = [p for p in trades if p.get('pnl_usdt', 0) < 0]
     net = sum(p.get('pnl_usdt', 0) for p in trades)
     
-    return f"[{title}]\n• تعداد معامله: {len(trades)} | مثبت: {len(wins)} | منفی: {len(losses)}\n• سود/زیان: {net:+.2f} USDT"
+    return f"📌 *[{title}]*\n• تعداد معامله: `{len(trades)}` | مثبت: `{len(wins)}` | منفی: `{len(losses)}`\n• سود/زیان: `{net:+.2f} USDT`"
 
 def send_full_performance(chat_id):
-    send_telegram_msg("گزارش جامع عملکرد:", chat_target=chat_id)
+    send_telegram_msg("📈 *گزارش جامع عملکرد ربات:*", chat_target=chat_id)
     send_telegram_msg(generate_report(None, "کل دوره"), chat_target=chat_id)
     send_telegram_msg(generate_report(4, "۴ ساعت گذشته"), chat_target=chat_id)
     send_telegram_msg(generate_report(12, "۱۲ ساعت گذشته"), chat_target=chat_id)
@@ -430,16 +431,16 @@ def send_full_performance(chat_id):
 
 def get_open_report():
     if not PAPER_POSITIONS: return "پوزیشن بازی وجود ندارد."
-    txt = f"پوزیشن‌های باز ({len(PAPER_POSITIONS)}):\n\n"
+    txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n\n"
     for p in PAPER_POSITIONS:
-        txt += f"• {p['symbol']} ({p['side']}) - ورود: {p['entry_price']:.4f}\n"
+        txt += f"• `{p['symbol']}` ({p['side']}) - ورود: `{p['entry_price']:.4f}`\n"
     return txt
 
 def get_closed_report():
     if not CLOSED_POSITIONS: return "معامله بسته‌شده‌ای نیست."
-    txt = "آخرین معاملات بسته شده:\n\n"
+    txt = "📜 *آخرین معاملات بسته شده:*\n\n"
     for p in CLOSED_POSITIONS[-5:][::-1]:
-        txt += f"• {p['symbol']} ({p['side']}) - سود: {p.get('pnl_usdt',0):+.2f} USDT\n"
+        txt += f"• `{p['symbol']}` ({p['side']}) - سود: `{p.get('pnl_usdt',0):+.2f} USDT`\n"
     return txt
 
 # ==========================================
@@ -517,7 +518,7 @@ def process_command(data, chat_id):
         elif cmd == "/set_tf_15m": TIMEFRAME = "15min"
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
         IS_BOT_ACTIVE = True
-        send_telegram_msg("تنظیمات ذخیره و اسکن زنده آغاز شد.", chat_target=chat_id)
+        send_telegram_msg("🚀 تنظیمات ذخیره و اسکن زنده آغاز شد.", chat_target=chat_id)
         send_main_menu(chat_id)
 
 def telegram_listener():
