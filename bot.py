@@ -103,8 +103,20 @@ ALL_SYMBOLS = [
 ]
 ACTIVE_SYMBOLS = ALL_SYMBOLS.copy()
 
-def send_telegram_msg(message, chat_target=None, reply_markup=None):
+def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=None):
     target = chat_target or CHAT_ID
+    if message_id:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+        payload = {"chat_id": target, "message_id": message_id, "text": message, "parse_mode": "Markdown"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        try:
+            res = requests.post(url, json=payload, timeout=10)
+            if res.status_code == 200:
+                return True
+        except Exception:
+            pass
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": target, "text": message, "parse_mode": "Markdown"}
     if reply_markup:
@@ -112,8 +124,7 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
     try:
         res = requests.post(url, json=payload, timeout=10)
         return res.status_code == 200
-    except Exception as e:
-        print(f"❌ خطا در ارسال پیام تلگرام: {e}")
+    except Exception:
         return False
 
 def send_persistent_keyboard(chat_id):
@@ -127,52 +138,52 @@ def send_persistent_keyboard(chat_id):
     send_telegram_msg("سیستم مدیریت آماده است.", chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۳. منوهای ویزارد
+# ۳. منوهای ویزارد با قابلیت ویرایش پیام
 # ==========================================
-def send_capital_menu(chat_id):
+def send_capital_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
             [{"text": "$500", "callback_data": "/set_cap_500"}, {"text": "$1,000", "callback_data": "/set_cap_1000"}],
             [{"text": "$5,000", "callback_data": "/set_cap_5000"}, {"text": "$10,000", "callback_data": "/set_cap_10000"}]
         ]
     }
-    send_telegram_msg("موجودی اولیه حساب کاغذی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("موجودی اولیه حساب کاغذی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def send_margin_menu(chat_id):
+def send_margin_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
             [{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}],
             [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}]
         ]
     }
-    send_telegram_msg("مقدار مارجین (سرمایه درگیر) در هر معامله:", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("مقدار مارجین (سرمایه درگیر) در هر معامله:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def send_leverage_menu(chat_id):
+def send_leverage_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
             [{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}]
         ]
     }
-    send_telegram_msg("ضریب اهرم (Leverage) را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("ضریب اهرم (Leverage) را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def send_max_positions_menu(chat_id):
+def send_max_positions_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
             [{"text": "2 معامله", "callback_data": "/set_max_2"}, {"text": "3 معامله", "callback_data": "/set_max_3"}, {"text": "5 معامله", "callback_data": "/set_max_5"}],
             [{"text": "10 معامله", "callback_data": "/set_max_10"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
         ]
     }
-    send_telegram_msg("حداکثر تعداد پوزیشن‌های هم‌زمان:", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("حداکثر تعداد پوزیشن‌های هم‌زمان:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def send_timeframe_menu(chat_id):
+def send_timeframe_menu(chat_id, message_id=None):
     keyboard = {
         "inline_keyboard": [
             [{"text": "5 دقیقه", "callback_data": "/set_tf_5m"}, {"text": "15 دقیقه", "callback_data": "/set_tf_15m"}, {"text": "1 ساعت", "callback_data": "/set_tf_1h"}]
         ]
     }
-    send_telegram_msg("انتخاب تایم‌فریم معاملاتی (شروع نهایی اسکن):", chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg("انتخاب تایم‌فریم معاملاتی (شروع نهایی اسکن):", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
-def send_main_menu(chat_id):
+def send_main_menu(chat_id, message_id=None):
     send_persistent_keyboard(chat_id)
     tf_display = "5m" if TIMEFRAME == "5min" else ("15m" if TIMEFRAME == "15min" else "1h")
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
@@ -207,7 +218,7 @@ def send_main_menu(chat_id):
         f"• اهرم: `{LEVERAGE}X` | حداکثر پوزیشن: `{max_pos}`\n"
         f"• تایم‌فریم: `{tf_display}` (ADX > {p['adx']})"
     )
-    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -339,7 +350,7 @@ def send_full_performance(chat_id):
     send_telegram_msg(generate_report(24, "روزانه (۲۴ ساعت)"), chat_target=chat_id)
     send_telegram_msg(generate_report(720, "ماهانه (۳۰ روز)"), chat_target=chat_id)
 
-def process_command(data, chat_id):
+def process_command(data, chat_id, message_id=None):
     global IS_BOT_ACTIVE, TRADING_MODE, INITIAL_BALANCE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME
     
     cmd = data.strip().lower()
@@ -352,18 +363,19 @@ def process_command(data, chat_id):
                 [{"text": "شروع معاملات با موجودی کاغذی", "callback_data": "/mode_paper"}]
             ]
         }
-        send_telegram_msg("به ربات معامله‌گر خوش آمدید.\nلطفاً نوع حساب معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard)
+        send_telegram_msg("به ربات معامله‌گر خوش آمدید.\nلطفاً نوع حساب معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
         
     elif cmd in ["/menu", "/main_menu", "menu", "منوی اصلی"]:
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, message_id=message_id)
     elif cmd in ["/performance", "گزارش عملکرد"]:
         send_full_performance(chat_id)
     elif cmd == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, message_id=message_id)
     elif cmd == "/close_all":
-        send_telegram_msg(close_all_open_positions(), chat_target=chat_id)
-        send_main_menu(chat_id)
+        res_txt = close_all_open_positions()
+        send_telegram_msg(res_txt, chat_target=chat_id)
+        send_main_menu(chat_id, message_id=message_id)
     elif cmd == "/mode_real":
         usdt_balance = 0.0
         if exchange:
@@ -381,25 +393,25 @@ def process_command(data, chat_id):
             PAPER_BALANCE = usdt_balance
             DAILY_START_BALANCE = usdt_balance
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`", chat_target=chat_id)
-            send_margin_menu(chat_id)
+            send_margin_menu(chat_id, message_id=message_id)
     elif cmd == "/mode_paper":
         TRADING_MODE = "PAPER"
-        send_capital_menu(chat_id)
+        send_capital_menu(chat_id, message_id=message_id)
     elif cmd in ["/set_cap_500", "/set_cap_1000", "/set_cap_5000", "/set_cap_10000"]:
         cap = float(cmd.replace("/set_cap_", ""))
         INITIAL_BALANCE, PAPER_BALANCE, DAILY_START_BALANCE = cap, cap, cap
         CLOSED_POSITIONS.clear()
         PAPER_POSITIONS.clear()
-        send_margin_menu(chat_id)
+        send_margin_menu(chat_id, message_id=message_id)
     elif cmd in ["/set_margin_10", "/set_margin_25", "/set_margin_50", "/set_margin_100"]:
         TRADE_AMOUNT_USDT = float(cmd.replace("/set_margin_", ""))
-        send_leverage_menu(chat_id)
+        send_leverage_menu(chat_id, message_id=message_id)
     elif cmd in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
         LEVERAGE = int(cmd.replace("/set_lev_", ""))
-        send_max_positions_menu(chat_id)
+        send_max_positions_menu(chat_id, message_id=message_id)
     elif cmd.startswith("/set_max_"):
         MAX_OPEN_POSITIONS = int(cmd.replace("/set_max_", ""))
-        send_timeframe_menu(chat_id)
+        send_timeframe_menu(chat_id, message_id=message_id)
     elif cmd in ["/open_positions", "پوزیشن‌های باز"]:
         txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n\n" + "".join([f"• `{p['symbol']}` ({p['side']})\n" for p in PAPER_POSITIONS]) if PAPER_POSITIONS else "پوزیشن بازی وجود ندارد."
         send_telegram_msg(txt, chat_target=chat_id)
@@ -412,7 +424,7 @@ def process_command(data, chat_id):
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
         IS_BOT_ACTIVE = True
         send_telegram_msg("🚀 تنظیمات ذخیره و اسکن زنده آغاز شد.", chat_target=chat_id)
-        send_main_menu(chat_id)
+        send_main_menu(chat_id, message_id=message_id)
 
 def telegram_listener():
     last_id = None
@@ -427,11 +439,14 @@ def telegram_listener():
                     last_id = r["update_id"] + 1
                     if "callback_query" in r:
                         cb = r["callback_query"]
+                        msg_id = cb["message"]["message_id"]
+                        chat_id = cb["message"]["chat"]["id"]
                         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]})
-                        process_command(cb.get("data", ""), cb["message"]["chat"]["id"])
+                        process_command(cb.get("data", ""), chat_id, message_id=msg_id)
                     elif "message" in r:
                         m = r["message"]
-                        process_command(m.get("text", ""), m["chat"]["id"])
+                        chat_id = m["chat"]["id"]
+                        process_command(m.get("text", ""), chat_id)
         except Exception as e:
             print(f"❌ خطا در دریافت آپدیت‌ها: {e}")
         time.sleep(2)
