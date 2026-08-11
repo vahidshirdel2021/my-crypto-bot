@@ -37,6 +37,7 @@ INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
 PAPER_BALANCE = INITIAL_BALANCE
 TRADE_AMOUNT_USDT = 50.0   # مارجین هر معامله
 LEVERAGE = 10              # اهرم پیش‌فرض
+MAX_OPEN_POSITIONS = 0     # ۰ یعنی بدون محدودیت (۲، ۳، ۵، ۱۰)
 TIMEFRAME = "5min"         # تایم‌فریم پیش‌فرض
 
 PAPER_POSITIONS = []
@@ -90,7 +91,6 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None):
         return False
 
 def send_persistent_keyboard(chat_id):
-    # کیبورد ثابت در پایین صفحه
     keyboard = {
         "keyboard": [
             [{"text": "🎛 منوی اصلی"}]
@@ -146,6 +146,23 @@ def send_leverage_menu(chat_id):
     msg = f"⚡ *گام ۲: اهرم معاملاتی (Leverage) خود را انتخاب کنید:*"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
+def send_max_positions_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "2 معامله", "callback_data": "/set_max_2"},
+                {"text": "3 معامله", "callback_data": "/set_max_3"},
+                {"text": "5 معامله", "callback_data": "/set_max_5"}
+            ],
+            [
+                {"text": "10 معامله", "callback_data": "/set_max_10"},
+                {"text": "♾ بدون محدودیت", "callback_data": "/set_max_0"}
+            ]
+        ]
+    }
+    msg = f"📊 *گام ۳: حداکثر تعداد پوزیشن‌های هم‌زمان را انتخاب کنید:*"
+    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+
 def send_timeframe_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
@@ -163,6 +180,7 @@ def send_main_menu(chat_id):
     tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
     status_icon = "🟢 در حال اسکن" if IS_BOT_ACTIVE else "🔴 متوقف شده"
     mode_icon = "🔴 واقعی (Real)" if TRADING_MODE == "REAL" else "🧪 کاغذی (Paper)"
+    max_pos_display = f"{MAX_OPEN_POSITIONS} معامله" if MAX_OPEN_POSITIONS > 0 else "بدون محدودیت"
     toggle_button_text = "⏸ توقف اسکن معاملات" if IS_BOT_ACTIVE else "▶️ شروع اسکن معاملات"
     
     keyboard = {
@@ -192,6 +210,7 @@ def send_main_menu(chat_id):
         f"🔹 *وضعیت اسکن:* `{status_icon}`\n"
         f"🔹 *موجودی کل:* `${PAPER_BALANCE:.2f} USDT`\n"
         f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *مارجین:* `${TRADE_AMOUNT_USDT:.0f}`\n"
+        f"🔹 *حداکثر پوزیشن هم‌زمان:* `{max_pos_display}`\n"
         f"🔹 *تایم‌فریم اسکن:* `{tf_display}`\n"
         f"🔹 *ارزهای فعال:* `{len(ACTIVE_SYMBOLS)} ارز`\n"
         f"🔹 *پوزیشن‌های باز:* `{len(PAPER_POSITIONS)}` | *بسته‌شده:* `{len(CLOSED_POSITIONS)}`"
@@ -310,6 +329,10 @@ def analyze_single_coin(symbol, chat_id):
 # ==========================================
 def execute_trade(symbol, side, price, sl, tp):
     if not IS_BOT_ACTIVE:
+        return
+
+    # چک کردن سقف تعداد پوزیشن‌های هم‌زمان
+    if MAX_OPEN_POSITIONS > 0 and len(PAPER_POSITIONS) >= MAX_OPEN_POSITIONS:
         return
 
     for pos in PAPER_POSITIONS:
@@ -587,7 +610,7 @@ def get_pnl_report():
 # ۸. مدیریت دستورات و Callbackهای تلگرام
 # ==========================================
 def process_command(data, chat_id):
-    global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE
+    global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE, MAX_OPEN_POSITIONS
     
     text_raw = data.strip()
     cmd = text_raw.lower()
@@ -652,6 +675,20 @@ def process_command(data, chat_id):
         send_telegram_msg(f"✅ *موجودی اولیه روی ${cap_val:.0f} دلار تنظیم شد.*", chat_target=chat_id)
         send_leverage_menu(chat_id)
 
+    # تنظیم اهرم و رفتن به گام بعدی (حداکثر پوزیشن‌های هم‌زمان)
+    elif cmd in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
+        LEVERAGE = int(cmd.replace("/set_lev_", ""))
+        send_telegram_msg(f"✅ *اهرم روی {LEVERAGE}X تنظیم شد.*", chat_target=chat_id)
+        send_max_positions_menu(chat_id)
+
+    # تنظیم حداکثر تعداد پوزیشن‌های هم‌زمان و رفتن به گام بعدی (تایم‌فریم)
+    elif cmd.startswith("/set_max_"):
+        max_val = int(cmd.replace("/set_max_", ""))
+        MAX_OPEN_POSITIONS = max_val
+        max_txt = f"{max_val} معامله هم‌زمان" if max_val > 0 else "بدون محدودیت"
+        send_telegram_msg(f"✅ *حداکثر پوزیشن‌های هم‌زمان روی «{max_txt}» تنظیم شد.*", chat_target=chat_id)
+        send_timeframe_menu(chat_id)
+
     elif cmd == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         status_txt = "🟢 *اسکن معاملات فعال شد.*" if IS_BOT_ACTIVE else "🔴 *اسکن معاملات متوقف شد.*"
@@ -674,12 +711,6 @@ def process_command(data, chat_id):
 
     elif cmd in ["/pnl", "/report", "/balance"]:
         send_telegram_msg(get_pnl_report(), chat_target=chat_id)
-        
-    # تنظیمات اهرم و رفتن به مرحله بعد (تایم‌فریم)
-    elif cmd in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
-        LEVERAGE = int(cmd.replace("/set_lev_", ""))
-        send_telegram_msg(f"✅ *اهرم روی {LEVERAGE}X تنظیم شد.*", chat_target=chat_id)
-        send_timeframe_menu(chat_id)
         
     # تنظیمات تایم‌فریم و فعال‌سازی نهایی اسکن
     elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
