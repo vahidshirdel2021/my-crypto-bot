@@ -280,7 +280,7 @@ def send_full_performance(chat_id):
     send_telegram_msg(generate_report(24, "روزانه (۲۴ ساعت)"), chat_target=chat_id)
     send_telegram_msg(generate_report(720, "ماهانه (۳۰ روز)"), chat_target=chat_id)
 
-def def process_command(data, chat_id):
+def process_command(data, chat_id):
     global IS_BOT_ACTIVE, TRADING_MODE, INITIAL_BALANCE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME
     
     cmd = data.strip().lower()
