@@ -25,12 +25,27 @@ def get_max_positions_keyboard():
         [{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], 
         [{"text": "5", "callback_data": "/set_max_5"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
     ]}
+
 def get_timeframe_keyboard():
     return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "مولتی آبشاری", "callback_data": "/set_tf_multi"}]]}
 
 def get_main_menu_keyboard(is_active):
     text = "🔴 توقف اسکن" if is_active else "🟢 روشن کردن اسکن"
-    return {"inline_keyboard": [[{"text": text, "callback_data": "/toggle_active"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}], [{"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]]}
+    return {"inline_keyboard": [
+        [{"text": text, "callback_data": "/toggle_active"}],
+        [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 انتخاب استراتژی", "callback_data": "/strategies_menu"}],
+        [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
+    ]}
+
+def get_strategies_selection_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "⚡ تشخیص هوشمند (Dynamic ADX)", "callback_data": "/set_strat_dynamic"}],
+        [{"text": "📈 روندپیروی (Trend)", "callback_data": "/set_strat_trend"}],
+        [{"text": "🚀 شکست کانال (Breakout)", "callback_data": "/set_strat_breakout"}],
+        [{"text": "🔄 بازگشت به میانگین RSI", "callback_data": "/set_strat_mean_reversion"}],
+        [{"text": "🌊 مولتی‌تایم‌فریم آبشاری", "callback_data": "/set_strat_multi"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
+    ]}
 
 def get_strategies_menu_keyboard():
     return {"inline_keyboard": [[{"text": "اسکالپ 5م", "callback_data": "/desc_5min"}, {"text": "روزانه 15م", "callback_data": "/desc_15min"}], [{"text": "سوئینگ 1س", "callback_data": "/desc_1hour"}, {"text": "مولتی آبشاری", "callback_data": "/desc_multi"}]]}
