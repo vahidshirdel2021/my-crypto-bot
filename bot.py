@@ -8,13 +8,10 @@ from threading import Thread
 from flask import Flask
 from strategy import calculate_indicators, get_signal, get_strategy_params
 from ui import (
-    get_start_keyboard, get_margin_keyboard, get_leverage_keyboard,
-    get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard
+    get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
+    get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard
 )
 
-# ==========================================
-# تنظیمات و متغیرها
-# ==========================================
 CONFIG_FILE = "config.json"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
@@ -211,9 +208,13 @@ def process_command(data, chat_id, message_id=None):
         
     elif cmd == "/mode_paper":
         TRADING_MODE = "PAPER"
-        PAPER_BALANCE = 1000.0
-        DAILY_START_BALANCE = 1000.0
-        send_telegram_msg("✅ حساب کاغذی فعال شد ($1000).\n\n⚙️ مقدار مارجین (سرمایه درگیر) در هر معامله را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
+        send_telegram_msg("⚙️ مقدار موجودی اولیه حساب کاغذی را انتخاب کنید:", chat_target=chat_id, reply_markup=get_balance_keyboard(), message_id=message_id)
+        
+    elif cmd.startswith("/set_bal_"):
+        bal_val = float(cmd.replace("/set_bal_", ""))
+        PAPER_BALANCE = bal_val
+        DAILY_START_BALANCE = bal_val
+        send_telegram_msg(f"✅ موجودی اولیه روی `{bal_val} USDT` تنظیم شد.\n\n⚙️ مقدار مارجین (سرمایه درگیر) در هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
         
     elif cmd == "/mode_real":
         usdt_balance = 0.0
