@@ -1,4 +1,4 @@
-requests
-pandas
 flask
-google-generativeai
+requests
+ccxt
+pandas
