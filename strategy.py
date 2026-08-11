@@ -96,7 +96,6 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     pullback_buy = prev['low'] <= prev['ema20'] and curr['close'] > curr['ema20']
     pullback_sell = prev['high'] >= prev['ema20'] and curr['close'] < curr['ema20']
 
-    # بررسی حالت مولتی تایم‌فریم
     if timeframe_mode == "multi" and market_data_dict:
         for tf in ['1d', '4h', '1h', '15m']:
             df_tf = market_data_dict.get(tf)
@@ -107,7 +106,6 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
                 if is_downtrend and h_curr['close'] > h_curr['ema50']:
                     return None, f"رد شد: روند تایم‌فریم بالاتر ({tf}) نزولی نیست و با روند کلان مغایرت دارد."
 
-    # بررسی شروط فنی
     if not adx_ok:
         return None, f"عدم ورود: قدرت روند (ADX = {current_adx:.1f}) کمتر از حد نصاب ({min_adx}) است و بازار رنج یا کم‌مومنتوم است."
     
@@ -127,3 +125,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
             return None, f"عدم ورود (نزولی): روند نزولی تایید شده (ADX = {current_adx:.1f}) اما پولبک معتبر به خط EMA20 رخ نداده است."
 
     return None, "شرایط معاملاتی استاندارد برقرار نیست."
+
+def get_signal(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min"):
+    sig, _ = get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe)
+    return sig
