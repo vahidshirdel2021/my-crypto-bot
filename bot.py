@@ -25,7 +25,7 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات اولیه و متغیرهای پویا
+# ۱. تنظیمات اولیه و متغیرهای مدیریت ریسک
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
@@ -35,10 +35,15 @@ TRADING_MODE = "PAPER"      # "REAL" یا "PAPER"
 IS_BOT_ACTIVE = False       # 🛑 اسکن تا زمان اتمام تنظیمات خاموش است
 INITIAL_BALANCE = 1000.0    # سرمایه اولیه پیش‌فرض
 PAPER_BALANCE = INITIAL_BALANCE
-TRADE_AMOUNT_USDT = 50.0   # مارجین هر معامله
+TRADE_AMOUNT_USDT = 50.0   # مارجین پیش‌فرض هر معامله (دلار)
 LEVERAGE = 10              # اهرم پیش‌فرض
-MAX_OPEN_POSITIONS = 0     # ۰ یعنی بدون محدودیت (۲، ۳، ۵، ۱۰)
+MAX_OPEN_POSITIONS = 3     # حداکثر معاملات هم‌زمان
 TIMEFRAME = "5min"         # تایم‌فریم پیش‌فرض
+
+# 🛡 تنظیمات مدیریت ریسک
+RISK_PER_TRADE_PCT = 1.0   # ریسک ۱٪ از کل حساب در هر معامله
+MAX_DAILY_LOSS_PCT = 5.0   # سقف زیان روزانه ۵٪
+DAILY_START_BALANCE = INITIAL_BALANCE
 
 PAPER_POSITIONS = []
 CLOSED_POSITIONS = []
@@ -133,6 +138,22 @@ def send_capital_menu(chat_id):
     msg = f"💰 *گام ۱: موجودی اولیه حساب کاغذی را انتخاب کنید:*"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
+def send_margin_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "💵 10 USDT", "callback_data": "/set_margin_10"},
+                {"text": "💵 25 USDT", "callback_data": "/set_margin_25"}
+            ],
+            [
+                {"text": "💵 50 USDT", "callback_data": "/set_margin_50"},
+                {"text": "💵 100 USDT", "callback_data": "/set_margin_100"}
+            ]
+        ]
+    }
+    msg = f"💼 *گام ۲: مقدار مارجین (سرمایه درگیر) در هر معامله را انتخاب کنید:*"
+    send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
+
 def send_leverage_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
@@ -143,7 +164,7 @@ def send_leverage_menu(chat_id):
             ]
         ]
     }
-    msg = f"⚡ *گام ۲: اهرم معاملاتی (Leverage) خود را انتخاب کنید:*"
+    msg = f"⚡ *گام ۳: اهرم معاملاتی (Leverage) خود را انتخاب کنید:*"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 def send_max_positions_menu(chat_id):
@@ -160,7 +181,7 @@ def send_max_positions_menu(chat_id):
             ]
         ]
     }
-    msg = f"📊 *گام ۳: حداکثر تعداد پوزیشن‌های هم‌زمان را انتخاب کنید:*"
+    msg = f"📊 *گام ۴: حداکثر تعداد پوزیشن‌های هم‌زمان را انتخاب کنید:*"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 def send_timeframe_menu(chat_id):
@@ -209,7 +230,8 @@ def send_main_menu(chat_id):
         f"🔹 *حالت معامله:* `{mode_icon}`\n"
         f"🔹 *وضعیت اسکن:* `{status_icon}`\n"
         f"🔹 *موجودی کل:* `${PAPER_BALANCE:.2f} USDT`\n"
-        f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *مارجین:* `${TRADE_AMOUNT_USDT:.0f}`\n"
+        f"🔹 *مارجین هر معامله:* `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
+        f"🔹 *اهرم فعال:* `{LEVERAGE}X` | *سقف زیان روزانه:* `{MAX_DAILY_LOSS_PCT}%`\n"
         f"🔹 *حداکثر پوزیشن هم‌زمان:* `{max_pos_display}`\n"
         f"🔹 *تایم‌فریم اسکن:* `{tf_display}`\n"
         f"🔹 *ارزهای فعال:* `{len(ACTIVE_SYMBOLS)} ارز`\n"
@@ -325,9 +347,10 @@ def analyze_single_coin(symbol, chat_id):
     send_telegram_msg(report, chat_target=chat_id)
 
 # ==========================================
-# ۵. سیستم معاملات واقعی و کاغذی
+# ۵. سیستم معاملات با تنظیمات مارجین انتخابی
 # ==========================================
 def execute_trade(symbol, side, price, sl, tp):
+    global IS_BOT_ACTIVE
     if not IS_BOT_ACTIVE:
         return
 
@@ -339,22 +362,13 @@ def execute_trade(symbol, side, price, sl, tp):
         if pos['symbol'] == symbol:
             return
 
-    if TRADING_MODE == "REAL":
-        if exchange:
-            try:
-                market_symbol = f"{symbol}/USDT:USDT"
-                order = exchange.create_order(
-                    symbol=market_symbol,
-                    type='market',
-                    side='buy' if 'BUY' in side else 'sell',
-                    amount=1
-                )
-                print(f"✅ معامله واقعی CoinEx ثبت شد: {order.get('id')}")
-            except Exception as e:
-                send_telegram_msg(f"❌ *خطا در ثبت معامله واقعی CoinEx:* `{e}`")
-                return
+    margin_needed = TRADE_AMOUNT_USDT
+    position_val = margin_needed * LEVERAGE
 
-    position_val = TRADE_AMOUNT_USDT * LEVERAGE
+    # اگر موجودی حساب کمتر از مارجین انتخاب شده باشد معامله باز نمی‌شود
+    if PAPER_BALANCE < margin_needed:
+        return
+
     trade = {
         "id": len(CLOSED_POSITIONS) + len(PAPER_POSITIONS) + 1,
         "symbol": symbol,
@@ -362,7 +376,7 @@ def execute_trade(symbol, side, price, sl, tp):
         "entry_price": price,
         "sl": sl,
         "tp": tp,
-        "margin": TRADE_AMOUNT_USDT,
+        "margin": margin_needed,
         "position_val": position_val,
         "leverage": LEVERAGE,
         "timeframe": TIMEFRAME,
@@ -377,8 +391,8 @@ def execute_trade(symbol, side, price, sl, tp):
         f"🔹 *نماد:* `{symbol}/USDT` | *جهت:* `{side}`\n"
         f"🔹 *قیمت ورود:* `{price:.4f}`\n"
         f"🎯 *حد سود (TP):* `{tp:.4f}` | 🛑 *حد زیان (SL):* `{sl:.4f}`\n"
-        f"⚡ *اهرم:* `{LEVERAGE}X` | *مارجین:* `${TRADE_AMOUNT_USDT:.0f}`\n"
-        f"⏱ *تایم‌فریم:* `{TIMEFRAME}`"
+        f"💼 *مارجین معامله:* `${margin_needed:.2f} USDT` ({LEVERAGE}X)\n"
+        f"⚡ *ارزش پوزیشن:* `${position_val:.2f} USDT`"
     )
     send_telegram_msg(msg)
 
@@ -426,7 +440,7 @@ def close_all_open_positions():
     )
 
 def update_open_positions():
-    global PAPER_BALANCE
+    global PAPER_BALANCE, IS_BOT_ACTIVE
     if not PAPER_POSITIONS:
         return
 
@@ -491,6 +505,18 @@ def update_open_positions():
                 f"💰 *موجودی کل جدید:* `{PAPER_BALANCE:.2f} USDT`"
             )
             send_telegram_msg(msg)
+
+            # 🛑 برسی سقف زیان روزانه ۵٪
+            total_daily_loss = DAILY_START_BALANCE - PAPER_BALANCE
+            daily_loss_pct = (total_daily_loss / DAILY_START_BALANCE) * 100.0
+            if daily_loss_pct >= MAX_DAILY_LOSS_PCT:
+                IS_BOT_ACTIVE = False
+                alert_msg = (
+                    f"🛑 *سقف زیان روزانه ({MAX_DAILY_LOSS_PCT}٪) لمس شد!*\n\n"
+                    f"📉 *میزان زیان امروز:* `{daily_loss_pct:.2f}%` (`{total_daily_loss:.2f} USDT`)\n"
+                    f"🛡 *ربات جهت محافظت از سرمایه شما اسکن جدید را متوقف کرد.*"
+                )
+                send_telegram_msg(alert_msg)
 
 # ==========================================
 # ۶. اسکن زنده
@@ -594,7 +620,7 @@ def get_pnl_report():
     total_pnl_pct = (total_pnl_usdt / INITIAL_BALANCE) * 100
 
     report = (
-        f"📊 *گزارش کامل PnL (اهرم {LEVERAGE}X | تایم‌فریم {TIMEFRAME})*\n\n"
+        f"📊 *گزارش کامل PnL (اهرم {LEVERAGE}X | مارجین ${TRADE_AMOUNT_USDT:.0f})\n\n"
         f"💵 *سرمایه اولیه:* `${INITIAL_BALANCE:.2f} USDT`\n"
         f"💰 *موجودی فعلی:* `${PAPER_BALANCE:.2f} USDT`\n"
         f"📈 *سود/زیان کل:* `{total_pnl_pct:+.2f}%` (`{total_pnl_usdt:+.2f} USDT`)\n\n"
@@ -610,13 +636,13 @@ def get_pnl_report():
 # ۸. مدیریت دستورات و Callbackهای تلگرام
 # ==========================================
 def process_command(data, chat_id):
-    global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE, MAX_OPEN_POSITIONS
+    global TIMEFRAME, LEVERAGE, INITIAL_BALANCE, PAPER_BALANCE, CLOSED_POSITIONS, PAPER_POSITIONS, IS_BOT_ACTIVE, ACTIVE_SYMBOLS, TRADING_MODE, MAX_OPEN_POSITIONS, DAILY_START_BALANCE, TRADE_AMOUNT_USDT
     
     text_raw = data.strip()
     cmd = text_raw.lower()
     
     if cmd in ["/start", "/menu", "/main_menu", "menu", "🎛 منوی اصلی"]:
-        IS_BOT_ACTIVE = False  # خاموش کردن اسکن موقع شروع مجدد تنظیمات
+        IS_BOT_ACTIVE = False
         send_welcome_mode_menu(chat_id)
 
     elif cmd == "/menu_analyze_coin":
@@ -626,7 +652,6 @@ def process_command(data, chat_id):
     elif cmd.startswith("/analyze"):
         analyze_single_coin(text_raw, chat_id)
 
-    # انتخاب حالت معامله واقعی
     elif cmd == "/mode_real":
         usdt_balance = 0.0
         if exchange:
@@ -651,11 +676,11 @@ def process_command(data, chat_id):
         else:
             TRADING_MODE = "REAL"
             PAPER_BALANCE = usdt_balance
-            msg = f"🔴 *حالت معامله واقعی انتخاب شد.* (موجودی: `{usdt_balance:.2f} USDT`)\n\n۱. اهرم معاملاتی خود را انتخاب کنید:"
+            DAILY_START_BALANCE = usdt_balance
+            msg = f"🔴 *حالت معامله واقعی انتخاب شد.* (موجودی: `{usdt_balance:.2f} USDT`)"
             send_telegram_msg(msg, chat_target=chat_id)
-            send_leverage_menu(chat_id)
+            send_margin_menu(chat_id)
 
-    # انتخاب حالت معامله کاغذی (پرسش سرمایه اولیه)
     elif cmd == "/mode_paper":
         TRADING_MODE = "PAPER"
         msg = (
@@ -665,23 +690,27 @@ def process_command(data, chat_id):
         send_telegram_msg(msg, chat_target=chat_id)
         send_capital_menu(chat_id)
 
-    # تنظیم سرمایه اولیه و رفتن به گام بعدی (اهرم)
     elif cmd in ["/set_cap_500", "/set_cap_1000", "/set_cap_5000", "/set_cap_10000"]:
         cap_val = float(cmd.replace("/set_cap_", ""))
         INITIAL_BALANCE = cap_val
         PAPER_BALANCE = cap_val
+        DAILY_START_BALANCE = cap_val
         CLOSED_POSITIONS = []
         PAPER_POSITIONS = []
         send_telegram_msg(f"✅ *موجودی اولیه روی ${cap_val:.0f} دلار تنظیم شد.*", chat_target=chat_id)
+        send_margin_menu(chat_id)
+
+    elif cmd in ["/set_margin_10", "/set_margin_25", "/set_margin_50", "/set_margin_100"]:
+        margin_val = float(cmd.replace("/set_margin_", ""))
+        TRADE_AMOUNT_USDT = margin_val
+        send_telegram_msg(f"✅ *مارجین هر معامله روی ${margin_val:.0f} USDT تنظیم شد.*", chat_target=chat_id)
         send_leverage_menu(chat_id)
 
-    # تنظیم اهرم و رفتن به گام بعدی (حداکثر پوزیشن‌های هم‌زمان)
     elif cmd in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
         LEVERAGE = int(cmd.replace("/set_lev_", ""))
         send_telegram_msg(f"✅ *اهرم روی {LEVERAGE}X تنظیم شد.*", chat_target=chat_id)
         send_max_positions_menu(chat_id)
 
-    # تنظیم حداکثر تعداد پوزیشن‌های هم‌زمان و رفتن به گام بعدی (تایم‌فریم)
     elif cmd.startswith("/set_max_"):
         max_val = int(cmd.replace("/set_max_", ""))
         MAX_OPEN_POSITIONS = max_val
@@ -712,15 +741,14 @@ def process_command(data, chat_id):
     elif cmd in ["/pnl", "/report", "/balance"]:
         send_telegram_msg(get_pnl_report(), chat_target=chat_id)
         
-    # تنظیمات تایم‌فریم و فعال‌سازی نهایی اسکن
     elif cmd in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h"]:
         if cmd == "/set_tf_5m": TIMEFRAME = "5min"
         elif cmd == "/set_tf_15m": TIMEFRAME = "15min"
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
         
-        IS_BOT_ACTIVE = True  # 🚀 شروع رسمی اسکن پس از اتمام آخرین مرحله تنظیمات
+        IS_BOT_ACTIVE = True
         tf_display = "5 دقیقه" if TIMEFRAME == "5min" else ("15 دقیقه" if TIMEFRAME == "15min" else "1 ساعته")
-        send_telegram_msg(f"🚀 *تنظیمات با موفقیت تکمیل شد! اسکن زنده روی تایم‌فریم {tf_display} فعال گردید.*", chat_target=chat_id)
+        send_telegram_msg(f"🚀 *تنظیمات کامل شد! اسکن زنده روی تایم‌فریم {tf_display} با مارجین ${TRADE_AMOUNT_USDT:.0f} فعال گردید.*", chat_target=chat_id)
         send_main_menu(chat_id)
 
 def telegram_listener():
