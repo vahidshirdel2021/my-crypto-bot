@@ -25,7 +25,7 @@ TRADE_AMOUNT_USDT = 50.0
 LEVERAGE = 10
 MAX_OPEN_POSITIONS = 3
 TIMEFRAME = "5min"
-ACTIVE_STRATEGY = "dynamic"  # پیش‌فرض روی تشخیص هوشمند رژیم بازار
+ACTIVE_STRATEGY = "dynamic"
 
 PAPER_POSITIONS = []
 CLOSED_POSITIONS = []
@@ -294,20 +294,10 @@ def process_command(data, chat_id, message_id=None):
     elif cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
-    elif cmd_lower == "/toggle_active":
-        IS_BOT_ACTIVE = not IS_BOT_ACTIVE
-        send_main_menu(chat_id, message_id=message_id)
     elif cmd_lower == "/strategies_menu":
         send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
         return
     elif cmd_lower.startswith("/set_strat_"):
-        strat_key = cmd_lower.replace("/set_strat_", "")
-        if strat_key in ["dynamic", "trend", "breakout", "mean_reversion", "multi"]:
-            ACTIVE_STRATEGY = strat_key
-            send_telegram_msg(f"✅ استراتژی فعال ربات با موفقیت تغییر کرد به: `{strat_key.upper()}`", chat_target=chat_id)
-            send_main_menu(chat_id, message_id=message_id)
-        return
-   elif cmd_lower.startswith("/set_strat_"):
         strat_key = cmd_lower.replace("/set_strat_", "")
         if strat_key in ["dynamic", "trend", "breakout", "mean_reversion", "multi"]:
             ACTIVE_STRATEGY = strat_key
