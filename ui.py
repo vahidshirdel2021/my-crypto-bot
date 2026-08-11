@@ -45,14 +45,25 @@ def get_timeframe_keyboard():
         ]
     }
 
+def get_strategies_menu_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "📊 استراتژی اسکالپ (5 دقیقه)", "callback_data": "/desc_5min"}],
+            [{"text": "📊 استراتژی روزانه (15 دقیقه)", "callback_data": "/desc_15min"}],
+            [{"text": "📊 استراتژی سوئینگ (1 ساعت)", "callback_data": "/desc_1hour"}],
+            [{"text": "📊 استراتژی مولتی‌تایم‌فریم آبشاری", "callback_data": "/desc_multi"}],
+            [{"text": "🏠 بازگشت به منوی اصلی", "callback_data": "/menu"}]
+        ]
+    }
+
 def get_main_menu_keyboard(is_active):
     active_btn_text = "🟢 روشن کردن اسکن" if not is_active else "🔴 متوقف کردن اسکن"
     return {
         "inline_keyboard": [
-            [{"text": active_btn_text, "callback_data": "/toggle_active"}, {"text": "🔍 تحلیل تک ارز", "callback_data": "/analyze_single"}],
-            [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "📊 تشریح استراتژی", "callback_data": "/strategy_info"}],
-            [{"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"}, {"text": "📈 گزارش عملکرد", "callback_data": "/performance"}],
-            [{"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}, {"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
+            [{"text": active_btn_text, "callback_data": "/toggle_active"}, {"text": "⚙️ تغییر تنظیمات", "callback_data": "/check_wizard"}],
+            [{"text": "🔍 تحلیل تک ارز", "callback_data": "/analyze_single"}, {"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}],
+            [{"text": "📊 انتخاب و تشریح استراتژی‌ها", "callback_data": "/strategies_list"}, {"text": "📈 گزارش عملکرد کلی", "callback_data": "/performance"}],
+            [{"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
         ]
     }
 
