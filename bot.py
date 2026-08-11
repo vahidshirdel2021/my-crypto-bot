@@ -2,7 +2,6 @@ import os
 import time
 import requests
 import pandas as pd
-from datetime import datetime
 from threading import Thread
 from flask import Flask
 
@@ -13,7 +12,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "OK - AI Dynamic Crypto Bot Active!", 200
+    return "OK - Balanced Crypto Signal Bot Active 24/7!", 200
 
 @app.route('/health')
 def health():
@@ -24,73 +23,10 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات تلگرام و جمینای
+# ۱. تنظیمات تلگرام و واچ‌لیست ارزها
 # ==========================================
 TELEGRAM_TOKEN = "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw"
 CHAT_ID = "1878257830"
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
-
-CACHED_MODEL_NAME = None
-
-def get_active_gemini_model():
-    """استعلام مستقیم لیست مدل‌های فعال از گوگل برای جلوگیری از خطای ۴۰۴"""
-    global CACHED_MODEL_NAME
-    if CACHED_MODEL_NAME:
-        return CACHED_MODEL_NAME
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
-    try:
-        res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            models = data.get("models", [])
-            for m in models:
-                methods = m.get("supportedGenerationMethods", [])
-                name = m.get("name", "")
-                # پیدا کردن اولین مدلی که تولید متن را پشتیبانی می‌کند
-                if "generateContent" in methods and ("flash" in name or "pro" in name):
-                    CACHED_MODEL_NAME = name  # فرمت خروجی گوگل: models/gemini-...
-                    print(f"✅ مدل فعال جمینای شناسایی شد: {CACHED_MODEL_NAME}")
-                    return CACHED_MODEL_NAME
-            # اگر فلیتر فلش/پرو پیدا نشد، اولین مدل پشتیبانی‌شده را بردار
-            for m in models:
-                if "generateContent" in m.get("supportedGenerationMethods", []):
-                    CACHED_MODEL_NAME = m.get("name")
-                    return CACHED_MODEL_NAME
-    except Exception as e:
-        print(f"⚠️ خطا در استعلام لیست مدل‌ها: {e}")
-
-    # مدل پیش‌فرض در صورت عدم دریافت پاسخ
-    return "models/gemini-1.5-flash"
-
-def generate_gemini_response(prompt):
-    """ارسال درخواست به مدل فعالِ تاییدشده توسط گوگل"""
-    model_name = get_active_gemini_model()
-    
-    # ساخت URL مستقیم
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
-    }
-
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=12)
-        if res.status_code == 200:
-            data = res.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "").strip()
-        else:
-            return f"⚠️ پاسخ گوگل (کد {res.status_code}):\n`{res.text[:200]}`"
-    except Exception as e:
-        return f"⚠️ خطای ارتباط: `{e}`"
-
-    return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
 
 SYMBOLS = [
     'BTC', 'ETH', 'DEFI', 'YFI', 'MKR', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE',
@@ -122,12 +58,13 @@ def send_telegram_msg(message, chat_target=None):
         return False
 
 # ==========================================
-# ۲. دریافت داده‌های آنلاین بازار (KuCoin / Gate.io)
+# ۲. دریافت داده‌های بازار و محاسبه اندیکاتورها
 # ==========================================
 def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
+    # اولویت اول: KuCoin API
     try:
         interval = "1hour" if aggregate == 1 else "4hour"
         url_kucoin = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval}"
@@ -145,6 +82,7 @@ def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
     except Exception:
         pass
 
+    # اولویت دوم: Gate.io API
     try:
         interval = "1h" if aggregate == 1 else "4h"
         url_gate = f"https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={coin_symbol}_USDT&interval={interval}&limit={limit}"
@@ -181,14 +119,9 @@ def calculate_indicators(df):
     df['atr'] = tr.rolling(window=14).mean()
     return df
 
-def get_ai_validation(coin, signal_type, price, rsi_val, macd_status):
-    prompt = f"""
-    یک معامله‌گر حرفه‌ای هستی. یک سیگنال با کیفیت بالا صادر شده است:
-    ارز: {coin}/USDT | نوع: {signal_type} | قیمت: {price} | RSI: {rsi_val:.1f} | MACD: {macd_status}
-    در ۲ جمله کوتاه و دقیق علت مناسب بودن این ورود را بگو.
-    """
-    return generate_gemini_response(prompt)
-
+# ==========================================
+# ۳. تحلیل دستی ارز (/analyze)
+# ==========================================
 def analyze_coin_on_demand(coin_symbol):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
     df = get_crypto_klines(coin_symbol, aggregate=1, limit=400)
@@ -211,22 +144,40 @@ def analyze_coin_on_demand(coin_symbol):
     macd_sig = float(curr['macd_signal'])
     vol_val = float(curr['volume'])
     vol_ma_val = float(curr['vol_ma'])
+    ema_1h_val = float(curr['ema200'])
+    atr_val = float(curr['atr'])
 
-    prompt = f"""
-    داده‌های ارز {coin_symbol}/USDT:
-    قیمت: {close_p} | EMA200 ۴ساعته: {ema_4h_val} | RSI: {rsi_val:.1f} | MACD: {macd_val:.4f} | حجم: {vol_val:.1f} (میانگین: {vol_ma_val:.1f})
-    حمایت: {lower_mid:.4f} | مقاومت: {upper_mid:.4f}
+    # فیلترهای روان‌تر
+    trend_long = (close_p > ema_1h_val) or (close_p > ema_4h_val)
+    trend_short = (close_p < ema_1h_val) or (close_p < ema_4h_val)
+    near_support = (abs(close_p - lower_mid) / lower_mid < 0.03) or (abs(close_p - mid_price) / mid_price < 0.03)
+    near_resistance = (abs(close_p - upper_mid) / upper_mid < 0.03) or (abs(close_p - mid_price) / mid_price < 0.03)
+    volume_ok = vol_val > (vol_ma_val * 1.0)
 
-    پاسخ دقیق فارسی با فرمت:
-    1. وضعیت معامله: (🟢 **ورود (Long)** / 🔻 **ورود (Short)** / 🛑 **عدم ورود**)
-    2. علت تصمیم در ۲ جمله کوتاه.
-    3. حد سود (TP) و حد زیان (SL) پیشنهادی.
-    """
-    res_text = generate_gemini_response(prompt)
-    return f"🔍 *تحلیل هوشمند لحظه‌ای `{coin_symbol}/USDT`*\n\n{res_text}"
+    if trend_long and near_support and (35 < rsi_val < 70) and (macd_val > macd_sig) and volume_ok:
+        status = "🟢 **ورود به معامله خرید (Long)**"
+        tp, sl = close_p + (atr_val * 3.0), close_p - (atr_val * 2.0)
+        details = f"🎯 *حد سود (TP):* `{tp:.4f}`\n🛑 *حد زیان (SL):* `{sl:.4f}`"
+    elif trend_short and near_resistance and (30 < rsi_val < 65) and (macd_val < macd_sig) and volume_ok:
+        status = "🔻 **ورود به معامله فروش (Short)**"
+        tp, sl = close_p - (atr_val * 3.0), close_p + (atr_val * 2.0)
+        details = f"🎯 *حد سود (TP):* `{tp:.4f}`\n🛑 *حد زیان (SL):* `{sl:.4f}`"
+    else:
+        status = "🛑 **عدم ورود (شرایط استراتژی مهیا نیست)**"
+        details = "⏳ منتظر موقعیت مناسب تکنیکال باشید."
+
+    msg = (
+        f"📊 *تحلیل تکنیکال لحظه‌ای `{coin_symbol}/USDT`*\n\n"
+        f"🔹 *قیمت فعلی:* `{close_p:.4f}`\n"
+        f"🔹 *شاخص RSI:* `{rsi_val:.1f}`\n"
+        f"🔹 *میانگین ۲۰۰ ۴ساعته:* `{ema_4h_val:.4f}`\n\n"
+        f"📌 *وضعیت معامله:* {status}\n\n"
+        f"{details}"
+    )
+    return msg
 
 # ==========================================
-# ۳. اسکنر سخت‌گیرانه (فقط سیگنال‌های A+)
+# ۴. اسکنر اتوماتیک و صدور سیگنال (متعادل)
 # ==========================================
 def check_symbol(coin_symbol):
     display_name = f"{coin_symbol}/USDT"
@@ -250,47 +201,47 @@ def check_symbol(coin_symbol):
     curr = df.iloc[-2]
     close_p = float(curr['close'])
     
-    near_support = (abs(close_p - lower_mid) / lower_mid < 0.01) or (abs(close_p - mid_price) / mid_price < 0.01)
-    near_resistance = (abs(close_p - upper_mid) / upper_mid < 0.01) or (abs(close_p - mid_price) / mid_price < 0.01)
+    # فیلتر فاصله از سطوح (۳٪)
+    near_support = (abs(close_p - lower_mid) / lower_mid < 0.03) or (abs(close_p - mid_price) / mid_price < 0.03)
+    near_resistance = (abs(close_p - upper_mid) / upper_mid < 0.03) or (abs(close_p - mid_price) / mid_price < 0.03)
     
-    volume_ok = float(curr['volume']) > (float(curr['vol_ma']) * 1.5)
+    # فیلتر حجم نرمال (۱.۱ برابر)
+    volume_ok = float(curr['volume']) > (float(curr['vol_ma']) * 1.1)
     
     macd_long_ok = float(curr['macd']) > float(curr['macd_signal'])
     macd_short_ok = float(curr['macd']) < float(curr['macd_signal'])
     rsi_val = float(curr['rsi'])
     
-    trend_long_ok = (close_p > ema_1h_val) and (close_p > ema_4h_val)
-    trend_short_ok = (close_p < ema_1h_val) and (close_p < ema_4h_val)
+    trend_long_ok = (close_p > ema_1h_val) or (close_p > ema_4h_val)
+    trend_short_ok = (close_p < ema_1h_val) or (close_p < ema_4h_val)
     
-    rsi_long_ok = 40 < rsi_val < 65
-    rsi_short_ok = 35 < rsi_val < 60
+    rsi_long_ok = 35 < rsi_val < 70
+    rsi_short_ok = 30 < rsi_val < 65
     
     if trend_long_ok and near_support and rsi_long_ok and macd_long_ok and volume_ok:
         atr_val = float(curr['atr'])
-        sl, tp = close_p - (atr_val * 1.5), close_p + (atr_val * 3.0)
-        ai_comment = get_ai_validation(coin_symbol, "خرید (Long)", close_p, rsi_val, "صعودی قوی")
+        sl = close_p - (atr_val * 2.0)
+        tp = close_p + (atr_val * 3.0)
         msg = (
-            f"🌟 *سیگنال ویژه خرید (Long - A+)*\n\n"
+            f"🚀 *سیگنال خرید (Long)*\n\n"
             f"🔹 *ارز:* `{display_name}`\n"
             f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
             f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
             f"🛑 *حد زیان (SL):* `{sl:.4f}`\n\n"
-            f"🤖 *تحلیل جمینای:*\n_{ai_comment}_\n\n"
             f"📊 *تایم‌فریم:* ۱ ساعته"
         )
         send_telegram_msg(msg)
         
     elif trend_short_ok and near_resistance and rsi_short_ok and macd_short_ok and volume_ok:
         atr_val = float(curr['atr'])
-        sl, tp = close_p + (atr_val * 1.5), close_p - (atr_val * 3.0)
-        ai_comment = get_ai_validation(coin_symbol, "فروش (Short)", close_p, rsi_val, "نزولی قوی")
+        sl = close_p + (atr_val * 2.0)
+        tp = close_p - (atr_val * 3.0)
         msg = (
-            f"🌟 *سیگنال ویژه فروش (Short - A+)*\n\n"
+            f"🔻 *سیگنال فروش (Short)*\n\n"
             f"🔹 *ارز:* `{display_name}`\n"
             f"🔹 *قیمت ورود:* `{close_p:.4f}`\n"
             f"🎯 *حد سود (TP):* `{tp:.4f}`\n"
             f"🛑 *حد زیان (SL):* `{sl:.4f}`\n\n"
-            f"🤖 *تحلیل جمینای:*\n_{ai_comment}_\n\n"
             f"📊 *تایم‌فریم:* ۱ ساعته"
         )
         send_telegram_msg(msg)
@@ -316,14 +267,14 @@ def telegram_listener():
                     if text.startswith("/analyze") or text.startswith("/check"):
                         parts = text.split()
                         coin = parts[1] if len(parts) > 1 else "BTC"
-                        send_telegram_msg(f"⏳ در حال استعلام مدل‌های هوشمند و تحلیل `{coin}`...", chat_target=chat_id)
+                        send_telegram_msg(f"⏳ در حال استعلام داده‌های تکنیکال `{coin}`...", chat_target=chat_id)
                         analysis_res = analyze_coin_on_demand(coin)
                         send_telegram_msg(analysis_res, chat_target=chat_id)
                     elif text.startswith("/start") or text.startswith("/help"):
                         help_text = (
-                            "🤖 *ربات هوشمند سیگنال‌دهی VIP*\n\n"
-                            "🔹 `/analyze BTC` : تحلیل کامل استراتژی روی بیت‌کوین\n"
-                            "🔹 `/analyze ETH` : تحلیل کامل روی اتریوم"
+                            "🤖 *ربات سیگنال‌دهی تکنیکال (نسخه متعادل)*\n\n"
+                            "🔹 `/analyze BTC` : استعلام تحلیل تکنیکال بیت‌کوین\n"
+                            "🔹 `/analyze SOL` : استعلام تحلیل تکنیکال سولانا"
                         )
                         send_telegram_msg(help_text, chat_target=chat_id)
         except Exception:
@@ -332,7 +283,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات با سیستم استعلام خودکار مدل‌های فعال جمینای آپدیت شد.*")
+    send_telegram_msg("⚡ *ربات سیگنال‌دهی با تنظیمات روان و روان‌تر صادرکننده سیگنال فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
