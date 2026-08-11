@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return f"OK - CoinEx Paper Trading Bot Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
+    return f"OK - Paper Trading Scalper (Leverage & Capital Configured) Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
 
 @app.route('/health')
 def health():
@@ -24,15 +24,35 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # ==========================================
-# ۱. تنظیمات تلگرام و سیستم Paper Trading
+# ۱. تنظیمات سرمایه، اهرم و تلگرام
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
 CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
 
-# تنظیمات معامله کاغذی (Paper Trading)
-PAPER_TRADING = True
-paper_balance = 1000.0  # موجودی اولیه مجازی دلار
-open_positions = []      # لیست پوزیشن‌های باز مجازی
+# ⚙️ تنظیمات متغیرهای سرمایه و اهرم (قابل تغییر)
+INITIAL_BALANCE = 500.0     # میزان سرمایه اولیه مجازی (دلار)
+PAPER_BALANCE = INITIAL_BALANCE
+TRADE_AMOUNT_USDT = 50.0   # مارجین/سرمایه درگیر در هر معامله (دلار)
+LEVERAGE = 10              # ضریب اهرم (Leverage) مثلا 10X
+
+PAPER_POSITIONS = []
+CLOSED_POSITIONS = []
+
+COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "D6A52010E5B846469B6EE3DB773B32B6")
+COINEX_SECRET = os.environ.get("COINEX_SECRET", "527FB6BC384FC302453676431692A8620F9A3E0F6A3D5D15")
+
+exchange = None
+if COINEX_API_KEY and COINEX_SECRET:
+    try:
+        exchange = ccxt.coinex({
+            'apiKey': COINEX_API_KEY,
+            'secret': COINEX_SECRET,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'}
+        })
+        print("✅ اتصال به API صرافی CoinEx برقرار شد.")
+    except Exception as e:
+        print(f"⚠️ خطا در راه‌اندازی API: {e}")
 
 ALL_SYMBOLS = [
     'BTC', 'ETH', 'SOL', 'AVAX', 'BNB', 'ADA', 'DOT', 'DOGE', 'LINK', 'XRP',
@@ -59,23 +79,21 @@ def send_main_menu(chat_id):
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "📋 واچ‌لیست ۵ دقیقه‌ای", "callback_data": "/active_coins"},
-                {"text": "📊 پوزیشن‌های باز کاغذی", "callback_data": "/positions"}
+                {"text": "⚡ اسکالپ BTC (5m)", "callback_data": "/analyze BTC"},
+                {"text": "⚡ اسکالپ ETH (5m)", "callback_data": "/analyze ETH"},
+                {"text": "⚡ اسکالپ SOL (5m)", "callback_data": "/analyze SOL"}
             ],
             [
-                {"text": "💼 موجودی حساب کاغذی", "callback_data": "/balance"}
+                {"text": "📋 واچ‌لیست ۵ دقیقه‌ای", "callback_data": "/active_coins"},
+                {"text": "📈 گزارش PnL و تنظیمات", "callback_data": "/pnl"}
             ]
         ]
     }
-    msg = (
-        "🎛 *پنل ربات اسکالپینگ (حالت Paper Trading)*\n\n"
-        f"💵 *موجودی مجازی فعلی:* `${paper_balance:.2f} USDT`\n"
-        "یکی از گزینه‌ها را انتخاب کنید:"
-    )
+    msg = f"🎛 *پنل مدیریت اسکالپینگ (سرمایه: ${INITIAL_BALANCE:.0f} | اهرم: {LEVERAGE}X)*\n\nیک گزینه را انتخاب کنید:"
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard)
 
 # ==========================================
-# ۲. دریافت داده‌های بازار
+# ۲. دریافت داده‌ها و اندیکاتورها
 # ==========================================
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
@@ -133,94 +151,108 @@ def calculate_indicators(df):
     return df
 
 # ==========================================
-# ۳. ثبت و مدیریت معاملات کاغذی (Paper Trading)
+# ۳. مدیریت پوزیشن کاغذی با اهرم
 # ==========================================
-def open_paper_position(symbol, side, entry_price, sl_price, tp_price):
-    global paper_balance, open_positions
-    
-    # بررسی جلوگیری از پوزیشن تکراری
-    for pos in open_positions:
+def execute_paper_trade(symbol, side, price, sl, tp):
+    for pos in PAPER_POSITIONS:
         if pos['symbol'] == symbol:
             return
-            
-    margin = 50.0  # مارجین اختصاصی هر معامله (۵۰ دلار مجازی)
-    leverage = 10  # اهرم ۱۰ برابر
-    position_size = (margin * leverage) / entry_price
-    
-    pos = {
-        'symbol': symbol,
-        'side': side,
-        'entry_price': entry_price,
-        'sl': sl_price,
-        'tp': tp_price,
-        'margin': margin,
-        'size': position_size,
-        'timestamp': time.time()
+
+    position_val = TRADE_AMOUNT_USDT * LEVERAGE
+    trade = {
+        "id": len(CLOSED_POSITIONS) + len(PAPER_POSITIONS) + 1,
+        "symbol": symbol,
+        "side": side,
+        "entry_price": price,
+        "sl": sl,
+        "tp": tp,
+        "margin": TRADE_AMOUNT_USDT,
+        "position_val": position_val,
+        "leverage": LEVERAGE,
+        "open_time": time.strftime("%H:%M:%S")
     }
-    open_positions.append(pos)
+    PAPER_POSITIONS.append(trade)
     
     msg = (
-        f"📝 *معامله کاغذی باز شد (Paper Trade)*\n\n"
-        f"🔹 *ارز:* `{symbol}/USDT`\n"
-        f"🔹 *جهت:* `{side}`\n"
-        f"🔹 *قیمت ورود:* `{entry_price:.4f}`\n"
-        f"🎯 *حد سود (TP):* `{tp_price:.4f}`\n"
-        f"🛑 *حد زیان (SL):* `{sl_price:.4f}`\n"
-        f"💰 *حجم معامله:* `${margin * leverage:.2f}` (اهرم ۱۰X)"
+        f"📝 *معامله کاغذی با اهرم {LEVERAGE}X ثبت شد*\n\n"
+        f"🔹 *نماد:* `{symbol}/USDT` | *جهت:* `{side}`\n"
+        f"🔹 *قیمت ورود:* `{price:.4f}`\n"
+        f"🎯 *حد سود (TP):* `{tp:.4f}` | 🛑 *حد زیان (SL):* `{sl:.4f}`\n"
+        f"💵 *مارجین (سرمایه):* `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
+        f"⚡ *ارزش پوزیشن (با اهرم):* `${position_val:.0f} USDT`"
     )
     send_telegram_msg(msg)
 
-def update_paper_positions():
-    global paper_balance, open_positions
-    if not open_positions:
+def update_open_positions():
+    global PAPER_BALANCE
+    if not PAPER_POSITIONS:
         return
 
-    for pos in open_positions[:]:
-        df = get_crypto_klines(pos['symbol'], interval_type="5min", limit=5)
+    for pos in PAPER_POSITIONS[:]:
+        symbol = pos['symbol']
+        df = get_crypto_klines(symbol, interval_type="5min", limit=5)
         if df.empty:
             continue
             
-        curr_price = float(df.iloc[-1]['close'])
         high_price = float(df.iloc[-1]['high'])
         low_price = float(df.iloc[-1]['low'])
         
-        hit_tp = False
-        hit_sl = False
-        pnl = 0.0
+        side = pos['side']
+        entry = pos['entry_price']
+        tp = pos['tp']
+        sl = pos['sl']
+        margin = pos['margin']
+        lev = pos['leverage']
         
-        if pos['side'] == 'BUY':
-            if high_price >= pos['tp']:
-                hit_tp = True
-                pnl = (pos['tp'] - pos['entry_price']) * pos['size']
-            elif low_price <= pos['sl']:
-                hit_sl = True
-                pnl = (pos['sl'] - pos['entry_price']) * pos['size']
-        elif pos['side'] == 'SELL':
-            if low_price <= pos['tp']:
-                hit_tp = True
-                pnl = (pos['entry_price'] - pos['tp']) * pos['size']
-            elif high_price >= pos['sl']:
-                hit_sl = True
-                pnl = (pos['entry_price'] - pos['sl']) * pos['size']
-                
-        if hit_tp or hit_sl:
-            paper_balance += pnl
-            status = "🎯 *برخورد با حد سود (TP)*" if hit_tp else "🛑 *برخورد با حد زیان (SL)*"
-            pnl_sign = "+" if pnl > 0 else ""
+        closed = False
+        raw_pnl_pct = 0.0
+        pnl_usdt = 0.0
+        exit_reason = ""
+
+        if "BUY" in side:
+            if high_price >= tp:
+                raw_pnl_pct = ((tp - entry) / entry) * 100
+                closed = True
+                exit_reason = "🎯 حد سود (TP)"
+            elif low_price <= sl:
+                raw_pnl_pct = ((sl - entry) / entry) * 100
+                closed = True
+                exit_reason = "🛑 حد زیان (SL)"
+
+        elif "SELL" in side:
+            if low_price <= tp:
+                raw_pnl_pct = ((entry - tp) / entry) * 100
+                closed = True
+                exit_reason = "🎯 حد سود (TP)"
+            elif high_price >= sl:
+                raw_pnl_pct = ((entry - sl) / entry) * 100
+                closed = True
+                exit_reason = "🛑 حد زیان (SL)"
+
+        if closed:
+            leveraged_pnl_pct = raw_pnl_pct * lev
+            pnl_usdt = (margin * leveraged_pnl_pct) / 100
             
+            PAPER_BALANCE += pnl_usdt
+            pos['pnl_pct'] = leveraged_pnl_pct
+            pos['pnl_usdt'] = pnl_usdt
+            pos['exit_reason'] = exit_reason
+            pos['close_time'] = time.strftime("%H:%M:%S")
+            
+            CLOSED_POSITIONS.append(pos)
+            PAPER_POSITIONS.remove(pos)
+            
+            pnl_icon = "🟢" if pnl_usdt >= 0 else "🔴"
             msg = (
-                f"{status}\n\n"
-                f"🔹 *ارز:* `{pos['symbol']}/USDT` ({pos['side']})\n"
-                f"🔹 *قیمت ورود:* `{pos['entry_price']:.4f}`\n"
-                f"🔹 *قیمت خروج:* `{curr_price:.4f}`\n"
-                f"💵 *سود/زیان:* `{pnl_sign}{pnl:.2f} USDT`\n"
-                f"💼 *موجودی کل جدید:* `${paper_balance:.2f} USDT`"
+                f"{pnl_icon} *پوزیشن کاغذی بسته شد ({exit_reason})*\n\n"
+                f"🔹 *نماد:* `{symbol}/USDT` | *جهت:* `{side}` ({lev}X)\n"
+                f"📊 *سود/زیان مارجین:* `{leveraged_pnl_pct:+.2f}%` (`{pnl_usdt:+.2f} USDT`)\n"
+                f"💰 *موجودی کل جدید:* `{PAPER_BALANCE:.2f} USDT`"
             )
             send_telegram_msg(msg)
-            open_positions.remove(pos)
 
 # ==========================================
-# ۴. اسکن زنده (تایم‌فریم ۵ دقیقه)
+# ۴. اسکن زنده اسکالپینگ ۵ دقیقه‌ای
 # ==========================================
 def check_symbol(coin_symbol):
     try:
@@ -245,14 +277,35 @@ def check_symbol(coin_symbol):
         if pullback_long:
             sl = close_p - (atr_val * 1.2)
             tp = close_p + (atr_val * 1.8)
-            open_paper_position(coin_symbol, 'BUY', close_p, sl, tp)
+            execute_paper_trade(coin_symbol, 'BUY (Long)', close_p, sl, tp)
             
         elif pullback_short:
             sl = close_p + (atr_val * 1.2)
             tp = close_p - (atr_val * 1.8)
-            open_paper_position(coin_symbol, 'SELL', close_p, sl, tp)
+            execute_paper_trade(coin_symbol, 'SELL (Short)', close_p, sl, tp)
     except Exception as e:
         print(f"خطا در اسکن {coin_symbol}: {e}")
+
+def get_pnl_report():
+    total_closed = len(CLOSED_POSITIONS)
+    wins = sum(1 for p in CLOSED_POSITIONS if p['pnl_usdt'] > 0)
+    losses = sum(1 for p in CLOSED_POSITIONS if p['pnl_usdt'] < 0)
+    win_rate = (wins / total_closed * 100) if total_closed > 0 else 0.0
+    
+    total_pnl_usdt = PAPER_BALANCE - INITIAL_BALANCE
+    total_pnl_pct = (total_pnl_usdt / INITIAL_BALANCE) * 100
+
+    report = (
+        f"📊 *گزارش PnL (با احتساب اهرم {LEVERAGE}X)*\n\n"
+        f"💵 *سرمایه اولیه:* `${INITIAL_BALANCE:.2f} USDT`\n"
+        f"💰 *موجودی فعلی:* `${PAPER_BALANCE:.2f} USDT`\n"
+        f"💵 *مارجین هر معامله:* `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
+        f"⚡ *اهرم معاملات:* `{LEVERAGE}X` (ارزش پوزیشن: `${TRADE_AMOUNT_USDT * LEVERAGE:.0f}`)\n"
+        f"📈 *سود/زیان کل:* `{total_pnl_pct:+.2f}%` (`{total_pnl_usdt:+.2f} USDT`)\n\n"
+        f"📉 *تعداد کل معاملات:* `{total_closed}` | 🟢 برد: `{wins}` | 🔴 باخت: `{losses}`\n"
+        f"🎯 *وین‌ریت (Win Rate):* `{win_rate:.1f}%`"
+    )
+    return report
 
 def process_command(text, chat_id):
     parts = text.strip().split()
@@ -262,17 +315,9 @@ def process_command(text, chat_id):
     if cmd in ["/start", "/menu", "/help"]:
         send_main_menu(chat_id)
     elif cmd in ["/active_coins", "/coins"]:
-        send_telegram_msg(f"📋 *تعداد ارزهای فعال در اسکن:* `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
-    elif cmd in ["/balance", "/bal"]:
-        send_telegram_msg(f"💼 *موجودی حساب کاغذی (Paper USDT):* `${paper_balance:.2f} USDT`", chat_target=chat_id)
-    elif cmd in ["/positions", "/pos"]:
-        if not open_positions:
-            send_telegram_msg("📊 *در حال حاضر هیچ پوزیشن کاغذی باز نیست.*", chat_target=chat_id)
-        else:
-            msg = "📊 *پوزیشن‌های کاغذی فعال:*\n\n"
-            for p in open_positions:
-                msg += f"🔹 `{p['symbol']}` ({p['side']}) | ورود: `{p['entry_price']:.4f}` | TP: `{p['tp']:.4f}` | SL: `{p['sl']:.4f}`\n"
-            send_telegram_msg(msg, chat_target=chat_id)
+        send_telegram_msg(f"📋 *تعداد ارزهای فعال:* `{len(ACTIVE_SYMBOLS)}`", chat_target=chat_id)
+    elif cmd in ["/pnl", "/report", "/balance", "/bal"]:
+        send_telegram_msg(get_pnl_report(), chat_target=chat_id)
 
 def telegram_listener():
     last_update_id = None
@@ -297,15 +342,20 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🚀 *سیستم معامله کاغذی (Paper Trading) با ۱,۰۰۰ دلار موجودی مجازی فعال شد.*")
+    send_telegram_msg(f"⚙️ *حساب کاغذی با سرمایه ${INITIAL_BALANCE:.0f} و اهرم {LEVERAGE}X راه‌اندازی شد.*")
     while True:
-        update_paper_positions()  # بررسی معاملات باز قبلی
+        try:
+            update_open_positions()
+        except Exception as e:
+            print(f"خطا در آپدیت پوزیشن‌ها: {e}")
+            
         for sym in ACTIVE_SYMBOLS:
             try:
                 check_symbol(sym)
             except Exception:
                 pass
             time.sleep(0.3)
+            
         time.sleep(30)
 
 if __name__ == "__main__":
