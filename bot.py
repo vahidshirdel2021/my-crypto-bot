@@ -354,11 +354,15 @@ def process_command(data, chat_id):
 def telegram_listener():
     last_id = None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    print("🤖 تلگرام لیسنر آغاز به کار کرد...")
     while True:
         try:
-            res = requests.get(url, params={"timeout": 10, "offset": last_id}, timeout=12)
+            res = requests.get(url, params={"timeout": 10, "offset": last_id}, timeout=15)
             if res.status_code == 200:
-                for r in res.json().get("result", []):
+                data = res.json()
+                if not data.get("ok"):
+                    print(f"⚠️ خطای تلگرام: {data}")
+                for r in data.get("result", []):
                     last_id = r["update_id"] + 1
                     if "callback_query" in r:
                         cb = r["callback_query"]
@@ -367,8 +371,10 @@ def telegram_listener():
                     elif "message" in r:
                         m = r["message"]
                         process_command(m.get("text", ""), m["chat"]["id"])
-        except Exception:
-            pass
+            else:
+                print(f"⚠️ وضعیت پاسخ تلگرام: {res.status_code}")
+        except Exception as e:
+            print(f"❌ خطا در دریافت آپدیت‌ها: {e}")
         time.sleep(2)
 
 def bot_loop():
