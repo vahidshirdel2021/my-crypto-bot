@@ -19,6 +19,24 @@ def home():
 def health():
     return "OK", 200
 
+# 🧪 مسیر تست دستی سیگنال
+@app.route('/test-signal')
+def test_signal():
+    msg = (
+        "🧪 *سیگنال تست دستی (آزمایشی)*\n\n"
+        "🔹 *ارز:* `BTC/USDT`\n"
+        "🔹 *قیمت ورود:* `64112.7100`\n"
+        "🎯 *حد سود (TP):* `66000.0000`\n"
+        "🛑 *حد زیان (SL):* `63000.0000`\n\n"
+        "📊 *تایم‌فریم:* ۱ ساعته\n"
+        "✅ *وضعیت:* ارتباط ربات با تلگرام و سرور کاملاً برقرار است."
+    )
+    ok = send_telegram_msg(msg)
+    if ok:
+        return "✅ Test signal sent to Telegram successfully!", 200
+    else:
+        return "❌ Failed to send test signal. Check bot logs.", 500
+
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
@@ -158,7 +176,7 @@ def check_symbol(coin_symbol):
 
 def bot_loop():
     """حلقه اسکن بازار در Thread مجزا"""
-    time.sleep(5)  # مهلت اولیه به سرور Flask برای بالامدن کامل
+    time.sleep(5)
     print("🚀 در حال راه‌اندازی ربات...")
     send_telegram_msg("🟢 *ربات سیگنال‌دهی بر روی سرور Render به‌صورت ۲۴/۷ فعال گردید.*")
     
@@ -177,9 +195,6 @@ def bot_loop():
 # ۳. اجرای اصلی
 # ==========================================
 if __name__ == "__main__":
-    # اجرای اسکریپت ربات در نخ پس‌زمینه
     t = Thread(target=bot_loop, daemon=True)
     t.start()
-    
-    # اجرای وب‌سرور روی نخ اصلی جهت پاسخ‌گویی به پینگ Render / UptimeRobot
     run_flask()
