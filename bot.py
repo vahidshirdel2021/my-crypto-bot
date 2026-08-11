@@ -10,7 +10,7 @@ from strategy import calculate_indicators, get_signal, get_strategy_params, get_
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
-    get_main_menu_keyboard, get_watchlist_manage_keyboard
+    get_main_menu_keyboard, get_watchlist_manage_keyboard, get_strategies_menu_keyboard
 )
 
 CONFIG_FILE = "config.json"
@@ -259,11 +259,11 @@ def process_command(data, chat_id, message_id=None):
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
         
-    elif cmd == "/wizard_start":
+    elif cmd == "/check_wizard":
         if IS_BOT_ACTIVE:
-            send_telegram_msg("⚠️ ابتدا اسکن را متوقف کنید.", chat_target=chat_id)
+            send_telegram_msg("⚠️ برای تغییر تنظیمات، ابتدا باید اسکن را متوقف کنید! روی دکمه متوقف کردن اسکن بزنید.", chat_target=chat_id)
         else:
-            send_telegram_msg("⚙️ تنظیمات مجدد - مقدار مارجین جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
+            send_telegram_msg("⚙️ تغییر تنظیمات - مقدار موجودی اولیه جدید را انتخاب کنید:", chat_target=chat_id, reply_markup=get_balance_keyboard(), message_id=message_id)
 
     elif cmd == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
@@ -284,16 +284,24 @@ def process_command(data, chat_id, message_id=None):
         USER_STATE = "WAITING_FOR_REMOVE_SYMBOL"
         send_telegram_msg("➖ نماد رمزارز برای حذف از واچ‌لیست را ارسال کنید (مثلاً `XRP`):", chat_target=chat_id)
         
-    elif cmd == "/strategy_info":
-        desc = get_strategy_description(TIMEFRAME)
-        send_telegram_msg(desc, chat_target=chat_id)
+    elif cmd == "/strategies_list":
+        send_telegram_msg("📊 *انتخاب استراتژی برای تشریح کامل:* روی هر استراتژی کلیک کنید تا جزئیات و پارامترهای آن را مشاهده کنید:", chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
+
+    elif cmd == "/desc_5min":
+        send_telegram_msg(get_strategy_description("5min"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
+    elif cmd == "/desc_15min":
+        send_telegram_msg(get_strategy_description("15min"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
+    elif cmd == "/desc_1hour":
+        send_telegram_msg(get_strategy_description("1hour"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
+    elif cmd == "/desc_multi":
+        send_telegram_msg(get_strategy_description("multi"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
 
     elif cmd == "/performance":
         total_pnl = sum(p.get('pnl_usdt', 0) for p in CLOSED_POSITIONS)
         wins = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) > 0]
         losses = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) < 0]
         send_telegram_msg(
-            f"📈 *گزارش عملکرد جامع*\n\n"
+            f"📈 *گزارش عملکرد کلی*\n\n"
             f"• کل معاملات بسته: `{len(CLOSED_POSITIONS)}`\n"
             f"• معاملات موفق: `{len(wins)}` | ناموفق: `{len(losses)}`\n"
             f"• سود/زیان کل: `{total_pnl:+.2f} USDT`\n"
@@ -302,9 +310,10 @@ def process_command(data, chat_id, message_id=None):
         )
 
     elif cmd == "/close_all":
+        IS_BOT_ACTIVE = False  # توقف اسکن هنگام بستن پوزیشن‌ها
         count = len(PAPER_POSITIONS)
         PAPER_POSITIONS.clear()
-        send_telegram_msg(f"❌ کل پوزیشن‌های باز (`{count} پوزیشن`) به صورت دستی بسته شدند.\n• مانده حساب: `${PAPER_BALANCE:.2f} USDT`", chat_target=chat_id)
+        send_telegram_msg(f"🛑 *اسکن متوقف شد!*\n❌ کل پوزیشن‌های باز (`{count} پوزیشن`) به صورت دستی بسته شدند.\n• مانده حساب: `${PAPER_BALANCE:.2f} USDT`", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
         
     elif cmd in ["/set_margin_10", "/set_margin_25", "/set_margin_50", "/set_margin_100"]:
@@ -325,11 +334,7 @@ def process_command(data, chat_id, message_id=None):
         elif cmd == "/set_tf_1h": TIMEFRAME = "1hour"
         elif cmd == "/set_tf_multi": TIMEFRAME = "multi"
         
-        desc = get_strategy_description(TIMEFRAME)
-        send_telegram_msg(desc, chat_target=chat_id)
-        
-        IS_BOT_ACTIVE = True
-        send_telegram_msg("🚀 تنظیمات ذخیره شد و اسکن زنده آغاز گردید.", chat_target=chat_id)
+        send_telegram_msg("🚀 تنظیمات جدید با موفقیت اعمال شد. اکنون می‌توانید اسکن را روشن کنید.", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
         
     elif cmd == "/open_positions":
@@ -384,8 +389,8 @@ def telegram_listener():
                             else:
                                 process_command(data, chat_id, message_id=msg_id)
                         else:
-                            USER_STATE = None
-                            process_command(data, chat_id, message_id=msg_id)
+		                    USER_STATE = None
+		                    process_command(data, chat_id, message_id=msg_id)
         except: pass
         time.sleep(2)
 
