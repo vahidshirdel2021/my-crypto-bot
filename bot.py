@@ -294,7 +294,10 @@ def process_command(data, chat_id, message_id=None):
     elif cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
-   elif cmd_lower == "/strategies_menu":
+    elif cmd_lower == "/toggle_active":
+        IS_BOT_ACTIVE = not IS_BOT_ACTIVE
+        send_main_menu(chat_id, message_id=message_id)
+    elif cmd_lower == "/strategies_menu":
         send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
         return
     elif cmd_lower.startswith("/set_strat_"):
