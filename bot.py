@@ -5,7 +5,6 @@ import pandas as pd
 from datetime import datetime
 from threading import Thread
 from flask import Flask
-import google.generativeai as genai
 
 # ==========================================
 # ۰. وب‌سرور Flask برای Render و UptimeRobot
@@ -14,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "OK - AI Strict Crypto Bot Active!", 200
+    return "OK - AI Crypto Bot Active!", 200
 
 @app.route('/health')
 def health():
@@ -31,43 +30,38 @@ TELEGRAM_TOKEN = "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw"
 CHAT_ID = "1878257830"
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
-genai.configure(api_key=GEMINI_API_KEY)
-
 def generate_gemini_response(prompt):
-    """اتصال هوشمند و پایدار به جمینای (SDK + REST API Backup)"""
-    # ۱. تلاش با SDK پایتون
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro']
-    for m_name in models_to_try:
-        try:
-            m = genai.GenerativeModel(m_name)
-            res = m.generate_content(prompt)
-            if res and res.text:
-                return res.text.strip()
-        except Exception as e:
-            print(f"⚠️ SDK Error on {m_name}: {e}")
-            continue
+    """فراخوانی مستقیم و بدون واسطه REST API جمینای"""
+    # لیست آدرس‌های مستقیم API برای مدل‌های رسمی
+    api_endpoints = [
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    ]
+    
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    headers = {'Content-Type': 'application/json'}
 
-    # ۲. پشتیبان مستقیم REST API (در صورت عدم پاسخگویی SDK)
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
-        res = requests.post(url, json=payload, headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", "").strip()
-        else:
-            return f"⚠️ پاسخ REST API ناامیدکننده بود: کد {res.status_code}"
-    except Exception as e:
-        return f"⚠️ خطا در REST API پشتیبان: {e}"
+    last_err = ""
+    for url in api_endpoints:
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", "").strip()
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text[:150]}"
+        except Exception as e:
+            last_err = str(e)
+            continue
 
     return "تاییدیه فنی صادر شد. رعایت حد زیان الزامی است."
 
@@ -311,7 +305,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات با سیستم دوگانه هوش مصنوعی (Direct REST API + SDK) فعال شد.*")
+    send_telegram_msg("🤖 *ربات با سیستم جدید و مستقیم HTTP API جمینای فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
