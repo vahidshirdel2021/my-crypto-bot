@@ -1,8 +1,8 @@
 def get_bottom_menu_keyboard():
     return {
         "keyboard": [
-            [{"text": "🏠 منوی اصلی"}, {"text": "📈 گزارش عملکرد کلی"}],
-            [{"text": "📊 انتخاب استراتژی"}]
+            [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
+            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 انتخاب استراتژی"}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
