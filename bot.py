@@ -11,7 +11,7 @@ from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
     get_main_menu_keyboard, get_watchlist_manage_keyboard, get_strategies_menu_keyboard,
-    get_bottom_menu_keyboard
+    get_bottom_menu_keyboard, get_strategies_selection_keyboard
 )
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
@@ -25,6 +25,7 @@ TRADE_AMOUNT_USDT = 50.0
 LEVERAGE = 10
 MAX_OPEN_POSITIONS = 3
 TIMEFRAME = "5min"
+ACTIVE_STRATEGY = "dynamic"  # پیش‌فرض روی تشخیص هوشمند رژیم بازار
 
 PAPER_POSITIONS = []
 CLOSED_POSITIONS = []
@@ -66,7 +67,7 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     status_str = "ACTIVE" if IS_BOT_ACTIVE else "PAUSED"
-    return f"OK - Mode: {TRADING_MODE} | Status: {status_str} | TF: {TIMEFRAME} | Watchlist: {len(ACTIVE_SYMBOLS)}", 200
+    return f"OK - Mode: {TRADING_MODE} | Status: {status_str} | Strategy: {ACTIVE_STRATEGY} | TF: {TIMEFRAME} | Watchlist: {len(ACTIVE_SYMBOLS)}", 200
 
 @app.route('/health')
 def health():
@@ -122,6 +123,7 @@ def send_main_menu(chat_id, message_id=None):
         f"📊 *پنل مدیریت پیشرفته ربات معامله‌گر*\n\n"
         f"• حالت: `{mode_str}`\n"
         f"• وضعیت: `{status_str}`\n"
+        f"• استراتژی فعال: `{ACTIVE_STRATEGY.upper()}`\n"
         f"• موجودی حساب: `${PAPER_BALANCE:.2f} USDT`\n"
         f"• مارجین هر معامله: `${TRADE_AMOUNT_USDT:.0f} USDT`\n"
         f"• اهرم: `{LEVERAGE}X` | پوزیشن: `{max_pos}`\n"
@@ -191,28 +193,27 @@ def update_open_positions():
 def check_symbol(coin_symbol):
     if not IS_BOT_ACTIVE: return
     try:
-        if TIMEFRAME == "multi":
-            market_data = {}
+        market_data = {}
+        if TIMEFRAME == "multi" or ACTIVE_STRATEGY == "multi":
             for tf_key, tf_val in [('1d', '1day'), ('4h', '4hour'), ('1h', '1hour'), ('15m', '15min'), ('5m', '5min')]:
                 df_t = get_crypto_klines(coin_symbol, interval_type=tf_val, limit=100)
                 if not df_t.empty:
                     market_data[tf_key] = calculate_indicators(df_t)
             df_5m = market_data.get('5m')
             if df_5m is None or df_5m.empty or len(df_5m) < 50: return
-            signal, _ = get_signal_with_reason(df_5m, market_data_dict=market_data, timeframe_mode="multi", timeframe=TIMEFRAME)
-            primary_df = df_5m
+            df_primary = calculate_indicators(df_5m)
         else:
             tf_api_map = {"5min": "5min", "15min": "15min", "1hour": "1hour"}
             api_tf = tf_api_map.get(TIMEFRAME, "5min")
             df_primary = get_crypto_klines(coin_symbol, interval_type=api_tf, limit=200)
             if df_primary.empty or len(df_primary) < 50: return
             df_primary = calculate_indicators(df_primary)
-            signal, _ = get_signal_with_reason(df_primary, timeframe_mode="single", timeframe=TIMEFRAME)
-            primary_df = df_primary
+        
+        signal, _ = get_signal_with_reason(df_primary, market_data_dict=market_data, timeframe_mode="single", timeframe=TIMEFRAME, strategy_type=ACTIVE_STRATEGY)
         
         if not signal: return
         
-        curr = primary_df.iloc[-2]
+        curr = df_primary.iloc[-2]
         close_p = float(curr['close'])
         atr = float(curr['atr'])
         p = get_strategy_params(TIMEFRAME)
@@ -224,11 +225,10 @@ def check_symbol(coin_symbol):
     except: pass
 
 def process_command(data, chat_id, message_id=None):
-    global IS_BOT_ACTIVE, TRADING_MODE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME, USER_STATE
+    global IS_BOT_ACTIVE, TRADING_MODE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME, ACTIVE_STRATEGY, USER_STATE
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    # مدیریت دکمه‌های متنی ثابت پایین صفحه
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
@@ -256,11 +256,11 @@ def process_command(data, chat_id, message_id=None):
             chat_target=chat_id
         )
         return
-    elif "مدیریت تنظیمات" in cmd or cmd_lower == "/check_wizard":
+    elif "مدیریت تنظیمات معامله" in cmd or cmd_lower == "/check_wizard":
         if IS_BOT_ACTIVE:
             send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای محافظت از موجودی و جلوگیری از تداخل در معاملات، لطفا ابتدا اسکن را متوقف کنید.", chat_target=chat_id)
         else:
-            send_telegram_msg("⚙️ *تغییر تنظیمات*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
+            send_telegram_msg("⚙️ *مدیریت تنظیمات معامله*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
         return
 
     if cmd_lower == "/start":
@@ -274,7 +274,7 @@ def process_command(data, chat_id, message_id=None):
         bal_val = float(cmd_lower.replace("/set_bal_", ""))
         PAPER_BALANCE = bal_val
         DAILY_START_BALANCE = bal_val
-        send_telegram_msg(f"✅ موجودی اولیه روی `{bal_val} USDT` تنظیم شد.\n\n⚙️ مقدار مارجین (سرمایه درگیر) در هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
+        send_telegram_msg(f"✅ موجودی اولیه روی `{bal_val} USDT` تنظیم شد.\n\n⚙️ مقدار مارجین در هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
     elif cmd_lower == "/mode_real":
         usdt_balance = 0.0
         if exchange:
@@ -294,6 +294,16 @@ def process_command(data, chat_id, message_id=None):
     elif cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
+    elif cmd_lower == "/strategies_menu":
+        send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
+        return
+    elif cmd_lower.startswith("/set_strat_"):
+        strat_key = cmd_lower.replace("/set_strat_", "")
+        if strat_key in ["dynamic", "trend", "breakout", "mean_reversion", "multi"]:
+            ACTIVE_STRATEGY = strat_key
+            send_telegram_msg(f"✅ استراتژی فعال ربات با موفقیت تغییر کرد به: `{strat_key.upper()`}", chat_target=chat_id)
+            send_main_menu(chat_id, message_id=message_id)
+        return
     elif cmd_lower == "/analyze_single":
         USER_STATE = "WAITING_FOR_SINGLE_SYMBOL"
         send_telegram_msg("🔍 نام رمزارز مورد نظر برای تحلیل (مثلاً `BTC` یا `ETH`) را ارسال کنید:", chat_target=chat_id)
@@ -305,14 +315,6 @@ def process_command(data, chat_id, message_id=None):
     elif cmd_lower == "/remove_symbol_prompt":
         USER_STATE = "WAITING_FOR_REMOVE_SYMBOL"
         send_telegram_msg("➖ نماد رمزارز برای حذف از واچ‌لیست را ارسال کنید:", chat_target=chat_id)
-    elif cmd_lower == "/desc_5min":
-        send_telegram_msg(get_strategy_description("5min"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
-    elif cmd_lower == "/desc_15min":
-        send_telegram_msg(get_strategy_description("15min"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
-    elif cmd_lower == "/desc_1hour":
-        send_telegram_msg(get_strategy_description("1hour"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
-    elif cmd_lower == "/desc_multi":
-        send_telegram_msg(get_strategy_description("multi"), chat_target=chat_id, reply_markup=get_strategies_menu_keyboard())
     elif cmd_lower == "/close_all":
         IS_BOT_ACTIVE = False
         count = len(PAPER_POSITIONS)
@@ -351,14 +353,14 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
                                 df = get_crypto_klines(text_val, interval_type="5min", limit=100)
                                 if not df.empty:
                                     df = calculate_indicators(df)
-                                    _, reason = get_signal_with_reason(df, timeframe=TIMEFRAME)
+                                    _, reason = get_signal_with_reason(df, timeframe=TIMEFRAME, strategy_type=ACTIVE_STRATEGY)
                                     curr = df.iloc[-2]
                                     send_telegram_msg(
                                         f"🔍 *تحلیل آنی نماد `{text_val}`*\n\n"
