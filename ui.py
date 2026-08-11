@@ -50,7 +50,16 @@ def get_main_menu_keyboard(is_active):
     return {
         "inline_keyboard": [
             [{"text": active_btn_text, "callback_data": "/toggle_active"}, {"text": "🔍 تحلیل تک ارز", "callback_data": "/analyze_single"}],
-            [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "⚙️ تنظیمات معاملاتی", "callback_data": "/wizard_start"}],
-            [{"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"}, {"text": "📈 گزارش عملکرد", "callback_data": "/performance"}]
+            [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "📊 تشریح استراتژی", "callback_data": "/strategy_info"}],
+            [{"text": "🔄 پوزیشن‌های باز", "callback_data": "/open_positions"}, {"text": "📈 گزارش عملکرد", "callback_data": "/performance"}],
+            [{"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}, {"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
+        ]
+    }
+
+def get_watchlist_manage_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "➕ افزودن ارز", "callback_data": "/add_symbol_prompt"}, {"text": "➖ حذف ارز", "callback_data": "/remove_symbol_prompt"}],
+            [{"text": "📋 لیست واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "🏠 بازگشت به منو", "callback_data": "/menu"}]
         ]
     }
