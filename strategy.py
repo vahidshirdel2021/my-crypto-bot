@@ -78,33 +78,52 @@ def get_strategy_description(timeframe):
         )
     return "⚠️ تایم‌فریم نامعتبر است."
 
-def get_signal(df_primary, market_data_dict=None, timeframe_mode="single"):
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min"):
     if df_primary.empty or len(df_primary) < 50:
-        return None
+        return None, "داده‌های کافی برای محاسبه اندیکاتورها وجود ندارد."
     
     curr = df_primary.iloc[-2]
     prev = df_primary.iloc[-3]
+    params = get_strategy_params(timeframe)
+    min_adx = params["adx"]
     
-    adx_ok = curr.get('adx', 30) > 20
+    current_adx = float(curr.get('adx', 0))
+    adx_ok = current_adx > min_adx
+    
     is_uptrend = curr['close'] > curr['ema50'] and curr['ema20'] > curr['ema50']
     is_downtrend = curr['close'] < curr['ema50'] and curr['ema20'] < curr['ema50']
     
     pullback_buy = prev['low'] <= prev['ema20'] and curr['close'] > curr['ema20']
     pullback_sell = prev['high'] >= prev['ema20'] and curr['close'] < curr['ema20']
 
+    # بررسی حالت مولتی تایم‌فریم
     if timeframe_mode == "multi" and market_data_dict:
         for tf in ['1d', '4h', '1h', '15m']:
             df_tf = market_data_dict.get(tf)
             if df_tf is not None and not df_tf.empty and len(df_tf) > 20:
                 h_curr = df_tf.iloc[-2]
                 if is_uptrend and h_curr['close'] < h_curr['ema50']:
-                    return None
+                    return None, f"رد شد: روند تایم‌فریم بالاتر ({tf}) صعودی نیست و با روند کلان مغایرت دارد."
                 if is_downtrend and h_curr['close'] > h_curr['ema50']:
-                    return None
+                    return None, f"رد شد: روند تایم‌فریم بالاتر ({tf}) نزولی نیست و با روند کلان مغایرت دارد."
 
-    if is_uptrend and pullback_buy and adx_ok:
-        return "BUY"
-    elif is_downtrend and pullback_sell and adx_ok:
-        return "SELL"
-        
-    return None
+    # بررسی شروط فنی
+    if not adx_ok:
+        return None, f"عدم ورود: قدرت روند (ADX = {current_adx:.1f}) کمتر از حد نصاب ({min_adx}) است و بازار رنج یا کم‌مومنتوم است."
+    
+    if not is_uptrend and not is_downtrend:
+        return None, "عدم ورود: روند مشخصی دیده نمی‌شود (خطوط EMA20 و EMA50 در هم تنیده یا خنثی هستند)."
+
+    if is_uptrend:
+        if pullback_buy:
+            return "BUY", f"تایید ورود خرید (Long): روند صعودی برقرار (ADX = {current_adx:.1f}) و پولبک معتبر به خط EMA20 ثبت شد."
+        else:
+            return None, f"عدم ورود (صعودی): روند صعودی تایید شده (ADX = {current_adx:.1f}) اما پولبک معتبر به خط EMA20 رخ نداده است."
+
+    if is_downtrend:
+        if pullback_sell:
+            return "SELL", f"تایید ورود فروش (Short): روند نزولی برقرار (ADX = {current_adx:.1f}) و پولبک معتبر به خط EMA20 ثبت شد."
+        else:
+            return None, f"عدم ورود (نزولی): روند نزولی تایید شده (ADX = {current_adx:.1f}) اما پولبک معتبر به خط EMA20 رخ نداده است."
+
+    return None, "شرایط معاملاتی استاندارد برقرار نیست."
