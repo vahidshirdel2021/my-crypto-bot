@@ -13,7 +13,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return f"OK - CoinEx 5M Scalper Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
+    return f"OK - CoinEx Scalper Active! Active Coins: {len(ACTIVE_SYMBOLS)}", 200
 
 @app.route('/health')
 def health():
