@@ -47,7 +47,7 @@ def run_flask():
 # ==========================================
 TELEGRAM_TOKEN = "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw"
 CHAT_ID = "1878257830"
-GEMINI_API_KEY = "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KAg0sT3mnay_Pq7lN3dXKWp-D7wNwp_hDGGMk0wYW3eg")
 
 genai.configure(api_key=GEMINI_API_KEY)
 ai_model = genai.GenerativeModel('gemini-1.5-flash')
@@ -81,52 +81,48 @@ def send_telegram_msg(message, chat_target=None):
         print(f"❌ خطا در ارسال پیام تلگرام: {e}")
         return False
 
+# ==========================================
+# ۲. دریافت داده‌های آنلاین بازار (KuCoin / Gate.io)
+# ==========================================
 def get_crypto_klines(coin_symbol, aggregate=1, limit=400):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     
-    # روش اول: CryptoCompare
-    url = "https://min-api.cryptocompare.com/data/v2/histohour"
-    params = {"fsym": coin_symbol, "tsym": "USDT", "limit": limit, "aggregate": aggregate}
+    # ۱. اولویت اول: KuCoin API
     try:
-        res = requests.get(url, params=params, headers=headers, timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            if data.get("Response") == "Success" and data.get("Data", {}).get("Data"):
-                df = pd.DataFrame(data["Data"]["Data"])
-                df = df.rename(columns={'time': 'timestamp', 'volumefrom': 'volume'})
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = df[col].astype(float)
-                if not df.empty and len(df) > 50:
-                    return df
-    except Exception as e:
-        print(f"⚠️ CryptoCompare Error ({coin_symbol}): {e}")
-
-    # روش دوم (پشتیبان زنده): CoinEx API
-    try:
-        coinex_market = f"{coin_symbol}USDT"
         interval = "1hour" if aggregate == 1 else "4hour"
-        url_coinex = f"https://api.coinex.com/v2/spot/market/kline?market={coinex_market}&interval={interval}&limit={limit}"
-        res = requests.get(url_coinex, headers=headers, timeout=5)
+        url_kucoin = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval}"
+        res = requests.get(url_kucoin, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
-            if data.get("code") == 0 and data.get("data"):
-                raw_data = data["data"]
-                df = pd.DataFrame(raw_data)
-                df = df.rename(columns={
-                    'created_at': 'timestamp',
-                    'open': 'open',
-                    'close': 'close',
-                    'high': 'high',
-                    'low': 'low',
-                    'volume': 'volume'
-                })
+            if data.get("code") == "200000" and data.get("data"):
+                raw = data["data"]
+                # فرمت کوکوین: [time, open, close, high, low, volume, turnover]
+                df = pd.DataFrame(raw, columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
+                df = df.iloc[::-1].reset_index(drop=True)
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = df[col].astype(float)
                 if not df.empty and len(df) > 50:
                     return df
     except Exception as e:
-        print(f"⚠️ CoinEx API Error ({coin_symbol}): {e}")
+        print(f"⚠️ KuCoin Error ({coin_symbol}): {e}")
+
+    # ۲. اولویت دوم: Gate.io API
+    try:
+        interval = "1h" if aggregate == 1 else "4h"
+        url_gate = f"https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair={coin_symbol}_USDT&interval={interval}&limit={limit}"
+        res = requests.get(url_gate, headers=headers, timeout=5)
+        if res.status_code == 200:
+            raw = res.json()
+            if isinstance(raw, list) and len(raw) > 50:
+                # فرمت گیت‌یو: [time, volume, close, high, low, open, amount]
+                df = pd.DataFrame(raw, columns=['timestamp', 'volume', 'close', 'high', 'low', 'open', 'amount'])
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = df[col].astype(float)
+                if not df.empty:
+                    return df
+    except Exception as e:
+        print(f"⚠️ Gate.io Error ({coin_symbol}): {e}")
 
     return pd.DataFrame()
 
@@ -311,7 +307,7 @@ def telegram_listener():
 
 def bot_loop():
     time.sleep(5)
-    send_telegram_msg("🤖 *ربات هوشمند با پشتیبانی از ۱۲۵ ارز و دستورات تلگرام روی Render فعال گردید.*")
+    send_telegram_msg("🤖 *ربات هوشمند با پشتیبانی از ۱۲۵ ارز و اتصال KuCoin/Gate.io فعال شد.*")
     while True:
         for sym in SYMBOLS:
             try:
