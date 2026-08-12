@@ -13,7 +13,7 @@ from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
     get_main_menu_keyboard, get_watchlist_manage_keyboard, get_strategies_menu_keyboard,
-    get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard, get_params_menu_keyboard
+    get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard
 )
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
@@ -324,6 +324,19 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
+    if cmd_lower.startswith("/close_"):
+        symbol_to_close = cmd_lower.replace("/close_", "").upper()
+        found = False
+        for pos in PAPER_POSITIONS[:]:
+            if pos['symbol'] == symbol_to_close:
+                PAPER_POSITIONS.remove(pos)
+                send_telegram_msg(f"✅ پوزیشن `{symbol_to_close}` به صورت دستی بسته شد.", chat_target=chat_id)
+                found = True
+                break
+        if not found:
+            send_telegram_msg(f"❌ پوزیشنی با نماد `{symbol_to_close}` یافت نشد.", chat_target=chat_id)
+        return
+
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
@@ -365,10 +378,10 @@ def process_command(data, chat_id, message_id=None):
             txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n"
             for p in PAPER_POSITIONS:
                 txt += f"• `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
-            txt += f"\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
+            keyboard = get_positions_keyboard(PAPER_POSITIONS)
+            send_telegram_msg(txt, chat_target=chat_id, reply_markup=keyboard)
         else:
-            txt = f"پوزیشن بازی وجود ندارد.\n\n💰 *مانده حساب کل:* `${PAPER_BALANCE:.2f} USDT`"
-        send_telegram_msg(txt, chat_target=chat_id)
+            send_telegram_msg("پوزیشن بازی وجود ندارد.", chat_target=chat_id)
         return
     elif "گزارش عملکرد" in cmd or cmd_lower == "/performance":
         total_pnl = sum(p.get('pnl_usdt', 0) for p in CLOSED_POSITIONS)
