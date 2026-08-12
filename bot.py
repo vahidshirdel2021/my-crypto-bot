@@ -21,6 +21,7 @@ IS_BOT_ACTIVE = False
 TRADING_MODE = "PAPER"
 PAPER_BALANCE = 1000.0
 DAILY_START_BALANCE = 1000.0
+DAILY_STOPPED = False
 TRADE_AMOUNT_USDT = 50.0
 LEVERAGE = 10
 MAX_OPEN_POSITIONS = 3
@@ -134,8 +135,8 @@ def send_main_menu(chat_id, message_id=None):
     send_telegram_msg(msg, chat_target=chat_id, reply_markup=keyboard, message_id=message_id)
 
 def execute_trade(symbol, side, price, sl, tp):
-    global IS_BOT_ACTIVE, PAPER_BALANCE
-    if not IS_BOT_ACTIVE: return
+    global IS_BOT_ACTIVE, PAPER_BALANCE, DAILY_STOPPED
+    if not IS_BOT_ACTIVE or DAILY_STOPPED: return
     if MAX_OPEN_POSITIONS > 0 and len(PAPER_POSITIONS) >= MAX_OPEN_POSITIONS: return
     for pos in PAPER_POSITIONS:
         if pos['symbol'] == symbol: return
@@ -159,7 +160,7 @@ def execute_trade(symbol, side, price, sl, tp):
     )
 
 def update_open_positions():
-    global PAPER_BALANCE, IS_BOT_ACTIVE
+    global PAPER_BALANCE, IS_BOT_ACTIVE, DAILY_STOPPED
     if not PAPER_POSITIONS: return
 
     for pos in PAPER_POSITIONS[:]:
@@ -168,7 +169,6 @@ def update_open_positions():
         high, low = float(df.iloc[-1]['high']), float(df.iloc[-1]['low'])
         current_price = float(df.iloc[-1]['close'])
 
-        # محاسبه سود لحظه‌ای برای تریلینگ استاپ
         if "BUY" in pos['side']:
             current_raw_pnl = ((current_price - pos['entry_price']) / pos['entry_price']) * 100
         else:
@@ -176,10 +176,9 @@ def update_open_positions():
 
         current_pnl_usdt = (pos['margin'] * (current_raw_pnl * pos['leverage'])) / 100
 
-        # منطق تریلینگ استاپ (اگر فعال باشد)
         if FILTERS["trailing_stop"] and not pos.get('trailing_activated', False):
-            if current_pnl_usdt >= (pos['margin'] * 0.10): # وقتی معامله ۱۰ درصد سود مارجین داد
-                pos['sl'] = pos['entry_price'] # جابجایی حد ضرر به نقطه ورود (Break-even)
+            if current_pnl_usdt >= (pos['margin'] * 0.10):
+                pos['sl'] = pos['entry_price']
                 pos['trailing_activated'] = True
                 send_telegram_msg(f"🛡️ *تریلینگ استاپ فعال شد*\n• نماد: `{pos['symbol']}`\n• حد ضرر به نقطه سر‌به‌سر منتقل شد.")
 
@@ -198,6 +197,21 @@ def update_open_positions():
             pos['close_timestamp'] = time.time()
             CLOSED_POSITIONS.append(pos)
             PAPER_POSITIONS.remove(pos)
+
+            if DAILY_START_BALANCE > 0 and not DAILY_STOPPED:
+                drawdown_pct = ((DAILY_START_BALANCE - PAPER_BALANCE) / DAILY_START_BALANCE) * 100
+                if drawdown_pct >= 5.0:
+                    IS_BOT_ACTIVE = False
+                    DAILY_STOPPED = True
+                    send_telegram_msg(
+                        f"🚨 *هشدار: سقف حد ضرر روزانه (۵٪) تکمیل شد!*\n\n"
+                        f"• موجودی پایه روز: `{DAILY_START_BALANCE:.2f} USDT`\n"
+                        f"• موجودی فعلی: `${PAPER_BALANCE:.2f} USDT`\n"
+                        f"• میزان افت: `{drawdown_pct:.2f}%`\n\n"
+                        f"🛑 معاملات و اسکن بازار به طور خودکار متوقف شدند.\n"
+                        f"🔹 برای بررسی بازار و تایید دستی جهت ادامه فعالیت، لطفاً دکمه «شروع اسکن» را بزنید."
+                    )
+
             send_telegram_msg(
                 f"📌 *پوزیشن بسته شد.*\n"
                 f"• نماد: `{pos['symbol']}`\n"
@@ -206,7 +220,7 @@ def update_open_positions():
             )
 
 def check_symbol(coin_symbol):
-    if not IS_BOT_ACTIVE: return
+    if not IS_BOT_ACTIVE or DAILY_STOPPED: return
     try:
         market_data = {}
         if TIMEFRAME == "multi" or ACTIVE_STRATEGY == "multi":
@@ -240,7 +254,7 @@ def check_symbol(coin_symbol):
     except: pass
 
 def process_command(data, chat_id, message_id=None):
-    global IS_BOT_ACTIVE, TRADING_MODE, PAPER_BALANCE, DAILY_START_BALANCE, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME, ACTIVE_STRATEGY, USER_STATE
+    global IS_BOT_ACTIVE, TRADING_MODE, PAPER_BALANCE, DAILY_START_BALANCE, DAILY_STOPPED, TRADE_AMOUNT_USDT, LEVERAGE, MAX_OPEN_POSITIONS, TIMEFRAME, ACTIVE_STRATEGY, USER_STATE
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
@@ -293,12 +307,18 @@ def process_command(data, chat_id, message_id=None):
         send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
         return
     elif "شروع اسکن" in cmd or "توقف اسکن" in cmd or "روشن کردن اسکن" in cmd or cmd_lower == "/toggle_active":
+        if not IS_BOT_ACTIVE and DAILY_STOPPED:
+            DAILY_START_BALANCE = PAPER_BALANCE
+            DAILY_STOPPED = False
+            send_telegram_msg("✅ تایید دستی اعمال شد. سقف ضرر روزانه ریست شد و اسکن ادامه می‌یابد.", chat_target=chat_id)
+        
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
         return
 
     if cmd_lower == "/start":
         IS_BOT_ACTIVE = False
+        DAILY_STOPPED = False
         USER_STATE = None
         send_telegram_msg("🤖 *به ربات معامله‌گر خوش آمدید.*\n\nلطفاً نوع حساب معاملاتی خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_start_keyboard(), message_id=message_id)
     elif cmd_lower == "/mode_paper":
@@ -308,6 +328,7 @@ def process_command(data, chat_id, message_id=None):
         bal_val = float(cmd_lower.replace("/set_bal_", ""))
         PAPER_BALANCE = bal_val
         DAILY_START_BALANCE = bal_val
+        DAILY_STOPPED = False
         send_telegram_msg(f"✅ موجودی اولیه روی `{bal_val} USDT` تنظیم شد.\n\n⚙️ مقدار مارجین در هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
     elif cmd_lower == "/mode_real":
         usdt_balance = 0.0
@@ -324,6 +345,7 @@ def process_command(data, chat_id, message_id=None):
             TRADING_MODE = "REAL"
             PAPER_BALANCE = usdt_balance
             DAILY_START_BALANCE = usdt_balance
+            DAILY_STOPPED = False
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مقدار مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
     elif cmd_lower == "/strategies_menu":
         send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
@@ -431,8 +453,9 @@ def bot_loop():
     while True:
         try: update_open_positions()
         except: pass
-        if IS_BOT_ACTIVE:
+        if IS_BOT_ACTIVE and not DAILY_STOPPED:
             for sym in ACTIVE_SYMBOLS:
+                if not IS_BOT_ACTIVE or DAILY_STOPPED: break
                 check_symbol(sym)
                 time.sleep(0.2)
         time.sleep(30)
