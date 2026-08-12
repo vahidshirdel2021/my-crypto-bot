@@ -5,7 +5,7 @@ def get_bottom_menu_keyboard(is_active=False):
     return {
         "keyboard": [
             [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
-            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 مدیریت تنظیمات معامله"}],
+            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}],
             [{"text": "⚙️ تنظیمات فیلترها"}, {"text": scan_btn_text}]
         ],
         "resize_keyboard": True,
@@ -19,7 +19,7 @@ def get_filters_menu_keyboard():
     return {"inline_keyboard": [
         [{"text": f"فیلتر حجم معاملات: {vol_icon}", "callback_data": "/toggle_vol"}],
         [{"text": f"تریلینگ استاپ: {trail_icon}", "callback_data": "/toggle_trail"}],
-        [{"text": f"کندل‌تاییدیه پرایس‌اکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
+        [{"text": f"کندل‌تاییدیه پرایس‌آکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
@@ -54,6 +54,7 @@ def get_main_menu_keyboard(is_active):
     text = "🔴 توقف اسکن" if is_active else "🟢 روشن کردن اسکن"
     return {"inline_keyboard": [
         [{"text": text, "callback_data": "/toggle_active"}],
+        [{"text": "📊 گزارش وضعیت بازار", "callback_data": "/market_report"}],
         [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 انتخاب استراتژی", "callback_data": "/strategies_menu"}],
         [{"text": "⚙️ تنظیمات فیلترها", "callback_data": "/filters_menu"}],
         [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
