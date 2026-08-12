@@ -354,7 +354,7 @@ def process_command(data, chat_id, message_id=None):
     # محافظت از تنظیمات معامله هنگام فعال بودن اسکن
     setting_commands = ["/check_wizard", "مدیریت تنظیمات معامله", "/mode_paper", "/mode_real", "/set_bal_", "/set_margin_", "/set_lev_", "/set_max_", "/set_tf_"]
     if IS_BOT_ACTIVE and any(cmd_lower.startswith(sc) or sc in cmd_lower for sc in setting_commands):
-        send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
+        send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات و مدیریت پارامترها (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
         return
 
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
