@@ -89,7 +89,7 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=N
     if reply_markup:
         payload["reply_markup"] = reply_markup
     else:
-        payload["reply_markup"] = get_bottom_menu_keyboard()
+        payload["reply_markup"] = get_bottom_menu_keyboard(IS_BOT_ACTIVE)
 
     try:
         return requests.post(url, json=payload, timeout=10).status_code == 200
@@ -262,6 +262,10 @@ def process_command(data, chat_id, message_id=None):
         else:
             send_telegram_msg("⚙️ *مدیریت تنظیمات معامله*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
         return
+    elif "شروع اسکن" in cmd or "توقف اسکن" in cmd or "روشن کردن اسکن" in cmd or cmd_lower == "/toggle_active":
+        IS_BOT_ACTIVE = not IS_BOT_ACTIVE
+        send_main_menu(chat_id, message_id=message_id)
+        return
 
     if cmd_lower == "/start":
         IS_BOT_ACTIVE = False
@@ -291,9 +295,6 @@ def process_command(data, chat_id, message_id=None):
             PAPER_BALANCE = usdt_balance
             DAILY_START_BALANCE = usdt_balance
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مقدار مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
-    elif cmd_lower == "/toggle_active":
-        IS_BOT_ACTIVE = not IS_BOT_ACTIVE
-        send_main_menu(chat_id, message_id=message_id)
     elif cmd_lower == "/strategies_menu":
         send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
         return
@@ -353,7 +354,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
