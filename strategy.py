@@ -4,7 +4,8 @@ import numpy as np
 FILTERS = {
     "volume_filter": True,
     "trailing_stop": True,
-    "candlestick_filter": True
+    "candlestick_filter": True,
+    "no_short_filter": False
 }
 
 STRATEGY_CONFIG = {
