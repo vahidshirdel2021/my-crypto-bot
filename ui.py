@@ -27,10 +27,16 @@ def get_start_keyboard():
     return {"inline_keyboard": [[{"text": "حساب کاغذی", "callback_data": "/mode_paper"}, {"text": "حساب واقعی", "callback_data": "/mode_real"}]]}
 
 def get_balance_keyboard():
-    return {"inline_keyboard": [[{"text": "500", "callback_data": "/set_bal_500"}, {"text": "1000", "callback_data": "/set_bal_1000"}], [{"text": "5000", "callback_data": "/set_bal_5000"}, {"text": "10000", "callback_data": "/set_bal_10000"}]]}
+    return {"inline_keyboard": [
+        [{"text": "500 USDT", "callback_data": "/set_bal_500"}, {"text": "1000 USDT", "callback_data": "/set_bal_1000"}],
+        [{"text": "5000 USDT", "callback_data": "/set_bal_5000"}, {"text": "10000 USDT", "callback_data": "/set_bal_10000"}]
+    ]}
 
 def get_margin_keyboard():
-    return {"inline_keyboard": [[{"text": "10", "callback_data": "/set_margin_10"}, {"text": "25", "callback_data": "/set_margin_25"}], [{"text": "50", "callback_data": "/set_margin_50"}, {"text": "100", "callback_data": "/set_margin_100"}]]}
+    return {"inline_keyboard": [
+        [{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}],
+        [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}]
+    ]}
 
 def get_leverage_keyboard():
     return {"inline_keyboard": [[{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}]]}
