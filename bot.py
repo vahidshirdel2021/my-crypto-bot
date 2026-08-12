@@ -217,8 +217,9 @@ def execute_trade(symbol, side, price, sl, tp):
         "close_timestamp": None, "pnl_usdt": 0.0, "trailing_activated": False
     }
     PAPER_POSITIONS.append(trade)
+    side_icon = "🟢" if "BUY" in side or "Long" in side else "🔴"
     send_telegram_msg(
-        f"📝 *معامله جدید ({side})*\n"
+        f"📝 *معامله جدید {side_icon} ({side})*\n"
         f"• نماد: `{symbol}`\n"
         f"• ورود: `{price:.4f}`\n"
         f"• مارجین درگیر: `${margin:.1f} USDT`\n"
@@ -324,7 +325,8 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    if cmd_lower.startswith("/close_"):
+    # بستن تکی پوزیشن
+    if cmd_lower.startswith("/close_") and cmd_lower != "/close_shorts":
         symbol_to_close = cmd_lower.replace("/close_", "").upper()
         found = False
         for pos in PAPER_POSITIONS[:]:
@@ -335,6 +337,24 @@ def process_command(data, chat_id, message_id=None):
                 break
         if not found:
             send_telegram_msg(f"❌ پوزیشنی با نماد `{symbol_to_close}` یافت نشد.", chat_target=chat_id)
+        return
+
+    # بستن تمام پوزیشن‌های شورت
+    if cmd_lower == "/close_shorts":
+        shorts = [p for p in PAPER_POSITIONS if "SELL" in p['side'] or "Short" in p['side']]
+        if not shorts:
+            send_telegram_msg("❌ پوزیشن شورت فعالی وجود ندارد.", chat_target=chat_id)
+            return
+        count = len(shorts)
+        for pos in shorts:
+            PAPER_POSITIONS.remove(pos)
+        send_telegram_msg(f"✅ تعداد `{count} پوزیشن شورت` به صورت دستی بسته شدند.", chat_target=chat_id)
+        return
+
+    # محافظت از تنظیمات معامله و مدیریت تنظیمات هنگام فعال بودن اسکن
+    setting_commands = ["/check_wizard", "مدیریت تنظیمات معامله", "/mode_paper", "/mode_real", "/set_bal_", "/set_margin_", "/set_lev_", "/set_max_", "/set_tf_"]
+    if IS_BOT_ACTIVE and any(cmd_lower.startswith(sc) or sc in cmd_lower for sc in setting_commands):
+        send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات و مدیریت پارامترها (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
         return
 
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
@@ -377,7 +397,8 @@ def process_command(data, chat_id, message_id=None):
         if PAPER_POSITIONS:
             txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n"
             for p in PAPER_POSITIONS:
-                txt += f"• `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
+                side_icon = "🟢" if "BUY" in p['side'] or "Long" in p['side'] else "🔴"
+                txt += f"{side_icon} • `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
             keyboard = get_positions_keyboard(PAPER_POSITIONS)
             send_telegram_msg(txt, chat_target=chat_id, reply_markup=keyboard)
         else:
@@ -398,7 +419,7 @@ def process_command(data, chat_id, message_id=None):
         return
     elif "مدیریت تنظیمات معامله" in cmd or cmd_lower == "/check_wizard":
         if IS_BOT_ACTIVE:
-            send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای محافظت از موجودی و جلوگیری از تداخل در معاملات، لطفا ابتدا اسکن را متوقف کنید.", chat_target=chat_id)
+            send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات و مدیریت پارامترها (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
         else:
             send_telegram_msg("⚙️ *مدیریت تنظیمات معامله*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
         return
