@@ -133,14 +133,14 @@ def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     except: pass
     return pd.DataFrame()
 
-def generate_market_health_report():
+async def generate_market_health_report_async(session):
     benchmarks = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
     up_count = 0
     total_adx = 0
     valid_coins = 0
     
     for sym in benchmarks:
-        df = get_crypto_klines(sym, interval_type=TIMEFRAME, limit=100)
+        df = await get_crypto_klines_async(session, sym, interval_type=TIMEFRAME)
         if not df.empty and len(df) > 50:
             df = calculate_indicators(df)
             curr = df.iloc[-2]
@@ -163,7 +163,7 @@ def generate_market_health_report():
         rec_adx = "پیشنهاد افزایش حساسیت ADX به 25 یا استفاده از تایم بالاتر"
     else:
         regime = "رنج و خنثی (Ranging / Chop)"
-        regime = "بازار کم‌روند؛ پیشنهاد استفاده از استراتژی RSI یا توقف موقت"
+        rec_adx = "بازار کم‌روند؛ پیشنهاد استفاده از استراتژی RSI یا توقف موقت"
         
     trend_str = "صعودی (Bullish)" if bullish_pct >= 60 else ("نزولی (Bearish)" if bullish_pct <= 40 else "خنثی / مخلوط (Mixed)")
     
@@ -328,9 +328,12 @@ def process_command(data, chat_id, message_id=None):
         send_main_menu(chat_id, message_id=message_id)
         return
     elif "گزارش وضعیت بازار" in cmd or cmd_lower == "/market_report":
-        send_telegram_msg("🔄 *در حال تحلیل و اسکن وضعیت بازار (ارزهای شاخص)...*", chat_target=chat_id)
-        report_msg = generate_market_health_report()
-        send_telegram_msg(report_msg, chat_target=chat_id)
+        send_telegram_msg("🔄 *در حال تحلیل موازی و اسکن بازار (ارزهای شاخص)...*", chat_target=chat_id)
+        async def send_report():
+            async with aiohttp.ClientSession() as session:
+                report_msg = await generate_market_health_report_async(session)
+                send_telegram_msg(report_msg, chat_target=chat_id)
+        asyncio.run_coroutine_threadsafe(send_report(), asyncio.get_event_loop())
         return
     elif "پوزیشن‌های باز" in cmd or cmd_lower == "/open_positions":
         if PAPER_POSITIONS:
