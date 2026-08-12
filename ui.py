@@ -85,6 +85,7 @@ def get_main_menu_keyboard(is_active):
     return {"inline_keyboard": [
         [{"text": text, "callback_data": "/toggle_active"}],
         [{"text": "📊 گزارش وضعیت بازار", "callback_data": "/market_report"}],
+        [{"text": "⚙️ مدیریت تنظیمات معامله", "callback_data": "/check_wizard"}],
         [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 انتخاب استراتژی", "callback_data": "/strategies_menu"}],
         [{"text": "⚙️ تنظیمات فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ تنظیم پارامترها", "callback_data": "/params_menu"}],
         [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
