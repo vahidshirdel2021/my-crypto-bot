@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 
-# دیکشنری مدیریت وضعیت فیلترها (قابل خاموش/روشن کردن)
 FILTERS = {
     "volume_filter": True,
     "trailing_stop": True,
