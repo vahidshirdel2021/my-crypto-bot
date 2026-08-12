@@ -351,10 +351,10 @@ def process_command(data, chat_id, message_id=None):
         send_telegram_msg(f"✅ تعداد `{count} پوزیشن شورت` به صورت دستی بسته شدند.", chat_target=chat_id)
         return
 
-    # محافظت از تنظیمات معامله و مدیریت تنظیمات هنگام فعال بودن اسکن
+    # محافظت از تنظیمات معامله هنگام فعال بودن اسکن
     setting_commands = ["/check_wizard", "مدیریت تنظیمات معامله", "/mode_paper", "/mode_real", "/set_bal_", "/set_margin_", "/set_lev_", "/set_max_", "/set_tf_"]
     if IS_BOT_ACTIVE and any(cmd_lower.startswith(sc) or sc in cmd_lower for sc in setting_commands):
-        send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات و مدیریت پارامترها (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
+        send_telegram_msg("⚠️ *اسکن بازار در حال حاضر فعال است!*\n\nبرای تغییر تنظیمات (اهرم، مارجین، تایم‌فریم و...) لطفاً ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
         return
 
     if "منوی اصلی" in cmd or cmd_lower == "/menu":
@@ -405,15 +405,20 @@ def process_command(data, chat_id, message_id=None):
             send_telegram_msg("پوزیشن بازی وجود ندارد.", chat_target=chat_id)
         return
     elif "گزارش عملکرد" in cmd or cmd_lower == "/performance":
+        wins_long = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) > 0 and ("BUY" in p['side'] or "Long" in p['side'])]
+        losses_long = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) <= 0 and ("BUY" in p['side'] or "Long" in p['side'])]
+        wins_short = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) > 0 and ("SELL" in p['side'] or "Short" in p['side'])]
+        losses_short = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) <= 0 and ("SELL" in p['side'] or "Short" in p['side'])]
         total_pnl = sum(p.get('pnl_usdt', 0) for p in CLOSED_POSITIONS)
-        wins = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) > 0]
-        losses = [p for p in CLOSED_POSITIONS if p.get('pnl_usdt', 0) < 0]
+        
         send_telegram_msg(
-            f"📈 *گزارش عملکرد کلی*\n\n"
-            f"• کل معاملات بسته: `{len(CLOSED_POSITIONS)}`\n"
-            f"• معاملات موفق: `{len(wins)}` | ناموفق: `{len(losses)}`\n"
-            f"• سود/زیان کل: `{total_pnl:+.2f} USDT`\n"
-            f"• مانده فعلی حساب: `${PAPER_BALANCE:.2f} USDT`",
+            f"📈 *گزارش عملکرد تخصصی (خرید و فروش)*\n\n"
+            f"🟢 *معاملات خرید (Long):*\n"
+            f"• موفق: `{len(wins_long)}` | ناموفق: `{len(losses_long)}`\n\n"
+            f"🔴 *معاملات فروش (Short):*\n"
+            f"• موفق: `{len(wins_short)}` | ناموفق: `{len(losses_short)}`\n\n"
+            f"💰 *سود/زیان کل خالص:* `{total_pnl:+.2f} USDT`\n"
+            f"🏦 *مانده فعلی:* `${PAPER_BALANCE:.2f} USDT`",
             chat_target=chat_id
         )
         return
