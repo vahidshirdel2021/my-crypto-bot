@@ -7,6 +7,12 @@ FILTERS = {
     "candlestick_filter": True
 }
 
+STRATEGY_CONFIG = {
+    "min_adx": 20,
+    "sl_multiplier": 1.5,
+    "tp_multiplier": 2.0
+}
+
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return df
@@ -44,20 +50,13 @@ def calculate_indicators(df):
     return df
 
 def get_strategy_params(timeframe):
-    if timeframe == "5min":
-        return {"adx": 20, "sl": 1.5, "tp": 2.0}
-    elif timeframe == "15min":
-        return {"adx": 22, "sl": 1.8, "tp": 2.5}
-    elif timeframe == "1hour":
-        return {"adx": 25, "sl": 2.0, "tp": 3.0}
-    else:
-        return {"adx": 20, "sl": 1.5, "tp": 2.0}
+    return {"adx": STRATEGY_CONFIG["min_adx"], "sl": STRATEGY_CONFIG["sl_multiplier"], "tp": STRATEGY_CONFIG["tp_multiplier"]}
 
 def get_strategy_description(timeframe):
     params = get_strategy_params(timeframe)
     return (
-        f"📊 *تشریح استراتژی پرایس‌اکشن و فیلترهای پیشرفته ({timeframe})*\n\n"
-        f"• **قدرت روند (ADX):** بالای `{params['adx']}`\n"
+        f"📊 *تشریح استراتژی و پارامترهای فعال ({timeframe})*\n\n"
+        f"• **آستانه قدرت روند (ADX):** `{params['adx']}`\n"
         f"• **حد ضرر (SL):** `{params['sl']}` برابر ATR\n"
         f"• **حد سود (TP):** `{params['tp']}` برابر ATR\n"
         f"• **فیلتر حجم:** `{'🟢 فعال' if FILTERS['volume_filter'] else '🔴 غیرفعال'}`\n"
@@ -172,10 +171,12 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min"):
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min"):
     curr = df_primary.iloc[-2]
     adx = float(curr.get('adx', 20))
-    if adx > 25:
+    min_adx_limit = STRATEGY_CONFIG["min_adx"]
+    
+    if adx > (min_adx_limit + 5):
         sig, reason = strategy_trend_following(df_primary, timeframe)
         return sig, f"[رژیم رونددار | ADX={adx:.1f}] {reason}"
-    elif adx < 20:
+    elif adx < min_adx_limit:
         sig, reason = strategy_mean_reversion(df_primary)
         return sig, f"[رژیم رنج | ADX={adx:.1f}] {reason}"
     else:
