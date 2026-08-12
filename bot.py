@@ -114,6 +114,52 @@ def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     except: pass
     return pd.DataFrame()
 
+def generate_market_health_report():
+    benchmarks = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
+    up_count = 0
+    total_adx = 0
+    valid_coins = 0
+    
+    for sym in benchmarks:
+        df = get_crypto_klines(sym, interval_type=TIMEFRAME, limit=100)
+        if not df.empty and len(df) > 50:
+            df = calculate_indicators(df)
+            curr = df.iloc[-2]
+            if curr['close'] > curr['ema50']:
+                up_count += 1
+            total_adx += float(curr['adx'])
+            valid_coins += 1
+            
+    if valid_coins == 0:
+        return "❌ خطا در دریافت اطلاعات از بازار برای ارزهای مرجع."
+        
+    avg_adx = total_adx / valid_coins
+    bullish_pct = (up_count / valid_coins) * 100
+    
+    if avg_adx > 25:
+        regime = "رونددار پرقدرت (Trending)"
+        rec_adx = "عالی برای روندپیروی (حساسیت فعلی مناسب است)"
+    elif avg_adx >= 20:
+        regime = "فاز گذار / نوسانی معتدل (Transition)"
+        rec_adx = "پیشنهاد افزایش حساسیت ADX به 25 یا استفاده از تایم بالاتر"
+    else:
+        regime = "رنج و خنثی (Ranging / Chop)"
+        rec_adx = "بازار کم‌روند؛ پیشنهاد استفاده از استراتژی RSI یا توقف موقت"
+        
+    trend_str = "صعودی (Bullish)" if bullish_pct >= 60 else ("نزولی (Bearish)" if bullish_pct <= 40 else "خنثی / مخلوط (Mixed)")
+    
+    report = (
+        f"📊 *گزارش هوشمند وضعیت بازار (Market Regime)*\n\n"
+        f"• **روند کلی سبد مرجع:** `{trend_str}` ({up_count}/{valid_coins} ارز بالای EMA50)\n"
+        f"• **میانگین قدرت روند (ADX):** `{avg_adx:.1f}`\n"
+        f"• **تشخیص رژیم بازار:** `{regime}`\n\n"
+        f"💡 *پیشنهاد استراتژیک سیستم:*\n"
+        f"• **تایم‌فریم فعلی:** `{TIMEFRAME}`\n"
+        f"• **وضعیت فیلتر پرایس‌آکشن:** `{'🟢 فعال' if FILTERS['candlestick_filter'] else '🔴 غیرفعال'}`\n"
+        f"• **توصیه معاملاتی:** `{rec_adx}`"
+    )
+    return report
+
 def send_main_menu(chat_id, message_id=None):
     tf_display = "5م" if TIMEFRAME == "5min" else ("15م" if TIMEFRAME == "15min" else ("1س" if TIMEFRAME == "1hour" else "مولتی آبشاری"))
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
@@ -262,6 +308,11 @@ def process_command(data, chat_id, message_id=None):
         USER_STATE = None
         send_main_menu(chat_id, message_id=message_id)
         return
+    elif "گزارش وضعیت بازار" in cmd or cmd_lower == "/market_report":
+        send_telegram_msg("🔄 *در حال تحلیل و اسکن وضعیت بازار (ارزهای شاخص)...*", chat_target=chat_id)
+        report_msg = generate_market_health_report()
+        send_telegram_msg(report_msg, chat_target=chat_id)
+        return
     elif "پوزیشن‌های باز" in cmd or cmd_lower == "/open_positions":
         if PAPER_POSITIONS:
             txt = f"🔄 *پوزیشن‌های باز ({len(PAPER_POSITIONS)}):*\n"
@@ -406,7 +457,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها", "گزارش وضعیت بازار"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
