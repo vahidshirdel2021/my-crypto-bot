@@ -1,6 +1,13 @@
 import pandas as pd
 import numpy as np
 
+# دیکشنری مدیریت وضعیت فیلترها (قابل خاموش/روشن کردن)
+FILTERS = {
+    "volume_filter": True,
+    "trailing_stop": True,
+    "candlestick_filter": True
+}
+
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return df
@@ -50,17 +57,24 @@ def get_strategy_params(timeframe):
 def get_strategy_description(timeframe):
     params = get_strategy_params(timeframe)
     return (
-        f"📊 *تشریح استراتژی پرایس‌اکشن و کندل‌استیک ({timeframe})*\n\n"
-        f"• **حداقل قدرت روند (ADX):** بالای `{params['adx']}`\n"
+        f"📊 *تشریح استراتژی پرایس‌اکشن و فیلترهای پیشرفته ({timeframe})*\n\n"
+        f"• **قدرت روند (ADX):** بالای `{params['adx']}`\n"
         f"• **حد ضرر (SL):** `{params['sl']}` برابر ATR\n"
         f"• **حد سود (TP):** `{params['tp']}` برابر ATR\n"
-        f"• **شرط ورود:** پولبک به EMA20 + تاییدیه الگوی کندل‌استیک (پین‌بار یا انگالفینگ)"
+        f"• **فیلتر حجم:** `{'🟢 فعال' if FILTERS['volume_filter'] else '🔴 غیرفعال'}`\n"
+        f"• **تریلینگ استاپ:** `{'🟢 فعال' if FILTERS['trailing_stop'] else '🔴 غیرفعال'}`"
     )
 
 def check_candlestick_confirmation(df):
     curr = df.iloc[-2]
     prev = df.iloc[-3]
     
+    # بررسی فیلتر حجم معاملات (در صورت فعال بودن)
+    if FILTERS["volume_filter"]:
+        avg_vol = df['volume'].rolling(20).mean().iloc[-2]
+        if curr['volume'] < avg_vol:
+            return None, "حجم معاملات پایین‌تر از میانگین است"
+            
     body = abs(curr['close'] - curr['open'])
     total_range = curr['high'] - curr['low']
     if total_range == 0:
@@ -102,19 +116,27 @@ def strategy_trend_following(df, timeframe="5min"):
     touch_ema_buy = (prev['low'] <= ema_val + tolerance) and (prev['low'] >= ema_val - (curr['atr'] * 0.5))
     touch_ema_sell = (prev['high'] >= ema_val - tolerance) and (prev['high'] <= ema_val + (curr['atr'] * 0.5))
     
+    # اگر فیلتر کندل‌استیک خاموش باشد، صرفاً تست EMA را ملاک قرار می‌دهیم
+    if not FILTERS["candlestick_filter"]:
+        if is_uptrend and touch_ema_buy and curr['close'] > curr['ema20']:
+            return "BUY", f"خرید (Trend): تست موفق EMA20 (بدون نیاز به کندل تاییدیه)"
+        if is_downtrend and touch_ema_sell and curr['close'] < curr['ema20']:
+            return "SELL", f"فروش (Trend): تست موفق EMA20 (بدون نیاز به کندل تاییدیه)"
+        return None, "شرایط روندپیروی برقرار نیست."
+
     candle_signal, pattern_desc = check_candlestick_confirmation(df)
     
     if is_uptrend and touch_ema_buy and curr['close'] > curr['ema20']:
         if candle_signal == "BUY_CONFIRMED":
-            return "BUY", f"خرید (Trend + {pattern_desc}): تست موفق محدوده EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
+            return "BUY", f"خرید (Trend + {pattern_desc}): تست موفق EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
         else:
-            return None, f"رد شد (صعودی): پولبک به EMA20 انجام شد اما کندل تاییدیه معتبر ثبت نشد."
+            return None, f"رد شد (صعودی): {pattern_desc if 'حجم' in str(pattern_desc) else 'کندل تاییدیه معتبر ثبت نشد.'}"
             
     if is_downtrend and touch_ema_sell and curr['close'] < curr['ema20']:
         if candle_signal == "SELL_CONFIRMED":
-            return "SELL", f"فروش (Trend + {pattern_desc}): تست موفق محدوده EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
+            return "SELL", f"فروش (Trend + {pattern_desc}): تست موفق EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
         else:
-            return None, f"رد شد (نزولی): پولبک به EMA20 انجام شد اما کندل تاییدیه معتبر ثبت نشد."
+            return None, f"رد شد (نزولی): {pattern_desc if 'حجم' in str(pattern_desc) else 'کندل تاییدیه معتبر ثبت نشد.'}"
     
     return None, "شرایط روندپیروی برقرار نیست."
 
