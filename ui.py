@@ -38,6 +38,13 @@ def get_params_menu_keyboard():
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
+def get_positions_keyboard(positions):
+    keyboard = []
+    for pos in positions:
+        keyboard.append([{"text": f"❌ بستن {pos['symbol']}", "callback_data": f"/close_{pos['symbol']}"}])
+    keyboard.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
+    return {"inline_keyboard": keyboard}
+
 def get_start_keyboard():
     return {"inline_keyboard": [[{"text": "حساب کاغذی", "callback_data": "/mode_paper"}, {"text": "حساب واقعی", "callback_data": "/mode_real"}]]}
 
