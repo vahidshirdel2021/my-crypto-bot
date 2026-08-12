@@ -1,14 +1,27 @@
+from strategy import FILTERS
+
 def get_bottom_menu_keyboard(is_active=False):
     scan_btn_text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
     return {
         "keyboard": [
             [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
             [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 مدیریت تنظیمات معامله"}],
-            [{"text": scan_btn_text}]
+            [{"text": "⚙️ تنظیمات فیلترها"}, {"text": scan_btn_text}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
+
+def get_filters_menu_keyboard():
+    vol_icon = "🟢 فعال" if FILTERS['volume_filter'] else "🔴 غیرفعال"
+    trail_icon = "🟢 فعال" if FILTERS['trailing_stop'] else "🔴 غیرفعال"
+    candle_icon = "🟢 فعال" if FILTERS['candlestick_filter'] else "🔴 غیرفعال"
+    return {"inline_keyboard": [
+        [{"text": f"فیلتر حجم معاملات: {vol_icon}", "callback_data": "/toggle_vol"}],
+        [{"text": f"تریلینگ استاپ: {trail_icon}", "callback_data": "/toggle_trail"}],
+        [{"text": f"کندل‌تاییدیه پرایس‌اکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
+    ]}
 
 def get_start_keyboard():
     return {"inline_keyboard": [[{"text": "حساب کاغذی", "callback_data": "/mode_paper"}, {"text": "حساب واقعی", "callback_data": "/mode_real"}]]}
@@ -36,6 +49,7 @@ def get_main_menu_keyboard(is_active):
     return {"inline_keyboard": [
         [{"text": text, "callback_data": "/toggle_active"}],
         [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 انتخاب استراتژی", "callback_data": "/strategies_menu"}],
+        [{"text": "⚙️ تنظیمات فیلترها", "callback_data": "/filters_menu"}],
         [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
     ]}
 
