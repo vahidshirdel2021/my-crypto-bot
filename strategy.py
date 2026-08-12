@@ -69,7 +69,6 @@ def check_candlestick_confirmation(df):
     curr = df.iloc[-2]
     prev = df.iloc[-3]
     
-    # بررسی فیلتر حجم معاملات (در صورت فعال بودن)
     if FILTERS["volume_filter"]:
         avg_vol = df['volume'].rolling(20).mean().iloc[-2]
         if curr['volume'] < avg_vol:
@@ -116,7 +115,6 @@ def strategy_trend_following(df, timeframe="5min"):
     touch_ema_buy = (prev['low'] <= ema_val + tolerance) and (prev['low'] >= ema_val - (curr['atr'] * 0.5))
     touch_ema_sell = (prev['high'] >= ema_val - tolerance) and (prev['high'] <= ema_val + (curr['atr'] * 0.5))
     
-    # اگر فیلتر کندل‌استیک خاموش باشد، صرفاً تست EMA را ملاک قرار می‌دهیم
     if not FILTERS["candlestick_filter"]:
         if is_uptrend and touch_ema_buy and curr['close'] > curr['ema20']:
             return "BUY", f"خرید (Trend): تست موفق EMA20 (بدون نیاز به کندل تاییدیه)"
