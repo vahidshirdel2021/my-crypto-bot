@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import asyncio
+import aiohttp
 import requests
 import ccxt
 import pandas as pd
@@ -97,6 +99,23 @@ def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=N
     except:
         return False
 
+async def get_crypto_klines_async(session, coin_symbol, interval_type="5min"):
+    coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
+    url = f"https://api.kucoin.com/api/v1/market/candles?symbol={coin_symbol}-USDT&type={interval_type}"
+    try:
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5) as res:
+            if res.status == 200:
+                data = await res.json()
+                if data.get("code") == "200000" and data.get("data"):
+                    df = pd.DataFrame(data["data"], columns=['timestamp', 'open', 'close', 'high', 'low', 'volume', 'turnover'])
+                    df = df.iloc[::-1].reset_index(drop=True)
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = df[col].astype(float)
+                    if not df.empty and len(df) > 30:
+                        return df
+    except: pass
+    return pd.DataFrame()
+
 def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     coin_symbol = coin_symbol.upper().replace("USDT", "").replace("/", "").strip()
     try:
@@ -144,7 +163,7 @@ def generate_market_health_report():
         rec_adx = "پیشنهاد افزایش حساسیت ADX به 25 یا استفاده از تایم بالاتر"
     else:
         regime = "رنج و خنثی (Ranging / Chop)"
-        rec_adx = "بازار کم‌روند؛ پیشنهاد استفاده از استراتژی RSI یا توقف موقت"
+        regime = "بازار کم‌روند؛ پیشنهاد استفاده از استراتژی RSI یا توقف موقت"
         
     trend_str = "صعودی (Bullish)" if bullish_pct >= 60 else ("نزولی (Bearish)" if bullish_pct <= 40 else "خنثی / مخلوط (Mixed)")
     
@@ -265,13 +284,13 @@ def update_open_positions():
                 f"• مانده جدید حساب: `${PAPER_BALANCE:.2f} USDT`"
             )
 
-def check_symbol(coin_symbol):
+async def check_symbol_async(session, coin_symbol):
     if not IS_BOT_ACTIVE or DAILY_STOPPED: return
     try:
         market_data = {}
         if TIMEFRAME == "multi" or ACTIVE_STRATEGY == "multi":
             for tf_key, tf_val in [('1d', '1day'), ('4h', '4hour'), ('1h', '1hour'), ('15m', '15min'), ('5m', '5min')]:
-                df_t = get_crypto_klines(coin_symbol, interval_type=tf_val, limit=100)
+                df_t = await get_crypto_klines_async(session, coin_symbol, interval_type=tf_val)
                 if not df_t.empty:
                     market_data[tf_key] = calculate_indicators(df_t)
             df_5m = market_data.get('5m')
@@ -280,7 +299,7 @@ def check_symbol(coin_symbol):
         else:
             tf_api_map = {"5min": "5min", "15min": "15min", "1hour": "1hour"}
             api_tf = tf_api_map.get(TIMEFRAME, "5min")
-            df_primary = get_crypto_klines(coin_symbol, interval_type=api_tf, limit=200)
+            df_primary = await get_crypto_klines_async(session, coin_symbol, interval_type=api_tf)
             if df_primary.empty or len(df_primary) < 50: return
             df_primary = calculate_indicators(df_primary)
         
@@ -499,17 +518,22 @@ def telegram_listener():
         except: pass
         time.sleep(2)
 
+async def async_main_scan_loop():
+    while True:
+        try:
+            update_open_positions()
+        except: pass
+        
+        if IS_BOT_ACTIVE and not DAILY_STOPPED:
+            async with aiohttp.ClientSession() as session:
+                tasks = [check_symbol_async(session, sym) for sym in ACTIVE_SYMBOLS]
+                await asyncio.gather(*tasks)
+                
+        await asyncio.sleep(30)
+
 def bot_loop():
     time.sleep(5)
-    while True:
-        try: update_open_positions()
-        except: pass
-        if IS_BOT_ACTIVE and not DAILY_STOPPED:
-            for sym in ACTIVE_SYMBOLS:
-                if not IS_BOT_ACTIVE or DAILY_STOPPED: break
-                check_symbol(sym)
-                time.sleep(0.2)
-        time.sleep(30)
+    asyncio.run(async_main_scan_loop())
 
 if __name__ == "__main__":
     Thread(target=telegram_listener, daemon=True).start()
