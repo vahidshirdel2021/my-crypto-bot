@@ -26,14 +26,12 @@ def calculate_indicators(df):
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
     df['adx'] = pd.Series(dx).rolling(14).mean()
     
-    # اندیکاتور RSI برای بازگشت به میانگین
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / (loss + 1e-9)
     df['rsi'] = 100 - (100 / (1 + rs))
     
-    # کانال دونچیان برای شکست کانال (Breakout)
     df['channel_high'] = df['high'].rolling(20).max().shift(1)
     df['channel_low'] = df['low'].rolling(20).min().shift(1)
     
@@ -52,32 +50,74 @@ def get_strategy_params(timeframe):
 def get_strategy_description(timeframe):
     params = get_strategy_params(timeframe)
     return (
-        f"📊 *تشریح استراتژی ({timeframe})*\n\n"
+        f"📊 *تشریح استراتژی پرایس‌اکشن و کندل‌استیک ({timeframe})*\n\n"
         f"• **حداقل قدرت روند (ADX):** بالای `{params['adx']}`\n"
         f"• **حد ضرر (SL):** `{params['sl']}` برابر ATR\n"
-        f"• **حد سود (TP):** `{params['tp']}` برابر ATR"
+        f"• **حد سود (TP):** `{params['tp']}` برابر ATR\n"
+        f"• **شرط ورود:** پولبک به EMA20 + تاییدیه الگوی کندل‌استیک (پین‌بار یا انگالفینگ)"
     )
 
-# ۱. استراتژی روندپیروی
+def check_candlestick_confirmation(df):
+    curr = df.iloc[-2]
+    prev = df.iloc[-3]
+    
+    body = abs(curr['close'] - curr['open'])
+    total_range = curr['high'] - curr['low']
+    if total_range == 0:
+        return None, None
+    
+    upper_shadow = curr['high'] - max(curr['close'], curr['open'])
+    lower_shadow = min(curr['close'], curr['open']) - curr['low']
+    
+    is_bullish_pin = (lower_shadow >= 2 * body) and (upper_shadow < body) and (curr['close'] > curr['open'])
+    is_bearish_pin = (upper_shadow >= 2 * body) and (lower_shadow < body) and (curr['close'] < curr['open'])
+    
+    prev_body = abs(prev['close'] - prev['open'])
+    is_bullish_engulfing = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (curr['close'] >= prev['open']) and (curr['open'] <= prev['close']) and (body > prev_body)
+    is_bearish_engulfing = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (curr['close'] <= prev['open']) and (curr['open'] >= prev['close']) and (body > prev_body)
+    
+    if is_bullish_pin or is_bullish_engulfing:
+        pattern_name = "پین‌بار صعودی" if is_bullish_pin else "انگالفینگ صعودی"
+        return "BUY_CONFIRMED", pattern_name
+    elif is_bearish_pin or is_bearish_engulfing:
+        pattern_name = "پین‌بار نزولی" if is_bearish_pin else "انگالفینگ نزولی"
+        return "SELL_CONFIRMED", pattern_name
+        
+    return None, None
+
 def strategy_trend_following(df, timeframe="5min"):
     curr = df.iloc[-2]
     prev = df.iloc[-3]
     params = get_strategy_params(timeframe)
     
     if curr['adx'] < params["adx"]:
-        return None, f"رد شد: ADX پایین ({curr['adx']:.1f})"
+        return None, f"رد شد: قدرت روند کم (ADX = {curr['adx']:.1f})"
     
     is_uptrend = curr['close'] > curr['ema50'] and curr['ema20'] > curr['ema50']
     is_downtrend = curr['close'] < curr['ema50'] and curr['ema20'] < curr['ema50']
     
-    if is_uptrend and prev['low'] <= prev['ema20'] and curr['close'] > curr['ema20']:
-        return "BUY", f"خرید (Trend): پولبک به EMA20 در روند صعودی (ADX={curr['adx']:.1f})"
-    if is_downtrend and prev['high'] >= prev['ema20'] and curr['close'] < curr['ema20']:
-        return "SELL", f"فروش (Trend): پولبک به EMA20 در روند نزولی (ADX={curr['adx']:.1f})"
+    ema_val = prev['ema20']
+    tolerance = curr['atr'] * 0.25
+    
+    touch_ema_buy = (prev['low'] <= ema_val + tolerance) and (prev['low'] >= ema_val - (curr['atr'] * 0.5))
+    touch_ema_sell = (prev['high'] >= ema_val - tolerance) and (prev['high'] <= ema_val + (curr['atr'] * 0.5))
+    
+    candle_signal, pattern_desc = check_candlestick_confirmation(df)
+    
+    if is_uptrend and touch_ema_buy and curr['close'] > curr['ema20']:
+        if candle_signal == "BUY_CONFIRMED":
+            return "BUY", f"خرید (Trend + {pattern_desc}): تست موفق محدوده EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
+        else:
+            return None, f"رد شد (صعودی): پولبک به EMA20 انجام شد اما کندل تاییدیه معتبر ثبت نشد."
+            
+    if is_downtrend and touch_ema_sell and curr['close'] < curr['ema20']:
+        if candle_signal == "SELL_CONFIRMED":
+            return "SELL", f"فروش (Trend + {pattern_desc}): تست موفق محدوده EMA20 و تاییدیه پرایس‌اکشن (ADX={curr['adx']:.1f})"
+        else:
+            return None, f"رد شد (نزولی): پولبک به EMA20 انجام شد اما کندل تاییدیه معتبر ثبت نشد."
     
     return None, "شرایط روندپیروی برقرار نیست."
 
-# ۲. استراتژی شکست کانال (Breakout)
 def strategy_breakout(df):
     curr = df.iloc[-2]
     if curr['close'] > curr['channel_high']:
@@ -86,17 +126,15 @@ def strategy_breakout(df):
         return "SELL", "فروش (Breakout): شکست کف کانال ۲۰ کندل گذشته"
     return None, "قیمت درون کانال نوسان دارد."
 
-# ۳. استراتژی بازگشت به میانگین با RSI
 def strategy_mean_reversion(df):
     curr = df.iloc[-2]
     rsi = float(curr.get('rsi', 50))
     if rsi < 30:
-        return "BUY", f"خرید (RSI): اشباع فروش شدید (RSI={rsi:.1f})"
+        return "BUY", f"خرید (RSI): اشباع فروش شدید (RSI = {rsi:.1f})"
     if rsi > 70:
-        return "SELL", f"فروش (RSI): اشباع خرید شدید (RSI={rsi:.1f})"
+        return "SELL", f"فروش (RSI): اشباع خرید شدید (RSI = {rsi:.1f})"
     return None, f"محدوده RSI خنثی است ({rsi:.1f})."
 
-# ۴. استراتژی مولتی‌تایم‌فریم آبشاری
 def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min"):
     if market_data_dict:
         curr = df_primary.iloc[-2]
@@ -112,7 +150,6 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min"):
                     return None, f"رد شد: عدم هم‌راستایی در تایم بالاتر ({tf})"
     return strategy_trend_following(df_primary, timeframe)
 
-# ۵. سیستم تشخیص هوشمند رژیم بازار (Dynamic ADX)
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min"):
     curr = df_primary.iloc[-2]
     adx = float(curr.get('adx', 20))
