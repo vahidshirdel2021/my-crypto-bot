@@ -1,8 +1,10 @@
-def get_bottom_menu_keyboard():
+def get_bottom_menu_keyboard(is_active=False):
+    scan_btn_text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
     return {
         "keyboard": [
             [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
-            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 مدیریت تنظیمات معامله"}]
+            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 مدیریت تنظیمات معامله"}],
+            [{"text": scan_btn_text}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
