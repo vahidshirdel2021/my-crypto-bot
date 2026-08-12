@@ -1,4 +1,4 @@
-from strategy import FILTERS
+from strategy import FILTERS, STRATEGY_CONFIG
 
 def get_bottom_menu_keyboard(is_active=False):
     scan_btn_text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
@@ -6,7 +6,8 @@ def get_bottom_menu_keyboard(is_active=False):
         "keyboard": [
             [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
             [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}],
-            [{"text": "⚙️ تنظیمات فیلترها"}, {"text": scan_btn_text}]
+            [{"text": "⚙️ تنظیمات فیلترها"}, {"text": "🎛️ تنظیم پارامترها"}],
+            [{"text": scan_btn_text}]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -20,6 +21,20 @@ def get_filters_menu_keyboard():
         [{"text": f"فیلتر حجم معاملات: {vol_icon}", "callback_data": "/toggle_vol"}],
         [{"text": f"تریلینگ استاپ: {trail_icon}", "callback_data": "/toggle_trail"}],
         [{"text": f"کندل‌تاییدیه پرایس‌آکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
+    ]}
+
+def get_params_menu_keyboard():
+    adx_val = STRATEGY_CONFIG["min_adx"]
+    sl_val = STRATEGY_CONFIG["sl_multiplier"]
+    tp_val = STRATEGY_CONFIG["tp_multiplier"]
+    return {"inline_keyboard": [
+        [{"text": f"🎯 آستانه ADX: {adx_val}", "callback_data": "/dummy"}],
+        [{"text": "➕ ADX (افزایش)", "callback_data": "/adx_up"}, {"text": "➖ ADX (کاهش)", "callback_data": "/adx_down"}],
+        [{"text": f"🛡️ حد ضرر ATR: {sl_val}x", "callback_data": "/dummy"}],
+        [{"text": "➕ SL +0.2", "callback_data": "/sl_up"}, {"text": "➖ SL -0.2", "callback_data": "/sl_down"}],
+        [{"text": f"🎯 حد سود ATR: {tp_val}x", "callback_data": "/dummy"}],
+        [{"text": "➕ TP +0.5", "callback_data": "/tp_up"}, {"text": "➖ TP -0.5", "callback_data": "/tp_down"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
@@ -44,11 +59,16 @@ def get_leverage_keyboard():
 def get_max_positions_keyboard():
     return {"inline_keyboard": [
         [{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], 
-        [{"text": "5", "callback_data": "/set_max_5"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
+        [{"text": "5", "callback_data": "/set_max_5"}, {"text": "10", "callback_data": "/set_max_10"}],
+        [{"text": "15", "callback_data": "/set_max_15"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]
     ]}
 
 def get_timeframe_keyboard():
-    return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "مولتی آبشاری", "callback_data": "/set_tf_multi"}]]}
+    return {"inline_keyboard": [
+        [{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}],
+        [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "4ساعته", "callback_data": "/set_tf_4h"}],
+        [{"text": "روزانه", "callback_data": "/set_tf_1d"}, {"text": "مولتی آبشاری", "callback_data": "/set_tf_multi"}]
+    ]}
 
 def get_main_menu_keyboard(is_active):
     text = "🔴 توقف اسکن" if is_active else "🟢 روشن کردن اسکن"
@@ -56,7 +76,7 @@ def get_main_menu_keyboard(is_active):
         [{"text": text, "callback_data": "/toggle_active"}],
         [{"text": "📊 گزارش وضعیت بازار", "callback_data": "/market_report"}],
         [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 انتخاب استراتژی", "callback_data": "/strategies_menu"}],
-        [{"text": "⚙️ تنظیمات فیلترها", "callback_data": "/filters_menu"}],
+        [{"text": "⚙️ تنظیمات فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ تنظیم پارامترها", "callback_data": "/params_menu"}],
         [{"text": "📋 مدیریت واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن کل پوزیشن‌ها", "callback_data": "/close_all"}]
     ]}
 
