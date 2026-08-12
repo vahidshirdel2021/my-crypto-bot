@@ -6,12 +6,12 @@ import ccxt
 import pandas as pd
 from threading import Thread
 from flask import Flask
-from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description
+from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description, FILTERS
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
     get_main_menu_keyboard, get_watchlist_manage_keyboard, get_strategies_menu_keyboard,
-    get_bottom_menu_keyboard, get_strategies_selection_keyboard
+    get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard
 )
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
@@ -147,7 +147,7 @@ def execute_trade(symbol, side, price, sl, tp):
         "symbol": symbol, "side": side, "entry_price": price,
         "sl": sl, "tp": tp, "margin": margin,
         "leverage": LEVERAGE, "timeframe": TIMEFRAME,
-        "close_timestamp": None, "pnl_usdt": 0.0
+        "close_timestamp": None, "pnl_usdt": 0.0, "trailing_activated": False
     }
     PAPER_POSITIONS.append(trade)
     send_telegram_msg(
@@ -155,7 +155,6 @@ def execute_trade(symbol, side, price, sl, tp):
         f"• نماد: `{symbol}`\n"
         f"• ورود: `{price:.4f}`\n"
         f"• مارجین درگیر: `${margin:.1f} USDT`\n"
-        f"• مانده حساب: `${PAPER_BALANCE:.2f} USDT`\n"
         f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`"
     )
 
@@ -167,7 +166,23 @@ def update_open_positions():
         df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', TIMEFRAME) if pos.get('timeframe') != 'multi' else '5min', limit=5)
         if df.empty: continue
         high, low = float(df.iloc[-1]['high']), float(df.iloc[-1]['low'])
-        
+        current_price = float(df.iloc[-1]['close'])
+
+        # محاسبه سود لحظه‌ای برای تریلینگ استاپ
+        if "BUY" in pos['side']:
+            current_raw_pnl = ((current_price - pos['entry_price']) / pos['entry_price']) * 100
+        else:
+            current_raw_pnl = ((pos['entry_price'] - current_price) / pos['entry_price']) * 100
+
+        current_pnl_usdt = (pos['margin'] * (current_raw_pnl * pos['leverage'])) / 100
+
+        # منطق تریلینگ استاپ (اگر فعال باشد)
+        if FILTERS["trailing_stop"] and not pos.get('trailing_activated', False):
+            if current_pnl_usdt >= (pos['margin'] * 0.10): # وقتی معامله ۱۰ درصد سود مارجین داد
+                pos['sl'] = pos['entry_price'] # جابجایی حد ضرر به نقطه ورود (Break-even)
+                pos['trailing_activated'] = True
+                send_telegram_msg(f"🛡️ *تریلینگ استاپ فعال شد*\n• نماد: `{pos['symbol']}`\n• حد ضرر به نقطه سر‌به‌سر منتقل شد.")
+
         closed, raw_pnl = False, 0.0
         if "BUY" in pos['side']:
             if high >= pos['tp']: closed, raw_pnl = True, ((pos['tp'] - pos['entry_price']) / pos['entry_price']) * 100
@@ -262,6 +277,21 @@ def process_command(data, chat_id, message_id=None):
         else:
             send_telegram_msg("⚙️ *مدیریت تنظیمات معامله*\n\nموجودی اولیه تثبیت شده است. لطفاً پارامتر مورد نظر را انتخاب کنید:", chat_target=chat_id, reply_markup=get_margin_keyboard())
         return
+    elif "تنظیمات فیلترها" in cmd or cmd_lower == "/filters_menu":
+        send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*\n\nبرای فعال یا غیرفعال کردن هر فیلتر روی دکمه مربوطه کلیک کنید:", chat_target=chat_id, reply_markup=get_filters_menu_keyboard())
+        return
+    elif cmd_lower == "/toggle_vol":
+        FILTERS["volume_filter"] = not FILTERS["volume_filter"]
+        send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/toggle_trail":
+        FILTERS["trailing_stop"] = not FILTERS["trailing_stop"]
+        send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/toggle_candle":
+        FILTERS["candlestick_filter"] = not FILTERS["candlestick_filter"]
+        send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
+        return
     elif "شروع اسکن" in cmd or "توقف اسکن" in cmd or "روشن کردن اسکن" in cmd or cmd_lower == "/toggle_active":
         IS_BOT_ACTIVE = not IS_BOT_ACTIVE
         send_main_menu(chat_id, message_id=message_id)
@@ -354,7 +384,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
