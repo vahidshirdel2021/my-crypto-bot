@@ -40,8 +40,11 @@ def get_params_menu_keyboard():
 
 def get_positions_keyboard(positions):
     keyboard = []
+    has_shorts = any("SELL" in pos['side'] or "Short" in pos['side'] for pos in positions)
     for pos in positions:
         keyboard.append([{"text": f"❌ بستن {pos['symbol']}", "callback_data": f"/close_{pos['symbol']}"}])
+    if has_shorts:
+        keyboard.append([{"text": "❌ بستن تمام معاملات Short", "callback_data": "/close_shorts"}])
     keyboard.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
     return {"inline_keyboard": keyboard}
 
