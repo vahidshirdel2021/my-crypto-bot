@@ -203,6 +203,7 @@ def send_main_menu(chat_id, message_id=None):
 def execute_trade(symbol, side, price, sl, tp):
     global IS_BOT_ACTIVE, PAPER_BALANCE, DAILY_STOPPED
     if not IS_BOT_ACTIVE or DAILY_STOPPED: return
+    if FILTERS["no_short_filter"] and ("SELL" in side or "Short" in side): return
     if MAX_OPEN_POSITIONS > 0 and len(PAPER_POSITIONS) >= MAX_OPEN_POSITIONS: return
     for pos in PAPER_POSITIONS:
         if pos['symbol'] == symbol: return
@@ -441,6 +442,10 @@ def process_command(data, chat_id, message_id=None):
         return
     elif cmd_lower == "/toggle_candle":
         FILTERS["candlestick_filter"] = not FILTERS["candlestick_filter"]
+        send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/toggle_short":
+        FILTERS["no_short_filter"] = not FILTERS["no_short_filter"]
         send_telegram_msg("⚙️ *مدیریت و کنترل فیلترهای استراتژی*", chat_target=chat_id, reply_markup=get_filters_menu_keyboard(), message_id=message_id)
         return
     elif "شروع اسکن" in cmd or "توقف اسکن" in cmd or "روشن کردن اسکن" in cmd or cmd_lower == "/toggle_active":
