@@ -8,12 +8,12 @@ import ccxt
 import pandas as pd
 from threading import Thread
 from flask import Flask
-from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description, FILTERS
+from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description, FILTERS, STRATEGY_CONFIG
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
     get_main_menu_keyboard, get_watchlist_manage_keyboard, get_strategies_menu_keyboard,
-    get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard
+    get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard, get_params_menu_keyboard
 )
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
@@ -133,14 +133,14 @@ def get_crypto_klines(coin_symbol, interval_type="5min", limit=200):
     except: pass
     return pd.DataFrame()
 
-async def generate_market_health_report_async(session):
+def generate_market_health_report():
     benchmarks = ['BTC', 'ETH', 'SOL', 'BNB', 'XRP']
     up_count = 0
     total_adx = 0
     valid_coins = 0
     
     for sym in benchmarks:
-        df = await get_crypto_klines_async(session, sym, interval_type=TIMEFRAME)
+        df = get_crypto_klines(sym, interval_type=TIMEFRAME, limit=100)
         if not df.empty and len(df) > 50:
             df = calculate_indicators(df)
             curr = df.iloc[-2]
@@ -180,7 +180,8 @@ async def generate_market_health_report_async(session):
     return report
 
 def send_main_menu(chat_id, message_id=None):
-    tf_display = "5م" if TIMEFRAME == "5min" else ("15م" if TIMEFRAME == "15min" else ("1س" if TIMEFRAME == "1hour" else "مولتی آبشاری"))
+    tf_map_display = {"5min": "5م", "15min": "15م", "1hour": "1س", "4hour": "4ساعته", "1day": "روزانه", "multi": "مولتی آبشاری"}
+    tf_display = tf_map_display.get(TIMEFRAME, TIMEFRAME)
     status_str = "فعال (در حال اسکن)" if IS_BOT_ACTIVE else "متوقف شده"
     mode_str = "معامله واقعی" if TRADING_MODE == "REAL" else "معامله کاغذی"
     max_pos = f"{MAX_OPEN_POSITIONS}" if MAX_OPEN_POSITIONS > 0 else "نامحدود"
@@ -297,7 +298,7 @@ async def check_symbol_async(session, coin_symbol):
             if df_5m is None or df_5m.empty or len(df_5m) < 50: return
             df_primary = calculate_indicators(df_5m)
         else:
-            tf_api_map = {"5min": "5min", "15min": "15min", "1hour": "1hour"}
+            tf_api_map = {"5min": "5min", "15min": "15min", "1hour": "1hour", "4hour": "4hour", "1day": "1day"}
             api_tf = tf_api_map.get(TIMEFRAME, "5min")
             df_primary = await get_crypto_klines_async(session, coin_symbol, interval_type=api_tf)
             if df_primary.empty or len(df_primary) < 50: return
@@ -328,12 +329,36 @@ def process_command(data, chat_id, message_id=None):
         send_main_menu(chat_id, message_id=message_id)
         return
     elif "گزارش وضعیت بازار" in cmd or cmd_lower == "/market_report":
-        send_telegram_msg("🔄 *در حال تحلیل موازی و اسکن بازار (ارزهای شاخص)...*", chat_target=chat_id)
-        async def send_report():
-            async with aiohttp.ClientSession() as session:
-                report_msg = await generate_market_health_report_async(session)
-                send_telegram_msg(report_msg, chat_target=chat_id)
-        asyncio.run_coroutine_threadsafe(send_report(), asyncio.get_event_loop())
+        send_telegram_msg("🔄 *در حال تحلیل و اسکن بازار (ارزهای شاخص)...*", chat_target=chat_id)
+        report_msg = generate_market_health_report()
+        send_telegram_msg(report_msg, chat_target=chat_id)
+        return
+    elif "تنظیم پارامترها" in cmd or cmd_lower == "/params_menu":
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*\n\n> ⚠️ *پیشنهاد سیستم:* توصیه می‌شود به مقادیر اصلی اندیکاتورها و ضرایب ریسک دست نزنید؛ مقادیر پیش‌فرض فعلی با دقت بهینه‌سازی شده‌اند.", chat_target=chat_id, reply_markup=get_params_menu_keyboard())
+        return
+    elif cmd_lower == "/adx_up":
+        STRATEGY_CONFIG["min_adx"] = min(50, STRATEGY_CONFIG["min_adx"] + 1)
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/adx_down":
+        STRATEGY_CONFIG["min_adx"] = max(10, STRATEGY_CONFIG["min_adx"] - 1)
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/sl_up":
+        STRATEGY_CONFIG["sl_multiplier"] = round(STRATEGY_CONFIG["sl_multiplier"] + 0.2, 1)
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/sl_down":
+        STRATEGY_CONFIG["sl_multiplier"] = max(0.5, round(STRATEGY_CONFIG["sl_multiplier"] - 0.2, 1))
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/tp_up":
+        STRATEGY_CONFIG["tp_multiplier"] = round(STRATEGY_CONFIG["tp_multiplier"] + 0.5, 1)
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
+        return
+    elif cmd_lower == "/tp_down":
+        STRATEGY_CONFIG["tp_multiplier"] = max(0.5, round(STRATEGY_CONFIG["tp_multiplier"] - 0.5, 1))
+        send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard(), message_id=message_id)
         return
     elif "پوزیشن‌های باز" in cmd or cmd_lower == "/open_positions":
         if PAPER_POSITIONS:
@@ -457,10 +482,12 @@ def process_command(data, chat_id, message_id=None):
         MAX_OPEN_POSITIONS = int(cmd_lower.replace("/set_max_", ""))
         pos_text = "بدون محدودیت" if MAX_OPEN_POSITIONS == 0 else str(MAX_OPEN_POSITIONS)
         send_telegram_msg(f"⚙️ حداکثر پوزیشن‌های هم‌زمان روی `{pos_text}` تنظیم شد.\n\nتایم‌فریم معاملاتی را انتخاب کنید:", chat_target=chat_id, reply_markup=get_timeframe_keyboard(), message_id=message_id)
-    elif cmd_lower in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h", "/set_tf_multi"]:
+    elif cmd_lower in ["/set_tf_5m", "/set_tf_15m", "/set_tf_1h", "/set_tf_4h", "/set_tf_1d", "/set_tf_multi"]:
         if cmd_lower == "/set_tf_5m": TIMEFRAME = "5min"
         elif cmd_lower == "/set_tf_15m": TIMEFRAME = "15min"
         elif cmd_lower == "/set_tf_1h": TIMEFRAME = "1hour"
+        elif cmd_lower == "/set_tf_4h": TIMEFRAME = "4hour"
+        elif cmd_lower == "/set_tf_1d": TIMEFRAME = "1day"
         elif cmd_lower == "/set_tf_multi": TIMEFRAME = "multi"
         send_telegram_msg("🚀 تنظیمات جدید با موفقیت اعمال شد.", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
@@ -479,7 +506,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها", "گزارش وضعیت بازار"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها", "گزارش وضعیت بازار", "تنظیم پارامترها"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if USER_STATE == "WAITING_FOR_SINGLE_SYMBOL":
