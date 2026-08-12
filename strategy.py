@@ -85,7 +85,7 @@ def check_candlestick_confirmation(df):
     
     prev_body = abs(prev['close'] - prev['open'])
     is_bullish_engulfing = (prev['close'] < prev['open']) and (curr['close'] > curr['open']) and (curr['close'] >= prev['open']) and (curr['open'] <= prev['close']) and (body > prev_body)
-    is_bearish_engulfing = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (curr['close'] <= prev['open']) and (curr['open'] >= prev['close']) and (body > prev_body)
+    is_bearish_engulfing = (prev['close'] > prev['open']) and (curr['close'] < curr['open']) and (curr['close'] <= prev['open']) and (curr['close'] >= prev['close']) and (body > prev_body)
     
     if is_bullish_pin or is_bullish_engulfing:
         pattern_name = "پین‌بار صعودی" if is_bullish_pin else "انگالفینگ صعودی"
