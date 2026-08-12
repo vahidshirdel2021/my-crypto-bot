@@ -17,10 +17,12 @@ def get_filters_menu_keyboard():
     vol_icon = "🟢 فعال" if FILTERS['volume_filter'] else "🔴 غیرفعال"
     trail_icon = "🟢 فعال" if FILTERS['trailing_stop'] else "🔴 غیرفعال"
     candle_icon = "🟢 فعال" if FILTERS['candlestick_filter'] else "🔴 غیرفعال"
+    short_filter_icon = "🟢 فعال" if FILTERS['no_short_filter'] else "🔴 غیرفعال"
     return {"inline_keyboard": [
         [{"text": f"فیلتر حجم معاملات: {vol_icon}", "callback_data": "/toggle_vol"}],
         [{"text": f"تریلینگ استاپ: {trail_icon}", "callback_data": "/toggle_trail"}],
         [{"text": f"کندل‌تاییدیه پرایس‌آکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
+        [{"text": f"فیلتر معاملات Short: {short_filter_icon}", "callback_data": "/toggle_short"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
