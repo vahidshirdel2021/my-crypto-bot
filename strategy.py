@@ -13,6 +13,13 @@ STRATEGY_DEFAULTS = {
     "min_adx": 20.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
+    # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
+    "dynamic_exits": True,
+    "min_trade_score": 68.0,
+    "min_rr": 1.30,
+    "max_sl_atr": 2.50,
+    "min_target_r": 1.30,
+    "max_target_r": 2.20,
 }
 
 # Legacy compatibility only. Production code passes per-user dictionaries.
@@ -101,18 +108,143 @@ def get_strategy_params(timeframe="5min", strategy_config=None):
     }
 
 
-def get_strategy_description(timeframe="5min", strategy_config=None, filters=None):
-    p = get_strategy_params(timeframe, strategy_config)
-    f = _flt(filters)
-    return (
-        f"📊 *استراتژی فعال ({timeframe})*\n\n"
-        f"• ADX: `{p['adx']:.1f}`\n"
-        f"• SL: `{p['sl']:.1f} ATR`\n"
-        f"• TP: `{p['tp']:.1f} ATR`\n"
-        f"• Volume: `{'🟢' if f.get('volume_filter', True) else '🔴'}`\n"
-        f"• Candle: `{'🟢' if f.get('candlestick_filter', True) else '🔴'}`\n"
-        f"• Trailing: `{'🟢' if f.get('trailing_stop', True) else '🔴'}`"
-    )
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
+    """Build a volatility + market-structure exit plan and a 0-100 trade-quality score.
+
+    This is a decision filter, not a probability forecast.  The plan uses the closed
+    candle only, ATR for volatility, recent swing structure for invalidation, and
+    a dynamic reward target.  A trade is rejected when the resulting R:R is below
+    the configured floor or the quality score is too low.
+    """
+    if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
+        return None, "داده کافی برای طراحی معامله وجود ندارد"
+    c = df.iloc[-2]
+    try:
+        entry = float(c["close"]); atr = float(c["atr"])
+    except Exception:
+        return None, "ATR یا قیمت ورود نامعتبر است"
+    if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
+        return None, "ATR یا قیمت ورود نامعتبر است"
+
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    min_score = float(cfg.get("min_trade_score", 68.0))
+    min_rr = float(cfg.get("min_rr", 1.30))
+    min_r = max(min_rr, float(cfg.get("min_target_r", 1.30)))
+    max_r = max(min_r, float(cfg.get("max_target_r", 2.20)))
+    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 2.50)))
+
+    adx = _safe_float(c.get("adx"), 0)
+    rsi = _safe_float(c.get("rsi"), 50)
+    vr = _safe_float(c.get("volume_ratio"), 1)
+    body_ratio = _safe_float(c.get("body_ratio"), 0)
+    ema20 = _safe_float(c.get("ema20"), entry)
+    ema50 = _safe_float(c.get("ema50"), entry)
+    plus_di = _safe_float(c.get("plus_di"), 0)
+    minus_di = _safe_float(c.get("minus_di"), 0)
+
+    # Volatility regime is relative to recent ATR, not a hard-coded % that
+    # would behave badly across BTC, altcoins and different timeframes.
+    recent_atr = pd.to_numeric(df["atr"].iloc[-32:-2], errors="coerce").dropna()
+    atr_ratio = atr / max(float(recent_atr.median()) if len(recent_atr) else atr, 1e-12)
+
+    trend_ok = (entry > ema20 > ema50 and plus_di > minus_di) if signal == "BUY" else (entry < ema20 < ema50 and minus_di > plus_di)
+    direction_di = plus_di > minus_di if signal == "BUY" else minus_di > plus_di
+    rsi_ok = (48 <= rsi <= 68) if signal == "BUY" else (32 <= rsi <= 52)
+
+    if strategy_type == "mean_reversion":
+        # Mean reversion intentionally prefers a non-trending regime and RSI extremes.
+        trend_score = 22.0 if adx < float(cfg.get("min_adx",20.0)) else 0.0
+        rsi_score = 10.0 if ((signal == "BUY" and rsi <= 35) or (signal == "SELL" and rsi >= 65)) else 2.0
+    else:
+        trend_score = 25.0 if trend_ok else (12.0 if direction_di else 0.0)
+        rsi_score = 10.0 if rsi_ok else max(0.0, 10.0 - abs(rsi - (58 if signal == "BUY" else 42)) * 0.25)
+    adx_score = min(20.0, max(0.0, (adx - 15.0) * 1.0))
+    volume_score = min(15.0, max(0.0, (vr - 0.85) * 25.0))
+    candle_score = min(15.0, max(0.0, body_ratio * 18.0))
+    vol_score = 15.0 * max(0.0, 1.0 - min(abs(np.log(max(atr_ratio, 1e-9))), 1.0))
+    score = int(round(max(0.0, min(100.0, trend_score + adx_score + volume_score + candle_score + rsi_score + vol_score))))
+
+    # Adaptive stop: start from ATR, then respect the most recent structural
+    # invalidation.  The cap prevents a distant swing from creating oversized risk.
+    lookback = df.iloc[-12:-2]
+    if signal == "BUY":
+        swing = float(pd.to_numeric(lookback["low"], errors="coerce").min())
+        base_mult = float(cfg.get("sl_multiplier", 1.5))
+        if atr_ratio > 1.35: base_mult += 0.20
+        elif atr_ratio < 0.80: base_mult -= 0.10
+        base_mult = max(1.25, min(max_sl_atr, base_mult))
+        atr_sl = entry - atr * base_mult
+        structure_sl = swing - atr * 0.15 if np.isfinite(swing) else atr_sl
+        sl = min(atr_sl, structure_sl)
+        if entry - sl > atr * max_sl_atr:
+            sl = entry - atr * max_sl_atr
+        risk_dist = entry - sl
+        resistance = _safe_float(c.get("channel_high"), 0)
+        if resistance <= entry + risk_dist * min_r:
+            resistance = 0
+        direction = 1
+    else:
+        swing = float(pd.to_numeric(lookback["high"], errors="coerce").max())
+        base_mult = float(cfg.get("sl_multiplier", 1.5))
+        if atr_ratio > 1.35: base_mult += 0.20
+        elif atr_ratio < 0.80: base_mult -= 0.10
+        base_mult = max(1.25, min(max_sl_atr, base_mult))
+        atr_sl = entry + atr * base_mult
+        structure_sl = swing + atr * 0.15 if np.isfinite(swing) else atr_sl
+        sl = max(atr_sl, structure_sl)
+        if sl - entry > atr * max_sl_atr:
+            sl = entry + atr * max_sl_atr
+        risk_dist = sl - entry
+        support = _safe_float(c.get("channel_low"), 0)
+        if support >= entry - risk_dist * min_r:
+            support = 0
+        resistance = support
+        direction = -1
+
+    if risk_dist <= 0 or not np.isfinite(risk_dist):
+        return None, "فاصله حد ضرر معتبر نیست"
+
+    # Stronger setups earn a larger target, but never below the configured floor.
+    target_r = min_r + (max_r - min_r) * (score / 100.0)
+    target_r = max(min_r, min(max_r, target_r))
+    tp = entry + direction * risk_dist * target_r
+
+    # If a meaningful structure level lies before the target, use it only when
+    # it still leaves enough reward. Otherwise keep the volatility-based target.
+    if direction == 1 and resistance > entry:
+        candidate = resistance - atr * 0.10
+        if candidate > entry and (candidate - entry) / risk_dist >= min_rr:
+            tp = min(tp, candidate)
+    elif direction == -1 and resistance > 0 and resistance < entry:
+        candidate = resistance + atr * 0.10
+        if candidate < entry and (entry - candidate) / risk_dist >= min_rr:
+            tp = max(tp, candidate)
+
+    rr = abs(tp - entry) / risk_dist
+    if rr < min_rr:
+        return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
+    quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
+    if score < min_score:
+        return None, f"امتیاز کیفیت پایین است ({score}/100)"
+
+    plan = {
+        "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
+        "quality_label": quality_label, "rr": float(rr),
+        "risk_atr": float(risk_dist / atr), "target_r": float(rr),
+        "atr": atr, "atr_ratio": float(atr_ratio), "adx": adx,
+        "rsi": rsi, "volume_ratio": vr,
+        "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | ATR نسبت به میانه {atr_ratio:.2f}x | R:R {rr:.2f}R"
+    }
+    return plan, plan["reason"]
+
+
+def get_strategy_description(timeframe="5min", strategy_config=None, filters=None, simple=False):
+    p=get_strategy_params(timeframe,strategy_config)
+    f=_flt(filters)
+    if simple:
+        return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود.\n\n💡 لازم نیست ADX یا ATR را بدانید؛ ربات از آن‌ها به‌عنوان ابزار داخلی استفاده می‌کند."
+    return (f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
+            f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter',True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter',True) else '🔴'}`")
 
 
 def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
@@ -174,16 +306,16 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
     if up and touch_buy and curr["close"] > curr["ema20"]:
         if not f.get("candlestick_filter", True):
             ok, reason = check_volume(df, -2, f)
-            return ("BUY", f"Trend Long | {reason}") if ok else (None, reason)
+            return ("BUY", f"روندی خرید | {reason}") if ok else (None, reason)
         sig, reason = check_candlestick_confirmation(df, f)
-        return ("BUY", f"Trend Long + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
+        return ("BUY", f"روندی خرید + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
     if down and touch_sell and curr["close"] < curr["ema20"]:
         if not f.get("candlestick_filter", True):
             ok, reason = check_volume(df, -2, f)
-            return ("SELL", f"Trend Short | {reason}") if ok else (None, reason)
+            return ("SELL", f"روندی فروش | {reason}") if ok else (None, reason)
         sig, reason = check_candlestick_confirmation(df, f)
-        return ("SELL", f"Trend Short + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
-    return None, "شرایط Trend برقرار نیست"
+        return ("SELL", f"روندی فروش + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
+    return None, "شرایط روندی برقرار نیست"
 
 
 def strategy_breakout(df, filters=None, strategy_config=None):
@@ -205,12 +337,12 @@ def strategy_breakout(df, filters=None, strategy_config=None):
     if not (bull or bear):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
-        return ("BUY", "Breakout Long تأیید شد") if bull else ("SELL", "Breakout Short تأیید شد")
+        return ("BUY", "شکست صعودی تأیید شد") if bull else ("SELL", "شکست نزولی تأیید شد")
     sig, reason = check_candlestick_confirmation(df, f)
     if bull and sig in ("BUY_CONFIRMED", "CONFIRMED"):
-        return "BUY", f"Breakout Long + {reason}"
+        return "BUY", f"شکست صعودی + {reason}"
     if bear and sig in ("SELL_CONFIRMED", "CONFIRMED"):
-        return "SELL", f"Breakout Short + {reason}"
+        return "SELL", f"شکست نزولی + {reason}"
     return None, reason
 
 
@@ -232,13 +364,13 @@ def strategy_mean_reversion(df, filters=None, strategy_config=None):
             sig, desc = check_candlestick_confirmation(df, f)
             if sig not in ("BUY_CONFIRMED", "CONFIRMED"):
                 return None, f"RSI اشباع فروش ولی برگشت تأیید نشده ({desc})"
-        return "BUY", f"Mean Reversion Long | RSI={rsi:.1f}"
+        return "BUY", f"بازگشت به میانگین خرید | RSI={rsi:.1f}"
     if rsi > 70:
         if f.get("candlestick_filter", True):
             sig, desc = check_candlestick_confirmation(df, f)
             if sig not in ("SELL_CONFIRMED", "CONFIRMED"):
                 return None, f"RSI اشباع خرید ولی برگشت تأیید نشده ({desc})"
-        return "SELL", f"Mean Reversion Short | RSI={rsi:.1f}"
+        return "SELL", f"بازگشت به میانگین فروش | RSI={rsi:.1f}"
     return None, f"RSI خنثی است ({rsi:.1f})"
 
 
@@ -262,7 +394,7 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
         if down and not (h["close"] < h["ema50"] and h["ema20"] <= h["ema50"] and h["minus_di"] >= h["plus_di"]):
             return None, f"عدم هم‌راستایی Short در {tf}"
     sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-    return (sig, f"Multi-TF | {reason}") if sig else (None, reason)
+    return (sig, f"چندزمانه | {reason}") if sig else (None, reason)
 
 
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None):
@@ -274,17 +406,17 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
         if timeframe == "5min" and all((market_data_dict.get(k) is not None and not market_data_dict[k].empty) for k in ["1d", "4h", "1h", "15m"]):
             multi_sig, multi_reason = strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
             if multi_sig:
-                return multi_sig, f"[Dynamic Multi] {multi_reason}"
+                return multi_sig, f"[پویا-چندزمانه] {multi_reason}"
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if break_sig:
-        return break_sig, f"[Breakout] {break_reason}"
+        return break_sig, f"[شکست] {break_reason}"
     if adx >= min_adx + 5:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-        return sig, f"[Trending] {reason}"
+        return sig, f"[رونددار] {reason}"
     if adx < min_adx:
         sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
-        return sig, f"[Ranging] {reason}"
-    return None, f"[Transition] ADX={adx:.1f}"
+        return sig, f"[رنج] {reason}"
+    return None, f"[گذار] ADX={adx:.1f}"
 
 
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None):
