@@ -21,7 +21,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
-    get_performance_keyboard, get_ai_settings_keyboard,
+    get_performance_keyboard, get_ai_settings_keyboard, get_ai_chat_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -177,6 +177,7 @@ def default_session():
         'closed_positions': [],
         'cooldowns': {},
         'user_state': None,
+        'ai_chat_history': [],
         'active_symbols': ALL_SYMBOLS[:],
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': STRATEGY_DEFAULTS.copy(),
@@ -201,6 +202,7 @@ def normalize_session(data):
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
     s['cooldowns'] = dict(data.get('cooldowns') or {})
+    s['ai_chat_history'] = list(data.get('ai_chat_history') or [])[-12:]
     s['active_symbols'] = list(data.get('active_symbols') or ALL_SYMBOLS[:])
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
@@ -496,6 +498,58 @@ def ai_performance_report(chat_id):
 def ai_position_report(chat_id,pos):
     payload={'نوع':'بررسی یک پوزیشن باز','نماد':pos.get('symbol'),'سمت':pos.get('side'),'ورود':pos.get('entry_price'),'حد ضرر':pos.get('sl'),'حد سود':pos.get('tp'),'مارجین':pos.get('margin'),'اهرم':pos.get('leverage'),'استراتژی':pos.get('strategy'),'امتیاز':pos.get('score'),'دلیل سیگنال':pos.get('signal_reason'),'زمان ورود':pos.get('opened_at')}
     return ai_call(chat_id,'position',payload,force=True)
+
+def ai_chat_context(chat_id):
+    s=get_session(chat_id)
+    positions=[]
+    for p in s.get('paper_positions',[])[:10]:
+        positions.append({
+            'نماد':p.get('symbol'),'سمت':p.get('side'),'ورود':p.get('entry_price'),
+            'حد ضرر':p.get('sl'),'حد سود':p.get('tp'),'PnL':p.get('pnl_usdt'),
+            'استراتژی':p.get('strategy'),'امتیاز':p.get('score')
+        })
+    return {
+        'نوع':'گفت‌وگوی مستقیم با کاربر',
+        'وضعیت ربات':'فعال' if s.get('is_bot_active') else 'متوقف',
+        'نوع حساب':'واقعی' if s.get('trading_mode')=='REAL' else 'کاغذی',
+        'ارائه‌دهنده هوش مصنوعی':ai_provider_status(s),
+        'استراتژی':s.get('active_strategy'),
+        'تایم‌فریم':TF_DISPLAY.get(s.get('timeframe'),s.get('timeframe')),
+        'پوزیشن‌های باز':positions,
+        'تعداد پوزیشن‌های باز':len(positions),
+        'ریسک هر معامله':s.get('risk_per_trade_pct'),
+        'حداکثر پوزیشن':s.get('max_open_positions'),
+        'موجودی کاغذی':s.get('paper_balance'),
+    }
+
+def ai_chat_reply(chat_id, user_text):
+    s=get_session(chat_id)
+    provider=s.get('ai_provider','off')
+    if provider=='off':
+        return '🤖 هوش مصنوعی خاموش است. ابتدا از «تنظیمات هوش مصنوعی» یک ارائه‌دهنده را فعال کنید.'
+    text=(user_text or '').strip()
+    if not text:
+        return '💬 سؤال یا درخواستت را بنویس.'
+    history=s.get('ai_chat_history',[])
+    history.append({'نقش':'کاربر','متن':text})
+    history=history[-12:]
+    payload={
+        'نوع':'چت تعاملی و پاسخ به سؤال کاربر',
+        'دستور مهم':'فقط پاسخ و توضیح بده؛ هیچ معامله، تنظیمات، ریسک یا پارامتری را اجرا یا تغییر نده.',
+        'درخواست فعلی':text,
+        'زمینه ربات':ai_chat_context(chat_id),
+        'گفت‌وگوی اخیر':history,
+    }
+    raw,err=(ai_call_gemini(payload) if provider=='gemini' else ai_call_openai(payload))
+    if err:
+        return err
+    reply=(raw or '').strip()
+    if not reply:
+        return '❌ هوش مصنوعی پاسخی تولید نکرد.'
+    history.append({'نقش':'هوش مصنوعی','متن':reply})
+    s['ai_chat_history']=history[-12:]
+    save_session(chat_id)
+    return '🤖 *پاسخ هوش مصنوعی*\n\n'+reply
 
 def fmt(v):
     try:
@@ -1175,14 +1229,27 @@ def chart(chat_id,symbol,df,trade):
 
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     s=get_session(chat_id)
-    if not s['is_bot_active'] or s['daily_stopped'] or not risk_guard(chat_id): return False
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_start side=%s mode=%s', chat_id, symbol, side, s.get('trading_mode'))
+    if not s['is_bot_active'] or s['daily_stopped'] or not risk_guard(chat_id):
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=bot_inactive_or_daily_risk', chat_id, symbol)
+        return False
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
-    if now<cd: return False
+    if now<cd:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=cooldown remaining=%.1fs', chat_id, symbol, cd-now)
+        return False
     s['cooldowns'].pop(symbol,None)
-    if s['filters'].get('no_short_filter') and 'SELL' in side: return False
-    if s['filters'].get('no_buy_filter') and 'BUY' in side: return False
-    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']: return False
-    if any(p['symbol']==symbol for p in s['paper_positions']): return False
+    if s['filters'].get('no_short_filter') and 'SELL' in side:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=no_short_filter', chat_id, symbol)
+        return False
+    if s['filters'].get('no_buy_filter') and 'BUY' in side:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=no_buy_filter', chat_id, symbol)
+        return False
+    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=max_open_positions open=%s max=%s', chat_id, symbol, len(s['paper_positions']), s['max_open_positions'])
+        return False
+    if any(p['symbol']==symbol for p in s['paper_positions']):
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=symbol_already_open', chat_id, symbol)
+        return False
 
     price=latest_price(symbol) or float(signal_price)
     gap_sl=abs(float(signal_price)-float(sl)); gap_tp=abs(float(tp)-float(signal_price))
@@ -1191,7 +1258,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     s['_symbol_tmp']=symbol
     margin, amount_or_reason=safe_size(chat_id,s,price,sl)
     s.pop('_symbol_tmp',None)
-    if margin<=0: logger.info('entry blocked %s: %s',symbol,amount_or_reason); return False
+    if margin<=0:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=sizing margin=%s detail=%s price=%s sl=%s', chat_id, symbol, margin, amount_or_reason, price, sl)
+        return False
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=sizing_ok price=%s sl=%s tp=%s margin=%s leverage=%s', chat_id, symbol, price, sl, tp, margin, s['leverage'])
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
@@ -1200,7 +1270,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
         if not ex:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=exchange_unavailable', chat_id, symbol)
             send_message(chat_id,'❌ حساب CoinEx این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=exchange_ready', chat_id, symbol)
         sym=ccxt_symbol(symbol)
         try:
             market=ex.market(sym)
@@ -1209,16 +1281,25 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
             max_lev=float(lev_info.get('max_leverage') or market.get('maxLeverage') or leverage)
             if leverage>max_lev: leverage=int(max_lev); trade['leverage']=leverage
             ex.set_margin_mode(MARGIN_MODE,sym,{'leverage':leverage})
-        except Exception:
-            try: ex.set_leverage(leverage,sym,{'marginMode':MARGIN_MODE})
-            except Exception as exc: send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`'); return False
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=leverage_ok leverage=%s', chat_id, symbol, leverage)
+        except Exception as lev_exc:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=leverage_fallback primary_error=%s', chat_id, symbol, lev_exc)
+            try:
+                ex.set_leverage(leverage,sym,{'marginMode':MARGIN_MODE})
+                logger.info('ENTRY_DIAG chat=%s symbol=%s stage=leverage_ok_fallback leverage=%s', chat_id, symbol, leverage)
+            except Exception as exc:
+                logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=leverage_error error=%s', chat_id, symbol, exc)
+                send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`'); return False
         amount=(margin*leverage)/price
         amount=normalize_amount(chat_id,symbol,amount)
         min_amt=float(((market.get('limits') or {}).get('amount') or {}).get('min') or 0)
         if amount<=0 or (min_amt and amount<min_amt):
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=invalid_amount amount=%s min_amount=%s', chat_id, symbol, amount, min_amt)
             send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=order_submit side=%s amount=%s price=%s', chat_id, symbol, 'buy' if side_long(side) else 'sell', amount, price)
         try:
             order=ex.create_order(sym,'market','buy' if side_long(side) else 'sell',amount)
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=order_submitted order_id=%s status=%s', chat_id, symbol, order.get('id'), order.get('status'))
             order_id=order.get('id')
             confirmed=None
             for _ in range(ORDER_CONFIRM_RETRIES):
@@ -1232,6 +1313,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
                 time.sleep(ORDER_CONFIRM_DELAY)
             if confirmed is None: confirmed=order
             filled=float(confirmed.get('filled') or 0)
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=order_confirm status=%s filled=%s order_id=%s', chat_id, symbol, (confirmed or {}).get('status'), filled, order_id)
             if filled<=0:
                 live=find_position(chat_id,symbol)
                 if live and float(live.get('amount') or 0)>0:
@@ -1246,7 +1328,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
             else: trade['sl']=exec_price+gap_sl; trade['tp']=exec_price-gap_tp
             trade['sl']=normalize_price(chat_id,symbol,trade['sl']); trade['tp']=normalize_price(chat_id,symbol,trade['tp'])
             trade['risk_usdt']=abs(float(trade['entry_price'])-float(trade['sl']))/max(float(trade['entry_price']),1e-12)*float(trade['margin'])*float(trade['leverage'])
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=filled entry=%s amount=%s', chat_id, symbol, trade['entry_price'], trade['amount'])
             ok,err=set_protection(chat_id,symbol,trade['sl'],trade['tp'])
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=protection_result ok=%s detail=%s', chat_id, symbol, ok, err)
             if not ok:
                 _halt_real_trading(chat_id,f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
                 try: ex.close_position(sym,None,{'type':'market','amount':filled})
@@ -1261,13 +1345,16 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
                     _halt_real_trading(chat_id,f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
                 return False
         except Exception as exc:
-            logger.exception('real order failed')
+            logger.exception('ENTRY_DIAG chat=%s symbol=%s stage=order_failed error=%s', chat_id, symbol, exc)
             _halt_real_trading(chat_id,f'وضعیت سفارش REAL {symbol} قابل تأیید نیست: {exc}')
             send_message(chat_id,f'❌ سفارش REAL `{symbol}` به‌طور قطعی تأیید نشد؛ برای جلوگیری از سفارش تکراری، ربات متوقف شد.',parse_mode=None)
             return False
     else:
-        if float(s['paper_balance'])-reserved_margin(s)<margin: return False
+        if float(s['paper_balance'])-reserved_margin(s)<margin:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=paper_balance_insufficient balance=%s reserved=%s margin=%s', chat_id, symbol, s['paper_balance'], reserved_margin(s), margin)
+            return False
         trade['amount']=(margin*leverage)/price
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=paper_entry_opened amount=%s price=%s', chat_id, symbol, trade['amount'], price)
         s['paper_positions'].append(trade); save_session(chat_id)
 
     m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
@@ -1277,6 +1364,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     if m_rr:
         trade['planned_rr']=float(m_rr.group(1))
     if trade.get('is_real'): s['paper_positions'].append(trade); save_session(chat_id)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_success side=%s entry=%s sl=%s tp=%s amount=%s mode=%s', chat_id, symbol, side, trade['entry_price'], trade['sl'], trade['tp'], trade['amount'], s['trading_mode'])
     df=get_klines(symbol,'5min' if s['timeframe']=='multi' else s['timeframe'],80)
     if not df.empty: chart(chat_id,symbol,calculate_indicators(df),trade)
     return True
@@ -1432,35 +1520,53 @@ def update_positions(chat_id):
 
 async def scan_symbol(http,chat_id,symbol):
     s=get_session(chat_id)
-    if not s['is_bot_active'] or s['daily_stopped']: return
+    if not s['is_bot_active'] or s['daily_stopped']:
+        return
     scan_generation=int(s.get('scan_generation',0))
-    if time.time() < float(s['cooldowns'].get(symbol,0)): return
+    if time.time() < float(s['cooldowns'].get(symbol,0)):
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_skipped reason=cooldown', chat_id, symbol)
+        return
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_start tf=%s strategy=%s', chat_id, symbol, s['timeframe'], s['active_strategy'])
     tf=s['timeframe']; strat=s['active_strategy']; md={}
     if tf=='multi' or strat=='multi':
         for k,v in [('1d','1day'),('4h','4hour'),('1h','1hour'),('15m','15min'),('5m','5min')]:
             d=await get_klines_async(http,symbol,v,140)
             if not d.empty: md[k]=calculate_indicators(d)
         primary=md.get('5m')
-        if primary is None or len(primary)<60: return
+        if primary is None or len(primary)<60:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=insufficient_primary_data rows=%s', chat_id, symbol, 0 if primary is None else len(primary))
+            return
         primary_tf='5min'; mode='multi'
     else:
         d=await get_klines_async(http,symbol,tf,160)
-        if d.empty: return
+        if d.empty:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=empty_market_data tf=%s', chat_id, symbol, tf)
+            return
         primary=calculate_indicators(d); primary_tf=tf; mode='single'
     s=get_session(chat_id)
-    if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation: return
-    if not risk_guard(chat_id): return
+    if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=scan_generation_or_bot_state_changed', chat_id, symbol)
+        return
+    if not risk_guard(chat_id):
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=risk_guard', chat_id, symbol)
+        return
     s=get_session(chat_id)
-    if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation: return
+    if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
+        return
     sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'])
-    if not sig: return
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
+    if not sig:
+        return
     plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
     if not plan:
-        logger.info('trade blocked by dynamic exit plan %s: %s', symbol, plan_reason)
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
         return
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     full_reason=f"{reason} | {plan_reason}"[:500]
-    execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=plan_ok signal=%s entry=%s sl=%s tp=%s detail=%s', chat_id, symbol, sig, entry, sl, tp, plan_reason)
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=execute_result ok=%s', chat_id, symbol, ok)
 
 
 def performance(chat_id):
@@ -1613,11 +1719,84 @@ def reset_stats(chat_id):
 
 
 def analyze(chat_id,symbol):
-    s=get_session(chat_id); tf='5min' if s['timeframe']=='multi' else s['timeframe']; d=get_klines(symbol,tf,160)
-    if d.empty: return f'❌ داده برای `{symbol}` پیدا نشد.'
+    # گزارش عمومی ساده و قابل فهم؛ اعداد فنی برای موتور تصمیم‌گیری باقی می‌مانند.
+    s=get_session(chat_id)
+    tf='5min' if s['timeframe']=='multi' else s['timeframe']
+    d=get_klines(symbol,tf,160)
+    if d.empty:
+        return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.'
     d=calculate_indicators(d); c=d.iloc[-2]
-    a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config']); b,r2=strategy_breakout(d,s['filters'],s['strategy_config']); m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
-    return f"🔍 *تحلیل `{symbol}`*\n\nقیمت بسته‌شدن: `{fmt(c.close)}`\nEMA20: `{fmt(c.ema20)}` | EMA50: `{fmt(c.ema50)}`\nADX: `{float(c.adx):.1f}` | RSI: `{float(c.rsi):.1f}` | ATR: `{fmt(c.atr)}`\n\nروند: `{a or 'NO'}` — {r1}\nشکست: `{b or 'NO'}` — {r2}\nبازگشت به میانگین: `{m or 'NO'}` — {r3}"
+    a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config'])
+    b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
+    m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
+
+    adx=float(c.adx or 0)
+    rsi=float(c.rsi or 50)
+    close=float(c.close)
+    ema20=float(c.ema20)
+    ema50=float(c.ema50)
+
+    # وضعیت کلی بازار به زبان ساده
+    if adx < 20:
+        market_state='🟡 آرام و بدون روند مشخص'
+        market_desc='بازار فعلاً قدرت و جهت مشخصی ندارد و احتمال ورود کم‌کیفیت بیشتر است.'
+        risk='متوسط'
+    elif adx < 25:
+        market_state='🟠 در حال شکل‌گیری روند'
+        market_desc='نشانه‌هایی از شکل‌گیری حرکت وجود دارد، اما هنوز قدرت روند کافی نیست.'
+        risk='متوسط'
+    else:
+        market_state='🟢 دارای روند مشخص'
+        market_desc='بازار حرکت مشخص‌تری دارد و در صورت تأیید سایر شرایط، فرصت‌های معاملاتی بهتری ممکن است شکل بگیرد.'
+        risk='متوسط' if adx < 35 else 'بالا'
+
+    if close > ema20 and close > ema50:
+        direction='📈 متمایل به صعود'
+        direction_desc='قیمت بالاتر از میانگین‌های مهم قرار دارد.'
+    elif close < ema20 and close < ema50:
+        direction='📉 متمایل به نزول'
+        direction_desc='قیمت پایین‌تر از میانگین‌های مهم قرار دارد.'
+    else:
+        direction='↔️ خنثی'
+        direction_desc='قیمت بین محدوده میانگین‌های مهم قرار گرفته و جهت قطعی ندارد.'
+
+    active_count=sum(bool(x) for x in (a,b,m))
+    if active_count:
+        decision='🟢 شرایط اولیه برای بررسی معامله وجود دارد'
+        if a:
+            opportunity='روند'
+        elif b:
+            opportunity='شکست'
+        else:
+            opportunity='بازگشت به میانگین'
+    else:
+        decision='⛔ فعلاً معامله نمی‌کنیم'
+        opportunity='هیچ‌کدام'
+    if not active_count:
+        decision_reason='شرایط لازم برای ورود هنوز به اندازه کافی قوی نیست؛ بهتر است منتظر تأیید بیشتر بمانیم.'
+    else:
+        decision_reason='یکی از الگوهای استراتژی فعال شده، اما قبل از ورود نهایی همه فیلترهای ریسک بررسی می‌شوند.'
+
+    # جزئیات فنی در انتهای گزارش و به صورت اختیاری/کم‌اهمیت نمایش داده می‌شوند.
+    technical=(f"\n\n⚙️ *جزئیات فنی*\n"
+               f"قدرت روند: `{adx:.1f}` | وضعیت مومنتوم: `{rsi:.1f}` | "
+               f"نوسان قیمت: `{fmt(float(c.atr))}`")
+
+    return (
+        f"🔍 *تحلیل {symbol}*\n\n"
+        f"*وضعیت فعلی:* {market_state}\n"
+        f"{market_desc}\n\n"
+        f"*جهت بازار:* {direction}\n"
+        f"{direction_desc}\n\n"
+        f"*روند:* {'فعال' if a else 'ضعیف/تأییدنشده'}\n"
+        f"*احتمال شکست:* {'مناسب برای بررسی' if b else 'پایین'}\n"
+        f"*بازگشت به میانگین:* {'قابل بررسی' if m else 'خنثی'}\n\n"
+        f"🎯 *تصمیم ربات:* {decision}\n"
+        f"دلیل: {decision_reason}\n"
+        f"ریسک فعلی: *{risk}*\n"
+        f"فرصت احتمالی: *{opportunity}*"
+        + technical
+    )
 
 
 def menu(chat_id,message_id=None):
@@ -2009,6 +2188,14 @@ def process_command(cmd,chat_id,message_id=None):
         if provider in ('gemini','openai','off'):
             s['ai_provider']=provider; save_session(chat_id); edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id)
         return
+    if cl in ('/ai_chat','💬 گفت‌وگو با هوش مصنوعی'):
+        s['user_state']='AI_CHAT'; save_session(chat_id)
+        send_message(chat_id, '💬 *گفت‌وگو با هوش مصنوعی*\n\nهر سؤالی درباره بازار، وضعیت ربات، پوزیشن‌ها یا تحلیل‌ها داری بنویس.\n\n🔐 این گفتگو فقط برای تحلیل و پاسخ است و خودش هیچ معامله یا تنظیماتی را اجرا نمی‌کند.', get_ai_chat_keyboard(), parse_mode='Markdown')
+        return
+    if cl=='/ai_chat_clear':
+        s['ai_chat_history']=[]; s['user_state']='AI_CHAT'; save_session(chat_id)
+        send_message(chat_id,'🗑 گفت‌وگو پاک شد. سؤال جدیدت را بنویس.',get_ai_chat_keyboard(),parse_mode=None)
+        return
     if cl in ('/ai_market','🤖 تحلیل هوشمند بازار'):
         send_message(chat_id, ai_market_report(chat_id), parse_mode=None); return
     if cl in ('/ai_performance','🤖 تحلیل هوشمند عملکرد'):
@@ -2166,11 +2353,16 @@ def handle_text(chat_id,text):
         'بستن همه':'/close_all_prompt',
         '🔍 تحلیل ارز':'/analyze_single',
         'تحلیل ارز':'/analyze_single',
+        '💬 گفت‌وگو با هوش مصنوعی':'/ai_chat',
+        'گفت‌وگو با هوش مصنوعی':'/ai_chat',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id)
         return
     s=get_session(chat_id); val=raw.upper()
+    if s['user_state']=='AI_CHAT':
+        send_message(chat_id, ai_chat_reply(chat_id, raw), get_ai_chat_keyboard(), parse_mode=None)
+        return
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
     if s['user_state']=='ADD_SYMBOL':
         if val not in s['active_symbols'] and len(val)<=12 and not get_klines(val,'5min',60).empty: s['active_symbols'].append(val); send_message(chat_id,f'✅ `{val}` اضافه شد.')
@@ -2246,7 +2438,9 @@ async def scan_loop():
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
                     # If capacity is full there is no point launching scanner tasks.
-                    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']: continue
+                    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+                        logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
+                        continue
                     for sym in list(s['active_symbols']): tasks.append(scan_symbol(http,cid,sym))
                 if tasks: await asyncio.gather(*tasks,return_exceptions=True)
         except Exception as exc: logger.exception('scan loop: %s',exc)

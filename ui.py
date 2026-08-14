@@ -107,7 +107,7 @@ def get_timeframe_keyboard():
 
 
 def get_main_menu_keyboard(active):
-    return {"inline_keyboard": [[{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}], [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"}], [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}], [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}], [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}], [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}, {"text": "📈 عملکرد", "callback_data": "/performance"}], [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"}, {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}], [{"text": "🧠 تنظیمات هوش مصنوعی", "callback_data": "/ai_settings"}]]}
+    return {"inline_keyboard": [[{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}], [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"}], [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}], [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}], [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}], [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}, {"text": "📈 عملکرد", "callback_data": "/performance"}], [{"text": "💬 گفت‌وگو با هوش مصنوعی", "callback_data": "/ai_chat"}], [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"}, {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}], [{"text": "🧠 تنظیمات هوش مصنوعی", "callback_data": "/ai_settings"}]]}
 
 
 def get_strategies_selection_keyboard():
@@ -120,6 +120,13 @@ def get_strategies_menu_keyboard():
 
 def get_watchlist_manage_keyboard():
     return {"inline_keyboard": [[{"text": "➕ افزودن", "callback_data": "/add_symbol_prompt"}, {"text": "➖ حذف", "callback_data": "/remove_symbol_prompt"}], [{"text": "📋 لیست", "callback_data": "/watchlist_list"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
+
+
+def get_ai_chat_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🗑 پاک کردن گفت‌وگو", "callback_data": "/ai_chat_clear"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
 
 
 def get_ai_settings_keyboard(session=None):
