@@ -1,9 +1,0 @@
-{
-  "trading_mode": "PAPER",
-  "initial_balance": 1000.0,
-  "trade_amount_usdt": 50.0,
-  "leverage": 10,
-  "max_open_positions": 3,
-  "timeframe": "5min",
-  "max_daily_loss_pct": 5.0
-}
