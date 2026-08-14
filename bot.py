@@ -20,6 +20,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard,
+    get_ai_settings_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -33,6 +34,11 @@ DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
+OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-5').strip()
+GEMINI_API_KEY = (os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or '').strip()
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash').strip()
+AI_TIMEOUT_SECONDS = max(10, int(os.environ.get('AI_TIMEOUT_SECONDS', '45')))
 
 # Multi-user REAL account mapping. Example:
 # COINEX_ACCOUNTS_JSON='{"123456":{"apiKey":"KEY_A","secret":"SECRET_A"},"987654":{"apiKey":"KEY_B","secret":"SECRET_B"}}'
@@ -64,6 +70,8 @@ EXCHANGE_CACHE: Dict[int, Any] = {}
 DATA_CACHE: Dict[str, Any] = {}
 PRICE_CACHE: Dict[str, Any] = {}
 ASYNC_SEMAPHORE = None
+AI_CACHE: Dict[str, Any] = {}
+AI_CACHE_TTL = 120
 
 
 def json_default(obj):
@@ -127,6 +135,7 @@ def default_session():
         'telegram_offset': None,
         'created_at': int(time.time()),
         'bottom_menu_open': True,
+        'ai_provider': ('gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')),
     }
 
 
@@ -141,6 +150,8 @@ def normalize_session(data):
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
+    if s.get('ai_provider') not in ('gemini','openai','off'):
+        s['ai_provider'] = 'gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     return s
 
@@ -232,6 +243,156 @@ def send_photo(chat_id, img, caption=''):
         return r.status_code == 200
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
+
+
+def ai_extract_text(data):
+    """Extract plain text from OpenAI Responses or Gemini GenerateContent payloads."""
+    if not isinstance(data, dict):
+        return ''
+    if isinstance(data.get('output_text'), str) and data.get('output_text').strip():
+        return data['output_text'].strip()
+    # OpenAI Responses API fallback parser
+    chunks=[]
+    for item in data.get('output', []) or []:
+        for content in item.get('content', []) or []:
+            text=content.get('text')
+            if isinstance(text, str) and text.strip(): chunks.append(text.strip())
+    if chunks:
+        return '\n'.join(chunks).strip()
+    # Gemini GenerateContent parser
+    for cand in data.get('candidates', []) or []:
+        content=cand.get('content') or {}
+        for part in content.get('parts', []) or []:
+            text=part.get('text')
+            if isinstance(text, str) and text.strip(): chunks.append(text.strip())
+    return '\n'.join(chunks).strip()
+
+
+def ai_provider_status(s):
+    provider=s.get('ai_provider','off')
+    if provider=='gemini':
+        return 'Gemini' if GEMINI_API_KEY else 'Gemini — کلید تنظیم نشده'
+    if provider=='openai':
+        return 'OpenAI' if OPENAI_API_KEY else 'OpenAI — کلید تنظیم نشده'
+    return 'خاموش'
+
+
+def ai_settings_text(chat_id):
+    s=get_session(chat_id)
+    return (
+        '🤖 *تنظیمات هوش مصنوعی*\n\n'
+        f'ارائه‌دهنده فعلی: *{ai_provider_status(s)}*\n\n'
+        f'Gemini: {"🟢 آماده" if GEMINI_API_KEY else "🔴 کلید ندارد"}\n'
+        f'OpenAI: {"🟢 آماده" if OPENAI_API_KEY else "🔴 کلید ندارد"}\n\n'
+        '🔐 کلیدها داخل محیط اجرای ربات نگهداری می‌شوند و از داخل تلگرام نمایش داده نمی‌شوند.\n'
+        '🛡️ هوش مصنوعی فقط تحلیل می‌کند و اجازه اجرای معامله یا تغییر ریسک را ندارد.'
+    )
+
+
+def ai_call_gemini(payload):
+    if not GEMINI_API_KEY:
+        return None, '⚠️ کلید Gemini تنظیم نشده است. متغیر `GEMINI_API_KEY` را در محیط اجرا قرار دهید.'
+    system=(
+        'تو تحلیل‌گر کمکی یک ربات معامله‌گری هستی. پاسخ فقط فارسی، روشن و حرفه‌ای باشد. '
+        'هرگز تضمین سود نده و هرگز دستور قطعی خرید/فروش صادر نکن. داده‌های ناقص را صریح بگو. '
+        'وظیفه تو تحلیل و توضیح است، نه اجرای معامله. هیچ پارامتری را خودکار تغییر نده. '
+        'اگر درباره معامله نظر می‌دهی، Entry/SL/TP/R:R و شرایط بازار را جداگانه بررسی کن و در پایان یک جمع‌بندی با سطح ریسک بده.'
+    )
+    body={
+        'systemInstruction': {'parts':[{'text':system}]},
+        'contents':[{'role':'user','parts':[{'text':json.dumps(payload,ensure_ascii=False,indent=2,default=str)}]}],
+        'generationConfig': {'maxOutputTokens':1200},
+    }
+    url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
+    try:
+        # Google documents x-goog-api-key for Gemini API authentication. This also
+        # lets the newer AQ auth-key format be passed without exposing the key in the URL.
+        r=requests.post(url,headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},json=body,timeout=AI_TIMEOUT_SECONDS)
+        if r.status_code!=200:
+            logger.warning('Gemini API error %s: %s',r.status_code,r.text[:700])
+            if GEMINI_API_KEY.startswith('AQ') and r.status_code in (401,403):
+                return None, ('❌ Gemini کلید `AQ...` را پذیرفت نکرد. این نوع کلید جدید احراز هویت گوگل است؛ '
+                              'اگر خطای 401/403 می‌بینی، یک کلید جدید از AI Studio بساز و مطمئن شو به پروژه و Gemini API متصل/محدود شده است.')
+            return None, f'❌ ارتباط با Gemini ناموفق بود. کد خطا: `{r.status_code}`'
+        text=ai_extract_text(r.json())
+        return (text, None) if text else (None,'❌ Gemini پاسخی تولید نکرد.')
+    except Exception as exc:
+        logger.exception('Gemini call failed: %s',exc)
+        return None,'❌ خطا در ارتباط با Gemini. اتصال اینترنت و کلید API را بررسی کنید.'
+
+
+def ai_call_openai(payload):
+    if not OPENAI_API_KEY:
+        return None, '⚠️ کلید OpenAI تنظیم نشده است.'
+    system=(
+        'تو تحلیل‌گر کمکی یک ربات معامله‌گری هستی. پاسخ فقط فارسی، روشن و حرفه‌ای باشد. '
+        'هرگز تضمین سود نده و هرگز دستور قطعی خرید/فروش صادر نکن. داده‌های ناقص را صریح بگو. '
+        'وظیفه تو تحلیل و توضیح است، نه اجرای معامله. هیچ پارامتری را خودکار تغییر نده. '
+        'اگر درباره معامله نظر می‌دهی، Entry/SL/TP/R:R و شرایط بازار را جداگانه بررسی کن و در پایان یک جمع‌بندی با سطح ریسک بده.'
+    )
+    body={'model':OPENAI_MODEL,'input':[{'role':'system','content':system},{'role':'user','content':json.dumps(payload,ensure_ascii=False,indent=2,default=str)}],'max_output_tokens':1200}
+    try:
+        r=requests.post('https://api.openai.com/v1/responses',headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},json=body,timeout=AI_TIMEOUT_SECONDS)
+        if r.status_code!=200:
+            logger.warning('OpenAI API error %s: %s',r.status_code,r.text[:500])
+            return None,f'❌ ارتباط با OpenAI ناموفق بود. کد خطا: `{r.status_code}`'
+        text=ai_extract_text(r.json())
+        return (text,None) if text else (None,'❌ OpenAI پاسخی تولید نکرد.')
+    except Exception as exc:
+        logger.exception('OpenAI call failed: %s',exc)
+        return None,'❌ خطا در ارتباط با OpenAI. تنظیمات اتصال و کلید API را بررسی کنید.'
+
+
+def ai_call(chat_id, purpose, payload, force=False):
+    """Manual AI analysis only. Provider is selected in bot settings; AI never controls orders."""
+    s=get_session(chat_id)
+    provider=s.get('ai_provider','off')
+    if provider=='off':
+        return '🤖 هوش مصنوعی خاموش است. از «تنظیمات هوش مصنوعی» یک ارائه‌دهنده آماده را انتخاب کنید.'
+    cache_key=hashlib.sha256((str(chat_id)+'|'+provider+'|'+purpose+'|'+json.dumps(payload,ensure_ascii=False,sort_keys=True,default=str)).encode()).hexdigest()
+    cached=AI_CACHE.get(cache_key)
+    if not force and cached and time.time()-cached['ts'] < AI_CACHE_TTL:
+        return cached['text']
+    text=None; err=None
+    if provider=='gemini': text,err=ai_call_gemini(payload)
+    elif provider=='openai': text,err=ai_call_openai(payload)
+    else: err='ارائه‌دهنده هوش مصنوعی نامعتبر است.'
+    if err: return err
+    result='🤖 *تحلیل هوش مصنوعی*\n\n'+text
+    AI_CACHE[cache_key]={'ts':time.time(),'text':result}
+    return result
+
+def ai_market_report(chat_id):
+    s=get_session(chat_id)
+    tf='5min' if s['timeframe']=='multi' else s['timeframe']
+    rows=[]
+    for sym in ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA']:
+        d=get_klines(sym,tf,140)
+        if d.empty: continue
+        ind=calculate_indicators(d); c=ind.iloc[-2]
+        rows.append({'نماد':sym,'قیمت':float(c.close),'EMA20':float(c.ema20),'EMA50':float(c.ema50),'ADX':float(c.adx),'RSI':float(c.rsi),'ATR':float(c.atr),'بالای EMA50':bool(c.close>c.ema50)})
+    return ai_call(chat_id,'market',{'نوع':'گزارش کلی بازار','تایم‌فریم':TF_DISPLAY.get(s['timeframe'],s['timeframe']),'داده':rows,'استراتژی فعال':s['active_strategy'],'حداکثر پوزیشن':s['max_open_positions'],'ریسک هر معامله':s['risk_per_trade_pct']},force=True)
+
+
+def ai_performance_report(chat_id):
+    s=get_session(chat_id); closed=s['closed_positions']
+    pnls=[float(p.get('pnl_usdt',0)) for p in closed]
+    wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
+    by_side={}
+    by_reason={}
+    for p in closed:
+        side='LONG' if side_long(p.get('side','')) else 'SHORT'; by_side.setdefault(side,[]).append(float(p.get('pnl_usdt',0)))
+        by_reason.setdefault(p.get('reason','نامشخص'),[]).append(float(p.get('pnl_usdt',0)))
+    peak=float(s.get('paper_balance',0)); dd=0.0; equity=peak
+    for x in pnls:
+        equity+=x; peak=max(peak,equity); dd=max(dd,peak-equity)
+    payload={'تعداد معاملات':len(closed),'برد':len(wins),'باخت':len(losses),'Win Rate':(len(wins)/len(closed)*100 if closed else 0),'سود ناخالص':sum(wins),'زیان ناخالص':sum(losses),'PnL خالص':sum(pnls),'موجودی فعلی':s.get('paper_balance'),'افت بیشینه تقریبی':dd,'عملکرد Long':sum(by_side.get('LONG',[])),'عملکرد Short':sum(by_side.get('SHORT',[])),'دلایل خروج':{k:{'تعداد':len(v),'PnL':sum(v)} for k,v in by_reason.items()}}
+    return ai_call(chat_id,'performance',{'نوع':'تحلیل عملکرد ربات','داده':payload},force=True)
+
+
+def ai_position_report(chat_id, pos):
+    payload={'نوع':'بررسی یک پوزیشن باز','نماد':pos.get('symbol'),'سمت':pos.get('side'),'ورود':pos.get('entry_price'),'حد ضرر':pos.get('sl'),'حد سود':pos.get('tp'),'مارجین':pos.get('margin'),'اهرم':pos.get('leverage'),'استراتژی':pos.get('strategy'),'امتیاز':pos.get('score'),'دلیل سیگنال':pos.get('reason'),'زمان ورود':pos.get('opened_at')}
+    return ai_call(chat_id,'position',payload,force=True)
 
 def fmt(v):
     try:
@@ -705,7 +866,7 @@ def menu(chat_id,message_id=None):
 
 def process_command(cmd,chat_id,message_id=None):
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
-    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/toggle_','/adx_','/sl_','/tp_')
+    sensitive_prefixes=('/ai_provider_','/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/toggle_','/adx_','/sl_','/tp_')
     if s['is_bot_active'] and cl.startswith(sensitive_prefixes): send_message(chat_id,'⚠️ ابتدا اسکن را متوقف کنید.'); return
     if cl=='/start': s['is_bot_active']=False; s['user_state']=None; save_session(chat_id); send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard()); return
     if cl in ('/menu',): s['user_state']=None; menu(chat_id,message_id); return
@@ -746,6 +907,23 @@ def process_command(cmd,chat_id,message_id=None):
         key=cl.replace('/set_strat_','')
         if key in ('dynamic','trend','breakout','mean_reversion','multi'): s['active_strategy']=key; save_session(chat_id); menu(chat_id)
         return
+    if cl in ('/ai_settings','🤖 تنظیمات هوش مصنوعی'):
+        send_message(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s)); return
+    if cl.startswith('/ai_provider_'):
+        provider=cl.replace('/ai_provider_','')
+        if provider in ('gemini','openai','off'):
+            s['ai_provider']=provider; save_session(chat_id)
+            send_message(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s))
+        return
+    if cl in ('/ai_market','🤖 تحلیل هوشمند بازار'):
+        send_message(chat_id, ai_market_report(chat_id), parse_mode=None); return
+    if cl in ('/ai_performance','🤖 تحلیل هوشمند عملکرد'):
+        send_message(chat_id, ai_performance_report(chat_id), parse_mode=None); return
+    if cl.startswith('/ai_pos_'):
+        sym=cl.replace('/ai_pos_','').upper()
+        pos=next((p for p in s['paper_positions'] if p.get('symbol','').upper()==sym),None)
+        if not pos: send_message(chat_id,'❌ این پوزیشن دیگر باز نیست.'); return
+        send_message(chat_id, ai_position_report(chat_id,pos), parse_mode=None); return
     if cl=='/market_report':
         vals=[]
         for sym in ['BTC','ETH','SOL','BNB','XRP']:
