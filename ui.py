@@ -23,7 +23,7 @@ def get_filters_menu_keyboard():
         [{"text": f"فیلتر حجم معاملات: {vol_icon}", "callback_data": "/toggle_vol"}],
         [{"text": f"تریلینگ استاپ: {trail_icon}", "callback_data": "/toggle_trail"}],
         [{"text": f"کندل‌تاییدیه پرایس‌آکشن: {candle_icon}", "callback_data": "/toggle_candle"}],
-        [{"text": f"فیلتر معاملات Short: {short_filter_icon}", "callback_data": "/toggle_short"}],
+        [{"text": f"توقف معاملات Short: {short_filter_icon}", "callback_data": "/toggle_short"}],
         [{"text": f"توقف معاملات Buy: {buy_filter_icon}", "callback_data": "/toggle_buy"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
