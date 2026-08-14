@@ -16,8 +16,7 @@ from ui import (
     get_bottom_menu_keyboard, get_strategies_selection_keyboard, get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard
 )
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8931433787:AAEdgjh8du4c-gLEF7DQA7H8xAzs6O0p7mw")
-CHAT_ID = os.environ.get("CHAT_ID", "1878257830")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
 USER_SESSIONS = {}
 
@@ -83,7 +82,9 @@ def health():
     return "OK", 200
 
 def send_telegram_msg(message, chat_target=None, reply_markup=None, message_id=None):
-    target = chat_target or CHAT_ID
+    if not TELEGRAM_TOKEN: return False
+    target = chat_target or list(USER_SESSIONS.keys())[0] if USER_SESSIONS else None
+    if not target: return False
     session = get_user_session(target)
     if message_id:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
@@ -235,6 +236,35 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
         chat_target=chat_id
     )
 
+def close_position_manually(chat_id, pos, current_price=None):
+    session = get_user_session(chat_id)
+    if pos not in session["paper_positions"]: return
+    
+    if current_price is None:
+        df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', session["timeframe"]) if pos.get('timeframe') != 'multi' else '5min', limit=2)
+        current_price = float(df.iloc[-1]['close']) if not df.empty else pos['entry_price']
+        
+    if "BUY" in pos['side']:
+        raw_pnl = ((current_price - pos['entry_price']) / pos['entry_price']) * 100
+    else:
+        raw_pnl = ((pos['entry_price'] - current_price) / pos['entry_price']) * 100
+        
+    pnl_usdt = (pos['margin'] * (raw_pnl * pos['leverage'])) / 100
+    session["paper_balance"] += pnl_usdt
+    pos['pnl_usdt'] = pnl_usdt
+    pos['close_timestamp'] = time.time()
+    
+    session["closed_positions"].append(pos)
+    session["paper_positions"].remove(pos)
+    
+    send_telegram_msg(
+        f"📌 *پوزیشن به صورت دستی بسته شد.*\n"
+        f"• نماد: `{pos['symbol']}`\n"
+        f"• سود/زیان: `{pnl_usdt:+.2f} USDT`\n"
+        f"• مانده جدید: `${session['paper_balance']:.2f} USDT`",
+        chat_target=chat_id
+    )
+
 def update_open_positions(chat_id):
     session = get_user_session(chat_id)
     if not session["paper_positions"]: return
@@ -345,7 +375,6 @@ def analyze_symbol_detailed(chat_id, text_val):
     adx_val = float(curr.get('adx', 20))
     rsi_val = float(curr.get('rsi', 50))
     
-    # Evaluate across all main strategies
     res_trend, reason_trend = strategy_trend_following(df, tf)
     res_breakout, reason_breakout = strategy_breakout(df)
     res_rsi, reason_rsi = strategy_mean_reversion(df)
@@ -362,7 +391,7 @@ def analyze_symbol_detailed(chat_id, text_val):
     )
     
     if adx_val < 20:
-        report += "💡 *ارزیابی کلی:* بازار کم‌روند (رنج). استراتژی‌های روندپیروی ممکن است سیگنال فیک بدهند؛ با احتیاط یا در جهت شورتِ محافظه‌کارانه عمل کنید."
+        report += "💡 *ارزیابی کلی:* بازار کم‌روند (رنج). استراتژی‌های روندپیروی ممکن است سیگنال فیک بدهند؛ با احتیاط عمل کنید."
     elif adx_val > 25:
         report += "💡 *ارزیابی کلی:* روند پرقدرت حاکم است. استراتژی‌های روندپیروی و شکست کانال عملکرد مناسبی دارند."
     else:
@@ -375,33 +404,29 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    # بستن تکی پوزیشن
+    # بستن تکی پوزیشن با اعمال سود/زیان
     if cmd_lower.startswith("/close_") and cmd_lower != "/close_shorts":
         symbol_to_close = cmd_lower.replace("/close_", "").upper()
         found = False
         for pos in session["paper_positions"][:]:
             if pos['symbol'] == symbol_to_close:
-                session["paper_positions"].remove(pos)
-                send_telegram_msg(f"✅ پوزیشن `{symbol_to_close}` به صورت دستی بسته شد.", chat_target=chat_id)
+                close_position_manually(chat_id, pos)
                 found = True
                 break
         if not found:
             send_telegram_msg(f"❌ پوزیشنی با نماد `{symbol_to_close}` یافت نشد.", chat_target=chat_id)
         return
 
-    # بستن تمام پوزیشن‌های شورت
+    # بستن تمام پوزیشن‌های شورت با اعمال سود/زیان
     if cmd_lower == "/close_shorts":
         shorts = [p for p in session["paper_positions"] if "SELL" in p['side'] or "Short" in p['side']]
         if not shorts:
             send_telegram_msg("❌ پوزیشن شورت فعالی وجود ندارد.", chat_target=chat_id)
             return
-        count = len(shorts)
         for pos in shorts:
-            session["paper_positions"].remove(pos)
-        send_telegram_msg(f"✅ تعداد `{count} پوزیشن شورت` به صورت دستی بسته شدند.", chat_target=chat_id)
+            close_position_manually(chat_id, pos)
         return
 
-    # محافظت از تنظیمات معامله هنگام فعال بودن اسکن
     setting_commands = ["/check_wizard", "مدیریت تنظیمات معامله", "/mode_paper", "/mode_real", "/set_bal_", "/set_margin_", "/set_lev_", "/set_max_", "/set_tf_"]
     if session["is_bot_active"] and any(cmd_lower.startswith(sc) or sc in cmd_lower for sc in setting_commands):
         send_telegram_msg("⚠️ *اسکن بازار فعال است!*\n\nبرای تغییر تنظیمات ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
@@ -566,11 +591,12 @@ def process_command(data, chat_id, message_id=None):
     elif cmd_lower == "/close_all":
         session["is_bot_active"] = False
         count = len(session["paper_positions"])
-        session["paper_positions"].clear()
+        for pos in session["paper_positions"][:]:
+            close_position_manually(chat_id, pos)
         send_telegram_msg(f"🛑 اسکن متوقف شد!\n❌ کل پوزیشن‌ها (`{count}`) بسته شدند.", chat_target=chat_id)
         send_main_menu(chat_id, message_id=message_id)
     elif cmd_lower in ["/set_margin_10", "/set_margin_25", "/set_margin_50", "/set_margin_100"]:
-        session["trade_amount_USDT"] = float(cmd_lower.replace("/set_margin_", ""))
+        session["trade_amount_usdt"] = float(cmd_lower.replace("/set_margin_", ""))
         send_telegram_msg("⚙️ ضریب اهرم (Leverage):", chat_target=chat_id, reply_markup=get_leverage_keyboard(), message_id=message_id)
     elif cmd_lower in ["/set_lev_3", "/set_lev_5", "/set_lev_10"]:
         session["leverage"] = int(cmd_lower.replace("/set_lev_", ""))
@@ -625,7 +651,6 @@ def telegram_listener():
                                     send_telegram_msg(f"❌ نماد یافت نشد.", chat_target=chat_id)
                                 session["user_state"] = None
                             else:
-                                # Universal direct text input analysis (if text is 2-8 chars, treat as symbol analysis directly)
                                 if len(text_val) >= 2 and len(text_val) <= 8 and text_val.isalpha():
                                     report_text = analyze_symbol_detailed(chat_id, text_val)
                                     send_telegram_msg(report_text, chat_target=chat_id)
