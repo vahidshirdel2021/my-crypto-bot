@@ -29,6 +29,7 @@ PORT = int(os.environ.get('PORT', '10000'))
 DB_PATH = os.environ.get('BOT_DB_PATH', 'trader_bot.sqlite3')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
+NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
 DATA_CACHE_SECONDS = max(5, int(os.environ.get('DATA_CACHE_SECONDS', '20')))
 MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
@@ -78,6 +79,8 @@ STATE_LOCK = RLock()
 DB_LOCK = RLock()
 DATA_LOCK = RLock()
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
+# وضعیت موقت گزارش تشخیصی عدم ورود؛ برای هر کاربر در حافظه نگهداری می‌شود.
+ENTRY_DIAG_STATE: Dict[int, Dict[str, Any]] = {}
 EXCHANGE_CACHE: Dict[int, Any] = {}
 DATA_CACHE: Dict[str, Any] = {}
 PRICE_CACHE: Dict[str, Any] = {}
@@ -1570,55 +1573,188 @@ def update_positions(chat_id):
     save_session(chat_id)
 
 
+def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None):
+    return {
+        'chat_id': chat_id,
+        'symbol': symbol,
+        'status': status,
+        'reason': str(reason or '').strip(),
+        'stage': stage,
+        'signal': signal,
+        'ts': time.time(),
+    }
+
+
+def _entry_diag_label(reason):
+    """یک دلیل قابل فهم برای گزارش کاربر از متن دلیل استراتژی استخراج می‌کند."""
+    r = str(reason or '').strip()
+    if not r:
+        return 'دلیل مشخصی ثبت نشد'
+    # متن‌های طولانی مدل/استراتژی را کوتاه نگه می‌داریم، اما اعداد تشخیصی را حفظ می‌کنیم.
+    replacements = {
+        'روند ضعیف است': 'روند بازار ضعیف است',
+        'شرایط روندی برقرار نیست': 'شرایط ورود روندی کامل نیست',
+        'شکست جدیدی ثبت نشد': 'شکست معتبر ثبت نشده است',
+        'حجم شکست کافی نیست': 'حجم برای تأیید شکست کافی نیست',
+        'قدرت بدنه کافی نیست': 'قدرت کندل برای ورود کافی نیست',
+        'RSI خنثی است': 'RSI در محدوده خنثی است',
+        'قیمت از محدوده میانگین دور است': 'قیمت برای بازگشت به میانگین مناسب نیست',
+        'کندل تأیید معتبر نبود': 'کندل تأیید لازم دیده نشد',
+        'امتیاز کیفیت پایین است': 'امتیاز کیفیت معامله به حد لازم نرسید',
+        'R:R کافی نیست': 'نسبت سود به ضرر مناسب نیست',
+        'داده کافی نیست': 'داده کافی برای تصمیم‌گیری وجود ندارد',
+        'داده کافی برای طراحی معامله وجود ندارد': 'داده کافی برای ساخت معامله وجود ندارد',
+    }
+    for old, new in replacements.items():
+        if old in r:
+            tail = r.split(old, 1)[1].strip()
+            return (new + (' ' + tail if tail else '')).strip()[:180]
+    return r[:180]
+
+
+def _entry_diag_report(chat_id, results, elapsed):
+    """گزارش خلاصه و کاربرپسند زمانی که مدتی هیچ ورودی ایجاد نشده است."""
+    s = get_session(chat_id)
+    scanned = len(results)
+    opened = sum(1 for x in results if x.get('status') == 'entry_opened')
+    signals = sum(1 for x in results if x.get('signal'))
+    data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
+    blocked = sum(1 for x in results if x.get('status') in ('blocked','risk_blocked','trade_plan_blocked','execute_blocked'))
+
+    counts = {}
+    for x in results:
+        if x.get('status') == 'entry_opened':
+            continue
+        label = _entry_diag_label(x.get('reason'))
+        if label and label != 'دلیل مشخصی ثبت نشد':
+            counts[label] = counts.get(label, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+
+    tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
+    lines = [
+        '🔎 *گزارش تشخیصی ورود*',
+        '━━━━━━━━━━━━━━━━━━━━',
+        f'⏱ بازه بدون ورود: `{max(1, int(elapsed/60))} دقیقه`',
+        f'📊 تایم‌فریم: `{tf}` | استراتژی: `{s.get("active_strategy")}`',
+        f'🔍 نمادهای بررسی‌شده: `{scanned}`',
+        f'🎯 سیگنال معتبر: `{signals}`',
+        f'📥 پوزیشن بازشده: `{opened}`',
+    ]
+    if data_issues:
+        lines.append(f'⚠️ مشکل داده: `{data_issues}`')
+    if blocked:
+        lines.append(f'🛑 موارد متوقف‌شده قبل از ورود: `{blocked}`')
+
+    if top:
+        lines.append('\n*دلایل اصلی عدم ورود:*')
+        for label, n in top:
+            lines.append(f'• `{n}×` {label}')
+    else:
+        lines.append('\n• هنوز دلیل مشخصی از اسکن‌ها ثبت نشده است.')
+
+    lines += [
+        '\n💡 *نتیجه:*',
+        'ربات در حال اسکن است و در این بازه شرایط ورود با فیلترهای فعلی کامل نشده است.',
+        'این گزارش فقط تشخیصی است و هیچ تنظیمی را تغییر نمی‌دهد.',
+    ]
+    return '\n'.join(lines)
+
+
+def _entry_diag_batch_update(chat_id, results):
+    """بعد از هر دور اسکن، در صورت طولانی شدن نبود ورود یک گزارش تلگرام بفرست."""
+    now = time.time()
+    state = ENTRY_DIAG_STATE.setdefault(chat_id, {
+        'no_entry_since': None,
+        'last_report_at': 0.0,
+        'last_entry_at': 0.0,
+        'window_results': [],
+    })
+    opened = any(x.get('status') == 'entry_opened' for x in results)
+    if opened:
+        state['last_entry_at'] = now
+        state['no_entry_since'] = None
+        state['last_report_at'] = 0.0
+        state['window_results'] = []
+        return
+    if not results:
+        return
+    state.setdefault('window_results', []).extend(results)
+    state['window_results'] = state['window_results'][-240:]
+    if state['no_entry_since'] is None:
+        state['no_entry_since'] = now
+    elapsed = now - float(state['no_entry_since'])
+    last_report = float(state.get('last_report_at', 0.0) or 0.0)
+    if elapsed >= NO_ENTRY_REPORT_SECONDS and (not last_report or now-last_report >= NO_ENTRY_REPORT_SECONDS):
+        try:
+            report_results = list(state.get('window_results') or results)
+            send_message(chat_id, _entry_diag_report(chat_id, report_results, elapsed), parse_mode='Markdown')
+            state['last_report_at'] = now
+            state['window_results'] = []
+            logger.info('ENTRY_DIAG chat=%s stage=telegram_report elapsed=%ss symbols=%s', chat_id, int(elapsed), len(results))
+        except Exception as exc:
+            logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
+
+
 async def scan_symbol(http,chat_id,symbol):
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped']:
-        return
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
     scan_generation=int(s.get('scan_generation',0))
     if time.time() < float(s['cooldowns'].get(symbol,0)):
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_skipped reason=cooldown', chat_id, symbol)
-        return
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_start tf=%s strategy=%s', chat_id, symbol, s['timeframe'], s['active_strategy'])
     tf=s['timeframe']; strat=s['active_strategy']; md={}
     if tf=='multi' or strat=='multi':
         for k,v in [('1d','1day'),('4h','4hour'),('1h','1hour'),('15m','15min'),('5m','5min')]:
-            d=await get_klines_async(http,symbol,v,140)
-            if not d.empty: md[k]=calculate_indicators(d)
+            try:
+                d=await get_klines_async(http,symbol,v,140)
+                if not d.empty: md[k]=calculate_indicators(d)
+            except Exception as exc:
+                logger.warning('ENTRY_DIAG chat=%s symbol=%s timeframe=%s data_error=%s', chat_id, symbol, v, exc)
         primary=md.get('5m')
         if primary is None or len(primary)<60:
+            reason=f'داده کافی برای تایم‌فریم اصلی دریافت نشد ({0 if primary is None else len(primary)} کندل)'
             logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=insufficient_primary_data rows=%s', chat_id, symbol, 0 if primary is None else len(primary))
-            return
+            return _entry_diag_result(chat_id, symbol, 'insufficient_data', reason, 'data')
         primary_tf='5min'; mode='multi'
     else:
-        d=await get_klines_async(http,symbol,tf,160)
+        try:
+            d=await get_klines_async(http,symbol,tf,160)
+        except Exception as exc:
+            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=data_error error=%s', chat_id, symbol, exc)
+            return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده بازار: {exc}', 'data')
         if d.empty:
             logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=empty_market_data tf=%s', chat_id, symbol, tf)
-            return
+            return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
         primary=calculate_indicators(d); primary_tf=tf; mode='single'
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=scan_generation_or_bot_state_changed', chat_id, symbol)
-        return
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات هنگام اسکن تغییر کرد', 'state')
     if not risk_guard(chat_id):
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=risk_guard', chat_id, symbol)
-        return
+        return _entry_diag_result(chat_id, symbol, 'risk_blocked', 'محدودیت ریسک اجازه ورود نمی‌دهد', 'risk')
     s=get_session(chat_id)
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
-        return
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
     sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'])
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
     if not sig:
-        return
+        return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal')
     plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
     if not plan:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
-        return
+        return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     full_reason=f"{reason} | {plan_reason}"[:500]
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=plan_ok signal=%s entry=%s sl=%s tp=%s detail=%s', chat_id, symbol, sig, entry, sl, tp, plan_reason)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=execute_result ok=%s', chat_id, symbol, ok)
+    if ok:
+        return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
+    return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال و طرح معامله ایجاد شد، اما اجرای ورود موفق نشد', 'execute', sig)
 
 
 def performance(chat_id):
@@ -2506,7 +2642,17 @@ async def scan_loop():
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
                         continue
                     for sym in list(s['active_symbols']): tasks.append(scan_symbol(http,cid,sym))
-                if tasks: await asyncio.gather(*tasks,return_exceptions=True)
+                if tasks:
+                    batch = await asyncio.gather(*tasks, return_exceptions=True)
+                    by_chat = {}
+                    for item in batch:
+                        if isinstance(item, Exception):
+                            logger.warning('ENTRY_DIAG scan task failed: %s', item)
+                            continue
+                        if isinstance(item, dict) and item.get('chat_id') is not None:
+                            by_chat.setdefault(item['chat_id'], []).append(item)
+                    for cid, results in by_chat.items():
+                        _entry_diag_batch_update(cid, results)
         except Exception as exc: logger.exception('scan loop: %s',exc)
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
