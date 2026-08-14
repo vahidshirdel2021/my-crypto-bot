@@ -2,14 +2,9 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
-    # یک کلید کوچک و ثابت پایین کادر چت؛ منوی کامل با /menu باز می‌شود.
-    return {
-        "keyboard": [[{"text": "☰ منو"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-        "is_persistent": True,
-        "input_field_placeholder": "برای باز کردن منو روی ☰ منو بزنید…"
-    }
+    # منوی قبلی Reply Keyboard حذف شده است.
+    # منوی اصلی اکنون از Menu Button بومی تلگرام کنار کادر پیام باز می‌شود.
+    return {"remove_keyboard": True}
 
 
 def get_filters_menu_keyboard(session=None):

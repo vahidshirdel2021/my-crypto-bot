@@ -274,8 +274,30 @@ def tg(method, payload=None, timeout=10):
         logger.warning('Telegram request failed: %s', exc); return None
 
 
+TELEGRAM_COMMANDS = [
+    {'command':'menu','description':'منوی اصلی'},
+    {'command':'ai_chat','description':'گفت‌وگو با هوش مصنوعی'},
+    {'command':'ai_market','description':'تحلیل هوشمند بازار'},
+    {'command':'market_report','description':'گزارش وضعیت بازار'},
+    {'command':'open_positions','description':'پوزیشن‌های باز'},
+    {'command':'performance','description':'گزارش عملکرد'},
+    {'command':'ai_settings','description':'تنظیمات هوش مصنوعی'},
+]
+
+def configure_telegram_native_menu():
+    """منوی بومی تلگرام را کنار کادر پیام فعال می‌کند و Reply Keyboard قبلی را حذف می‌کند."""
+    if not TELEGRAM_TOKEN:
+        return
+    r=tg('setMyCommands', {'commands': TELEGRAM_COMMANDS}, 10)
+    if not r or not r.get('ok'):
+        logger.warning('setMyCommands failed')
+    r=tg('setChatMenuButton', {'menu_button': {'type':'commands'}}, 10)
+    if not r or not r.get('ok'):
+        logger.warning('setChatMenuButton failed')
+
+
 def answer_callback(cid):
-    if cid: tg('answerCallbackQuery', {'callback_query_id': cid}, 5)
+    if cid: tg('answerCallbackQuery', {'callback_query_id':cid}, 5)
 
 
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
@@ -499,6 +521,35 @@ def ai_position_report(chat_id,pos):
     payload={'نوع':'بررسی یک پوزیشن باز','نماد':pos.get('symbol'),'سمت':pos.get('side'),'ورود':pos.get('entry_price'),'حد ضرر':pos.get('sl'),'حد سود':pos.get('tp'),'مارجین':pos.get('margin'),'اهرم':pos.get('leverage'),'استراتژی':pos.get('strategy'),'امتیاز':pos.get('score'),'دلیل سیگنال':pos.get('signal_reason'),'زمان ورود':pos.get('opened_at')}
     return ai_call(chat_id,'position',payload,force=True)
 
+def ai_chat_market_snapshot(chat_id):
+    """آخرین داده بازار را از منبع داده خود ربات برای چت AI آماده می‌کند."""
+    s=get_session(chat_id)
+    tf='5min' if s.get('timeframe')=='multi' else s.get('timeframe','15min')
+    symbols=list(s.get('active_symbols') or [])[:8]
+    if not symbols:
+        symbols=['BTC','ETH','SOL','BNB']
+    rows=[]
+    for sym in symbols:
+        try:
+            d=get_klines(sym,tf,80)
+            if d is None or d.empty: continue
+            ind=calculate_indicators(d)
+            c=ind.iloc[-2] if len(ind)>=2 else ind.iloc[-1]
+            close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
+            adx=float(c.adx); rsi=float(c.rsi)
+            rows.append({
+                'نماد':sym,
+                'قیمت':round(close,8),
+                'وضعیت نسبت به EMA20':'بالای EMA20' if close>ema20 else 'پایین EMA20',
+                'وضعیت نسبت به EMA50':'بالای EMA50' if close>ema50 else 'پایین EMA50',
+                'قدرت روند':'قوی' if adx>=25 else 'متوسط' if adx>=20 else 'ضعیف',
+                'RSI وضعیت':'اشباع خرید' if rsi>=70 else 'اشباع فروش' if rsi<=30 else 'متعادل',
+            })
+        except Exception as exc:
+            logger.debug('AI market snapshot %s failed: %s', sym, exc)
+    return {'تایم‌فریم':TF_DISPLAY.get(tf,tf),'نمادها':rows}
+
+
 def ai_chat_context(chat_id):
     s=get_session(chat_id)
     positions=[]
@@ -520,6 +571,7 @@ def ai_chat_context(chat_id):
         'ریسک هر معامله':s.get('risk_per_trade_pct'),
         'حداکثر پوزیشن':s.get('max_open_positions'),
         'موجودی کاغذی':s.get('paper_balance'),
+        'آخرین وضعیت بازار':ai_chat_market_snapshot(chat_id),
     }
 
 def ai_chat_reply(chat_id, user_text):
@@ -2361,7 +2413,19 @@ def handle_text(chat_id,text):
         return
     s=get_session(chat_id); val=raw.upper()
     if s['user_state']=='AI_CHAT':
-        send_message(chat_id, ai_chat_reply(chat_id, raw), get_ai_chat_keyboard(), parse_mode=None)
+        # پاسخ AI ممکن است چند ثانیه زمان ببرد؛ اول یک پیام انتظار واقعی نشان بده.
+        wait_res=tg('sendMessage', {
+            'chat_id':chat_id,
+            'text':'⏳ در حال بررسی درخواستت…\nداده‌های فعلی بازار و وضعیت ربات را بررسی می‌کنم؛ لطفاً چند لحظه صبر کن.',
+            'reply_markup':get_ai_chat_keyboard()
+        }, 10)
+        wait_id=((wait_res or {}).get('result') or {}).get('message_id')
+        tg('sendChatAction', {'chat_id':chat_id, 'action':'typing'}, 5)
+        reply=ai_chat_reply(chat_id, raw)
+        if wait_id:
+            send_message(chat_id, reply, get_ai_chat_keyboard(), message_id=wait_id, parse_mode=None)
+        else:
+            send_message(chat_id, reply, get_ai_chat_keyboard(), parse_mode=None)
         return
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
     if s['user_state']=='ADD_SYMBOL':
@@ -2460,6 +2524,7 @@ def status():
 
 def main():
     init_db(); load_telegram_offset(); load_sessions(); logger.info('Loaded %s sessions',len(USER_SESSIONS))
+    configure_telegram_native_menu()
     Thread(target=telegram_listener,daemon=True,name='telegram').start(); Thread(target=lambda:(time.sleep(3),asyncio.run(scan_loop())),daemon=True,name='scanner').start()
     app.run(host='0.0.0.0',port=PORT,threaded=True)
 
