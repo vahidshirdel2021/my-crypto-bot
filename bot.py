@@ -516,13 +516,104 @@ def safe_size(chat_id,s,entry,sl):
 
 
 def chart(chat_id,symbol,df,trade):
+    """Render a clean trade chart: no EMA overlays, only candles + Entry/TP/SL levels."""
     try:
-        if df.empty: return
-        d=df.tail(60); plt.figure(figsize=(10,5)); plt.plot(d.close.values,label='قیمت'); plt.plot(d.ema20.values,label='EMA20',linestyle='--'); plt.plot(d.ema50.values,label='EMA50',linestyle='--')
-        for val,ls,label in [(trade['entry_price'],'-','Entry'),(trade['tp'],':','TP'),(trade['sl'],':','SL')]: plt.axhline(val,linestyle=ls,label=f'{label}: {fmt(val)}')
-        plt.title(f"{symbol} {trade['side']}"); plt.legend(fontsize=8); plt.grid(alpha=.25); plt.tight_layout(); b=io.BytesIO(); plt.savefig(b,format='png',dpi=100); plt.close(); b.seek(0)
-        send_photo(chat_id,b.getvalue(),f"📊 *معامله جدید [{ 'REAL' if trade.get('is_real') else 'PAPER'}]*\n• `{symbol}` {trade['side']}\n• ورود: `{fmt(trade['entry_price'])}`\n• مارجین: `${trade['margin']:.2f}` | `{trade['leverage']}X`\n• حد سود: `{fmt(trade['tp'])}` | حد ضرر: `{fmt(trade['sl'])}`")
-    except Exception: logger.exception('chart error')
+        if df.empty or len(df) < 5:
+            return
+
+        d = df.tail(60).copy().reset_index(drop=True)
+        fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+
+        # Candlesticks without an external charting dependency.
+        body_width = 0.62
+        for i, row in d.iterrows():
+            o = float(row['open']); h = float(row['high'])
+            l = float(row['low']); c = float(row['close'])
+            up = c >= o
+            candle_color = '#22c55e' if up else '#ef4444'
+            ax.vlines(i, l, h, color=candle_color, linewidth=1.1, alpha=0.95, zorder=2)
+            bottom = min(o, c)
+            height = max(abs(c - o), max((h - l) * 0.003, 1e-12))
+            rect = plt.Rectangle((i - body_width / 2, bottom), body_width, height,
+                                 facecolor=candle_color, edgecolor=candle_color,
+                                 linewidth=0.7, alpha=0.92, zorder=3)
+            ax.add_patch(rect)
+
+        entry = float(trade['entry_price'])
+        tp = float(trade['tp'])
+        sl = float(trade['sl'])
+        is_long = side_long(trade.get('side', 'BUY'))
+
+        # Clear horizontal levels. Labels are placed at the right edge so they
+        # remain readable even when the chart is viewed inside Telegram.
+        levels = [
+            (entry, '#60a5fa', 'ENTRY', '-', 1.8),
+            (tp, '#22c55e', 'TP', '--', 2.0),
+            (sl, '#ef4444', 'SL', '--', 2.0),
+        ]
+        x_right = len(d) + 1.8
+        for value, color, label, style, width in levels:
+            ax.axhline(value, color=color, linestyle=style, linewidth=width, alpha=0.95, zorder=1)
+            ax.text(x_right, value, f' {label}  {fmt(value)} ',
+                    va='center', ha='left', fontsize=9.5, fontweight='bold',
+                    color='white',
+                    bbox=dict(boxstyle='round,pad=0.28', facecolor=color, edgecolor='none', alpha=0.95),
+                    clip_on=False, zorder=5)
+
+        # Highlight the actual entry candle.
+        entry_idx = int((d['close'] - entry).abs().idxmin())
+        entry_y = float(d.loc[entry_idx, 'low'] if is_long else d.loc[entry_idx, 'high'])
+        ax.scatter([entry_idx], [entry_y], s=42, color='#60a5fa', edgecolors='white',
+                   linewidths=0.8, zorder=6)
+        ax.annotate('ENTRY', xy=(entry_idx, entry_y),
+                    xytext=(entry_idx, entry_y + (float(d['high'].max()) - float(d['low'].min())) * (0.07 if is_long else -0.07)),
+                    color='white', fontsize=9, fontweight='bold', ha='center',
+                    arrowprops=dict(arrowstyle='-|>', color='#60a5fa', lw=1.2), zorder=7)
+
+        # Compact title/header.
+        mode = 'REAL' if trade.get('is_real') else 'PAPER'
+        direction = 'LONG' if is_long else 'SHORT'
+        ax.set_title(f'{symbol}  •  {direction}  •  {mode}', loc='left',
+                     color='white', fontsize=15, fontweight='bold', pad=14)
+
+        # Small trade summary inside the chart.
+        summary = f"Entry  {fmt(entry)}    TP  {fmt(tp)}    SL  {fmt(sl)}"
+        ax.text(0.01, 0.015, summary, transform=ax.transAxes, color='#cbd5e1',
+                fontsize=9.5, va='bottom', ha='left',
+                bbox=dict(boxstyle='round,pad=0.35', facecolor='#1e293b', edgecolor='#334155', alpha=0.95))
+
+        ax.set_xlim(-1, len(d) + 5.5)
+        ymin = float(d['low'].min()); ymax = float(d['high'].max())
+        pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
+        ax.set_ylim(min(ymin, sl, tp) - pad, max(ymax, sl, tp) + pad)
+        ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
+        ax.grid(False, axis='x')
+        ax.tick_params(axis='both', colors='#94a3b8', labelsize=8.5)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_xticks([])
+        ax.set_ylabel('Price', color='#94a3b8', fontsize=9)
+
+        # Give the right-side level labels enough room.
+        plt.subplots_adjust(left=0.06, right=0.82, top=0.90, bottom=0.10)
+        b = io.BytesIO()
+        plt.savefig(b, format='png', dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        b.seek(0)
+
+        send_photo(
+            chat_id, b.getvalue(),
+            f"📊 *معامله جدید [{mode}]*\n"
+            f"• `{symbol}` {trade['side']}\n"
+            f"• ورود: `{fmt(entry)}`\n"
+            f"• مارجین: `${trade['margin']:.2f}` | `{trade['leverage']}X`\n"
+            f"• حد سود: `{fmt(tp)}`\n"
+            f"• حد ضرر: `{fmt(sl)}`"
+        )
+    except Exception:
+        logger.exception('chart error')
 
 
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
@@ -903,7 +994,38 @@ def process_command(cmd,chat_id,message_id=None):
 
 
 def handle_text(chat_id,text):
-    s=get_session(chat_id); val=text.strip().upper()
+    # دکمه‌های ثابت Reply Keyboard به صورت متن ارسال می‌شوند، نه callback_query.
+    # آن‌ها را قبل از منطق state به command داخلی تبدیل می‌کنیم تا همه کلیدهای ثابت کار کنند.
+    raw=(text or '').strip()
+    fixed_buttons={
+        '🏠 منوی اصلی':'/menu',
+        'منوی اصلی':'/menu',
+        '🔄 پوزیشن‌های باز':'/open_positions',
+        'پوزیشن‌های باز':'/open_positions',
+        '📈 گزارش عملکرد کلی':'/performance',
+        'گزارش عملکرد کلی':'/performance',
+        '📊 گزارش وضعیت بازار':'/market_report',
+        'وضعیت بازار':'/market_report',
+        '📊 وضعیت بازار':'/market_report',
+        '⚙️ تنظیمات فیلترها':'/filters_menu',
+        'تنظیمات فیلترها':'/filters_menu',
+        '🎛️ تنظیم پارامترها':'/params_menu',
+        'تنظیم پارامترها':'/params_menu',
+        '⚙️ تنظیمات معامله':'/check_wizard',
+        'تنظیمات معامله':'/check_wizard',
+        '📊 استراتژی':'/strategies_menu',
+        'استراتژی':'/strategies_menu',
+        '📋 واچ‌لیست':'/manage_watchlist',
+        'واچ‌لیست':'/manage_watchlist',
+        '❌ بستن همه':'/close_all_prompt',
+        'بستن همه':'/close_all_prompt',
+        '🔍 تحلیل ارز':'/analyze_single',
+        'تحلیل ارز':'/analyze_single',
+    }
+    if raw in fixed_buttons:
+        process_command(fixed_buttons[raw],chat_id)
+        return
+    s=get_session(chat_id); val=raw.upper()
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
     if s['user_state']=='ADD_SYMBOL':
         if val not in s['active_symbols'] and len(val)<=12 and not get_klines(val,'5min',60).empty: s['active_symbols'].append(val); send_message(chat_id,f'✅ `{val}` اضافه شد.')
