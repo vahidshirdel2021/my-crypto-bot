@@ -362,10 +362,63 @@ def ai_settings_text(chat_id):
 
 
 def _ai_system_prompt():
-    return ('تو تحلیل‌گر کمکی یک ربات معامله‌گری هستی. پاسخ فقط فارسی، روشن و حرفه‌ای باشد. '
-            'هرگز تضمین سود نده و هرگز دستور قطعی خرید/فروش صادر نکن. داده ناقص را صریح بگو. '
-            'وظیفه تو تحلیل و توضیح است، نه اجرای معامله. هیچ پارامتری را خودکار تغییر نده. '
-            'اگر درباره معامله نظر می‌دهی Entry/SL/TP/R:R و شرایط بازار را جداگانه بررسی کن و در پایان سطح ریسک را بگو.')
+    return (
+        'تو تحلیل‌گر کمکی یک ربات معامله‌گری فارسی‌زبان هستی. '
+        'خروجی نهایی باید ۱۰۰٪ فارسی و راست‌خوان باشد و نباید هیچ جمله انگلیسی داشته باشد. '
+        'فقط نام نمادها و اصطلاحات فنی استاندارد مانند BTC، ETH، SOL، EMA50، RSI، ADX، ATR، Entry، SL، TP و R:R '
+        'می‌توانند به همان شکل انگلیسی باقی بمانند. '
+        'هر پاسخ را با یک جمله کامل فارسی شروع کن و هرگز پاسخ را از وسط یک جمله یا سناریو آغاز نکن. '
+        'ساختار پیشنهادی: خلاصه تحلیل، وضعیت بازار، سناریوهای محتمل، نکات ریسک. '
+        'اگر داده ناقص است صریحاً بگو. هرگز تضمین سود نده و هرگز دستور قطعی خرید/فروش صادر نکن. '
+        'وظیفه تو تحلیل و توضیح است، نه اجرای معامله. هیچ پارامتری را خودکار تغییر نده. '
+        'اگر درباره معامله نظر می‌دهی Entry/SL/TP/R:R و شرایط بازار را جداگانه بررسی کن و در پایان سطح ریسک را بگو. '
+        'مهم: حتی اگر بخشی از ورودی انگلیسی باشد، خروجی را به فارسی روان بازنویسی کن و متن انگلیسی ورودی را کپی نکن.'
+    )
+
+
+def _ai_needs_persian_rewrite(text):
+    """تشخیص می‌دهد آیا پاسخ AI عملاً انگلیسی/ناقص است و باید دوباره بازنویسی شود."""
+    if not text or len(text.strip()) < 25:
+        return True
+    import re
+    fa = len(re.findall(r'[\u0600-\u06FF]', text))
+    latin = len(re.findall(r'[A-Za-z]', text))
+    # اگر فارسی بسیار کم باشد، پاسخ احتمالاً انگلیسی است. اصطلاحات فنی کوتاه مجازند.
+    if fa == 0:
+        return True
+    if latin > max(45, fa * 0.65):
+        return True
+    # پاسخ نباید با یک قطعه انگلیسی یا جمله نیمه‌کاره شروع شود.
+    first = text.strip().splitlines()[0].strip()
+    if re.match(r'^[A-Za-z0-9].{8,}', first) and not re.match(r'^(BTC|ETH|SOL|BNB|XRP|DOGE|ADA)\b', first):
+        return True
+    return False
+
+
+def _gemini_persian_rewrite(draft):
+    """یک بار پاسخ Gemini را در همان مدل، به فارسی روان و کامل بازنویسی می‌کند."""
+    instruction = (
+        'متن زیر پیش‌نویس تحلیل است. آن را از نو و بدون حذف اطلاعات مهم به فارسی روان، کامل و حرفه‌ای بازنویسی کن. '
+        'هیچ جمله انگلیسی باقی نگذار؛ فقط نمادها و اصطلاحات فنی استاندارد مانند EMA50، RSI، ADX، ATR، Entry، SL، TP و R:R مجازند. '
+        'پاسخ باید با یک جمله کامل فارسی شروع شود و از وسط جمله شروع نشود. هیچ توضیحی درباره فرایند بازنویسی نده.\n\n'
+        f'پیش‌نویس:\n{draft}'
+    )
+    body = {
+        'systemInstruction': {'parts':[{'text': _ai_system_prompt()}]},
+        'contents':[{'role':'user','parts':[{'text': instruction}]}],
+        'generationConfig': {'maxOutputTokens': 1400, 'temperature': 0.2},
+    }
+    url=f'https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent'
+    try:
+        r=requests.post(url, headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'}, json=body, timeout=AI_TIMEOUT_SECONDS)
+        if r.status_code == 200:
+            rewritten=ai_extract_text(r.json())
+            if rewritten:
+                return rewritten
+        logger.warning('Gemini Persian rewrite failed: %s', r.status_code)
+    except Exception:
+        logger.exception('Gemini Persian rewrite failed')
+    return draft
 
 
 def ai_call_gemini(payload):
@@ -383,6 +436,12 @@ def ai_call_gemini(payload):
                 return None, '❌ Gemini کلید AQ فعلاً توسط API پذیرفته نشد (401/403). کلید را در AI Studio بررسی و در صورت نیاز کلید جدید بسازید.'
             return None, f'❌ ارتباط با Gemini ناموفق بود. کد خطا: {r.status_code}'
         text=ai_extract_text(r.json())
+        if not text:
+            return None,'❌ Gemini پاسخی تولید نکرد.'
+        # اگر مدل برخلاف دستور، انگلیسی یا ناقص جواب داد، یک بار همان پاسخ را
+        # با دستور سخت‌گیرانه به فارسی روان بازنویسی می‌کنیم.
+        if _ai_needs_persian_rewrite(text):
+            text=_gemini_persian_rewrite(text)
         return (text,None) if text else (None,'❌ Gemini پاسخی تولید نکرد.')
     except Exception:
         logger.exception('Gemini call failed')
