@@ -5,7 +5,8 @@ FILTERS = {
     "volume_filter": True,
     "trailing_stop": True,
     "candlestick_filter": True,
-    "no_short_filter": False
+    "no_short_filter": False,
+    "no_buy_filter": False
 }
 
 STRATEGY_CONFIG = {
