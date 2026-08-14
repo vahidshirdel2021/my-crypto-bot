@@ -993,21 +993,56 @@ def handle_text(chat_id,text):
 
 
 def telegram_listener():
-    offsets={}
+    # Telegram getUpdates is an offset-based queue. Without advancing the
+    # offset, the same update is delivered again on every polling cycle,
+    # which caused repeated /start and duplicate account-selection messages.
+    offset = None
+    first_poll = True
     while True:
-        if not TELEGRAM_TOKEN: time.sleep(5); continue
+        if not TELEGRAM_TOKEN:
+            time.sleep(5)
+            continue
         try:
-            r=requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates',params={'timeout':25},timeout=30)
-            if not r.ok: time.sleep(2); continue
-            for u in r.json().get('result',[]):
-                upd=u['update_id']; callback=u.get('callback_query') or {}; msg=callback.get('message') or u.get('message') or {}; chat=(msg.get('chat') or {}).get('id')
-                if not chat: continue
-                if callback.get('id'): answer_callback(callback['id'])
-                if not is_allowed(chat): continue
-                data=callback.get('data') or (u.get('message') or {}).get('text');
-                if callback: process_command(data,chat,msg.get('message_id'))
-                elif data: handle_text(chat,data)
-        except Exception as exc: logger.exception('Telegram listener: %s',exc); time.sleep(2)
+            params = {'timeout': 25}
+            if first_poll:
+                # Discard stale updates left in the queue by older buggy
+                # deployments. New clicks/messages after startup are handled normally.
+                params['offset'] = -1
+            elif offset is not None:
+                params['offset'] = offset
+
+            r=requests.get(
+                f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates',
+                params=params, timeout=30
+            )
+            if not r.ok:
+                time.sleep(2)
+                continue
+
+            updates = r.json().get('result', [])
+            first_poll = False
+            for u in updates:
+                upd = u.get('update_id')
+                if upd is not None:
+                    offset = upd + 1
+
+                callback=u.get('callback_query') or {}
+                msg=callback.get('message') or u.get('message') or {}
+                chat=(msg.get('chat') or {}).get('id')
+                if not chat:
+                    continue
+                if callback.get('id'):
+                    answer_callback(callback['id'])
+                if not is_allowed(chat):
+                    continue
+                data=callback.get('data') or (u.get('message') or {}).get('text')
+                if callback:
+                    process_command(data,chat,msg.get('message_id'))
+                elif data:
+                    handle_text(chat,data)
+        except Exception as exc:
+            logger.exception('Telegram listener: %s',exc)
+            time.sleep(2)
 
 
 async def scan_loop():
