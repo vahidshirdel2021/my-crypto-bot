@@ -10,7 +10,7 @@ def get_filters_menu_keyboard(session=None):
     f = (session or {}).get("filters", FILTER_DEFAULTS)
     return {"inline_keyboard": [
         [{"text": f"فیلتر حجم: {'🟢 فعال' if f.get('volume_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_vol"}],
-        [{"text": f"Trailing Stop: {'🟢 فعال' if f.get('trailing_stop', True) else '🔴 خاموش'}", "callback_data": "/toggle_trail"}],
+        [{"text": f"حد ضرر دنبال‌کننده: {'🟢 فعال' if f.get('trailing_stop', True) else '🔴 خاموش'}", "callback_data": "/toggle_trail"}],
         [{"text": f"تأیید کندل: {'🟢 فعال' if f.get('candlestick_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_candle"}],
         [{"text": f"توقف Short: {'🟢 بله' if f.get('no_short_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_short"}],
         [{"text": f"توقف Buy: {'🟢 بله' if f.get('no_buy_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_buy"}],
@@ -38,9 +38,9 @@ def get_params_menu_keyboard(session=None):
 def get_positions_keyboard(positions):
     k = [[{"text": f"❌ بستن {p['symbol']}", "callback_data": f"/close_{p['symbol']}"}] for p in positions]
     if any("BUY" in p["side"] for p in positions):
-        k.append([{"text": "❌ بستن همه Long", "callback_data": "/close_longs"}])
+        k.append([{"text": "❌ بستن همه خرید", "callback_data": "/close_longs"}])
     if any("SELL" in p["side"] for p in positions):
-        k.append([{"text": "❌ بستن همه Short", "callback_data": "/close_shorts"}])
+        k.append([{"text": "❌ بستن همه فروش", "callback_data": "/close_shorts"}])
     k.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
     return {"inline_keyboard": k}
 
@@ -74,11 +74,11 @@ def get_timeframe_keyboard():
 
 
 def get_main_menu_keyboard(active):
-    return {"inline_keyboard": [[{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/toggle_active"}], [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"}], [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}], [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}], [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}], [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}, {"text": "📈 عملکرد", "callback_data": "/performance"}]]}
+    return {"inline_keyboard": [[{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}], [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"}], [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}], [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}], [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}], [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}, {"text": "📈 عملکرد", "callback_data": "/performance"}]]}
 
 
 def get_strategies_selection_keyboard():
-    return {"inline_keyboard": [[{"text": "⚡ Dynamic", "callback_data": "/set_strat_dynamic"}], [{"text": "📈 Trend", "callback_data": "/set_strat_trend"}], [{"text": "🚀 Breakout", "callback_data": "/set_strat_breakout"}], [{"text": "🔄 Mean Reversion", "callback_data": "/set_strat_mean_reversion"}], [{"text": "🌊 Multi-TF", "callback_data": "/set_strat_multi"}], [{"text": "📚 توضیح", "callback_data": "/strategy_desc_menu"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
+    return {"inline_keyboard": [[{"text": "⚡ پویا", "callback_data": "/set_strat_dynamic"}], [{"text": "📈 روندی", "callback_data": "/set_strat_trend"}], [{"text": "🚀 شکست", "callback_data": "/set_strat_breakout"}], [{"text": "🔄 بازگشت به میانگین", "callback_data": "/set_strat_mean_reversion"}], [{"text": "🌊 چندزمانه", "callback_data": "/set_strat_multi"}], [{"text": "📚 توضیح", "callback_data": "/strategy_desc_menu"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
 def get_strategies_menu_keyboard():

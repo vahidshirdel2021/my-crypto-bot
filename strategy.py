@@ -105,13 +105,13 @@ def get_strategy_description(timeframe="5min", strategy_config=None, filters=Non
     p = get_strategy_params(timeframe, strategy_config)
     f = _flt(filters)
     return (
-        f"📊 *استراتژی فعال ({timeframe})*\n\n"
+        f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
         f"• ADX: `{p['adx']:.1f}`\n"
         f"• SL: `{p['sl']:.1f} ATR`\n"
         f"• TP: `{p['tp']:.1f} ATR`\n"
-        f"• Volume: `{'🟢' if f.get('volume_filter', True) else '🔴'}`\n"
-        f"• Candle: `{'🟢' if f.get('candlestick_filter', True) else '🔴'}`\n"
-        f"• Trailing: `{'🟢' if f.get('trailing_stop', True) else '🔴'}`"
+        f"• حجم: `{'🟢' if f.get('volume_filter', True) else '🔴'}`\n"
+        f"• کندل: `{'🟢' if f.get('candlestick_filter', True) else '🔴'}`\n"
+        f"• حد ضرر دنبال‌کننده: `{'🟢' if f.get('trailing_stop', True) else '🔴'}`"
     )
 
 
@@ -174,24 +174,24 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
     if up and touch_buy and curr["close"] > curr["ema20"]:
         if not f.get("candlestick_filter", True):
             ok, reason = check_volume(df, -2, f)
-            return ("BUY", f"Trend Long | {reason}") if ok else (None, reason)
+            return ("BUY", f"روندی خرید | {reason}") if ok else (None, reason)
         sig, reason = check_candlestick_confirmation(df, f)
-        return ("BUY", f"Trend Long + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
+        return ("BUY", f"روندی خرید + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
     if down and touch_sell and curr["close"] < curr["ema20"]:
         if not f.get("candlestick_filter", True):
             ok, reason = check_volume(df, -2, f)
-            return ("SELL", f"Trend Short | {reason}") if ok else (None, reason)
+            return ("SELL", f"روندی فروش | {reason}") if ok else (None, reason)
         sig, reason = check_candlestick_confirmation(df, f)
-        return ("SELL", f"Trend Short + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
-    return None, "شرایط Trend برقرار نیست"
+        return ("SELL", f"روندی فروش + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
+    return None, "شرایط روندی برقرار نیست"
 
 
-def strategy_breakout(df, filters=None, strategy_config=None, timeframe="5min"):
+def strategy_breakout(df, filters=None, strategy_config=None):
     curr, prev = df.iloc[-2], df.iloc[-3]
     if pd.isna(curr.get("channel_high")) or pd.isna(curr.get("channel_low")):
         return None, "کانال آماده نیست"
     f = _flt(filters)
-    p = get_strategy_params(timeframe, strategy_config)
+    p = get_strategy_params("5min", strategy_config)
     adx = _safe_float(curr.get("adx"))
     if adx < max(15.0, p["adx"] - 5):
         return None, f"ADX پایین است ({adx:.1f})"
@@ -205,19 +205,19 @@ def strategy_breakout(df, filters=None, strategy_config=None, timeframe="5min"):
     if not (bull or bear):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
-        return ("BUY", "Breakout Long تأیید شد") if bull else ("SELL", "Breakout Short تأیید شد")
+        return ("BUY", "شکست صعودی تأیید شد") if bull else ("SELL", "شکست نزولی تأیید شد")
     sig, reason = check_candlestick_confirmation(df, f)
     if bull and sig in ("BUY_CONFIRMED", "CONFIRMED"):
-        return "BUY", f"Breakout Long + {reason}"
+        return "BUY", f"شکست صعودی + {reason}"
     if bear and sig in ("SELL_CONFIRMED", "CONFIRMED"):
-        return "SELL", f"Breakout Short + {reason}"
+        return "SELL", f"شکست نزولی + {reason}"
     return None, reason
 
 
-def strategy_mean_reversion(df, filters=None, strategy_config=None, timeframe="5min"):
+def strategy_mean_reversion(df, filters=None, strategy_config=None):
     curr = df.iloc[-2]
     rsi, adx = _safe_float(curr.get("rsi"), 50), _safe_float(curr.get("adx"), 50)
-    p = get_strategy_params(timeframe, strategy_config)
+    p = get_strategy_params("5min", strategy_config)
     if adx >= p["adx"]:
         return None, f"روند برای Mean Reversion قوی است (ADX={adx:.1f})"
     atr = _safe_float(curr.get("atr"), 0)
@@ -232,25 +232,14 @@ def strategy_mean_reversion(df, filters=None, strategy_config=None, timeframe="5
             sig, desc = check_candlestick_confirmation(df, f)
             if sig not in ("BUY_CONFIRMED", "CONFIRMED"):
                 return None, f"RSI اشباع فروش ولی برگشت تأیید نشده ({desc})"
-        return "BUY", f"Mean Reversion Long | RSI={rsi:.1f}"
+        return "BUY", f"بازگشت به میانگین خرید | RSI={rsi:.1f}"
     if rsi > 70:
         if f.get("candlestick_filter", True):
             sig, desc = check_candlestick_confirmation(df, f)
             if sig not in ("SELL_CONFIRMED", "CONFIRMED"):
                 return None, f"RSI اشباع خرید ولی برگشت تأیید نشده ({desc})"
-        return "SELL", f"Mean Reversion Short | RSI={rsi:.1f}"
+        return "SELL", f"بازگشت به میانگین فروش | RSI={rsi:.1f}"
     return None, f"RSI خنثی است ({rsi:.1f})"
-
-
-def _latest_closed_at_or_before(df, target_ts):
-    if df is None or df.empty or "timestamp" not in df.columns or len(df) < 2:
-        return None
-    closed = df.iloc[:-1]
-    try:
-        eligible = closed[pd.to_numeric(closed["timestamp"], errors="coerce") <= float(target_ts)]
-        return eligible.iloc[-1] if not eligible.empty else None
-    except Exception:
-        return closed.iloc[-1]
 
 
 def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=None, strategy_config=None):
@@ -259,15 +248,12 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
     if missing:
         return None, f"تایم‌فریم‌های لازم موجود نیست: {', '.join(missing)}"
     c = df_primary.iloc[-2]
-    target_ts = c.get("timestamp", None)
     up = c["close"] > c["ema50"] and c["ema20"] > c["ema50"] and c["plus_di"] > c["minus_di"]
     down = c["close"] < c["ema50"] and c["ema20"] < c["ema50"] and c["minus_di"] > c["plus_di"]
     if not (up or down):
         return None, "روند تایم اصلی مشخص نیست"
     for tf in required:
-        h = _latest_closed_at_or_before(market_data_dict[tf], target_ts) if target_ts is not None else market_data_dict[tf].iloc[-2]
-        if h is None:
-            return None, f"کندل بسته‌شده برای {tf} هم‌زمان با تایم اصلی پیدا نشد"
+        h = market_data_dict[tf].iloc[-2]
         h_adx = _safe_float(h.get("adx"))
         if h_adx < max(15.0, get_strategy_params(timeframe, strategy_config)["adx"] - 5):
             return None, f"ADX تایم {tf} ضعیف است ({h_adx:.1f})"
@@ -276,7 +262,7 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
         if down and not (h["close"] < h["ema50"] and h["ema20"] <= h["ema50"] and h["minus_di"] >= h["plus_di"]):
             return None, f"عدم هم‌راستایی Short در {tf}"
     sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-    return (sig, f"Multi-TF | {reason}") if sig else (None, reason)
+    return (sig, f"چندزمانه | {reason}") if sig else (None, reason)
 
 
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None):
@@ -288,17 +274,17 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
         if timeframe == "5min" and all((market_data_dict.get(k) is not None and not market_data_dict[k].empty) for k in ["1d", "4h", "1h", "15m"]):
             multi_sig, multi_reason = strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
             if multi_sig:
-                return multi_sig, f"[Dynamic Multi] {multi_reason}"
-    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config, timeframe)
+                return multi_sig, f"[پویا-چندزمانه] {multi_reason}"
+    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if break_sig:
-        return break_sig, f"[Breakout] {break_reason}"
+        return break_sig, f"[شکست] {break_reason}"
     if adx >= min_adx + 5:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-        return sig, f"[Trending] {reason}"
+        return sig, f"[رونددار] {reason}"
     if adx < min_adx:
-        sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config, timeframe)
-        return sig, f"[Ranging] {reason}"
-    return None, f"[Transition] ADX={adx:.1f}"
+        sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
+        return sig, f"[رنج] {reason}"
+    return None, f"[گذار] ADX={adx:.1f}"
 
 
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None):
@@ -308,9 +294,9 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if st == "trend":
         return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
     if st == "breakout":
-        return strategy_breakout(df_primary, filters, strategy_config, timeframe)
+        return strategy_breakout(df_primary, filters, strategy_config)
     if st == "mean_reversion":
-        return strategy_mean_reversion(df_primary, filters, strategy_config, timeframe)
+        return strategy_mean_reversion(df_primary, filters, strategy_config)
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
     if st == "dynamic":
