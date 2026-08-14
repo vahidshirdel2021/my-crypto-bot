@@ -13,7 +13,7 @@ from flask import Flask, request
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     get_strategy_params, get_strategy_description, strategy_trend_following,
-    strategy_breakout, strategy_mean_reversion,
+    strategy_breakout, strategy_mean_reversion, build_trade_plan,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -655,6 +655,20 @@ def expected_trade_pnl(trade):
     m=expected_trade_metrics(trade)
     return m['tp_pnl'],m['sl_pnl']
 
+def historical_expectancy_r(chat_id, min_samples=10):
+    """Historical average R from closed trades; None until enough valid samples exist."""
+    s=get_session(chat_id); vals=[]
+    for p in s.get('closed_positions',[]):
+        try:
+            risk=float(p.get('risk_usdt') or 0)
+            pnl=float(p.get('pnl_usdt') or 0)
+            if risk>0 and math.isfinite(risk) and math.isfinite(pnl):
+                vals.append(pnl/risk)
+        except Exception:
+            continue
+    if len(vals)<min_samples: return None, len(vals)
+    return sum(vals)/len(vals), len(vals)
+
 
 def trade_action_keyboard(symbol):
     return {'inline_keyboard': [
@@ -937,6 +951,12 @@ def chart(chat_id,symbol,df,trade):
 
         metrics=expected_trade_metrics(trade)
         warning='' if metrics['valid'] else '\n⚠️ بررسی جهت TP/SL: مقادیر با جهت معامله سازگار نیستند.'
+        hist_r, hist_n = historical_expectancy_r(chat_id)
+        quality_line=''
+        if trade.get('quality_score') is not None:
+            quality_line=f"\n• امتیاز کیفیت معامله: `{trade.get('quality_score')}/100` — {trade.get('quality_label','')}"
+        if hist_r is not None:
+            quality_line+=f"\n• امیدریاضی تاریخی: `{hist_r:+.2f}R` بر اساس `{hist_n}` معامله"
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *معامله جدید [{mode}]*\n"
@@ -946,6 +966,7 @@ def chart(chat_id,symbol,df,trade):
             f"• حد سود: `{fmt(tp)}` → 🟢 `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → 🔴 `-{metrics['risk']:.2f} USDT`\n"
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
+            f"{quality_line}"
             f"{warning}\n\n"
             f"ℹ️ سود/زیان بالا قبل از کارمزد و Funding است.",
             trade_action_keyboard(symbol)
@@ -974,7 +995,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     s.pop('_symbol_tmp',None)
     if margin<=0: logger.info('entry blocked %s: %s',symbol,amount_or_reason); return False
     leverage=int(s['leverage'])
-    trade={'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'trailing_activated':False}
+    risk_dist=abs(float(price)-float(sl))
+    risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
+    trade={'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'trailing_activated':False}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1024,6 +1047,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
             if side_long(side): trade['sl']=exec_price-gap_sl; trade['tp']=exec_price+gap_tp
             else: trade['sl']=exec_price+gap_sl; trade['tp']=exec_price-gap_tp
             trade['sl']=normalize_price(chat_id,symbol,trade['sl']); trade['tp']=normalize_price(chat_id,symbol,trade['tp'])
+            trade['risk_usdt']=abs(float(trade['entry_price'])-float(trade['sl']))/max(float(trade['entry_price']),1e-12)*float(trade['margin'])*float(trade['leverage'])
             ok,err=set_protection(chat_id,symbol,trade['sl'],trade['tp'])
             if not ok:
                 _halt_real_trading(chat_id,f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
@@ -1048,6 +1072,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
         trade['amount']=(margin*leverage)/price
         s['paper_positions'].append(trade); save_session(chat_id)
 
+    m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
+    if m_score:
+        trade['quality_score']=int(m_score.group(1)); trade['quality_label']=m_score.group(2)
+    m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
+    if m_rr:
+        trade['planned_rr']=float(m_rr.group(1))
     if trade.get('is_real'): s['paper_positions'].append(trade); save_session(chat_id)
     df=get_klines(symbol,'5min' if s['timeframe']=='multi' else s['timeframe'],80)
     if not df.empty: chart(chat_id,symbol,calculate_indicators(df),trade)
@@ -1118,6 +1148,9 @@ def close_position(chat_id,pos,price=None,reason='manual'):
     else:
         if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
         entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry); pnl=float(pos['margin'])*frac*float(pos['leverage']); s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+    if not pos.get('risk_usdt'):
+        try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
+        except Exception: pos['risk_usdt']=0.0
     pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
     s['cooldowns'][pos['symbol']]=time.time()+300; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
     est=' تقریبی' if pos.get('pnl_is_estimate') else ''
@@ -1223,10 +1256,13 @@ async def scan_symbol(http,chat_id,symbol):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation: return
     sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'])
     if not sig: return
-    c=primary.iloc[-2]; entry=float(c['close']); atr=float(c['atr']); p=get_strategy_params(primary_tf,s['strategy_config'])
-    if not math.isfinite(atr) or atr<=0: return
-    sl=entry-atr*p['sl'] if sig=='BUY' else entry+atr*p['sl']; tp=entry+atr*p['tp'] if sig=='BUY' else entry-atr*p['tp']
-    execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,reason)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
+    if not plan:
+        logger.info('trade blocked by dynamic exit plan %s: %s', symbol, plan_reason)
+        return
+    entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
+    full_reason=f"{reason} | {plan_reason}"[:500]
+    execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
 
 
 def performance(chat_id):
@@ -1256,6 +1292,13 @@ def performance(chat_id):
     avg_trade=(net/total) if total else 0.0
     avg_win=(gross_profit/wins) if wins else 0.0
     avg_loss=(gross_loss/losses) if losses else 0.0
+    r_values=[]
+    for p in closed:
+        try:
+            risk=float(p.get('risk_usdt') or 0); val=float(p.get('pnl_usdt') or 0)
+            if risk>0 and math.isfinite(risk) and math.isfinite(val): r_values.append(val/risk)
+        except Exception: pass
+    expectancy_r=(sum(r_values)/len(r_values)) if r_values else None
     profit_factor=(gross_profit/gross_loss) if gross_loss>0 else (float('inf') if gross_profit>0 else 0.0)
     best=max((pnl(p) for p in closed), default=0.0)
     worst=min((pnl(p) for p in closed), default=0.0)
@@ -1285,7 +1328,7 @@ def performance(chat_id):
         balance_label='موجودی حساب کاغذی'
 
     open_margin=sum(float(p.get('margin',0) or 0) for p in open_pos)
-    open_pnl=sum(pnl(p) for p in open_pos)
+    open_pnl=sum(float(p.get('last_unrealized_pnl', p.get('pnl_usdt', 0)) or 0) for p in open_pos)
     tp_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('tp','take_profit','take profit','target'))
     sl_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('sl','stop_loss','stop loss','stop'))
     manual_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('manual','close_all','user'))
@@ -1335,7 +1378,8 @@ def performance(chat_id):
         f'• بهترین معامله: `+{best:,.2f} USDT`\n'
         f'• بدترین معامله: `{worst:+,.2f} USDT`\n'
         f'• ضریب سودآوری: `{pf}`\n'
-        f'• بیشترین افت سرمایه: `{max_drawdown:.2f}%`\n\n'
+        + (f'• امیدریاضی تاریخی: `{expectancy_r:+.2f}R`\n' if expectancy_r is not None else '• امیدریاضی تاریخی: `داده کافی نیست`\n')
+        + f'• بیشترین افت سرمایه: `{max_drawdown:.2f}%`\n\n'
         '🔄 *پوزیشن‌های باز*\n'
         f'• تعداد پوزیشن: `{len(open_pos)}`\n'
         f'• مارجین درگیر: `{open_margin:,.2f} USDT`\n'
