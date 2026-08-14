@@ -3,3 +3,5 @@ requests
 ccxt
 pandas
 numpy
+aiohttp
+matplotlib
