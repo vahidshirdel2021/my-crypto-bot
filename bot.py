@@ -319,7 +319,7 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
             send_telegram_msg(
                 f"🔴 *سفارش واقعی در صرافی کوینکس ثبت شد ({side_icon} {side})*\n"
                 f"• نماد: `{symbol}`\n"
-                f"• قیمت اجرایی: `{exec_price:.4f}`\n"
+                f"• قیمت ورود: `{exec_price:.4f}`\n"
                 f"• مارجین: `${margin:.1f} USDT` (اهرم {session['leverage']}X)\n"
                 f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`",
                 chat_target=chat_id
@@ -348,7 +348,7 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
     send_telegram_msg(
         f"📝 *معامله جدید کاغذی {side_icon} ({side})*\n"
         f"• نماد: `{symbol}`\n"
-        f"• ورود: `{price:.4f}`\n"
+        f"• قیمت ورود: `{price:.4f}`\n"
         f"• مارجین: `${margin:.1f} USDT`\n"
         f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`",
         chat_target=chat_id
