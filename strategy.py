@@ -238,18 +238,13 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     return plan, plan["reason"]
 
 
-def get_strategy_description(timeframe="5min", strategy_config=None, filters=None):
-    p = get_strategy_params(timeframe, strategy_config)
-    f = _flt(filters)
-    return (
-        f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
-        f"• ADX: `{p['adx']:.1f}`\n"
-        f"• SL: `{p['sl']:.1f} ATR`\n"
-        f"• TP: `{p['tp']:.1f} ATR`\n"
-        f"• حجم: `{'🟢' if f.get('volume_filter', True) else '🔴'}`\n"
-        f"• کندل: `{'🟢' if f.get('candlestick_filter', True) else '🔴'}`\n"
-        f"• حد ضرر دنبال‌کننده: `{'🟢' if f.get('trailing_stop', True) else '🔴'}`"
-    )
+def get_strategy_description(timeframe="5min", strategy_config=None, filters=None, simple=False):
+    p=get_strategy_params(timeframe,strategy_config)
+    f=_flt(filters)
+    if simple:
+        return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود.\n\n💡 لازم نیست ADX یا ATR را بدانید؛ ربات از آن‌ها به‌عنوان ابزار داخلی استفاده می‌کند."
+    return (f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
+            f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter',True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter',True) else '🔴'}`")
 
 
 def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):

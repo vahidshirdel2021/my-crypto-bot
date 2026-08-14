@@ -20,7 +20,7 @@ from ui import (
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
-    get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard,
+    get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
     get_performance_keyboard,
 )
 
@@ -186,6 +186,7 @@ def normalize_session(data):
     s = default_session(); s.update(data or {})
     s['filters'] = {**FILTER_DEFAULTS, **(data.get('filters') or {})}
     s['strategy_config'] = {**STRATEGY_DEFAULTS, **(data.get('strategy_config') or {})}
+    s['user_experience'] = data.get('user_experience') if data.get('user_experience') in ('simple','advanced') else 'simple'
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
     s['cooldowns'] = dict(data.get('cooldowns') or {})
@@ -1742,6 +1743,22 @@ def runtime_audit(chat_id):
     return '\n'.join(lines)
 
 
+def learning_text(topic):
+    texts={
+        'adx':"📈 *ADX چیست؟*\n\nADX برای سنجش *قدرت روند* است، نه جهت آن.\n\nربات از آن کمک می‌گیرد تشخیص دهد بازار رونددار است یا خنثی.\n\nلازم نیست عدد ADX را تنظیم کنید؛ در حالت ساده ربات خودش آن را مدیریت می‌کند.",
+        'atr':"🌪 *ATR چیست؟*\n\nATR میزان *نوسان معمول قیمت* را اندازه می‌گیرد.\n\nربات از آن برای هماهنگ‌کردن حد ضرر و حد سود با نوسان بازار استفاده می‌کند.",
+        'rsi':"📊 *RSI چیست؟*\n\nRSI به ربات کمک می‌کند قدرت و وضعیت حرکت قیمت را بسنجد.\n\nRSI به‌تنهایی سیگنال خرید یا فروش نیست و کنار عوامل دیگر بررسی می‌شود.",
+        'rr':"⚖️ *R:R چیست؟*\n\nR:R یعنی پاداش احتمالی نسبت به ریسک احتمالی.\n\nمثلاً 2R یعنی پاداش هدف تقریباً دو برابر ریسک حد ضرر است.",
+        'why':"🧠 *چرا ربات این شاخص‌ها را می‌بیند؟*\n\nهیچ شاخصی به‌تنهایی آینده را پیش‌بینی نمی‌کند. ربات قدرت روند، نوسان، حرکت قیمت، حجم، ساختار بازار و نسبت سود به ریسک را کنار هم بررسی می‌کند تا کاربر مجبور نباشد ده‌ها عدد فنی را دستی تنظیم کند."
+    }
+    return texts.get(topic,texts['why'])
+
+def apply_user_profile(s, profile):
+    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(68.0,1.30,0.50,20.0,'متعادل'),'opportunity':(62.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
+    score,rr,risk,adx,label=presets[profile]
+    s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
+    return label,score,rr,risk
+
 def process_command(cmd,chat_id,message_id=None):
 
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
@@ -1751,7 +1768,19 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active']))
         return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
-    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
+    if cl in ('/learn_menu','learn','🎓 آموزش مفاهیم'):
+        send_message(chat_id,'🎓 *آموزش ساده مفاهیم ربات*\n\nلازم نیست ADX، ATR یا RSI را بلد باشید. از اینجا توضیح ساده هرکدام را ببینید.',get_learn_menu_keyboard()); return
+    if cl in ('/learn_adx','/learn_atr','/learn_rsi','/learn_rr','/learn_why'):
+        send_message(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard()); return
+    if cl=='/profile_advanced':
+        s['user_experience']='advanced'; save_session(chat_id); send_message(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*\nپارامترهای فنی نمایش داده می‌شوند.',get_params_menu_keyboard(s)); return
+    if cl=='/profile_simple':
+        s['user_experience']='simple'; save_session(chat_id); send_message(chat_id,'🟢 *حالت ساده فعال شد.*\nپارامترهای فنی پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s)); return
+    if cl in ('/profile_conservative','/profile_balanced','/profile_opportunity'):
+        profile={'/profile_conservative':'conservative','/profile_balanced':'balanced','/profile_opportunity':'opportunity'}[cl]
+        label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
+        send_message(chat_id,f'🟢 *پروفایل {label} فعال شد.*\n\n🎯 حداقل کیفیت: `{score:.0f}/100`\n⚖️ حداقل سود به ضرر: `{rr:.2f}R`\n🛡️ ریسک هر معامله: `{risk:.2f}%`\n\nجزئیات فنی مثل ADX و ATR پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s)); return
+    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/profile_','/learn_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
     if s['is_bot_active'] and (
         cl.startswith(sensitive_prefixes)
         or any(k in c for k in (
@@ -1819,7 +1848,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl in ('/params_menu',): send_message(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s)); return
     if cl=='/strategy_desc_menu': send_message(chat_id,'📚 *توضیح استراتژی*',get_strategies_menu_keyboard()); return
     if cl.startswith('/desc_'):
-        tf=cl.replace('/desc_',''); tf={'multi':'multi'}.get(tf,tf); send_message(chat_id,get_strategy_description(tf,s['strategy_config'],s['filters'])); return
+        tf=cl.replace('/desc_',''); tf={'multi':'multi'}.get(tf,tf); send_message(chat_id,get_strategy_description(tf,s['strategy_config'],s['filters'],simple=(s.get('user_experience','simple')!='advanced'))); return
     if cl in ('/toggle_vol','/toggle_trail','/toggle_candle','/toggle_short','/toggle_buy'):
         key={'/toggle_vol':'volume_filter','/toggle_trail':'trailing_stop','/toggle_candle':'candlestick_filter','/toggle_short':'no_short_filter','/toggle_buy':'no_buy_filter'}[cl]; s['filters'][key]=not s['filters'].get(key,False); save_session(chat_id); send_message(chat_id,'⚙️ *فیلترها*',get_filters_menu_keyboard(s)); return
     if cl in ('/adx_up','/adx_down','/sl_up','/sl_down','/tp_up','/tp_down'):
