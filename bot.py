@@ -285,10 +285,21 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
         if parse_mode: body['parse_mode'] = parse_mode
         res = tg('editMessageText', body, 10)
         if res and res.get('ok'): return True
+        # اگر محتوا دقیقاً همان قبلی باشد، نباید پیام تکراری ساخته شود.
+        desc = ((res or {}).get('description') or '').lower()
+        if 'message is not modified' in desc:
+            return True
     body = {'chat_id':chat_id,'text':text,'reply_markup':markup}
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
     return bool(res and res.get('ok'))
+
+
+def edit_page(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
+    """نمایش یک صفحه از رابط کاربری؛ در callback همان پیام را ویرایش می‌کند.
+    اگر message_id مربوط به پیام کاربر باشد، send_message به‌صورت خودکار fallback می‌کند.
+    """
+    return send_message(chat_id, text, markup, message_id=message_id, parse_mode=parse_mode)
 
 
 def sync_bottom_keyboard(chat_id, status_message=None):
@@ -1896,17 +1907,17 @@ def process_command(cmd,chat_id,message_id=None):
         return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
     if cl in ('/learn_menu','learn','🎓 آموزش مفاهیم'):
-        send_message(chat_id,'🎓 *آموزش ساده مفاهیم ربات*\n\nلازم نیست ADX، ATR یا RSI را بلد باشید. از اینجا توضیح ساده هرکدام را ببینید.',get_learn_menu_keyboard()); return
+        edit_page(chat_id,'🎓 *آموزش ساده مفاهیم ربات*\n\nلازم نیست ADX، ATR یا RSI را بلد باشید. از اینجا توضیح ساده هرکدام را ببینید.',get_learn_menu_keyboard(),message_id); return
     if cl in ('/learn_adx','/learn_atr','/learn_rsi','/learn_rr','/learn_why'):
-        send_message(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard()); return
+        edit_page(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard(),message_id); return
     if cl=='/profile_advanced':
-        s['user_experience']='advanced'; save_session(chat_id); send_message(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*\nپارامترهای فنی نمایش داده می‌شوند.',get_params_menu_keyboard(s)); return
+        s['user_experience']='advanced'; save_session(chat_id); edit_page(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*\nپارامترهای فنی نمایش داده می‌شوند.',get_params_menu_keyboard(s),message_id); return
     if cl=='/profile_simple':
-        s['user_experience']='simple'; save_session(chat_id); send_message(chat_id,'🟢 *حالت ساده فعال شد.*\nپارامترهای فنی پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s)); return
+        s['user_experience']='simple'; save_session(chat_id); edit_page(chat_id,'🟢 *حالت ساده فعال شد.*\nپارامترهای فنی پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s),message_id); return
     if cl in ('/profile_conservative','/profile_balanced','/profile_opportunity'):
         profile={'/profile_conservative':'conservative','/profile_balanced':'balanced','/profile_opportunity':'opportunity'}[cl]
         label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
-        send_message(chat_id,f'🟢 *پروفایل {label} فعال شد.*\n\n🎯 حداقل کیفیت: `{score:.0f}/100`\n⚖️ حداقل سود به ضرر: `{rr:.2f}R`\n🛡️ ریسک هر معامله: `{risk:.2f}%`\n\nجزئیات فنی مثل ADX و ATR پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s)); return
+        edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*\n\n🎯 حداقل کیفیت: `{score:.0f}/100`\n⚖️ حداقل سود به ضرر: `{rr:.2f}R`\n🛡️ ریسک هر معامله: `{risk:.2f}%`\n\nجزئیات فنی مثل ADX و ATR پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s),message_id); return
     sensitive_prefixes=('/ai_provider_','/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/profile_','/learn_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
     if s['is_bot_active'] and (
         cl.startswith(sensitive_prefixes)
@@ -1933,11 +1944,11 @@ def process_command(cmd,chat_id,message_id=None):
     if cl in ('/close_bottom_menu','⬇️ بستن منوی سریع'):
         s['bottom_menu_open']=False; save_session(chat_id); sync_bottom_keyboard(chat_id, '☰ منوی سریع بسته شد.'); return
     if cl in ('/ai_settings','🤖 تنظیمات هوش مصنوعی'):
-        send_message(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s)); return
+        edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id); return
     if cl.startswith('/ai_provider_'):
         provider=cl.replace('/ai_provider_','')
         if provider in ('gemini','openai','off'):
-            s['ai_provider']=provider; save_session(chat_id); send_message(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s))
+            s['ai_provider']=provider; save_session(chat_id); edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id)
         return
     if cl in ('/ai_market','🤖 تحلیل هوشمند بازار'):
         send_message(chat_id, ai_market_report(chat_id), parse_mode=None); return
@@ -1947,7 +1958,7 @@ def process_command(cmd,chat_id,message_id=None):
         sym=cl.replace('/ai_pos_','').upper(); pos=next((p for p in s['paper_positions'] if p.get('symbol','').upper()==sym),None)
         if not pos: send_message(chat_id,'❌ این پوزیشن دیگر باز نیست.'); return
         send_message(chat_id, ai_position_report(chat_id,pos), parse_mode=None); return
-    if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id); return
+    if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id, message_id); return
     if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
         stop_scan(chat_id, 'manual')
         menu(chat_id,message_id)
@@ -1967,36 +1978,36 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/mode_paper':
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
-        s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); send_message(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard()); return
+        s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
     if cl=='/mode_real':
         if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
         if not get_exchange(chat_id): send_message(chat_id,'❌ حساب CoinEx این کاربر در `COINEX_ACCOUNTS_JSON` تنظیم نشده یا اتصال ناموفق است.'); return
         bal=exchange_balance(chat_id)
         if bal<=0: send_message(chat_id,'❌ موجودی USDT معتبر پیدا نشد.'); return
-        s['trading_mode']='REAL'; s['is_bot_active']=False; s['daily_start_equity']=bal; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; s['real_reconciliation_required']=not reconcile_real(chat_id); save_session(chat_id); send_message(chat_id,f'🔴 موجودی REAL: `{bal:.2f} USDT`\n\n⚙️ مارجین هر معامله:',get_margin_keyboard()); return
+        s['trading_mode']='REAL'; s['is_bot_active']=False; s['daily_start_equity']=bal; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; s['real_reconciliation_required']=not reconcile_real(chat_id); save_session(chat_id); edit_page(chat_id,f'🔴 موجودی REAL: `{bal:.2f} USDT`\n\n⚙️ مارجین هر معامله:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_bal_'):
-        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); send_message(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard()); return
-    if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); send_message(chat_id,'⚙️ اهرم:',get_leverage_keyboard()); return
-    if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); send_message(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard()); return
-    if cl.startswith('/set_max_'): s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id); send_message(chat_id,'⚙️ تایم‌فریم:',get_timeframe_keyboard()); return
+        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
+    if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
+    if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl.startswith('/set_max_'): s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id); edit_page(chat_id,'⚙️ تایم‌فریم:',get_timeframe_keyboard(),message_id); return
     if cl.startswith('/set_tf_'):
-        s['timeframe']={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour','/set_tf_1d':'1day','/set_tf_multi':'multi'}[cl]; save_session(chat_id); menu(chat_id); return
+        s['timeframe']={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour','/set_tf_1d':'1day','/set_tf_multi':'multi'}[cl]; save_session(chat_id); menu(chat_id, message_id); return
     if cl.startswith('/set_strat_'):
         key=cl.replace('/set_strat_','')
-        if key in ('dynamic','trend','breakout','mean_reversion','multi'): s['active_strategy']=key; save_session(chat_id); menu(chat_id)
+        if key in ('dynamic','trend','breakout','mean_reversion','multi'): s['active_strategy']=key; save_session(chat_id); menu(chat_id, message_id)
         return
     if cl=='/market_report':
         send_message(chat_id, '⏳ *در حال تهیه گزارش جامع بازار...*\nداده چندین نماد در حال بررسی است.', get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True)))
         send_message(chat_id, market_report(chat_id))
         return
-    if cl in ('/strategies_menu',): send_message(chat_id,'📊 *انتخاب استراتژی*',get_strategies_selection_keyboard()); return
-    if cl in ('/filters_menu',): send_message(chat_id,'⚙️ *فیلترها*',get_filters_menu_keyboard(s)); return
-    if cl in ('/params_menu',): send_message(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s)); return
-    if cl=='/strategy_desc_menu': send_message(chat_id,'📚 *توضیح استراتژی*',get_strategies_menu_keyboard()); return
+    if cl in ('/strategies_menu',): edit_page(chat_id,'📊 *انتخاب استراتژی*',get_strategies_selection_keyboard(),message_id); return
+    if cl in ('/filters_menu',): edit_page(chat_id,'⚙️ *فیلترها*',get_filters_menu_keyboard(s),message_id); return
+    if cl in ('/params_menu',): edit_page(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s),message_id); return
+    if cl=='/strategy_desc_menu': edit_page(chat_id,'📚 *توضیح استراتژی*',get_strategies_menu_keyboard(),message_id); return
     if cl.startswith('/desc_'):
-        tf=cl.replace('/desc_',''); tf={'multi':'multi'}.get(tf,tf); send_message(chat_id,get_strategy_description(tf,s['strategy_config'],s['filters'],simple=(s.get('user_experience','simple')!='advanced'))); return
+        tf=cl.replace('/desc_',''); tf={'multi':'multi'}.get(tf,tf); edit_page(chat_id,get_strategy_description(tf,s['strategy_config'],s['filters'],simple=(s.get('user_experience','simple')!='advanced')),get_strategies_menu_keyboard(),message_id); return
     if cl in ('/toggle_vol','/toggle_trail','/toggle_candle','/toggle_short','/toggle_buy'):
-        key={'/toggle_vol':'volume_filter','/toggle_trail':'trailing_stop','/toggle_candle':'candlestick_filter','/toggle_short':'no_short_filter','/toggle_buy':'no_buy_filter'}[cl]; s['filters'][key]=not s['filters'].get(key,False); save_session(chat_id); send_message(chat_id,'⚙️ *فیلترها*',get_filters_menu_keyboard(s)); return
+        key={'/toggle_vol':'volume_filter','/toggle_trail':'trailing_stop','/toggle_candle':'candlestick_filter','/toggle_short':'no_short_filter','/toggle_buy':'no_buy_filter'}[cl]; s['filters'][key]=not s['filters'].get(key,False); save_session(chat_id); edit_page(chat_id,'⚙️ *فیلترها*',get_filters_menu_keyboard(s),message_id); return
     if cl in ('/adx_up','/adx_down','/sl_up','/sl_down','/tp_up','/tp_down'):
         c=s['strategy_config'];
         if cl=='/adx_up': c['min_adx']=min(50,c['min_adx']+1)
@@ -2005,7 +2016,7 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl=='/sl_down': c['sl_multiplier']=max(.5,round(c['sl_multiplier']-.2,1))
         elif cl=='/tp_up': c['tp_multiplier']=round(c['tp_multiplier']+.5,1)
         else: c['tp_multiplier']=max(.5,round(c['tp_multiplier']-.5,1))
-        save_session(chat_id); send_message(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s)); return
+        save_session(chat_id); edit_page(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s),message_id); return
     if cl=='/analyze_single': s['user_state']='WAIT_SYMBOL'; save_session(chat_id); send_message(chat_id,'🔍 نماد را ارسال کنید، مثال `BTC`'); return
     if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
         if not s['paper_positions']: send_message(chat_id,'پوزیشن بازی وجود ندارد.'); return
@@ -2019,9 +2030,9 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id,'⚠️ *ریست آمار تست*\n\nتاریخچه معاملات، PnL و آمار عملکرد صفر می‌شود.\nتنظیمات، واچ‌لیست، استراتژی و موجودی حفظ می‌شوند.\n\nاین عملیات قابل برگشت نیست. ادامه می‌دهید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]}); return
     if cl=='/reset_stats_confirm':
         ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))); return
-    if cl=='/check_wizard': send_message(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard()); return
-    if cl=='/manage_watchlist': send_message(chat_id,f'📋 واچ‌لیست: `{len(s["active_symbols"])}`',get_watchlist_manage_keyboard()); return
-    if cl=='/watchlist_list': send_message(chat_id,'📋 *واچ‌لیست*\n\n`'+', '.join(s['active_symbols'])+'`'); return
+    if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
+    if cl=='/manage_watchlist': edit_page(chat_id,f'📋 واچ‌لیست: `{len(s["active_symbols"])}`',get_watchlist_manage_keyboard(),message_id); return
+    if cl=='/watchlist_list': edit_page(chat_id,'📋 *واچ‌لیست*\n\n`'+', '.join(s['active_symbols'])+'`',get_watchlist_manage_keyboard(),message_id); return
     if cl=='/add_symbol_prompt': s['user_state']='ADD_SYMBOL'; save_session(chat_id); send_message(chat_id,'➕ نماد را بفرستید'); return
     if cl=='/remove_symbol_prompt': s['user_state']='REMOVE_SYMBOL'; save_session(chat_id); send_message(chat_id,'➖ نماد را بفرستید'); return
     if cl.startswith('/manage_'):
