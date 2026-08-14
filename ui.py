@@ -3,7 +3,7 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 def get_bottom_menu_keyboard(is_active=False):
     text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
-    return {"keyboard": [[{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}], [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}], [{"text": "⚙️ تنظیمات فیلترها"}, {"text": "🎛️ تنظیم پارامترها"}], [{"text": text}]], "resize_keyboard": True, "one_time_keyboard": False}
+    return {"keyboard": [[{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}], [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}], [{"text": "⚙️ تنظیمات فیلترها"}, {"text": "🎛️ تنظیم پارامترها"}], [{"text": text}]], "resize_keyboard": True, "one_time_keyboard": False, "is_persistent": True, "input_field_placeholder": "از منوی پایین انتخاب کنید…"}
 
 
 def get_filters_menu_keyboard(session=None):
