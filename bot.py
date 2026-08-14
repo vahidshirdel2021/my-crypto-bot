@@ -21,6 +21,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard,
+    get_performance_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -1022,8 +1023,31 @@ async def scan_symbol(http,chat_id,symbol):
 
 
 def performance(chat_id):
-    s=get_session(chat_id); closed=s['closed_positions']; total=sum(float(p.get('pnl_usdt',0)) for p in closed); wins=sum(1 for p in closed if float(p.get('pnl_usdt',0))>0); wr=wins/len(closed)*100 if closed else 0
-    return f"📈 *گزارش عملکرد*\n\nمعاملات: `{len(closed)}`\nبرد: `{wins}`\nنرخ برد: `{wr:.1f}%`\nسود/زیان خالص: `{total:+.2f} USDT`\nموجودی کاغذی: `${s['paper_balance']:.2f}`"
+    s=get_session(chat_id); closed=s['closed_positions']; total=sum(float(p.get('pnl_usdt',0)) for p in closed); wins=sum(1 for p in closed if float(p.get('pnl_usdt',0))>0); losses=sum(1 for p in closed if float(p.get('pnl_usdt',0))<0); wr=wins/len(closed)*100 if closed else 0
+    gross_profit=sum(max(0.0,float(p.get('pnl_usdt',0))) for p in closed)
+    gross_loss=sum(min(0.0,float(p.get('pnl_usdt',0))) for p in closed)
+    return f"📈 *گزارش عملکرد*\n\nمعاملات: `{len(closed)}`\nبرد: `{wins}` | باخت: `{losses}`\nنرخ برد: `{wr:.1f}%`\nسود ناخالص: `{gross_profit:+.2f} USDT`\nزیان ناخالص: `{gross_loss:+.2f} USDT`\nسود/زیان خالص: `{total:+.2f} USDT`\nموجودی کاغذی: `${s['paper_balance']:.2f}`\n\nبرای شروع یک تست آماری جدید، از دکمه زیر استفاده کنید."
+
+
+def reset_stats(chat_id):
+    s=get_session(chat_id)
+    if s.get('paper_positions'):
+        return False, '❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'
+    # Only performance/history state is reset. User settings, watchlist, credentials
+    # and strategy configuration remain untouched.
+    s['closed_positions'] = []
+    s['daily_stopped'] = False
+    if s.get('trading_mode') == 'REAL':
+        try:
+            equity = exchange_balance(chat_id)
+        except Exception:
+            return False, '❌ موجودی REAL برای تنظیم مبنای جدید قابل دریافت نیست؛ آمار ریست نشد.'
+    else:
+        equity = float(s.get('paper_balance', 1000.0))
+    s['daily_start_equity'] = float(equity)
+    s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime())
+    save_session(chat_id)
+    return True, f"✅ *آمار تست ریست شد*\n\nتاریخچه معاملات: `0`\nسود/زیان خالص: `0.00 USDT`\nمبنای ریسک روزانه جدید: `{equity:.2f} USDT`\n\n⚙️ تنظیمات، واچ‌لیست، استراتژی و موجودی حذف نشده‌اند."
 
 
 def analyze(chat_id,symbol):
@@ -1383,7 +1407,13 @@ def process_command(cmd,chat_id,message_id=None):
         lines=[f'🔄 *پوزیشن‌ها ({len(s["paper_positions"])})*']
         for p in s['paper_positions']: lines.append(f"{'🟢' if side_long(p['side']) else '🔴'} `{p['symbol']}` | {p['side']} | Entry `{fmt(p['entry_price'])}` | SL `{fmt(p['sl'])}` | TP `{fmt(p['tp'])}`")
         send_message(chat_id,'\n'.join(lines),get_positions_keyboard(s['paper_positions'])); return
-    if cl=='/performance' or 'گزارش عملکرد' in c: send_message(chat_id,performance(chat_id)); return
+    if cl=='/performance' or 'گزارش عملکرد' in c: send_message(chat_id,performance(chat_id),get_performance_keyboard()); return
+    if cl=='/reset_stats_prompt':
+        if s.get('paper_positions'):
+            send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'); return
+        send_message(chat_id,'⚠️ *ریست آمار تست*\n\nتاریخچه معاملات، PnL و آمار عملکرد صفر می‌شود.\nتنظیمات، واچ‌لیست، استراتژی و موجودی حفظ می‌شوند.\n\nاین عملیات قابل برگشت نیست. ادامه می‌دهید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]}); return
+    if cl=='/reset_stats_confirm':
+        ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else get_bottom_menu_keyboard(s['is_bot_active'])); return
     if cl=='/check_wizard': send_message(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard()); return
     if cl=='/manage_watchlist': send_message(chat_id,f'📋 واچ‌لیست: `{len(s["active_symbols"])}`',get_watchlist_manage_keyboard()); return
     if cl=='/watchlist_list': send_message(chat_id,'📋 *واچ‌لیست*\n\n`'+', '.join(s['active_symbols'])+'`'); return

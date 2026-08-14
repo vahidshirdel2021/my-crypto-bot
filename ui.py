@@ -35,6 +35,13 @@ def get_params_menu_keyboard(session=None):
     ]}
 
 
+def get_performance_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
+
+
 def get_positions_keyboard(positions):
     k = [[{"text": f"❌ بستن {p['symbol']}", "callback_data": f"/close_{p['symbol']}"}] for p in positions]
     if any("BUY" in p["side"] for p in positions):
