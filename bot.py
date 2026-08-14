@@ -40,8 +40,8 @@ def get_user_session(chat_id):
         }
     return USER_SESSIONS[chat_id]
 
-COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "")
-COINEX_SECRET = os.environ.get("COINEX_SECRET", "")
+COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "") or os.environ.get("coinexaccessid", "")
+COINEX_SECRET = os.environ.get("COINEX_SECRET", "") or os.environ.get("coinexSecretKey", "")
 
 exchange = None
 if COINEX_API_KEY and COINEX_SECRET:
@@ -217,18 +217,61 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
         if pos['symbol'] == symbol: return
 
     margin = session["trade_amount_usdt"]
+
+    # اگر حالت واقعی (REAL) فعال باشد و صرافی متصل باشد، سفارش واقعی در کوینکس ثبت می‌شود
+    if session["trading_mode"] == "REAL" and exchange:
+        try:
+            notional = margin * session["leverage"]
+            amount = notional / price
+            try:
+                exchange.set_leverage(session["leverage"], f"{symbol}/USDT:USDT")
+            except:
+                pass
+
+            order = exchange.create_order(
+                symbol=f"{symbol}/USDT:USDT",
+                type='market',
+                side='buy' if "BUY" in side else 'sell',
+                amount=amount
+            )
+            exec_price = float(order.get('average', price) or price)
+
+            trade = {
+                "symbol": symbol, "side": side, "entry_price": exec_price,
+                "sl": sl, "tp": tp, "margin": margin,
+                "leverage": session["leverage"], "timeframe": session["timeframe"],
+                "close_timestamp": None, "pnl_usdt": 0.0, "trailing_activated": False,
+                "is_real": True
+            }
+            session["paper_positions"].append(trade)
+            side_icon = "🟢" if "BUY" in side or "Long" in side else "🔴"
+            send_telegram_msg(
+                f"🔴 *سفارش واقعی در صرافی کوینکس ثبت شد ({side_icon} {side})*\n"
+                f"• نماد: `{symbol}`\n"
+                f"• قیمت اجرایی: `{exec_price:.4f}`\n"
+                f"• مارجین: `${margin:.1f} USDT` (اهرم {session['leverage']}X)\n"
+                f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`",
+                chat_target=chat_id
+            )
+            return
+        except Exception as e:
+            send_telegram_msg(f"❌ خطا در ثبت سفارش واقعی در صرافی کوینکس: {e}", chat_target=chat_id)
+            return
+
+    # حالت کاغذی (Paper Trading)
     if session["paper_balance"] < margin: return
 
     trade = {
         "symbol": symbol, "side": side, "entry_price": price,
         "sl": sl, "tp": tp, "margin": margin,
         "leverage": session["leverage"], "timeframe": session["timeframe"],
-        "close_timestamp": None, "pnl_usdt": 0.0, "trailing_activated": False
+        "close_timestamp": None, "pnl_usdt": 0.0, "trailing_activated": False,
+        "is_real": False
     }
     session["paper_positions"].append(trade)
     side_icon = "🟢" if "BUY" in side or "Long" in side else "🔴"
     send_telegram_msg(
-        f"📝 *معامله جدید {side_icon} ({side})*\n"
+        f"📝 *معامله جدید کاغذی {side_icon} ({side})*\n"
         f"• نماد: `{symbol}`\n"
         f"• ورود: `{price:.4f}`\n"
         f"• مارجین: `${margin:.1f} USDT`\n"
@@ -244,24 +287,40 @@ def close_position_manually(chat_id, pos, current_price=None):
         df = get_crypto_klines(pos['symbol'], interval_type=pos.get('timeframe', session["timeframe"]) if pos.get('timeframe') != 'multi' else '5min', limit=2)
         current_price = float(df.iloc[-1]['close']) if not df.empty else pos['entry_price']
         
+    if pos.get("is_real") and exchange:
+        try:
+            close_side = 'sell' if "BUY" in pos['side'] else 'buy'
+            notional = pos['margin'] * pos['leverage']
+            amount = notional / pos['entry_price']
+            exchange.create_order(
+                symbol=f"{pos['symbol']}/USDT:USDT",
+                type='market',
+                side=close_side,
+                amount=amount,
+                params={'reduceOnly': True}
+            )
+        except Exception as e:
+            send_telegram_msg(f"⚠️ خطا در بستن پوزیشن در صرافی: {e}", chat_target=chat_id)
+
     if "BUY" in pos['side']:
         raw_pnl = ((current_price - pos['entry_price']) / pos['entry_price']) * 100
     else:
         raw_pnl = ((pos['entry_price'] - current_price) / pos['entry_price']) * 100
         
     pnl_usdt = (pos['margin'] * (raw_pnl * pos['leverage'])) / 100
-    session["paper_balance"] += pnl_usdt
+    if not pos.get("is_real"):
+        session["paper_balance"] += pnl_usdt
     pos['pnl_usdt'] = pnl_usdt
     pos['close_timestamp'] = time.time()
     
     session["closed_positions"].append(pos)
     session["paper_positions"].remove(pos)
     
+    mode_text = "واقعی (صرافی)" if pos.get("is_real") else "کاغذی"
     send_telegram_msg(
-        f"📌 *پوزیشن به صورت دستی بسته شد.*\n"
+        f"📌 *پوزیشن {mode_text} بسته شد.*\n"
         f"• نماد: `{pos['symbol']}`\n"
-        f"• سود/زیان: `{pnl_usdt:+.2f} USDT`\n"
-        f"• مانده جدید: `${session['paper_balance']:.2f} USDT`",
+        f"• سود/زیان: `{pnl_usdt:+.2f} USDT`",
         chat_target=chat_id
     )
 
@@ -297,34 +356,7 @@ def update_open_positions(chat_id):
             elif high >= pos['sl']: closed, raw_pnl = True, ((pos['entry_price'] - high) / pos['entry_price']) * 100
 
         if closed:
-            pnl_usdt = (pos['margin'] * (raw_pnl * pos['leverage'])) / 100
-            session["paper_balance"] += pnl_usdt
-            pos['pnl_usdt'] = pnl_usdt
-            pos['close_timestamp'] = time.time()
-            session["closed_positions"].append(pos)
-            session["paper_positions"].remove(pos)
-
-            if session["daily_start_balance"] > 0 and not session["daily_stopped"]:
-                drawdown_pct = ((session["daily_start_balance"] - session["paper_balance"]) / session["daily_start_balance"]) * 100
-                if drawdown_pct >= 5.0:
-                    session["is_bot_active"] = False
-                    session["daily_stopped"] = True
-                    send_telegram_msg(
-                        f"🚨 *حد ضرر روزانه (۵٪) تکمیل شد!*\n\n"
-                        f"• پایه روز: `{session['daily_start_balance']:.2f} USDT`\n"
-                        f"• موجودی: `${session['paper_balance']:.2f} USDT`\n"
-                        f"• افت: `{drawdown_pct:.2f}%`\n\n"
-                        f"🛑 اسکن متوقف شد.",
-                        chat_target=chat_id
-                    )
-
-            send_telegram_msg(
-                f"📌 *پوزیشن بسته شد.*\n"
-                f"• نماد: `{pos['symbol']}`\n"
-                f"• سود/زیان: `{pnl_usdt:+.2f} USDT`\n"
-                f"• مانده جدید: `${session['paper_balance']:.2f} USDT`",
-                chat_target=chat_id
-            )
+            close_position_manually(chat_id, pos, current_price=current_price)
 
 async def check_symbol_async(session_data, chat_id, coin_symbol):
     session = get_user_session(chat_id)
@@ -404,7 +436,6 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    # بستن تکی پوزیشن با اعمال سود/زیان
     if cmd_lower.startswith("/close_") and cmd_lower != "/close_shorts":
         symbol_to_close = cmd_lower.replace("/close_", "").upper()
         found = False
@@ -417,7 +448,6 @@ def process_command(data, chat_id, message_id=None):
             send_telegram_msg(f"❌ پوزیشنی با نماد `{symbol_to_close}` یافت نشد.", chat_target=chat_id)
         return
 
-    # بستن تمام پوزیشن‌های شورت با اعمال سود/زیان
     if cmd_lower == "/close_shorts":
         shorts = [p for p in session["paper_positions"] if "SELL" in p['side'] or "Short" in p['side']]
         if not shorts:
@@ -473,7 +503,8 @@ def process_command(data, chat_id, message_id=None):
             txt = f"🔄 *پوزیشن‌های باز ({len(session['paper_positions'])}):*\n"
             for p in session["paper_positions"]:
                 side_icon = "🟢" if "BUY" in p['side'] or "Long" in p['side'] else "🔴"
-                txt += f"{side_icon} • `{p['symbol']}` ({p['side']})\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
+                mode_badge = " [واقعی]" if p.get("is_real") else ""
+                txt += f"{side_icon} • `{p['symbol']}` ({p['side']}){mode_badge}\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
             keyboard = get_positions_keyboard(session["paper_positions"])
             send_telegram_msg(txt, chat_target=chat_id, reply_markup=keyboard)
         else:
@@ -557,16 +588,16 @@ def process_command(data, chat_id, message_id=None):
                 bal = exchange.fetch_balance()
                 usdt_balance = float(bal.get('total', {}).get('USDT', 0.0))
             except Exception as e:
-                send_telegram_msg(f"⚠️ خطا در صرافی: {e}", chat_target=chat_id)
+                send_telegram_msg(f"⚠️ خطا در ارتباط با صرافی: {e}", chat_target=chat_id)
                 return
         if usdt_balance <= 0:
-            send_telegram_msg("❌ موجودی حساب واقعی صفر است.", chat_target=chat_id)
+            send_telegram_msg("❌ موجودی حساب واقعی شما در صرافی صفر است یا کلیدها نامعتبرند.", chat_target=chat_id)
         else:
             session["trading_mode"] = "REAL"
             session["paper_balance"] = usdt_balance
             session["daily_start_balance"] = usdt_balance
             session["daily_stopped"] = False
-            send_telegram_msg(f"🔴 موجودی واقعی: `{usdt_balance:.2f} USDT`\n\n⚙️ مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
+            send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
     elif cmd_lower == "/strategies_menu":
         send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
         return
@@ -679,7 +710,7 @@ async def async_main_scan_loop():
         await asyncio.sleep(30)
 
 def bot_loop():
-    time.sleep(5)
+    type(5)
     asyncio.run(async_main_scan_loop())
 
 if __name__ == "__main__":
