@@ -35,6 +35,7 @@ def get_user_session(chat_id):
             "active_strategy": "dynamic",
             "paper_positions": [],
             "closed_positions": [],
+            "cooldowns": {},  # سیستم وقفه برای جلوگیری از ورود مجدد تکراری
             "user_state": None,
             "active_symbols": ALL_SYMBOLS.copy()
         }
@@ -210,6 +211,12 @@ def send_main_menu(chat_id, message_id=None):
 def execute_trade(chat_id, symbol, side, price, sl, tp):
     session = get_user_session(chat_id)
     if not session["is_bot_active"] or session["daily_stopped"]: return
+    
+    # بررسی وقفه (Cooldown) برای جلوگیری از ورود مجدد بلافاصله روی همان نماد
+    if symbol in session.get("cooldowns", {}):
+        if time.time() < session["cooldowns"][symbol]:
+            return
+            
     if FILTERS["no_short_filter"] and ("SELL" in side or "Short" in side): return
     if FILTERS["no_buy_filter"] and ("BUY" in side or "Long" in side): return
     if session["max_open_positions"] > 0 and len(session["paper_positions"]) >= session["max_open_positions"]: return
@@ -311,6 +318,10 @@ def close_position_manually(chat_id, pos, current_price=None):
     pos['pnl_usdt'] = pnl_usdt
     pos['close_timestamp'] = time.time()
     
+    # اعمال زمان وقفه (مثلاً ۳۰۰ ثانیه معادل ۵ دقیقه) روی این نماد پس از بسته شدن پوزیشن
+    if "cooldowns" not in session: session["cooldowns"] = {}
+    session["cooldowns"][pos['symbol']] = time.time() + 300
+    
     session["closed_positions"].append(pos)
     session["paper_positions"].remove(pos)
     
@@ -359,6 +370,12 @@ def update_open_positions(chat_id):
 async def check_symbol_async(session_data, chat_id, coin_symbol):
     session = get_user_session(chat_id)
     if not session["is_bot_active"] or session["daily_stopped"]: return
+    
+    # اگر نماد در حالت وقفه (Cooldown) باشد، اسکن این نماد موقتاً رد می‌شود
+    if coin_symbol in session.get("cooldowns", {}):
+        if time.time() < session["cooldowns"][coin_symbol]:
+            return
+            
     tf = session["timeframe"]
     strat = session["active_strategy"]
     try:
