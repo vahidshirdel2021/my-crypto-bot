@@ -45,6 +45,16 @@ def get_user_session(chat_id):
         }
     return USER_SESSIONS[chat_id]
 
+def fmt_p(val):
+    if val is None: return "0.00"
+    try:
+        f = float(val)
+        if f < 0.0001: return f"{f:.8f}"
+        if f < 1.0: return f"{f:.6f}"
+        return f"{f:.4f}"
+    except:
+        return str(val)
+
 COINEX_API_KEY = os.environ.get("COINEX_API_KEY", "") or os.environ.get("coinexaccessid", "")
 COINEX_SECRET = os.environ.get("COINEX_SECRET", "") or os.environ.get("coinexSecretKey", "")
 
@@ -146,9 +156,9 @@ def generate_and_send_trade_chart(chat_id, symbol, df, trade):
         tp_val = trade['tp']
         sl_val = trade['sl']
         
-        plt.axhline(y=entry_val, color='green', linestyle='-', label=f'Entry: {entry_val:.4f}')
-        plt.axhline(y=tp_val, color='blue', linestyle=':', label=f'TP: {tp_val:.4f}')
-        plt.axhline(y=sl_val, color='red', linestyle=':', label=f'SL: {sl_val:.4f}')
+        plt.axhline(y=entry_val, color='green', linestyle='-', label=f'Entry: {fmt_p(entry_val)}')
+        plt.axhline(y=tp_val, color='blue', linestyle=':', label=f'TP: {fmt_p(tp_val)}')
+        plt.axhline(y=sl_val, color='red', linestyle=':', label=f'SL: {fmt_p(sl_val)}')
         
         side_title = trade['side']
         plt.title(f"Trade Chart: {symbol} ({side_title})", fontsize=14, fontweight='bold')
@@ -162,12 +172,13 @@ def generate_and_send_trade_chart(chat_id, symbol, df, trade):
         plt.close()
         
         side_icon = "🟢" if "BUY" in trade['side'] or "Long" in trade['side'] else "🔴"
+        mode_badge = " [واقعی]" if trade.get("is_real") else " [کاغذی]"
         caption = (
-            f"📊 *چارت موقعیت معاملاتی {side_icon} ({trade['side']})*\n"
+            f"📊 *معامله جدید{mode_badge} {side_icon} ({trade['side']})*\n"
             f"• نماد: `{symbol}`\n"
-            f"• قیمت ورود: `{entry_val:.4f}`\n"
-            f"• حد سود (TP): `{tp_val:.4f}`\n"
-            f"• حد ضرر (SL): `{sl_val:.4f}`"
+            f"• قیمت ورود: `{fmt_p(entry_val)}`\n"
+            f"• مارجین: `${trade['margin']:.1f} USDT` (اهرم {trade['leverage']}X)\n"
+            f"• TP: `{fmt_p(tp_val)}` | SL: `{fmt_p(sl_val)}`"
         )
         send_telegram_photo(buf.getvalue(), caption=caption, chat_target=chat_id)
     except Exception as e:
@@ -315,16 +326,8 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
                 "is_real": True
             }
             session["paper_positions"].append(trade)
-            side_icon = "🟢" if "BUY" in side or "Long" in side else "🔴"
-            send_telegram_msg(
-                f"🔴 *سفارش واقعی در صرافی کوینکس ثبت شد ({side_icon} {side})*\n"
-                f"• نماد: `{symbol}`\n"
-                f"• قیمت ورود: `{exec_price:.4f}`\n"
-                f"• مارجین: `${margin:.1f} USDT` (اهرم {session['leverage']}X)\n"
-                f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`",
-                chat_target=chat_id
-            )
-            # ارسال چارت معامله واقعی
+            
+            # ارسال فقط چارت به همراه جزئیات کامل (بدون پیام متنی تکراری اضافه)
             df_chart = get_crypto_klines(symbol, interval_type=session["timeframe"] if session["timeframe"] != 'multi' else '5min', limit=60)
             if not df_chart.empty:
                 df_chart = calculate_indicators(df_chart)
@@ -344,16 +347,8 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
         "is_real": False
     }
     session["paper_positions"].append(trade)
-    side_icon = "🟢" if "BUY" in side or "Long" in side else "🔴"
-    send_telegram_msg(
-        f"📝 *معامله جدید کاغذی {side_icon} ({side})*\n"
-        f"• نماد: `{symbol}`\n"
-        f"• قیمت ورود: `{price:.4f}`\n"
-        f"• مارجین: `${margin:.1f} USDT`\n"
-        f"• TP: `{tp:.4f}` | SL: `{sl:.4f}`",
-        chat_target=chat_id
-    )
-    # ارسال چارت معامله کاغذی
+    
+    # ارسال فقط چارت به همراه جزئیات کامل (بدون پیام متنی تکراری اضافه)
     df_chart = get_crypto_klines(symbol, interval_type=session["timeframe"] if session["timeframe"] != 'multi' else '5min', limit=60)
     if not df_chart.empty:
         df_chart = calculate_indicators(df_chart)
@@ -606,7 +601,7 @@ def process_command(data, chat_id, message_id=None):
             for p in session["paper_positions"]:
                 side_icon = "🟢" if "BUY" in p['side'] or "Long" in p['side'] else "🔴"
                 mode_badge = " [واقعی]" if p.get("is_real") else ""
-                txt += f"{side_icon} • `{p['symbol']}` ({p['side']}){mode_badge}\n  - ورود: `{p['entry_price']}` | مارجین: `${p['margin']:.1f}`\n"
+                txt += f"{side_icon} • `{p['symbol']}` ({p['side']}){mode_badge}\n  - ورود: `{fmt_p(p['entry_price'])}` | مارجین: `${p['margin']:.1f}`\n"
             keyboard = get_positions_keyboard(session["paper_positions"])
             send_telegram_msg(txt, chat_target=chat_id, reply_markup=keyboard)
         else:
