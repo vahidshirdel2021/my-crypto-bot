@@ -1,7 +1,0 @@
-flask
-aiohttp
-requests
-ccxt
-pandas
-numpy
-matplotlib
