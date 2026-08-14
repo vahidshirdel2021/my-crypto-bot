@@ -101,8 +101,35 @@ def get_timeframe_keyboard():
     return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "4س", "callback_data": "/set_tf_4h"}], [{"text": "1روز", "callback_data": "/set_tf_1d"}, {"text": "مولتی", "callback_data": "/set_tf_multi"}]]}
 
 
-def get_main_menu_keyboard(active):
-    return {"inline_keyboard": [[{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}], [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"}], [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}], [{"text": "🔍 تحلیل ارز", "callback_data": "/analyze_single"}, {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}], [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}, {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}], [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}, {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}], [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}, {"text": "📈 عملکرد", "callback_data": "/performance"}], [{"text": "💬 گفت‌وگو با هوش مصنوعی", "callback_data": "/ai_chat"}], [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"}, {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}], [{"text": "🧠 تنظیمات هوش مصنوعی", "callback_data": "/ai_settings"}]]}
+def get_main_menu_keyboard(active, entry_diag_enabled=True):
+    # منوی اصلی به‌صورت شبکه‌ای و گروه‌بندی‌شده طراحی شده تا خواناتر از منوی خطی باشد.
+    diag_label = "🟢 لاگ ورود: فعال" if entry_diag_enabled else "🔴 لاگ ورود: خاموش"
+    return {"inline_keyboard": [
+        [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
+        [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
+         {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
+        [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
+         {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}],
+        [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"},
+         {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}],
+        [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"},
+         {"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}],
+        [{"text": "📈 عملکرد", "callback_data": "/performance"},
+         {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
+        [{"text": "💬 گفت‌وگو با هوش مصنوعی", "callback_data": "/ai_chat"}],
+        [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"},
+         {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}],
+        [{"text": "🧠 تنظیمات هوش مصنوعی", "callback_data": "/ai_settings"}],
+    ]}
+
+
+def get_entry_diag_keyboard(enabled=True):
+    return {"inline_keyboard": [
+        [{"text": "🟢 فعال است — خاموش کردن" if enabled else "🔴 خاموش است — فعال کردن",
+          "callback_data": "/toggle_entry_diag"}],
+        [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
 
 
 def get_strategies_selection_keyboard():

@@ -21,7 +21,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
-    get_performance_keyboard, get_ai_settings_keyboard, get_ai_chat_keyboard,
+    get_performance_keyboard, get_ai_settings_keyboard, get_ai_chat_keyboard, get_entry_diag_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -193,6 +193,9 @@ def default_session():
         'telegram_offset': None,
         'created_at': int(time.time()),
         'bottom_menu_open': True,
+        # گزارش تشخیصی عدم ورود در تلگرام به‌صورت پیش‌فرض فعال است.
+        # لاگ سرور ENTRY_DIAG مستقل از این گزینه و همیشه فعال می‌ماند.
+        'entry_diag_enabled': True,
         'ai_provider': ('gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')),
     }
 
@@ -212,6 +215,7 @@ def normalize_session(data):
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
+    s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
     if s.get('ai_provider') not in ('gemini','openai','off'):
         s['ai_provider'] = 'gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')
     return s
@@ -1684,6 +1688,8 @@ def _entry_diag_batch_update(chat_id, results):
         state['no_entry_since'] = now
     elapsed = now - float(state['no_entry_since'])
     last_report = float(state.get('last_report_at', 0.0) or 0.0)
+    if not get_session(chat_id).get('entry_diag_enabled', True):
+        return
     if elapsed >= NO_ENTRY_REPORT_SECONDS and (not last_report or now-last_report >= NO_ENTRY_REPORT_SECONDS):
         try:
             report_results = list(state.get('window_results') or results)
@@ -1989,8 +1995,9 @@ def analyze(chat_id,symbol):
 
 def menu(chat_id,message_id=None):
     s=get_session(chat_id); bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']; maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
-    text=f"📊 *پنل ربات*\n\nهوش مصنوعی: `{ai_provider_status(s)}`\nنوع حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`\nوضعیت: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\nاستراتژی: `{'روندی' if s['active_strategy']=='trend' else 'شکست' if s['active_strategy']=='breakout' else 'بازگشت به میانگین' if s['active_strategy']=='mean_reversion' else 'چندزمانه'}`\nموجودی: `{bal:.2f} USDT`\nمارجین: `{s['trade_amount_usdt']:.0f} USDT` | اهرم: `{s['leverage']} برابر`\nپوزیشن‌های باز: `{maxp}`\nتایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\nریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`\nحد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`"
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active']),message_id)
+    diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`  |  🤖 هوش مصنوعی: `{ai_provider_status(s)}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'روندی' if s['active_strategy']=='trend' else 'شکست' if s['active_strategy']=='breakout' else 'بازگشت به میانگین' if s['active_strategy']=='mean_reversion' else 'چندزمانه'}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True)),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
@@ -2369,6 +2376,44 @@ def process_command(cmd,chat_id,message_id=None):
         s['bottom_menu_open']=True; save_session(chat_id); sync_bottom_keyboard(chat_id, '☰ منوی سریع باز شد.'); return
     if cl in ('/close_bottom_menu','⬇️ بستن منوی سریع'):
         s['bottom_menu_open']=False; save_session(chat_id); sync_bottom_keyboard(chat_id, '☰ منوی سریع بسته شد.'); return
+    if cl in ('/entry_diag', '🔍 لاگ تشخیصی ورود'):
+        enabled = s.get('entry_diag_enabled', True)
+        text = (
+            "🔍 *لاگ تشخیصی ورود*\n\n"
+            f"وضعیت گزارش داخل تلگرام: {'🟢 فعال' if enabled else '🔴 خاموش'}\n\n"
+            "این گزینه گزارش‌های تشخیصیِ عدم ورود را بعد از چند دقیقه بدون پوزیشن ارسال می‌کند.\n"
+            "گزارش توضیح می‌دهد ربات چه چیزهایی را بررسی کرده و مهم‌ترین دلایل وارد نشدن چه بوده‌اند.\n\n"
+            "📌 لاگ فنی `ENTRY_DIAG` روی سرور مستقل از این گزینه است و برای مراحل ورود ثبت می‌شود."
+        )
+        edit_page(chat_id, text, get_entry_diag_keyboard(enabled), message_id)
+        return
+    if cl == '/toggle_entry_diag':
+        s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
+        save_session(chat_id)
+        enabled = s['entry_diag_enabled']
+        text = (
+            "🔍 *لاگ تشخیصی ورود*\n\n"
+            f"وضعیت گزارش داخل تلگرام: {'🟢 فعال' if enabled else '🔴 خاموش'}\n\n"
+            "از این به بعد گزارش عدم ورود " + ("ارسال می‌شود." if enabled else "ارسال نمی‌شود.") +
+            "\n\n📌 لاگ فنی `ENTRY_DIAG` روی سرور همیشه ثبت می‌شود."
+        )
+        edit_page(chat_id, text, get_entry_diag_keyboard(enabled), message_id)
+        return
+    if cl == '/entry_diag_log':
+        state = ENTRY_DIAG_STATE.get(chat_id, {})
+        results = list(state.get('window_results') or [])[-8:]
+        if not results:
+            msg = "📋 هنوز تشخیص ورودی در این نشست ثبت نشده است.\n\nاسکن را روشن نگه دار تا ربات بررسی‌ها را ثبت کند."
+        else:
+            lines = ["📋 *آخرین تشخیص‌های ورود*"]
+            for r in results:
+                sym = r.get('symbol','?')
+                status = r.get('status','?')
+                reason = r.get('reason') or r.get('detail') or ''
+                lines.append(f"• `{sym}` — `{status}`" + (f" — {reason}" if reason else ""))
+            msg = "\n".join(lines)
+        send_message(chat_id, msg, get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), parse_mode='Markdown')
+        return
     if cl in ('/ai_settings','🤖 تنظیمات هوش مصنوعی'):
         edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id); return
     if cl.startswith('/ai_provider_'):
