@@ -8,7 +8,7 @@ import ccxt
 import pandas as pd
 from threading import Thread
 from flask import Flask
-from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description, FILTERS, STRATEGY_CONFIG
+from strategy import calculate_indicators, get_signal, get_signal_with_reason, get_strategy_params, get_strategy_description, FILTERS, STRATEGY_CONFIG, strategy_trend_following, strategy_breakout, strategy_mean_reversion
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, 
     get_leverage_keyboard, get_max_positions_keyboard, get_timeframe_keyboard, 
@@ -434,7 +434,7 @@ def process_command(data, chat_id, message_id=None):
     cmd = data.strip()
     cmd_lower = cmd.lower()
     
-    if cmd_lower.startswith("/close_") and cmd_lower != "/close_shorts":
+    if cmd_lower.startswith("/close_") and cmd_lower != "/close_shorts" and cmd_lower != "/close_longs":
         symbol_to_close = cmd_lower.replace("/close_", "").upper()
         found = False
         for pos in session["paper_positions"][:]:
@@ -455,6 +455,15 @@ def process_command(data, chat_id, message_id=None):
             close_position_manually(chat_id, pos)
         return
 
+    if cmd_lower == "/close_longs":
+        longs = [p for p in session["paper_positions"] if "BUY" in p['side'] or "Long" in p['side']]
+        if not longs:
+            send_telegram_msg("❌ پوزیشن خرید فعالی وجود ندارد.", chat_target=chat_id)
+            return
+        for pos in longs:
+            close_position_manually(chat_id, pos)
+        return
+
     setting_commands = ["/check_wizard", "مدیریت تنظیمات معامله", "/mode_paper", "/mode_real", "/set_bal_", "/set_margin_", "/set_lev_", "/set_max_", "/set_tf_"]
     if session["is_bot_active"] and any(cmd_lower.startswith(sc) or sc in cmd_lower for sc in setting_commands):
         send_telegram_msg("⚠️ *اسکن بازار فعال است!*\n\nبرای تغییر تنظیمات ابتدا دکمه «توقف اسکن» را بزنید.", chat_target=chat_id)
@@ -468,6 +477,9 @@ def process_command(data, chat_id, message_id=None):
         send_telegram_msg("🔄 *در حال تحلیل و اسکن بازار...*", chat_target=chat_id)
         report_msg = generate_market_health_report(session)
         send_telegram_msg(report_msg, chat_target=chat_id)
+        return
+    elif "انتخاب استراتژی" in cmd or cmd_lower == "/strategies_menu":
+        send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*\n\nمدل هوشمند یا استراتژی دلخواه خود را انتخاب کنید:", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
         return
     elif "تنظیم پارامترها" in cmd or cmd_lower == "/params_menu":
         send_telegram_msg("🎛️ *مدیریت و تنظیم دستی پارامترهای استراتژی*", chat_target=chat_id, reply_markup=get_params_menu_keyboard())
@@ -596,9 +608,6 @@ def process_command(data, chat_id, message_id=None):
             session["daily_start_balance"] = usdt_balance
             session["daily_stopped"] = False
             send_telegram_msg(f"🔴 موجودی واقعی شناسایی شد: `{usdt_balance:.2f} USDT`\n\n⚙️ مارجین هر معامله:", chat_target=chat_id, reply_markup=get_margin_keyboard(), message_id=message_id)
-    elif cmd_lower == "/strategies_menu":
-        send_telegram_msg("📊 *انتخاب استراتژی معاملاتی*", chat_target=chat_id, reply_markup=get_strategies_selection_keyboard())
-        return
     elif cmd_lower.startswith("/set_strat_"):
         strat_key = cmd_lower.replace("/set_strat_", "")
         if strat_key in ["dynamic", "trend", "breakout", "mean_reversion", "multi"]:
@@ -658,7 +667,7 @@ def telegram_listener():
                     msg_id = r.get("callback_query", {}).get("message", {}).get("message_id")
                     
                     if data:
-                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها", "گزارش وضعیت بازار", "تنظیم پارامترها"])
+                        is_menu_btn = any(k in data for k in ["منوی اصلی", "پوزیشن‌های باز", "گزارش عملکرد", "مدیریت تنظیمات معامله", "شروع اسکن", "توقف اسکن", "روشن کردن اسکن", "تنظیمات فیلترها", "گزارش وضعیت بازار", "تنظیم پارامترها", "انتخاب استراتژی"])
                         if not data.startswith("/") and not is_menu_btn:
                             text_val = data.strip().upper()
                             if session["user_state"] == "WAITING_FOR_SINGLE_SYMBOL":
@@ -680,14 +689,12 @@ def telegram_listener():
                                     send_telegram_msg(f"❌ نماد یافت نشد.", chat_target=chat_id)
                                 session["user_state"] = None
                             else:
-                                # اصلاح تشخیص مستقیم نام ارز در چت
                                 if len(text_val) >= 2 and len(text_val) <= 8 and text_val.isalpha():
                                     report_text = analyze_symbol_detailed(chat_id, text_val)
                                     send_telegram_msg(report_text, chat_target=chat_id)
                                 else:
                                     process_command(data, chat_id, message_id=msg_id)
                         else:
-                            session["user_state"] = None
                             process_command(data, chat_id, message_id=msg_id)
         except: pass
         time.sleep(2)
