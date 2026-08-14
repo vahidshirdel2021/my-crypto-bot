@@ -2,8 +2,23 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False):
-    text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
-    return {"keyboard": [[{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}], [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}], [{"text": "⚙️ تنظیمات فیلترها"}, {"text": "🎛️ تنظیم پارامترها"}], [{"text": text}]], "resize_keyboard": True, "one_time_keyboard": False, "is_persistent": True, "input_field_placeholder": "از منوی پایین انتخاب کنید…"}
+    scan_text = "🔴 توقف اسکن" if is_active else "🟢 شروع اسکن"
+    filter_text = "🔒 فیلترها (اسکن فعال)" if is_active else "⚙️ تنظیمات فیلترها"
+    param_text = "🔒 پارامترها (اسکن فعال)" if is_active else "🎛️ تنظیم پارامترها"
+    strategy_text = "🔒 استراتژی (اسکن فعال)" if is_active else "📊 استراتژی"
+    return {
+        "keyboard": [
+            [{"text": "🏠 منوی اصلی"}, {"text": "🔄 پوزیشن‌های باز"}],
+            [{"text": "📈 گزارش عملکرد کلی"}, {"text": "📊 گزارش وضعیت بازار"}],
+            [{"text": filter_text}, {"text": param_text}],
+            [{"text": strategy_text}],
+            [{"text": scan_text}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+        "input_field_placeholder": "از منوی پایین انتخاب کنید…"
+    }
 
 
 def get_filters_menu_keyboard(session=None):
@@ -12,8 +27,8 @@ def get_filters_menu_keyboard(session=None):
         [{"text": f"فیلتر حجم: {'🟢 فعال' if f.get('volume_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_vol"}],
         [{"text": f"حد ضرر دنبال‌کننده: {'🟢 فعال' if f.get('trailing_stop', True) else '🔴 خاموش'}", "callback_data": "/toggle_trail"}],
         [{"text": f"تأیید کندل: {'🟢 فعال' if f.get('candlestick_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_candle"}],
-        [{"text": f"توقف Short: {'🟢 بله' if f.get('no_short_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_short"}],
-        [{"text": f"توقف Buy: {'🟢 بله' if f.get('no_buy_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_buy"}],
+        [{"text": f"توقف فروش: {'🟢 بله' if f.get('no_short_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_short"}],
+        [{"text": f"توقف خرید: {'🟢 بله' if f.get('no_buy_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_buy"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
@@ -23,11 +38,11 @@ def get_params_menu_keyboard(session=None):
     c = s.get("strategy_config", STRATEGY_DEFAULTS)
     return {"inline_keyboard": [
         [{"text": f"🎯 ADX: {float(c.get('min_adx',20)):.1f}", "callback_data": "/dummy"}],
-        [{"text": "➕ ADX +1", "callback_data": "/adx_up"}, {"text": "➖ ADX -1", "callback_data": "/adx_down"}],
-        [{"text": f"🛡️ SL ATR: {float(c.get('sl_multiplier',1.5)):.1f}x", "callback_data": "/dummy"}],
-        [{"text": "➕ SL +0.2", "callback_data": "/sl_up"}, {"text": "➖ SL -0.2", "callback_data": "/sl_down"}],
-        [{"text": f"🎯 TP ATR: {float(c.get('tp_multiplier',2.0)):.1f}x", "callback_data": "/dummy"}],
-        [{"text": "➕ TP +0.5", "callback_data": "/tp_up"}, {"text": "➖ TP -0.5", "callback_data": "/tp_down"}],
+        [{"text": "➕ ADX +۱", "callback_data": "/adx_up"}, {"text": "➖ ADX -۱", "callback_data": "/adx_down"}],
+        [{"text": f"🛡️ ضریب حد ضرر: {float(c.get('sl_multiplier',1.5)):.1f}x", "callback_data": "/dummy"}],
+        [{"text": "➕ حد ضرر +۰٫۲", "callback_data": "/sl_up"}, {"text": "➖ حد ضرر -۰٫۲", "callback_data": "/sl_down"}],
+        [{"text": f"🎯 ضریب حد سود: {float(c.get('tp_multiplier',2.0)):.1f}x", "callback_data": "/dummy"}],
+        [{"text": "➕ حد سود +۰٫۵", "callback_data": "/tp_up"}, {"text": "➖ حد سود -۰٫۵", "callback_data": "/tp_down"}],
         [{"text": f"⚠️ ریسک: {float(s.get('risk_per_trade_pct',0.5)):.2f}%", "callback_data": "/dummy"}],
         [{"text": f"🛑 حد ضرر روزانه: {float(s.get('daily_loss_limit_pct',3.0)):.2f}%", "callback_data": "/dummy"}],
         [{"text": f"📦 سقف مارجین: {float(s.get('max_margin_usage_pct',50)):.0f}%", "callback_data": "/dummy"}],

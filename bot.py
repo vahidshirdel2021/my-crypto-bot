@@ -276,6 +276,18 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     return bool(res and res.get('ok'))
 
 
+def sync_bottom_keyboard(chat_id, status_message=None):
+    """ReplyKeyboard را مستقل از InlineKeyboard منوی اصلی به‌روز می‌کند."""
+    s = get_session(chat_id)
+    active = bool(s.get('is_bot_active'))
+    text = status_message or (
+        "🟢 اسکن فعال است.\n🔒 تنظیمات حساس تا توقف اسکن قفل هستند."
+        if active else
+        "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند."
+    )
+    return send_message(chat_id, text, get_bottom_menu_keyboard(active), parse_mode=None)
+
+
 def send_photo(chat_id, img, caption='', markup=None):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s = get_session(chat_id)
@@ -560,6 +572,7 @@ def risk_guard(chat_id):
     limit=start*(1-float(s['daily_loss_limit_pct'])/100)
     if equity<=limit:
         s['daily_stopped']=True; s['is_bot_active']=False; s['scan_generation']=int(s.get('scan_generation',0))+1; save_session(chat_id)
+        sync_bottom_keyboard(chat_id, "🛑 اسکن به‌دلیل حد ضرر روزانه متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند.")
         send_message(chat_id,f"🛑 *حد ضرر روزانه فعال شد.*\n\nشروع روز: `${start:.2f}`\nEquity: `${equity:.2f}`\nحد: `{s['daily_loss_limit_pct']:.2f}%`\n\nورود جدید متوقف شد؛ پوزیشن‌های باز دست‌نخورده باقی می‌مانند.")
         return False
     return True
@@ -609,16 +622,36 @@ def safe_size(chat_id,s,entry,sl):
     return margin,amount
 
 
-def expected_trade_pnl(trade):
-    """Gross PnL at TP/SL from the actual position amount; excludes fees/funding."""
+def expected_trade_metrics(trade):
+    """TP/SL gross outcome from the actual position amount; fees/funding excluded."""
     try:
-        entry=float(trade['entry_price']); tp=float(trade['tp']); sl=float(trade['sl']); amount=abs(float(trade.get('amount') or 0))
-        if amount <= 0: return 0.0, 0.0
+        entry=float(trade.get('entry_price') or 0)
+        tp=float(trade.get('tp') or 0)
+        sl=float(trade.get('sl') or 0)
+        amount=abs(float(trade.get('amount') or 0))
+        if entry <= 0 or tp <= 0 or sl <= 0 or amount <= 0:
+            return {'tp_pnl':0.0,'sl_pnl':0.0,'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
         if side_long(trade.get('side','BUY')):
-            return (tp-entry)*amount, (sl-entry)*amount
-        return (entry-tp)*amount, (entry-sl)*amount
+            tp_pnl=(tp-entry)*amount
+            sl_pnl=(sl-entry)*amount
+            valid=(tp > entry and sl < entry)
+        else:
+            tp_pnl=(entry-tp)*amount
+            sl_pnl=(entry-sl)*amount
+            valid=(tp < entry and sl > entry)
+        risk=abs(sl_pnl)
+        reward=abs(tp_pnl)
+        rr=(reward/risk) if risk > 0 else 0.0
+        return {'tp_pnl':tp_pnl,'sl_pnl':sl_pnl,'risk':risk,'reward':reward,'rr':rr,
+                'valid':bool(valid and risk > 0 and reward > 0)}
     except Exception:
-        return 0.0, 0.0
+        return {'tp_pnl':0.0,'sl_pnl':0.0,'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
+
+def expected_trade_pnl(trade):
+    """Backward-compatible wrapper."""
+    m=expected_trade_metrics(trade)
+    return m['tp_pnl'],m['sl_pnl']
+
 
 def trade_action_keyboard(symbol):
     return {'inline_keyboard': [
@@ -632,22 +665,184 @@ def close_confirm_keyboard(symbol):
     ]}
 
 def format_trade_status(p, price=None):
-    entry=float(p.get('entry_price') or 0); sl=float(p.get('sl') or 0); tp=float(p.get('tp') or 0)
-    if price is None: price=latest_price(p['symbol']) or entry
+    entry=float(p.get('entry_price') or 0)
+    sl=float(p.get('sl') or 0)
+    tp=float(p.get('tp') or 0)
+    if price is None:
+        price=latest_price(p['symbol']) or entry
     price=float(price)
     amount=abs(float(p.get('amount') or 0))
-    if side_long(p.get('side','BUY')):
-        pnl=(price-entry)*amount
-    else:
-        pnl=(entry-price)*amount
-    tp_pnl, sl_pnl=expected_trade_pnl(p)
-    risk=abs(sl_pnl)
-    reward=abs(tp_pnl)
-    rr=(reward/risk) if risk>0 else 0
-    direction='LONG' if side_long(p.get('side','BUY')) else 'SHORT'
+    long_side=side_long(p.get('side','BUY'))
+    pnl=(price-entry)*amount if long_side else (entry-price)*amount
+    metrics=expected_trade_metrics(p)
+    direction='LONG' if long_side else 'SHORT'
     mode='REAL' if p.get('is_real') else 'PAPER'
-    lines=[f'📊 *مدیریت معامله* — `{p["symbol"]}`', '', f'📌 وضعیت: `{"🟢 LONG" if direction=="LONG" else "🔴 SHORT"}` | `{mode}`', f'💰 ورود: `{fmt(entry)}`', f'📍 قیمت فعلی: `{fmt(price)}`', f'🎯 TP: `{fmt(tp)}`', f'🛑 SL: `{fmt(sl)}`', f'📦 حجم: `{amount:.6f}`', '', f'💵 سود/زیان فعلی: `{pnl:+.2f} USDT`', f'🟢 اگر TP فعال شود: `{tp_pnl:+.2f} USDT`', f'🔴 اگر SL فعال شود: `{sl_pnl:+.2f} USDT`', f'⚖️ نسبت سود به ضرر: `{rr:.2f}R`']
+
+    tp_dist_pct=abs(tp-entry)/entry*100 if entry else 0
+    sl_dist_pct=abs(sl-entry)/entry*100 if entry else 0
+
+    lines=[
+        f'📊 *مدیریت معامله* — `{p["symbol"]}`',
+        '',
+        f'📌 وضعیت: `{"🟢 LONG" if long_side else "🔴 SHORT"}` | `{mode}`',
+        f'💰 ورود: `{fmt(entry)}`',
+        f'📍 قیمت فعلی: `{fmt(price)}`',
+        f'🎯 حد سود: `{fmt(tp)}`',
+        f'🛑 حد ضرر: `{fmt(sl)}`',
+        f'📦 حجم: `{amount:.6f}`',
+        '',
+        f'💵 سود/زیان فعلی: `{pnl:+.2f} USDT`',
+        f'🟢 *پاداش در صورت فعال شدن TP:* `+{metrics["reward"]:.2f} USDT`',
+        f'🔴 *ریسک در صورت فعال شدن SL:* `-{metrics["risk"]:.2f} USDT`',
+        f'⚖️ *نسبت پاداش به ریسک:* `{metrics["rr"]:.2f}R`',
+        '',
+        f'📏 فاصله تا TP: `{tp_dist_pct:.2f}%`',
+        f'📏 فاصله تا SL: `{sl_dist_pct:.2f}%`',
+    ]
+    if not metrics['valid']:
+        lines += ['', '⚠️ *هشدار:* ورود، TP، SL و جهت معامله با هم سازگار نیستند.']
+    lines += ['', 'ℹ️ اعداد TP/SL ناخالص‌اند و قبل از کارمزد و Funding محاسبه شده‌اند.']
     return '\n'.join(lines)
+
+
+
+def _fa_num(x, digits=2):
+    try:
+        return f"{float(x):,.{digits}f}"
+    except Exception:
+        return "—"
+
+def _closed_trades(s):
+    return [t for t in s.get('trade_history', []) if t.get('closed_at')]
+
+def _performance_dashboard(chat_id):
+    """Professional Persian performance dashboard using the bot's existing trade history."""
+    s = get_session(chat_id)
+    trades = _closed_trades(s)
+
+    wins = [t for t in trades if float(t.get('pnl', 0) or 0) > 0]
+    losses = [t for t in trades if float(t.get('pnl', 0) or 0) < 0]
+    breakeven = [t for t in trades if abs(float(t.get('pnl', 0) or 0)) < 1e-9]
+
+    buys = [t for t in trades if side_long(t.get('side',''))]
+    sells = [t for t in trades if not side_long(t.get('side',''))]
+
+    tp_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('tp','take_profit','target'))
+    sl_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('sl','stop_loss','stop'))
+    manual_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('manual','user','manual_close'))
+
+    net = sum(float(t.get('pnl', 0) or 0) for t in trades)
+    gross_profit = sum(max(float(t.get('pnl', 0) or 0), 0) for t in trades)
+    gross_loss = abs(sum(min(float(t.get('pnl', 0) or 0), 0) for t in trades))
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0)
+
+    avg = net / len(trades) if trades else 0
+    avg_win = sum(float(t.get('pnl',0) or 0) for t in wins) / len(wins) if wins else 0
+    avg_loss = sum(float(t.get('pnl',0) or 0) for t in losses) / len(losses) if losses else 0
+    best = max((float(t.get('pnl',0) or 0) for t in trades), default=0)
+    worst = min((float(t.get('pnl',0) or 0) for t in trades), default=0)
+
+    # Equity/drawdown from closed-trade sequence. This is strategy/account history,
+    # not an assertion about exchange wallet equity.
+    starting = float(s.get('paper_balance', 0) or 0)
+    equity = starting
+    peak = equity
+    max_dd = 0.0
+    for t in sorted(trades, key=lambda x: x.get('closed_at', x.get('opened_at', 0))):
+        equity += float(t.get('pnl',0) or 0)
+        peak = max(peak, equity)
+        if peak > 0:
+            max_dd = max(max_dd, (peak-equity)/peak*100)
+
+    open_positions = s.get('paper_positions', [])
+    open_pnl = sum(float(p.get('unrealized_pnl', p.get('pnl', 0)) or 0) for p in open_positions)
+    margin_open = sum(float(p.get('margin', 0) or 0) for p in open_positions)
+
+    # Today
+    day_key = time.strftime('%Y-%m-%d')
+    today = [t for t in trades if time.strftime('%Y-%m-%d', time.localtime(float(t.get('closed_at',0) or 0))) == day_key]
+    today_net = sum(float(t.get('pnl',0) or 0) for t in today)
+    today_wins = sum(1 for t in today if float(t.get('pnl',0) or 0) > 0)
+
+    win_rate = (len(wins)/len(trades)*100) if trades else 0
+
+    # By symbol
+    by_symbol = {}
+    for t in trades:
+        sym = t.get('symbol','?')
+        by_symbol.setdefault(sym, {'n':0,'pnl':0.0,'wins':0})
+        by_symbol[sym]['n'] += 1
+        by_symbol[sym]['pnl'] += float(t.get('pnl',0) or 0)
+        by_symbol[sym]['wins'] += int(float(t.get('pnl',0) or 0) > 0)
+
+    top_symbols = sorted(by_symbol.items(), key=lambda kv: kv[1]['pnl'], reverse=True)[:5]
+    worst_symbols = sorted(by_symbol.items(), key=lambda kv: kv[1]['pnl'])[:5]
+
+    # By strategy
+    by_strategy = {}
+    for t in trades:
+        name = t.get('strategy') or t.get('strategy_name') or 'نامشخص'
+        by_strategy.setdefault(name, {'n':0,'pnl':0.0,'wins':0})
+        by_strategy[name]['n'] += 1
+        by_strategy[name]['pnl'] += float(t.get('pnl',0) or 0)
+        by_strategy[name]['wins'] += int(float(t.get('pnl',0) or 0) > 0)
+
+    lines = []
+    lines.append("📊 *داشبورد حرفه‌ای عملکرد*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💼 حساب: {'واقعی' if s.get('real_mode') else 'کاغذی'}")
+    lines.append(f"🤖 وضعیت ربات: {'🟢 فعال' if s.get('is_bot_active') else '🔴 متوقف'}")
+    lines.append(f"💰 موجودی پایه: `{_fa_num(starting)} USDT`")
+    lines.append(f"📌 پوزیشن باز: `{len(open_positions)}` | مارجین درگیر: `{_fa_num(margin_open)} USDT`")
+    lines.append("")
+    lines.append("📈 *خلاصه معاملات*")
+    lines.append(f"• کل معاملات بسته‌شده: `{len(trades)}`")
+    lines.append(f"• 🟢 خرید: `{len(buys)}`   🔴 فروش: `{len(sells)}`")
+    lines.append(f"• ✅ موفق: `{len(wins)}`   ❌ ناموفق: `{len(losses)}`   ➖ سر‌به‌سر: `{len(breakeven)}`")
+    lines.append(f"• 🎯 حد سود: `{tp_count}`   🛑 حد ضرر: `{sl_count}`   ✋ دستی: `{manual_count}`")
+    lines.append(f"• 🎯 نرخ موفقیت: `{win_rate:.1f}%`")
+    lines.append("")
+    lines.append("💰 *سود و زیان*")
+    lines.append(f"• سود ناخالص: `+{_fa_num(gross_profit)} USDT`")
+    lines.append(f"• زیان ناخالص: `-{_fa_num(gross_loss)} USDT`")
+    pnl_icon = "🟢" if net > 0 else ("🔴" if net < 0 else "🟡")
+    lines.append(f"• {pnl_icon} سود/زیان خالص: `{net:+,.2f} USDT`")
+    lines.append(f"• میانگین هر معامله: `{avg:+,.2f} USDT`")
+    lines.append(f"• میانگین موفق: `+{avg_win:,.2f} USDT`")
+    lines.append(f"• میانگین ناموفق: `{avg_loss:+,.2f} USDT`")
+    lines.append(f"• بهترین معامله: `+{best:,.2f} USDT`")
+    lines.append(f"• بدترین معامله: `{worst:+,.2f} USDT`")
+    lines.append(f"• ضریب سودآوری: `{profit_factor:.2f}`" if profit_factor != float('inf') else "• ضریب سودآوری: `∞`")
+    lines.append(f"• بیشترین افت سرمایه: `{max_dd:.2f}%`")
+    lines.append("")
+    lines.append("📅 *عملکرد امروز*")
+    lines.append(f"• معاملات: `{len(today)}` | موفق: `{today_wins}`")
+    lines.append(f"• سود/زیان امروز: `{today_net:+,.2f} USDT`")
+    lines.append("")
+    lines.append("🏆 *بهترین نمادها*")
+    if top_symbols:
+        for sym, d in top_symbols:
+            lines.append(f"• `{sym}` — {d['n']} معامله | {d['wins']}/{d['n']} موفق | `{d['pnl']:+,.2f} USDT`")
+    else:
+        lines.append("• هنوز داده‌ای ثبت نشده است.")
+    lines.append("")
+    lines.append("⚠️ *ضعیف‌ترین نمادها*")
+    if worst_symbols:
+        for sym, d in worst_symbols:
+            lines.append(f"• `{sym}` — {d['n']} معامله | {d['wins']}/{d['n']} موفق | `{d['pnl']:+,.2f} USDT`")
+    else:
+        lines.append("• هنوز داده‌ای ثبت نشده است.")
+    lines.append("")
+    lines.append("🧠 *نکته*")
+    lines.append("این گزارش بر اساس تاریخچه ثبت‌شده در ربات است؛ سود/زیان شناور پوزیشن‌های باز جداگانه نمایش داده می‌شود و جایگزین موجودی قطعی صرافی نیست.")
+
+    # Keep existing report buttons if available.
+    try:
+        kb = report_keyboard(chat_id)
+    except Exception:
+        kb = None
+    send_message(chat_id, "\n".join(lines), kb, parse_mode='Markdown')
+
 
 def chart(chat_id,symbol,df,trade):
     """Render a clean trade chart: no EMA overlays, only candles + Entry/TP/SL levels."""
@@ -737,17 +932,18 @@ def chart(chat_id,symbol,df,trade):
         plt.close(fig)
         b.seek(0)
 
-        tp_pnl, sl_pnl = expected_trade_pnl(trade)
-        risk_abs=abs(sl_pnl); reward_abs=abs(tp_pnl); rr=(reward_abs/risk_abs) if risk_abs>0 else 0
+        metrics=expected_trade_metrics(trade)
+        warning='' if metrics['valid'] else '\n⚠️ بررسی جهت TP/SL: مقادیر با جهت معامله سازگار نیستند.'
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *معامله جدید [{mode}]*\n"
             f"• `{symbol}` {trade['side']}\n"
             f"• ورود: `{fmt(entry)}`\n"
             f"• مارجین: `${trade['margin']:.2f}` | `{trade['leverage']}X`\n"
-            f"• حد سود: `{fmt(tp)}` → 🟢 `{tp_pnl:+.2f} USDT`\n"
-            f"• حد ضرر: `{fmt(sl)}` → 🔴 `{sl_pnl:+.2f} USDT`\n"
-            f"• نسبت سود به ضرر: `{rr:.2f}R`\n\n"
+            f"• حد سود: `{fmt(tp)}` → 🟢 `+{metrics['reward']:.2f} USDT`\n"
+            f"• حد ضرر: `{fmt(sl)}` → 🔴 `-{metrics['risk']:.2f} USDT`\n"
+            f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
+            f"{warning}\n\n"
             f"ℹ️ سود/زیان بالا قبل از کارمزد و Funding است.",
             trade_action_keyboard(symbol)
         )
@@ -1023,10 +1219,123 @@ async def scan_symbol(http,chat_id,symbol):
 
 
 def performance(chat_id):
-    s=get_session(chat_id); closed=s['closed_positions']; total=sum(float(p.get('pnl_usdt',0)) for p in closed); wins=sum(1 for p in closed if float(p.get('pnl_usdt',0))>0); losses=sum(1 for p in closed if float(p.get('pnl_usdt',0))<0); wr=wins/len(closed)*100 if closed else 0
-    gross_profit=sum(max(0.0,float(p.get('pnl_usdt',0))) for p in closed)
-    gross_loss=sum(min(0.0,float(p.get('pnl_usdt',0))) for p in closed)
-    return f"📈 *گزارش عملکرد*\n\nمعاملات: `{len(closed)}`\nبرد: `{wins}` | باخت: `{losses}`\nنرخ برد: `{wr:.1f}%`\nسود ناخالص: `{gross_profit:+.2f} USDT`\nزیان ناخالص: `{gross_loss:+.2f} USDT`\nسود/زیان خالص: `{total:+.2f} USDT`\nموجودی کاغذی: `${s['paper_balance']:.2f}`\n\nبرای شروع یک تست آماری جدید، از دکمه زیر استفاده کنید."
+    s=get_session(chat_id)
+    closed=list(s.get('closed_positions') or [])
+    open_pos=list(s.get('paper_positions') or [])
+
+    def pnl(p):
+        try:
+            return float(p.get('pnl_usdt', 0) or 0)
+        except Exception:
+            return 0.0
+
+    def is_buy(p):
+        return side_long(p.get('side',''))
+
+    total=len(closed)
+    buys=sum(1 for p in closed if is_buy(p))
+    sells=total-buys
+    wins=sum(1 for p in closed if pnl(p)>0)
+    losses=sum(1 for p in closed if pnl(p)<0)
+    breakeven=total-wins-losses
+    net=sum(pnl(p) for p in closed)
+    gross_profit=sum(pnl(p) for p in closed if pnl(p)>0)
+    gross_loss=abs(sum(pnl(p) for p in closed if pnl(p)<0))
+    win_rate=(wins/total*100) if total else 0.0
+    avg_trade=(net/total) if total else 0.0
+    avg_win=(gross_profit/wins) if wins else 0.0
+    avg_loss=(gross_loss/losses) if losses else 0.0
+    profit_factor=(gross_profit/gross_loss) if gross_loss>0 else (float('inf') if gross_profit>0 else 0.0)
+    best=max((pnl(p) for p in closed), default=0.0)
+    worst=min((pnl(p) for p in closed), default=0.0)
+
+    # افت سرمایه بر اساس توالی زمانی معاملات بسته‌شده
+    start_equity=float(s.get('daily_start_equity') or s.get('paper_balance') or 0.0)
+    equity=start_equity
+    peak=equity
+    max_drawdown=0.0
+    ordered=sorted(closed, key=lambda p: float(p.get('close_timestamp', p.get('opened_at', 0)) or 0))
+    for p in ordered:
+        equity += pnl(p)
+        peak=max(peak,equity)
+        if peak>0:
+            max_drawdown=max(max_drawdown,(peak-equity)/peak*100)
+
+    # موجودی فعلی
+    if s.get('trading_mode')=='REAL':
+        try:
+            balance=float(exchange_balance(chat_id))
+            balance_label='موجودی حساب واقعی'
+        except Exception:
+            balance=float(s.get('paper_balance',0) or 0)
+            balance_label='موجودی ثبت‌شده'
+    else:
+        balance=float(s.get('paper_balance',0) or 0)
+        balance_label='موجودی حساب کاغذی'
+
+    open_margin=sum(float(p.get('margin',0) or 0) for p in open_pos)
+    open_pnl=sum(pnl(p) for p in open_pos)
+    tp_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('tp','take_profit','take profit','target'))
+    sl_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('sl','stop_loss','stop loss','stop'))
+    manual_count=sum(1 for p in closed if str(p.get('close_reason','')).lower() in ('manual','close_all','user'))
+    other_count=max(0,total-tp_count-sl_count-manual_count)
+
+    today=time.strftime('%Y-%m-%d',time.gmtime())
+    today_closed=[p for p in closed if time.strftime('%Y-%m-%d',time.gmtime(float(p.get('close_timestamp',0) or 0)))==today]
+    today_pnl=sum(pnl(p) for p in today_closed)
+    today_wins=sum(1 for p in today_closed if pnl(p)>0)
+
+    if profit_factor==float('inf'):
+        pf='بی‌نهایت'
+    else:
+        pf=f'{profit_factor:.2f}'
+
+    status='🟢 سودده' if net>0 else ('🔴 زیان‌ده' if net<0 else '🟡 خنثی')
+    mode='حساب واقعی' if s.get('trading_mode')=='REAL' else 'حساب کاغذی'
+    active='🟢 فعال' if s.get('is_bot_active') else '🔴 متوقف'
+
+    return (
+        '📊 *گزارش حرفه‌ای عملکرد*\n'
+        '━━━━━━━━━━━━━━━━━━━━\n'
+        f'💼 نوع حساب: `{mode}`\n'
+        f'🤖 وضعیت ربات: `{active}`\n'
+        f'💰 {balance_label}: `{balance:,.2f} USDT`\n'
+        f'📌 نتیجه کلی: {status}\n\n'
+        '📈 *آمار معاملات*\n'
+        f'• کل معاملات بسته‌شده: `{total}`\n'
+        f'• خرید: `🟢 {buys}`\n'
+        f'• فروش: `🔴 {sells}`\n'
+        f'• موفق: `🟢 {wins}`\n'
+        f'• ناموفق: `🔴 {losses}`\n'
+        f'• سر‌به‌سر: `🟡 {breakeven}`\n'
+        f'• نرخ موفقیت: `{win_rate:.1f}%`\n\n'
+        '🎯 *نحوه بسته‌شدن معاملات*\n'
+        f'• حد سود: `{tp_count}`\n'
+        f'• حد ضرر: `{sl_count}`\n'
+        f'• بستن دستی: `{manual_count}`\n'
+        f'• سایر: `{other_count}`\n\n'
+        '💵 *سود و زیان*\n'
+        f'• سود ناخالص: `+{gross_profit:,.2f} USDT`\n'
+        f'• زیان ناخالص: `-{gross_loss:,.2f} USDT`\n'
+        f'• سود/زیان خالص: `{net:+,.2f} USDT`\n'
+        f'• میانگین هر معامله: `{avg_trade:+,.2f} USDT`\n'
+        f'• میانگین معامله موفق: `+{avg_win:,.2f} USDT`\n'
+        f'• میانگین معامله ناموفق: `-{avg_loss:,.2f} USDT`\n'
+        f'• بهترین معامله: `+{best:,.2f} USDT`\n'
+        f'• بدترین معامله: `{worst:+,.2f} USDT`\n'
+        f'• ضریب سودآوری: `{pf}`\n'
+        f'• بیشترین افت سرمایه: `{max_drawdown:.2f}%`\n\n'
+        '🔄 *پوزیشن‌های باز*\n'
+        f'• تعداد پوزیشن: `{len(open_pos)}`\n'
+        f'• مارجین درگیر: `{open_margin:,.2f} USDT`\n'
+        f'• سود/زیان شناور ثبت‌شده: `{open_pnl:+,.2f} USDT`\n\n'
+        '📅 *عملکرد امروز*\n'
+        f'• معاملات بسته‌شده: `{len(today_closed)}`\n'
+        f'• معاملات موفق: `{today_wins}`\n'
+        f'• سود/زیان امروز: `{today_pnl:+,.2f} USDT`\n\n'
+        '━━━━━━━━━━━━━━━━━━━━\n'
+        'ℹ️ سود و زیان بر اساس معاملات ثبت‌شده ربات است؛ در حساب واقعی، عدد نهایی صرافی پس از کارمزد و تسویه ملاک نهایی است.'
+    )
 
 
 def reset_stats(chat_id):
@@ -1060,7 +1369,7 @@ def analyze(chat_id,symbol):
 
 def menu(chat_id,message_id=None):
     s=get_session(chat_id); bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']; maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
-    text=f"📊 *پنل ربات*\n\nحالت: `{s['trading_mode']}`\nوضعیت: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\nاستراتژی: `{s['active_strategy'].upper()}`\nموجودی: `${bal:.2f}`\nمارجین: `${s['trade_amount_usdt']:.0f}` | اهرم: `{s['leverage']}X`\nپوزیشن‌ها: `{maxp}`\nتایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\nریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`\nحد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`"
+    text=f"📊 *پنل ربات*\n\nنوع حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`\nوضعیت: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\nاستراتژی: `{'روندی' if s['active_strategy']=='trend' else 'شکست' if s['active_strategy']=='breakout' else 'بازگشت به میانگین' if s['active_strategy']=='mean_reversion' else 'چندبازه‌ای'}`\nموجودی: `{bal:.2f} USDT`\nمارجین: `{s['trade_amount_usdt']:.0f} USDT` | اهرم: `{s['leverage']} برابر`\nپوزیشن‌ها: `{maxp}`\nتایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\nریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`\nحد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`"
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active']),message_id)
 
 
@@ -1106,7 +1415,7 @@ def start_scan(chat_id,message_id=None):
         s['last_stop_reason']=None
         save_session(chat_id)
     menu(chat_id,message_id)
-
+    sync_bottom_keyboard(chat_id, "🟢 اسکن فعال شد.\n🔒 تنظیمات حساس تا توقف اسکن قفل هستند.")
 
 
 def _market_snapshot(symbol, tf):
@@ -1339,15 +1648,36 @@ def market_report(chat_id):
 
 
 def process_command(cmd,chat_id,message_id=None):
+
+    if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
+        _performance_dashboard(chat_id)
+        return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
     sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/toggle_','/adx_','/sl_','/tp_')
-    if s['is_bot_active'] and cl.startswith(sensitive_prefixes): send_message(chat_id,'⚠️ ابتدا اسکن را متوقف کنید.'); return
-    if cl=='/start': s['is_bot_active']=False; s['user_state']=None; save_session(chat_id); send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard()); return
+    if s['is_bot_active'] and (
+        cl.startswith(sensitive_prefixes)
+        or any(k in c for k in (
+            'تنظیمات فیلترها', 'فیلترها',
+            'تنظیم پارامترها', 'پارامترها',
+            'استراتژی',
+            '🔒'
+        ))
+    ):
+        send_message(chat_id,'⚠️ اسکن در حال انجام است. برای تغییر تنظیمات ابتدا «توقف اسکن» را بزنید.', parse_mode=None)
+        return
+    if cl=='/start':
+        s['is_bot_active']=False
+        s['user_state']=None
+        save_session(chat_id)
+        send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
+        return
     if cl in ('/menu',): s['user_state']=None; menu(chat_id,message_id); return
     if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id); return
     if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
         stop_scan(chat_id, 'manual')
         menu(chat_id,message_id)
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند.")
         return
     if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن','روشن کردن اسکن'):
         start_scan(chat_id,message_id)
@@ -1357,6 +1687,7 @@ def process_command(cmd,chat_id,message_id=None):
         if s['is_bot_active']:
             stop_scan(chat_id, 'manual-toggle')
             menu(chat_id,message_id)
+            sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند.")
         else:
             start_scan(chat_id,message_id)
         return
@@ -1424,7 +1755,7 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions']:
             if p['symbol']==sym:
                 send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym)); return
-        send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+        send_message(chat_id,f'❌ پوزیشن باز `{sym}` در وضعیت ربات پیدا نشد.'); return
     if cl.startswith('/close_prompt_'):
         sym=cl.replace('/close_prompt_','').upper()
         for p in s['paper_positions']:
