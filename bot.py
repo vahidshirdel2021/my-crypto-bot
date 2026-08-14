@@ -218,7 +218,6 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
 
     margin = session["trade_amount_usdt"]
 
-    # اگر حالت واقعی (REAL) فعال باشد و صرافی متصل باشد، سفارش واقعی در کوینکس ثبت می‌شود
     if session["trading_mode"] == "REAL" and exchange:
         try:
             notional = margin * session["leverage"]
@@ -258,7 +257,6 @@ def execute_trade(chat_id, symbol, side, price, sl, tp):
             send_telegram_msg(f"❌ خطا در ثبت سفارش واقعی در صرافی کوینکس: {e}", chat_target=chat_id)
             return
 
-    # حالت کاغذی (Paper Trading)
     if session["paper_balance"] < margin: return
 
     trade = {
@@ -682,6 +680,7 @@ def telegram_listener():
                                     send_telegram_msg(f"❌ نماد یافت نشد.", chat_target=chat_id)
                                 session["user_state"] = None
                             else:
+                                # اصلاح تشخیص مستقیم نام ارز در چت
                                 if len(text_val) >= 2 and len(text_val) <= 8 and text_val.isalpha():
                                     report_text = analyze_symbol_detailed(chat_id, text_val)
                                     send_telegram_msg(report_text, chat_target=chat_id)
@@ -710,7 +709,7 @@ async def async_main_scan_loop():
         await asyncio.sleep(30)
 
 def bot_loop():
-    type(5)
+    time.sleep(5)
     asyncio.run(async_main_scan_loop())
 
 if __name__ == "__main__":
