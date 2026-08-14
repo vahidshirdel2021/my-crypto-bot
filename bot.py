@@ -571,7 +571,10 @@ def risk_guard(chat_id):
     if start<=0: return True
     limit=start*(1-float(s['daily_loss_limit_pct'])/100)
     if equity<=limit:
-        s['daily_stopped']=True; s['is_bot_active']=False; s['scan_generation']=int(s.get('scan_generation',0))+1; save_session(chat_id)
+        stop_scan(chat_id, 'daily-risk')
+        s=get_session(chat_id)
+        s['daily_stopped']=True
+        save_session(chat_id)
         sync_bottom_keyboard(chat_id, "🛑 اسکن به‌دلیل حد ضرر روزانه متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند.")
         send_message(chat_id,f"🛑 *حد ضرر روزانه فعال شد.*\n\nشروع روز: `${start:.2f}`\nEquity: `${equity:.2f}`\nحد: `{s['daily_loss_limit_pct']:.2f}%`\n\nورود جدید متوقف شد؛ پوزیشن‌های باز دست‌نخورده باقی می‌مانند.")
         return False
@@ -1145,7 +1148,15 @@ def reconcile_real(chat_id):
                 try: rp=float(h.get('realizedPnl') or h.get('info',{}).get('realized_pnl'))
                 except: continue
                 if rp is not None: break
-            p['pnl_usdt']=rp if rp is not None else 0.0; p['pnl_is_estimate']=rp is None; p['close_timestamp']=time.time(); p['close_reason']='external TP/SL or exchange close'
+            if rp is None:
+                p['pnl_usdt']=0.0
+                p['pnl_is_estimate']=True
+                p['pnl_note']='PnL نهایی از تاریخچه صرافی قابل تأیید نبود؛ عدد 0 صرفاً موقت است.'
+            else:
+                p['pnl_usdt']=rp
+                p['pnl_is_estimate']=False
+            p['close_timestamp']=time.time()
+            p['close_reason']='external TP/SL or exchange close'
             s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+300
             send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
     s['last_reconcile']=time.time(); save_session(chat_id); return True
@@ -1647,26 +1658,70 @@ def market_report(chat_id):
 
 
 
+def runtime_audit(chat_id):
+    """Quick self-check of state invariants; does not place/cancel any order."""
+    s=get_session(chat_id)
+    issues=[]
+    # Position uniqueness and basic numeric validity.
+    symbols=[p.get('symbol') for p in s.get('paper_positions',[])]
+    if len(symbols)!=len(set(symbols)):
+        issues.append('پوزیشن تکراری برای یک نماد وجود دارد')
+    for p in s.get('paper_positions',[]):
+        try:
+            e=float(p.get('entry_price') or 0); sl=float(p.get('sl') or 0); tp=float(p.get('tp') or 0); a=float(p.get('amount') or 0)
+            if min(e,sl,tp,a)<=0: issues.append(f'اعداد نامعتبر در {p.get("symbol","?")}')
+            m=expected_trade_metrics(p)
+            if not m['valid']: issues.append(f'TP/SL ناسازگار در {p.get("symbol","?")}')
+        except Exception:
+            issues.append(f'ساختار پوزیشن خراب در {p.get("symbol","?")}')
+    if s.get('is_bot_active') and s.get('daily_stopped'):
+        issues.append('ربات همزمان ACTIVE و DAILY_STOPPED است')
+    if s.get('max_open_positions',0)>0 and len(s.get('paper_positions',[]))>int(s['max_open_positions']):
+        issues.append('تعداد پوزیشن‌ها از سقف تنظیم‌شده بیشتر است')
+    if s.get('trading_mode')=='REAL' and s.get('real_reconciliation_required') and s.get('is_bot_active'):
+        issues.append('REAL در وضعیت نیازمند تطبیق ولی اسکن فعال است')
+    status='✅ بدون مغایرت ساختاری مهم' if not issues else '⚠️ مغایرت پیدا شد'
+    lines=[
+        '🧪 *ممیزی سریع وضعیت ربات*',
+        '',
+        f'🤖 اسکن: `{"فعال" if s.get("is_bot_active") else "متوقف"}`',
+        f'💼 حساب: `{"REAL" if s.get("trading_mode")=="REAL" else "PAPER"}`',
+        f'📦 پوزیشن باز: `{len(s.get("paper_positions",[]))}`',
+        f'🔢 نسل اسکن: `{s.get("scan_generation",0)}`',
+        f'🔐 تطبیق REAL: `{"لازم است" if s.get("real_reconciliation_required") else "OK"}`',
+        '',
+        status
+    ]
+    if issues:
+        lines.append('')
+        lines.append('• ' + '\n• '.join(issues[:10]))
+    return '\n'.join(lines)
+
+
 def process_command(cmd,chat_id,message_id=None):
 
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
         _performance_dashboard(chat_id)
         return
+    if cmd in ('/audit','audit','🧪 ممیزی ربات'):
+        send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active']))
+        return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
-    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/toggle_','/adx_','/sl_','/tp_')
+    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
     if s['is_bot_active'] and (
         cl.startswith(sensitive_prefixes)
         or any(k in c for k in (
             'تنظیمات فیلترها', 'فیلترها',
             'تنظیم پارامترها', 'پارامترها',
-            'استراتژی',
+            'استراتژی', 'واچ‌لیست', 'واچ لیست',
             '🔒'
         ))
     ):
         send_message(chat_id,'⚠️ اسکن در حال انجام است. برای تغییر تنظیمات ابتدا «توقف اسکن» را بزنید.', parse_mode=None)
         return
     if cl=='/start':
-        s['is_bot_active']=False
+        if s.get('is_bot_active'):
+            stop_scan(chat_id, 'start-reset')
         s['user_state']=None
         save_session(chat_id)
         send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
@@ -1772,9 +1827,13 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
     if cl=='/close_all_prompt': send_message(chat_id,'⚠️ *تأیید بستن همه پوزیشن‌ها*',get_confirm_close_all_keyboard()); return
     if cl=='/confirm_close_all':
-        s['is_bot_active']=False; save_session(chat_id)
-        for p in s['paper_positions'][:]: close_position(chat_id,p,reason='close_all')
-        menu(chat_id); return
+        stop_scan(chat_id, 'close-all')
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد؛ در حال بستن همه پوزیشن‌ها...")
+        for p in s['paper_positions'][:]:
+            close_position(chat_id,p,reason='close_all')
+        menu(chat_id)
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ همه پوزیشن‌های انتخاب‌شده بسته شدند.")
+        return
     if cl.startswith('/close_') and cl not in ('/close_longs','/close_shorts','/close_all_prompt','/close_all'):
         sym=cl.replace('/close_','').upper()
         for p in s['paper_positions'][:]:
