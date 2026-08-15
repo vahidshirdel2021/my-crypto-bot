@@ -5,21 +5,21 @@ FILTER_DEFAULTS = {
     "volume_filter": True,
     "trailing_stop": True,
     "candlestick_filter": True,
-    "no_short_filter": False,
+    "no_short_filter": True,
     "no_buy_filter": False,
 }
 
 STRATEGY_DEFAULTS = {
-    "min_adx": 20.0,
+    "min_adx": 24.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
     "dynamic_exits": True,
-    "min_trade_score": 68.0,
-    "min_rr": 1.30,
+    "min_trade_score": 82.0,
+    "min_rr": 1.35,
     "max_sl_atr": 2.50,
-    "min_target_r": 1.30,
-    "max_target_r": 2.20,
+    "min_target_r": 1.35,
+    "max_target_r": 1.8,
 }
 
 # Legacy compatibility only. Production code passes per-user dictionaries.
@@ -281,11 +281,11 @@ def check_candlestick_confirmation(df, filters=None):
     strong_bull = curr["close"] > curr["open"] and body / rng >= 0.60
     strong_bear = curr["close"] < curr["open"] and body / rng >= 0.60
 
-    if bullish_pin or bull_engulf or strong_bull:
-        name = "پین‌بار صعودی" if bullish_pin else "انگالفینگ صعودی" if bull_engulf else "کندل صعودی قدرتمند"
+    if bullish_pin or strong_bull:
+        name = "پین‌بار صعودی" if bullish_pin else "کندل صعودی قدرتمند"
         return "BUY_CONFIRMED", name
-    if bearish_pin or bear_engulf or strong_bear:
-        name = "پین‌بار نزولی" if bearish_pin else "انگالفینگ نزولی" if bear_engulf else "کندل نزولی قدرتمند"
+    if bearish_pin or strong_bear:
+        name = "پین‌بار نزولی" if bearish_pin else "کندل نزولی قدرتمند"
         return "SELL_CONFIRMED", name
     return None, "کندل تأیید معتبر نبود"
 
@@ -332,8 +332,10 @@ def strategy_breakout(df, filters=None, strategy_config=None):
         return None, f"حجم شکست کافی نیست ({vr:.2f}x)"
     if _safe_float(curr.get("body_ratio"), 0) < 0.55:
         return None, "قدرت بدنه کافی نیست"
-    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf)
-    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf)
+    trend_buy = curr["close"] > curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
+    trend_sell = curr["close"] < curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
+    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= 24.0
+    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= 24.0
     if not (bull or bear):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
@@ -398,25 +400,12 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
 
 
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None):
-    c = df_primary.iloc[-2]
-    adx = _safe_float(c.get("adx"), 20)
-    min_adx = get_strategy_params(timeframe, strategy_config)["adx"]
-    if market_data_dict:
-        # In multi mode, first require full alignment before taking any directional signal.
-        if timeframe == "5min" and all((market_data_dict.get(k) is not None and not market_data_dict[k].empty) for k in ["1d", "4h", "1h", "15m"]):
-            multi_sig, multi_reason = strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
-            if multi_sig:
-                return multi_sig, f"[پویا-چندزمانه] {multi_reason}"
+    # V4: keep only the strongest observed regime from the baseline tests:
+    # bullish breakout with a strong candle. Long-only by design for this candidate.
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
-    if break_sig:
-        return break_sig, f"[شکست] {break_reason}"
-    if adx >= min_adx + 5:
-        sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-        return sig, f"[رونددار] {reason}"
-    if adx < min_adx:
-        sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
-        return sig, f"[رنج] {reason}"
-    return None, f"[گذار] ADX={adx:.1f}"
+    if break_sig == "BUY":
+        return "BUY", f"[شکست-قوی] {break_reason}"
+    return None, break_reason if break_reason else "No strong bullish breakout"
 
 
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None):

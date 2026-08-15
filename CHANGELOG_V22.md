@@ -26,3 +26,9 @@
 - رویداد `signal_and_plan` از ابتدا quality score و planned R:R را ذخیره می‌کند.
 - خطاهای fallback در `fmt`/`market_meta`/`normalize_amount`/`normalize_price` حداقل در سطح debug ثبت می‌شوند.
 - منوی پایین چت همچنان حذف است و فقط Menu بومی تلگرام برای ورود به `/menu` استفاده می‌شود.
+
+
+## V4 strategy integration
+- Dynamic strategy updated to V4 candidate: strong bullish breakout only.
+- Default strategy filters/config use min ADX 24, minimum score 82, no-short enabled, target cap 1.8R.
+- Existing audit, AI, UI, public multi-user test access, and full watchlist are preserved.
