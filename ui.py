@@ -2,14 +2,9 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
-    # یک دکمه ثابت و ساده پایین چت؛ فقط منوی اصلی را باز می‌کند.
-    return {
-        "keyboard": [[{"text": "☰ منوی اصلی"}]],
-        "resize_keyboard": True,
-        "one_time_keyboard": False,
-        "is_persistent": True,
-        "input_field_placeholder": "پیام یا انتخاب از منوی اصلی…"
-    }
+    # Reply Keyboard پایین چت عمداً حذف شده است.
+    # منوی اصلی فقط از Menu بومی تلگرام (کنار کادر پیام) باز می‌شود.
+    return {"remove_keyboard": True}
 
 
 def get_filters_menu_keyboard(session=None):
