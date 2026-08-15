@@ -1,4 +1,4 @@
-import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, threading
+import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, threading, re
 from threading import Thread, RLock
 from typing import Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,6 +35,8 @@ MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
+# کارمزد Taker هر طرف معامله (درصد)؛ برای محاسبه هزینه تخمینی رفت‌وبرگشت در PnL استفاده می‌شود.
+TAKER_FEE_PCT = max(0.0, float(os.environ.get('TAKER_FEE_PCT', '0.05')))
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -67,6 +69,10 @@ ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x
 ALL_SYMBOLS = [
     'BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI'
 ]
+# فقط برای Session های تازه (کاربر جدید یا واچ‌لیست خالی): زیرمجموعه‌ای محدود و نقدشونده‌تر
+# برای کاهش overtrading و ریسک همبستگی پنهان بین ده‌ها آلت‌کوین هم‌زمان.
+# واچ‌لیست کاربرهای فعلی که از قبل ذخیره شده دست‌نخورده می‌ماند و از منوی «واچ‌لیست» قابل تغییر است.
+DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC','LINK','DOT','AVAX','ATOM','NEAR','TRX','ETC','FIL','UNI','AAVE','MATIC','XTZ']
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه','multi':'مولتی'}
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
@@ -128,6 +134,47 @@ def save_session(chat_id):
         finally: conn.close()
 
 
+def audit_event(chat_id, trade_id, stage, data=None):
+    """Persist the important lifecycle of each trade so it can be reconstructed later."""
+    try:
+        s = get_session(chat_id)
+        event = {
+            'trade_id': str(trade_id),
+            'stage': str(stage),
+            'ts': time.time(),
+            'data': data or {},
+        }
+        s.setdefault('trade_audit', []).append(event)
+        s['trade_audit'] = s['trade_audit'][-2000:]
+        save_session(chat_id)
+        return event
+    except Exception:
+        logger.exception('trade audit event failed chat=%s trade=%s stage=%s', chat_id, trade_id, stage)
+        return None
+
+
+def new_trade_id(chat_id, symbol):
+    raw = f"{chat_id}:{symbol}:{time.time_ns()}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12].upper()
+
+
+def audit_trade_record(p):
+    return {
+        'trade_id': p.get('trade_id'), 'symbol': p.get('symbol'), 'side': p.get('side'),
+        'timeframe': p.get('timeframe'), 'strategy': p.get('strategy'),
+        'opened_at': p.get('opened_at'), 'closed_at': p.get('close_timestamp'),
+        'entry_price': p.get('entry_price'), 'close_price': p.get('close_price'),
+        'sl': p.get('sl'), 'tp': p.get('tp'), 'amount': p.get('amount'),
+        'margin': p.get('margin'), 'leverage': p.get('leverage'),
+        'planned_rr': p.get('planned_rr'), 'quality_score': p.get('quality_score'),
+        'quality_label': p.get('quality_label'), 'risk_usdt': p.get('risk_usdt'),
+        'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
+        'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
+        'entry_reason': p.get('entry_reason'),
+        'fee_usdt': p.get('fee_usdt'), 'pnl_gross_usdt': p.get('pnl_gross_usdt'),
+    }
+
+
 def get_entry_lock(chat_id):
     with ENTRY_LOCKS_GUARD:
         return ENTRY_LOCKS.setdefault(int(chat_id), RLock())
@@ -174,14 +221,16 @@ def default_session():
         'trade_amount_usdt': 50.0,
         'leverage': 5,
         'max_open_positions': 3,
-        'timeframe': '5min',
+        'timeframe': '15min',
         'active_strategy': 'dynamic',
         'paper_positions': [],
         'closed_positions': [],
+        'trade_audit': [],
+        'scan_stats': {'scans': 0, 'symbols': 0, 'signals': 0, 'entries': 0, 'blocked': 0, 'data_errors': 0, 'reason_counts': {}},
         'cooldowns': {},
         'user_state': None,
         'ai_chat_history': [],
-        'active_symbols': ALL_SYMBOLS[:],
+        'active_symbols': DEFAULT_ACTIVE_SYMBOLS[:],
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': STRATEGY_DEFAULTS.copy(),
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
@@ -207,9 +256,13 @@ def normalize_session(data):
     s['user_experience'] = data.get('user_experience') if data.get('user_experience') in ('simple','advanced') else 'simple'
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
+    s['trade_audit'] = list(data.get('trade_audit') or [])[-2000:]
+    ss = data.get('scan_stats') or {}
+    s['scan_stats'] = {**default_session()['scan_stats'], **ss}
+    s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['ai_chat_history'] = list(data.get('ai_chat_history') or [])[-12:]
-    s['active_symbols'] = list(data.get('active_symbols') or ALL_SYMBOLS[:])
+    s['active_symbols'] = list(data.get('active_symbols') or DEFAULT_ACTIVE_SYMBOLS[:])
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
@@ -851,6 +904,31 @@ def side_long(side): return 'BUY' in str(side).upper() or 'LONG' in str(side).up
 def reserved_margin(s): return sum(float(p.get('margin',0)) for p in s['paper_positions'])
 
 
+def round_trip_fee_usdt(margin, leverage):
+    """هزینه تخمینی کارمزد Taker رفت‌وبرگشت (ورود+خروج) برای یک پوزیشن مارکت‌اوردر، بر حسب USDT."""
+    try:
+        notional = abs(float(margin)) * abs(float(leverage))
+        if not math.isfinite(notional): return 0.0
+        return notional * (TAKER_FEE_PCT / 100.0) * 2
+    except Exception:
+        return 0.0
+
+
+def trailing_locked_r(entry, risk_distance, current_price, is_long):
+    """مقدار R که باید حد ضرر دنبال‌کننده روی آن قفل شود؛ اگر هنوز زود است None برمی‌گرداند.
+    وقتی قیمت حداقل ۱R به نفع معامله حرکت کرده باشد، حد ضرر یک R کامل پشت پیشرفت فعلی
+    (در پله‌های ۰.۵R) قفل می‌شود، نه فقط یک‌بار روی نقطه سربه‌سر."""
+    try:
+        entry=float(entry); risk_distance=float(risk_distance); current_price=float(current_price)
+    except Exception:
+        return None
+    if risk_distance<=0 or not math.isfinite(risk_distance): return None
+    r=(current_price-entry)/risk_distance if is_long else (entry-current_price)/risk_distance
+    if r<1.0: return None
+    step=math.floor(r*2)/2.0
+    return max(0.0, step-1.0)
+
+
 def reset_daily_if_needed(chat_id, equity):
     s=get_session(chat_id); today=time.strftime('%Y-%m-%d',time.gmtime())
     if s.get('daily_start_date')!=today:
@@ -1008,6 +1086,10 @@ def format_trade_status(p, price=None):
 
     tp_dist_pct=abs(tp-entry)/entry*100 if entry else 0
     sl_dist_pct=abs(sl-entry)/entry*100 if entry else 0
+    fee_est=round_trip_fee_usdt(p.get('margin'), p.get('leverage'))
+    net_reward=max(0.0, metrics['reward']-fee_est)
+    net_risk=metrics['risk']+fee_est
+    net_rr=(net_reward/net_risk) if net_risk>0 else 0.0
 
     lines=[
         f'📊 *مدیریت معامله* — `{p["symbol"]}`',
@@ -1020,16 +1102,20 @@ def format_trade_status(p, price=None):
         f'📦 حجم: `{amount:.6f}`',
         '',
         f'💵 سود/زیان فعلی: `{pnl:+.2f} USDT`',
-        f'🟢 *پاداش در صورت فعال شدن TP:* `+{metrics["reward"]:.2f} USDT`',
-        f'🔴 *ریسک در صورت فعال شدن SL:* `-{metrics["risk"]:.2f} USDT`',
-        f'⚖️ *نسبت پاداش به ریسک:* `{metrics["rr"]:.2f}R`',
+        f'🟢 پاداش ناخالص در صورت TP: `+{metrics["reward"]:.2f} USDT`',
+        f'🔴 ریسک ناخالص در صورت SL: `-{metrics["risk"]:.2f} USDT`',
+        f'⚖️ R:R ناخالص: `{metrics["rr"]:.2f}R`',
+        f'💸 کارمزد تخمینی رفت‌وبرگشت: `{fee_est:.2f} USDT`',
+        f'🟢 *پاداش خالص در صورت TP:* `+{net_reward:.2f} USDT`',
+        f'🔴 *ریسک خالص در صورت SL:* `-{net_risk:.2f} USDT`',
+        f'⚖️ *R:R خالص:* `{net_rr:.2f}R`',
         '',
         f'📏 فاصله تا TP: `{tp_dist_pct:.2f}%`',
         f'📏 فاصله تا SL: `{sl_dist_pct:.2f}%`',
     ]
     if not metrics['valid']:
         lines += ['', '⚠️ *هشدار:* ورود، TP، SL و جهت معامله با هم سازگار نیستند.']
-    lines += ['', 'ℹ️ اعداد TP/SL ناخالص‌اند و قبل از کارمزد و Funding محاسبه شده‌اند.']
+    lines += ['', 'ℹ️ اعداد خالص شامل کارمزد تخمینی رفت‌وبرگشت هستند؛ Funding واقعی صرافی همچنان لحاظ نشده است.']
     return '\n'.join(lines)
 
 
@@ -1286,9 +1372,11 @@ def chart(chat_id,symbol,df,trade):
         logger.exception('chart error')
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None):
     s=get_session(chat_id)
-    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_start side=%s mode=%s', chat_id, symbol, side, s.get('trading_mode'))
+    trade_id = new_trade_id(chat_id, symbol)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=entry_start side=%s mode=%s', chat_id, symbol, trade_id, side, s.get('trading_mode'))
+    audit_event(chat_id, trade_id, 'signal_and_plan', {'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp, 'reason': reason, 'timeframe': s.get('timeframe'), 'strategy': s.get('active_strategy')})
     if not s['is_bot_active'] or s['daily_stopped'] or not risk_guard(chat_id):
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=bot_inactive_or_daily_risk', chat_id, symbol)
         return False
@@ -1324,7 +1412,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
-    trade={'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'trailing_activated':False}
+    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1387,9 +1475,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
             else: trade['sl']=exec_price+gap_sl; trade['tp']=exec_price-gap_tp
             trade['sl']=normalize_price(chat_id,symbol,trade['sl']); trade['tp']=normalize_price(chat_id,symbol,trade['tp'])
             trade['risk_usdt']=abs(float(trade['entry_price'])-float(trade['sl']))/max(float(trade['entry_price']),1e-12)*float(trade['margin'])*float(trade['leverage'])
-            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=filled entry=%s amount=%s', chat_id, symbol, trade['entry_price'], trade['amount'])
+            logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=filled entry=%s amount=%s', chat_id, symbol, trade_id, trade['entry_price'], trade['amount'])
+            audit_event(chat_id, trade_id, 'order_filled', {'entry_price': trade['entry_price'], 'amount': trade['amount'], 'order_id': order_id})
             ok,err=set_protection(chat_id,symbol,trade['sl'],trade['tp'])
-            logger.info('ENTRY_DIAG chat=%s symbol=%s stage=protection_result ok=%s detail=%s', chat_id, symbol, ok, err)
+            logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=protection_result ok=%s detail=%s', chat_id, symbol, trade_id, ok, err)
+            audit_event(chat_id, trade_id, 'protection_set', {'ok': ok, 'detail': err, 'sl': trade.get('sl'), 'tp': trade.get('tp')})
             if not ok:
                 _halt_real_trading(chat_id,f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
                 try: ex.close_position(sym,None,{'type':'market','amount':filled})
@@ -1413,7 +1503,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
             logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=paper_balance_insufficient balance=%s reserved=%s margin=%s', chat_id, symbol, s['paper_balance'], reserved_margin(s), margin)
             return False
         trade['amount']=(margin*leverage)/price
-        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=paper_entry_opened amount=%s price=%s', chat_id, symbol, trade['amount'], price)
+        logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=paper_entry_opened amount=%s price=%s', chat_id, symbol, trade_id, trade['amount'], price)
+        audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin})
         s['paper_positions'].append(trade); save_session(chat_id)
 
     m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
@@ -1423,7 +1514,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     if m_rr:
         trade['planned_rr']=float(m_rr.group(1))
     if trade.get('is_real'): s['paper_positions'].append(trade); save_session(chat_id)
-    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_success side=%s entry=%s sl=%s tp=%s amount=%s mode=%s', chat_id, symbol, side, trade['entry_price'], trade['sl'], trade['tp'], trade['amount'], s['trading_mode'])
+    logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=entry_success side=%s entry=%s sl=%s tp=%s amount=%s mode=%s', chat_id, symbol, trade_id, side, trade['entry_price'], trade['sl'], trade['tp'], trade['amount'], s['trading_mode'])
+    audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
     df=get_klines(symbol,'5min' if s['timeframe']=='multi' else s['timeframe'],80)
     if not df.empty: chart(chat_id,symbol,calculate_indicators(df),trade)
     return True
@@ -1440,7 +1532,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation)
 
 
 
@@ -1461,6 +1553,8 @@ def realized_history_value(chat_id,symbol,opened_at):
 def close_position(chat_id,pos,price=None,reason='manual'):
     s=get_session(chat_id)
     if pos not in s['paper_positions']: return False
+    fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
+    fee_note=''
     if pos.get('is_real'):
         ex=get_exchange(chat_id)
         if not ex: send_message(chat_id,'❌ اتصال CoinEx در دسترس نیست.'); return False
@@ -1484,22 +1578,39 @@ def close_position(chat_id,pos,price=None,reason='manual'):
                 raise RuntimeError(f'cannot verify close: {state_exc}') from state_exc
             realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
             if realized is None:
-                # last-resort estimate, explicitly labeled as estimate
-                entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry); realized=float(pos['margin'])*frac*float(pos['leverage'])
+                # last-resort estimate, explicitly labeled as estimate؛ چون این برآورد شامل کارمزد
+                # نیست، هزینه تخمینی رفت‌وبرگشت را از آن کم می‌کنیم تا سود کاذب نمایش داده نشود.
+                entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+                pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+                realized=pnl_gross-fee
                 pos['pnl_is_estimate']=True
-            else: pos['pnl_is_estimate']=False
+                pos['pnl_gross_usdt']=pnl_gross
+                fee_note=' (کسر شده در برآورد)'
+            else:
+                # CoinEx معمولاً realizedPnl را پس از کسر کارمزد معاملاتی گزارش می‌دهد؛ برای جلوگیری
+                # از کسر دوباره روی یک عدد واقعی حساب، آن را دست‌نخورده نگه می‌داریم.
+                pos['pnl_is_estimate']=False
+                fee_note=' (احتمالاً قبلاً توسط صرافی لحاظ شده)'
             pnl=realized; pos['close_price']=price
         except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
     else:
         if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
-        entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry); pnl=float(pos['margin'])*frac*float(pos['leverage']); s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+        entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+        pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+        pnl=pnl_gross-fee
+        s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+        pos['pnl_gross_usdt']=pnl_gross
+        fee_note=' (کسر شده)'
+    pos['fee_usdt']=fee
     if not pos.get('risk_usdt'):
         try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
         except Exception: pos['risk_usdt']=0.0
     pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
+    audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'fee_usdt': fee, 'reason': reason, 'duration_seconds': max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])) )})
     s['cooldowns'][pos['symbol']]=time.time()+300; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
     est=' تقریبی' if pos.get('pnl_is_estimate') else ''
-    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL{est}: `{pnl:+.2f} USDT`\n• علت: `{reason}`")
+    fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
+    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL{est}: `{pnl:+.2f} USDT`{fee_line}\n• علت: `{reason}`")
     return True
 
 
@@ -1536,6 +1647,7 @@ def reconcile_real(chat_id):
             p['close_timestamp']=time.time()
             p['close_reason']='external TP/SL or exchange close'
             s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+300
+            audit_event(chat_id, p.get('trade_id') or new_trade_id(chat_id, sym), 'position_closed', {'close_price': p.get('close_price'), 'pnl_usdt': p.get('pnl_usdt'), 'reason': p.get('close_reason'), 'external': True})
             send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
     s['last_reconcile']=time.time(); save_session(chat_id); return True
 
@@ -1551,10 +1663,21 @@ def update_positions(chat_id):
             if not price: continue
             entry=float(p['entry_price']); pnl=float(p.get('margin',0))*(((price-entry)/entry) if side_long(p['side']) else ((entry-price)/entry))*float(p['leverage'])
             p['last_unrealized_pnl']=pnl
-            if s['filters'].get('trailing_stop',True) and not p.get('trailing_activated') and pnl>=float(p['margin'])*.10:
-                ok,err=move_stop_loss(chat_id,p['symbol'],normalize_price(chat_id,p['symbol'],entry))
-                if ok: p['sl']=entry; p['trailing_activated']=True; send_message(chat_id,f"🛡️ حد ضرر دنبال‌کننده فعال شد: `{p['symbol']}`")
-                else: logger.warning('trailing %s: %s',p['symbol'],err)
+            if s['filters'].get('trailing_stop',True):
+                risk_distance=p.get('risk_distance')
+                if not risk_distance and not p.get('trailing_activated'):
+                    risk_distance=abs(entry-float(p.get('sl',entry)))
+                lr=trailing_locked_r(entry,risk_distance,price,side_long(p['side'])) if risk_distance else None
+                if lr is not None:
+                    new_sl=entry+(lr*risk_distance if side_long(p['side']) else -lr*risk_distance)
+                    is_better=(new_sl>float(p['sl'])) if side_long(p['side']) else (new_sl<float(p['sl']))
+                    if is_better and lr>float(p.get('trailing_locked_r') or 0.0):
+                        ok,err=move_stop_loss(chat_id,p['symbol'],normalize_price(chat_id,p['symbol'],new_sl))
+                        if ok:
+                            first_activation=float(p.get('trailing_locked_r') or 0.0)==0.0
+                            p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
+                            if first_activation: send_message(chat_id,f"🛡️ حد ضرر دنبال‌کننده فعال شد: `{p['symbol']}` (قفل روی {lr:.1f}R)")
+                        else: logger.warning('trailing %s: %s',p['symbol'],err)
         save_session(chat_id); return
     for p in s['paper_positions'][:]:
         df=get_klines(p['symbol'],p.get('timeframe','5min') if p.get('timeframe')!='multi' else '5min',5)
@@ -1572,7 +1695,17 @@ def update_positions(chat_id):
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=float(p['sl']); reason='SL'
             pnl=float(p['margin'])*((float(p['entry_price'])-close)/float(p['entry_price']))*float(p['leverage'])
-        if s['filters'].get('trailing_stop',True) and not p.get('trailing_activated') and pnl>=float(p['margin'])*.10: p['sl']=float(p['entry_price']); p['trailing_activated']=True
+        if s['filters'].get('trailing_stop',True):
+            entry_p=float(p['entry_price'])
+            risk_distance=p.get('risk_distance')
+            if not risk_distance and not p.get('trailing_activated'):
+                risk_distance=abs(entry_p-float(p.get('sl',entry_p)))
+            lr=trailing_locked_r(entry_p,risk_distance,close,side_long(p['side'])) if risk_distance else None
+            if lr is not None:
+                new_sl=entry_p+(lr*risk_distance if side_long(p['side']) else -lr*risk_distance)
+                is_better=(new_sl>float(p['sl'])) if side_long(p['side']) else (new_sl<float(p['sl']))
+                if is_better and lr>float(p.get('trailing_locked_r') or 0.0):
+                    p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
         if reason: close_position(chat_id,p,exit_price,reason)
     save_session(chat_id)
 
@@ -1763,6 +1896,99 @@ async def scan_symbol(http,chat_id,symbol):
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال و طرح معامله ایجاد شد، اما اجرای ورود موفق نشد', 'execute', sig)
 
 
+def timeframe_advice(chat_id):
+    """Suggest a timeframe; never changes user settings automatically."""
+    s=get_session(chat_id)
+    symbols=['BTC','ETH','BNB','SOL','XRP']
+    metrics=[]
+    for sym in symbols:
+        try:
+            d=get_klines(sym,'15min',120)
+            if d.empty: continue
+            x=calculate_indicators(d).iloc[-2]
+            metrics.append((float(x.adx or 0), float(x.atr or 0), float(x.close or 0)))
+        except Exception: continue
+    if not metrics:
+        return '🧠 *پیشنهاد تایم‌فریم*\n\nفعلاً داده کافی برای پیشنهاد مطمئن وجود ندارد.\n\n⚠️ ربات هیچ تایم‌فریمی را خودکار تغییر نمی‌دهد.'
+    avg_adx=sum(x[0] for x in metrics)/len(metrics)
+    avg_atr=sum((x[1]/x[2]*100 if x[2] else 0) for x in metrics)/len(metrics)
+    if avg_adx >= 30 and avg_atr >= 0.35:
+        tf='15min'; reason='بازار حرکت و نوسان قابل‌توجهی دارد؛ 5 دقیقه می‌تواند نویز بیشتری ایجاد کند.'
+    elif avg_adx >= 25:
+        tf='15min'; reason='روند در حال شکل‌گیری/تقویت است و 15 دقیقه تعادل مناسبی بین سرعت و نویز دارد.'
+    elif avg_adx < 20:
+        tf='1hour'; reason='قدرت روند پایین است؛ تایم‌فریم بالاتر معمولاً نویز کوتاه‌مدت را کمتر می‌کند.'
+    else:
+        tf='15min'; reason='شرایط بازار میانه است؛ 15 دقیقه انتخاب متعادل‌تری است.'
+    return (f'🧠 *پیشنهاد هوشمند تایم‌فریم*\n━━━━━━━━━━━━━━━━━━━━\n'
+            f'📌 تایم‌فریم فعلی: `{TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))}`\n'
+            f'💡 پیشنهاد: *{TF_DISPLAY[tf]}*\n\n'
+            f'📊 قدرت روند تقریبی بازار: `{avg_adx:.1f}`\n'
+            f'🌪 نوسان نسبی تقریبی: `{avg_atr:.2f}%`\n\n'
+            f'📝 دلیل: {reason}\n\n'
+            '⚠️ این فقط پیشنهاد است؛ تایم‌فریم و پارامترها خودکار تغییر نمی‌کنند.')
+
+
+def performance_period_report(chat_id, period='all'):
+    s=get_session(chat_id)
+    closed=list(s.get('closed_positions') or [])
+    now=time.time()
+    seconds={'day':86400,'week':7*86400,'month':30*86400}.get(period)
+    if seconds: closed=[p for p in closed if now-float(p.get('close_timestamp',p.get('opened_at',0)) or 0)<=seconds]
+    label={'day':'امروز','week':'۷ روز اخیر','month':'۳۰ روز اخیر','all':'کل سابقه'}.get(period,'کل سابقه')
+    n=len(closed); pnls=[float(p.get('pnl_usdt',0) or 0) for p in closed]
+    wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
+    net=sum(pnls); gp=sum(wins); gl=abs(sum(losses)); pf=gp/gl if gl else (float('inf') if gp else 0)
+    rvals=[]
+    for p in closed:
+        try:
+            risk=float(p.get('risk_usdt') or 0); pnl=float(p.get('pnl_usdt') or 0)
+            if risk>0: rvals.append(pnl/risk)
+        except: pass
+    by_strat={}
+    by_tf={}
+    for p in closed:
+        k=p.get('strategy') or 'نامشخص'; by_strat.setdefault(k,[0,0.0,0]); by_strat[k][0]+=1; by_strat[k][1]+=float(p.get('pnl_usdt',0) or 0); by_strat[k][2]+=int(float(p.get('pnl_usdt',0) or 0)>0)
+        k=p.get('timeframe') or 'نامشخص'; by_tf.setdefault(k,[0,0.0,0]); by_tf[k][0]+=1; by_tf[k][1]+=float(p.get('pnl_usdt',0) or 0); by_tf[k][2]+=int(float(p.get('pnl_usdt',0) or 0)>0)
+    lines=['📊 *گزارش عملکرد '+label+'*','━━━━━━━━━━━━━━━━━━━━',f'معاملات بسته‌شده: `{n}`',f'موفق: `{len(wins)}` | ناموفق: `{len(losses)}`',f'نرخ موفقیت: `{(len(wins)/n*100 if n else 0):.1f}%`',f'سود/زیان خالص: `{net:+.2f} USDT`',f'Profit Factor: `{("∞" if pf==float("inf") else f"{pf:.2f}")}`',f'امیدریاضی: `{(sum(rvals)/len(rvals) if rvals else 0):+.2f}R`' if rvals else 'امیدریاضی: `داده کافی نیست`', '', '🧠 *عملکرد استراتژی‌ها*']
+    for k,v in sorted(by_strat.items(), key=lambda z:z[1][1], reverse=True): lines.append(f'• `{k}` — {v[0]} معامله | {v[2]}/{v[0]} موفق | `{v[1]:+.2f} USDT`')
+    lines += ['', '⏱ *عملکرد تایم‌فریم‌ها*']
+    for k,v in sorted(by_tf.items(), key=lambda z:z[1][1], reverse=True): lines.append(f'• `{TF_DISPLAY.get(k,k)}` — {v[0]} معامله | {v[2]}/{v[0]} موفق | `{v[1]:+.2f} USDT`')
+    stats=s.get('scan_stats',{})
+    top_reasons=sorted((stats.get('reason_counts') or {}).items(), key=lambda z:-z[1])[:4]
+    lines += ['', f'🔄 پوزیشن‌های باز فعلی: `{len(s.get("paper_positions",[]))}`', f'🔍 اسکن‌های ثبت‌شده: `{stats.get("scans",0)}` | نمادها: `{stats.get("symbols",0)}`', f'🎯 سیگنال‌ها: `{stats.get("signals",0)}` | ورود موفق: `{stats.get("entries",0)}` | موارد متوقف‌شده: `{stats.get("blocked",0)}`', '', '🔎 *مهم‌ترین دلایل عدم ورود ثبت‌شده*']
+    if top_reasons:
+        lines += [f'• `{n}×` {r}' for r,n in top_reasons]
+    else: lines.append('• هنوز داده کافی ثبت نشده است.')
+    lines.append('')
+    lines.append('⚠️ نتیجه‌گیری آماری با نمونه کم قطعی نیست.')
+    return '\n'.join(lines)
+
+
+def trade_audit_report(chat_id):
+    s=get_session(chat_id); positions=list(s.get('paper_positions') or []); closed=list(s.get('closed_positions') or [])
+    allp=closed+positions
+    if not allp: return '🔎 *ممیزی معامله*\n\nهنوز معامله‌ای برای بررسی ثبت نشده است.'
+    p=max(allp,key=lambda x: float(x.get('opened_at',0) or 0)); tid=p.get('trade_id','—')
+    events=[e for e in s.get('trade_audit',[]) if e.get('trade_id')==tid]
+    lines=['🔎 *ممیزی صفر تا صد آخرین پوزیشن*','━━━━━━━━━━━━━━━━━━━━',f'🆔 شناسه معامله: `{tid}`',f'🪙 نماد: `{p.get("symbol")}` | {"LONG" if side_long(p.get("side")) else "SHORT"}',f'⏱ تایم‌فریم: `{TF_DISPLAY.get(p.get("timeframe"),p.get("timeframe"))}`',f'🧠 استراتژی: `{p.get("strategy")}`',f'🎯 Entry: `{fmt(p.get("entry_price",0))}` | SL: `{fmt(p.get("sl",0))}` | TP: `{fmt(p.get("tp",0))}`',f'⚖️ R:R برنامه‌ریزی‌شده: `{float(p.get("planned_rr",0) or 0):.2f}R`',f'📊 کیفیت: `{p.get("quality_score","—")}/100`',f'📦 وضعیت: `{"بسته‌شده" if p in closed else "باز"}`']
+    if p in closed: lines += [f'🚪 خروج: `{fmt(p.get("close_price",0))}`',f'💰 PnL: `{float(p.get("pnl_usdt",0) or 0):+.2f} USDT`',f'📝 علت خروج: `{p.get("close_reason","—")}`']
+    lines += ['',f'🧾 مراحل ثبت‌شده: `{len(events)}`']
+    for e in events[-10:]: lines.append(f'• `{e.get("stage")}` — {time.strftime("%H:%M:%S",time.localtime(float(e.get("ts",0))))}')
+    return '\n'.join(lines)
+
+
+def export_trade_data(chat_id):
+    if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
+    s=get_session(chat_id)
+    payload={'generated_at':time.time(),'chat_id':chat_id,'settings':{'timeframe':s.get('timeframe'),'strategy':s.get('active_strategy'),'max_open_positions':s.get('max_open_positions')},'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[]),'scan_stats':s.get('scan_stats',{})}
+    raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
+    try:
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات و ممیزی صفر تا صد'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        return True
+    except Exception as exc: logger.warning('export trade data failed: %s',exc); return False
+
+
 def performance(chat_id):
     s=get_session(chat_id)
     closed=list(s.get('closed_positions') or [])
@@ -1898,6 +2124,8 @@ def reset_stats(chat_id):
     # Only performance/history state is reset. User settings, watchlist, credentials
     # and strategy configuration remain untouched.
     s['closed_positions'] = []
+    s['trade_audit'] = []
+    s['scan_stats'] = {'scans':0,'symbols':0,'signals':0,'entries':0,'blocked':0,'data_errors':0,'reason_counts':{}}
     s['daily_stopped'] = False
     if s.get('trading_mode') == 'REAL':
         try:
@@ -2333,7 +2561,7 @@ def apply_user_profile(s, profile):
 def process_command(cmd,chat_id,message_id=None):
 
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
-        _performance_dashboard(chat_id)
+        send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
         return
     if cmd in ('/audit','audit','🧪 ممیزی ربات'):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active']))
@@ -2502,7 +2730,19 @@ def process_command(cmd,chat_id,message_id=None):
         lines=[f'🔄 *پوزیشن‌ها ({len(s["paper_positions"])})*']
         for p in s['paper_positions']: lines.append(f"{'🟢' if side_long(p['side']) else '🔴'} `{p['symbol']}` | {p['side']} | Entry `{fmt(p['entry_price'])}` | SL `{fmt(p['sl'])}` | TP `{fmt(p['tp'])}`")
         send_message(chat_id,'\n'.join(lines),get_positions_keyboard(s['paper_positions'])); return
-    if cl=='/performance' or 'گزارش عملکرد' in c: send_message(chat_id,performance(chat_id),get_performance_keyboard()); return
+    if cl in ('/performance_today','/report_today'):
+        send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard()); return
+    if cl in ('/performance_week','/report_week'):
+        send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard()); return
+    if cl in ('/performance_month','/report_month'):
+        send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard()); return
+    if cl in ('/trade_audit','/last_trade_audit'):
+        send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard()); return
+    if cl=='/timeframe_advice':
+        send_message(chat_id, timeframe_advice(chat_id), get_performance_keyboard()); return
+    if cl=='/export_trade_data':
+        export_trade_data(chat_id); return
+    if cl=='/performance' or 'گزارش عملکرد' in c: send_message(chat_id,performance_period_report(chat_id, 'all'),get_performance_keyboard()); return
     if cl=='/reset_stats_prompt':
         if s.get('paper_positions'):
             send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'); return
@@ -2715,6 +2955,8 @@ def status():
 
 def main():
     init_db(); load_telegram_offset(); load_sessions(); logger.info('Loaded %s sessions',len(USER_SESSIONS))
+    if not ALLOWED_CHAT_IDS:
+        logger.warning('SECURITY: ALLOWED_CHAT_IDS تنظیم نشده — ربات به پیام هر کاربر تلگرامی پاسخ می‌دهد. برای محدود کردن دسترسی، ALLOWED_CHAT_IDS را در متغیرهای محیطی تنظیم کنید.')
     configure_telegram_native_menu()
     Thread(target=telegram_listener,daemon=True,name='telegram').start(); Thread(target=lambda:(time.sleep(3),asyncio.run(scan_loop())),daemon=True,name='scanner').start()
     app.run(host='0.0.0.0',port=PORT,threaded=True)

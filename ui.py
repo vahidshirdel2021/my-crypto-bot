@@ -2,9 +2,14 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
-    # منوی قبلی Reply Keyboard حذف شده است.
-    # منوی اصلی اکنون از Menu Button بومی تلگرام کنار کادر پیام باز می‌شود.
-    return {"remove_keyboard": True}
+    # یک دکمه ثابت و ساده پایین چت؛ فقط منوی اصلی را باز می‌کند.
+    return {
+        "keyboard": [[{"text": "☰ منوی اصلی"}]],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+        "is_persistent": True,
+        "input_field_placeholder": "پیام یا انتخاب از منوی اصلی…"
+    }
 
 
 def get_filters_menu_keyboard(session=None):
@@ -58,6 +63,11 @@ def get_learn_menu_keyboard():
 
 def get_performance_keyboard():
     return {"inline_keyboard": [
+        [{"text": "📅 امروز", "callback_data": "/performance_today"}, {"text": "📆 ۷ روز", "callback_data": "/performance_week"}],
+        [{"text": "🗓 ۳۰ روز", "callback_data": "/performance_month"}, {"text": "📊 کل سابقه", "callback_data": "/performance"}],
+        [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+        [{"text": "🧠 پیشنهاد تایم‌فریم", "callback_data": "/timeframe_advice"}],
+        [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
         [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
@@ -114,8 +124,10 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
          {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}],
         [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"},
          {"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}],
-        [{"text": "📈 عملکرد", "callback_data": "/performance"},
+        [{"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"},
          {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
+        [{"text": "🧠 پیشنهاد تایم‌فریم", "callback_data": "/timeframe_advice"},
+         {"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
         [{"text": "💬 گفت‌وگو با هوش مصنوعی", "callback_data": "/ai_chat"}],
         [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"},
          {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}],
