@@ -103,7 +103,7 @@ def get_max_positions_keyboard():
 
 
 def get_timeframe_keyboard():
-    return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "4س", "callback_data": "/set_tf_4h"}], [{"text": "1روز", "callback_data": "/set_tf_1d"}, {"text": "مولتی", "callback_data": "/set_tf_multi"}]]}
+    return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "1س", "callback_data": "/set_tf_1h"}], [{"text": "4س", "callback_data": "/set_tf_4h"}, {"text": "مولتی", "callback_data": "/set_tf_multi"}]]}
 
 
 def get_main_menu_keyboard(active, entry_diag_enabled=True):

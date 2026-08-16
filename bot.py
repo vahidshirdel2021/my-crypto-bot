@@ -75,6 +75,15 @@ DEFAULT_ACTIVE_SYMBOLS = ALL_SYMBOLS[:]
 LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC','LINK','DOT','AVAX','ATOM','NEAR','TRX','ETC','FIL','UNI','AAVE','MATIC','XTZ']
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه','multi':'مولتی'}
+# واچ‌لیست‌های برنده حاصل از تست کاربر؛ اسکن فقط از لیست متناظر تایم‌فریم استفاده می‌کند.
+WINNING_WATCHLISTS = {
+    '5min': ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT'],
+    '1hour': ['UNI','ZEC','ADA','CRV','GALA','DOT','EGLD'],
+    '4hour': ['BCH','TRX','EGLD','ATOM','NEAR','ZEC','GALA','WAVES','RUNE','KSM','HNT','UNI','DYDX','THETA','ETC','STORJ'],
+    'multi': ['UNI','STORJ','BCH','ATOM','TRX','HOT','ZEC','EGLD','WAVES','QTUM','SHIB','HNT','GALA','ADA','DOT','RUNE','THETA'],
+}
+SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
+LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
 
@@ -230,7 +239,7 @@ def default_session():
         'trade_amount_usdt': 50.0,
         'leverage': 5,
         'max_open_positions': 3,
-        'timeframe': '15min',
+        'timeframe': '5min',
         'active_strategy': 'dynamic',
         'paper_positions': [],
         'closed_positions': [],
@@ -280,6 +289,9 @@ def normalize_session(data):
         s['active_symbols'] = stored_symbols
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
+    if s.get('timeframe') not in SUPPORTED_TRADING_TIMEFRAMES:
+        # 15m/روزانه در این نسخه واچ‌لیست برنده ندارند؛ برای جلوگیری از اسکن اشتباه به 5m برمی‌گردیم.
+        s['timeframe'] = '5min'
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
@@ -1581,6 +1593,68 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     return True
 
 
+def scan_watchlist_for_timeframe(timeframe):
+    """Return the fixed winning watchlist for the selected timeframe."""
+    return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
+
+
+async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe):
+    """Final entry gate: block correlated altcoin entries during a confirmed BTC+ETH selloff."""
+    if symbol.upper() in LEADER_SYMBOLS:
+        return True, 'لیدر بازار است'
+    try:
+        if primary_df is None or primary_df.empty:
+            return False, 'داده کافی برای سنجش همبستگی موجود نیست'
+        leader_frames = {}
+        for leader in LEADER_SYMBOLS:
+            d = await get_klines_async(http, leader, timeframe if timeframe in TIMEFRAME_MAP else '5min', 100)
+            if d is None or d.empty or len(d) < 65:
+                return False, f'داده کافی برای {leader} جهت محافظت بازار دریافت نشد'
+            leader_frames[leader] = calculate_indicators(d)
+
+        alt = primary_df.copy()
+        if len(alt) < 65:
+            return False, 'داده کافی برای محاسبه همبستگی ارز هدف موجود نیست'
+        alt_ret = pd.to_numeric(alt['close'], errors='coerce').pct_change().dropna().tail(60)
+
+        leader_states = []
+        correlations = []
+        for leader, frame in leader_frames.items():
+            c = frame.iloc[-2]
+            ret = pd.to_numeric(frame['close'], errors='coerce').pct_change().dropna().tail(60)
+            corr = float(alt_ret.corr(ret)) if len(alt_ret) >= 20 and len(ret) >= 20 else 0.0
+            if not math.isfinite(corr):
+                corr = 0.0
+            correlations.append((leader, corr))
+            change_1 = (float(c.close) / float(frame.iloc[-3].close) - 1.0) * 100 if float(frame.iloc[-3].close) else 0.0
+            change_3 = (float(c.close) / float(frame.iloc[-5].close) - 1.0) * 100 if float(frame.iloc[-5].close) else 0.0
+            bearish = bool(float(c.close) < float(c.ema20) < float(c.ema50) and float(c.adx) >= 20 and change_3 <= -0.8)
+            crash = bool(change_1 <= -1.0 or change_3 <= -2.0)
+            leader_states.append((leader, bearish, crash, change_1, change_3))
+
+        both_bearish = all(x[1] for x in leader_states)
+        any_crash = any(x[2] for x in leader_states)
+        max_corr = max(abs(x[1]) for x in correlations) if correlations else 0.0
+        avg_positive_corr = sum(max(0.0, x[1]) for x in correlations) / len(correlations) if correlations else 0.0
+
+        # سقوط هم‌زمان هر دو لیدر: اگر ارز با حداقل یکی از لیدرها همبستگی مثبت معنادار داشته باشد، ورود مسدود است.
+        if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+            detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+            return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
+
+        # سقوط شدید یکی از لیدرها نیز برای ارزهای به‌شدت همبسته ورود را متوقف می‌کند.
+        if any_crash and max_corr >= 0.65:
+            detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+            return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+
+        detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+        return True, f'محافظ بازار عبور کرد | BTC: {leader_states[0][4]:+.2f}%/3c | ETH: {leader_states[1][4]:+.2f}%/3c | همبستگی: {detail}'
+    except Exception as exc:
+        logger.warning('LEADER_GUARD chat=%s symbol=%s error=%s', chat_id, symbol, exc)
+        # در گیت حفاظتی، شکست داده‌خوانی را fail-closed در نظر می‌گیریم تا ورود ناامن رخ ندهد.
+        return False, f'محافظ بازار به دلیل خطای دریافت داده فعال نشد: {exc}'
+
+
 def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
     """Serialize entry transactions so STOP cannot race an order submission."""
     s=get_session(chat_id)
@@ -1963,6 +2037,10 @@ async def scan_symbol(http,chat_id,symbol):
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     full_reason=f"{reason} | {plan_reason}"[:500]
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=plan_ok signal=%s entry=%s sl=%s tp=%s detail=%s', chat_id, symbol, sig, entry, sl, tp, plan_reason)
+    guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=leader_guard ok=%s reason=%s', chat_id, symbol, guard_ok, guard_reason)
+    if not guard_ok:
+        return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=execute_result ok=%s', chat_id, symbol, ok)
     if ok:
@@ -1971,36 +2049,61 @@ async def scan_symbol(http,chat_id,symbol):
 
 
 def timeframe_advice(chat_id):
-    """Suggest a timeframe; never changes user settings automatically."""
+    """Suggest one of the supported winning watchlist timeframes; never changes user settings."""
     s=get_session(chat_id)
-    symbols=['BTC','ETH','BNB','SOL','XRP']
-    metrics=[]
-    for sym in symbols:
-        try:
-            d=get_klines(sym,'15min',120)
-            if d.empty: continue
-            x=calculate_indicators(d).iloc[-2]
-            metrics.append((float(x.adx or 0), float(x.atr or 0), float(x.close or 0)))
-        except Exception: continue
-    if not metrics:
-        return '🧠 *پیشنهاد تایم‌فریم*\n\nفعلاً داده کافی برای پیشنهاد مطمئن وجود ندارد.\n\n⚠️ ربات هیچ تایم‌فریمی را خودکار تغییر نمی‌دهد.'
-    avg_adx=sum(x[0] for x in metrics)/len(metrics)
-    avg_atr=sum((x[1]/x[2]*100 if x[2] else 0) for x in metrics)/len(metrics)
-    if avg_adx >= 30 and avg_atr >= 0.35:
-        tf='15min'; reason='بازار حرکت و نوسان قابل‌توجهی دارد؛ 5 دقیقه می‌تواند نویز بیشتری ایجاد کند.'
-    elif avg_adx >= 25:
-        tf='15min'; reason='روند در حال شکل‌گیری/تقویت است و 15 دقیقه تعادل مناسبی بین سرعت و نویز دارد.'
-    elif avg_adx < 20:
-        tf='1hour'; reason='قدرت روند پایین است؛ تایم‌فریم بالاتر معمولاً نویز کوتاه‌مدت را کمتر می‌کند.'
-    else:
-        tf='15min'; reason='شرایط بازار میانه است؛ 15 دقیقه انتخاب متعادل‌تری است.'
-    return (f'🧠 *پیشنهاد هوشمند تایم‌فریم*\n━━━━━━━━━━━━━━━━━━━━\n'
-            f'📌 تایم‌فریم فعلی: `{TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))}`\n'
-            f'💡 پیشنهاد: *{TF_DISPLAY[tf]}*\n\n'
-            f'📊 قدرت روند تقریبی بازار: `{avg_adx:.1f}`\n'
-            f'🌪 نوسان نسبی تقریبی: `{avg_atr:.2f}%`\n\n'
+    benchmark=['BTC','ETH','BNB','SOL','XRP']
+    scores=[]
+    details=[]
+    tf_choices=['5min','1hour','4hour']
+    for tf in tf_choices:
+        results=[]
+        for sym in benchmark:
+            try:
+                item=_market_snapshot(sym, tf)
+                if item: results.append(item)
+            except Exception: continue
+        if not results: continue
+        avg_adx=sum(x['adx'] for x in results)/len(results)
+        avg_rsi=sum(x['rsi'] for x in results)/len(results)
+        avg_atr=sum(x['atr_pct'] for x in results)/len(results)
+        avg_vol=sum(x['volume_ratio'] for x in results)/len(results)
+        score,_=_market_score(results, avg_adx, avg_rsi, avg_atr, avg_vol)
+        details.append((tf, score, avg_adx, avg_atr))
+        scores.append((score, tf))
+
+    # Multi-timeframe uses the medium/high timeframe market quality as its recommendation proxy.
+    multi_score=None
+    if details:
+        dmap={x[0]:x for x in details}
+        usable=[dmap[k][1] for k in ('1hour','4hour') if k in dmap]
+        if usable: multi_score=round(sum(usable)/len(usable))
+    if multi_score is not None:
+        scores.append((multi_score, 'multi'))
+
+    if not scores:
+        return ('🧠 *پیشنهاد سیستم برای تایم‌فریم*\n\n'
+                '⚠️ فعلاً داده کافی برای پیشنهاد مطمئن دریافت نشد.\n'
+                'تایم‌فریم را از گزینه‌های زیر انتخاب کنید.')
+
+    scores.sort(reverse=True)
+    suggested=scores[0][1]
+    best_score=scores[0][0]
+    selected=TF_DISPLAY.get(s.get('timeframe'),s.get('timeframe'))
+    score_lines=' | '.join(f'{TF_DISPLAY.get(tf,tf)}: {score}/100' for score,tf in sorted(scores, key=lambda x: ['5min','1hour','4hour','multi'].index(x[1])))
+    reason={
+        '5min':'برای شرایط فعلی، مومنتوم و قابلیت معامله در تایم کوتاه امتیاز بالاتری گرفته است.',
+        '1hour':'برای شرایط فعلی، تعادل بهتری بین قدرت روند و نویز بازار دارد.',
+        '4hour':'برای شرایط فعلی، روند و کیفیت حرکت در تایم بالاتر مناسب‌تر ارزیابی شده است.',
+        'multi':'ترکیب تایم‌های 1ساعته و 4ساعته در شرایط فعلی امتیاز بالاتری گرفته است.',
+    }[suggested]
+    return (f'🧠 *پیشنهاد سیستم برای تایم‌فریم*\n'
+            f'━━━━━━━━━━━━━━━━━━━━\n'
+            f'💡 پیشنهاد فعلی سیستم: *{TF_DISPLAY[suggested]}* (امتیاز بازار: `{best_score}/100`)\n'
             f'📝 دلیل: {reason}\n\n'
-            '⚠️ این فقط پیشنهاد است؛ تایم‌فریم و پارامترها خودکار تغییر نمی‌کنند.')
+            f'📊 مقایسه کیفیت بازار: {score_lines}\n\n'
+            f'⏱ انتخاب فعلی کاربر: `{selected}`\n'
+            '👇 حالا تایم‌فریم موردنظر را انتخاب کنید.\n'
+            '⚠️ این پیام فقط پیشنهاد است و انتخاب شما را خودکار تغییر نمی‌دهد.')
 
 
 def performance_period_report(chat_id, period='all'):
@@ -2817,9 +2920,16 @@ def process_command(cmd,chat_id,message_id=None):
         v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
-    if cl.startswith('/set_max_'): s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id); edit_page(chat_id,'⚙️ تایم‌فریم:',get_timeframe_keyboard(),message_id); return
+    if cl.startswith('/set_max_'):
+        s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
+        advice=timeframe_advice(chat_id)
+        edit_page(chat_id, advice, get_timeframe_keyboard(), message_id)
+        return
     if cl.startswith('/set_tf_'):
-        s['timeframe']={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour','/set_tf_1d':'1day','/set_tf_multi':'multi'}[cl]; save_session(chat_id); menu(chat_id, message_id); return
+        tf_map={'/set_tf_5m':'5min','/set_tf_1h':'1hour','/set_tf_4h':'4hour','/set_tf_multi':'multi'}
+        if cl not in tf_map:
+            return
+        s['timeframe']=tf_map[cl]; save_session(chat_id); menu(chat_id, message_id); return
     if cl.startswith('/set_strat_'):
         key=cl.replace('/set_strat_','')
         if key in ('dynamic','trend','breakout','mean_reversion','multi'): s['active_strategy']=key; save_session(chat_id); menu(chat_id, message_id)
@@ -3047,7 +3157,8 @@ async def scan_loop():
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
                         continue
-                    for sym in list(s['active_symbols']): tasks.append(scan_symbol(http,cid,sym))
+                    for sym in scan_watchlist_for_timeframe(s.get('timeframe','5min')):
+                        tasks.append(scan_symbol(http,cid,sym))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
