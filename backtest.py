@@ -42,7 +42,7 @@ import pandas as pd
 
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan,
-    FILTER_DEFAULTS, STRATEGY_DEFAULTS,
+    FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
 PAPER_CONSERVATIVE_OHLC = True  # اگر در یک کندل هم SL و هم TP لمس شود، بدترین حالت (SL) فرض می‌شود؛ دقیقاً مطابق bot.py
@@ -120,8 +120,16 @@ def fetch_ohlcv_coinex(symbol, timeframe, start_iso, end_iso, market_type='swap'
 # ---------------------------------------------------------------------------
 # هسته بک‌تست: دقیقاً مطابق strategy.py + منطق مدیریت پوزیشن paper در bot.py
 # ---------------------------------------------------------------------------
+# نگاشت تایم‌فریم سبک ccxt (که برای دانلود داده استفاده می‌شود) به کلید تایم‌فریم استراتژی
+# (که آستانه‌های ADX/امتیاز/R:R را بر اساس آن تنظیم می‌کند - مطابق TIMEFRAME_PARAM_ADJUST در strategy.py)
+CCXT_TO_STRATEGY_TF = {
+    '5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour', '1d': 'multi',
+}
+
+
 def run_backtest(df, strategy_type='breakout', side='both', filters=None, strategy_config=None,
-                  margin_usdt=50.0, leverage=5, taker_fee_pct=0.05, use_trailing=True):
+                  margin_usdt=50.0, leverage=5, taker_fee_pct=0.05, use_trailing=True,
+                  strategy_timeframe='1hour'):
     filters = {**FILTER_DEFAULTS, **(filters or {})}
     strategy_config = {**STRATEGY_DEFAULTS, **(strategy_config or {})}
 
@@ -136,7 +144,7 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
         # پنجره‌ای که آخرین کندل کامل‌شده روی ایندکس -2 آن قرار دارد (دقیقاً مطابق نحوه فراخوانی در bot.py)
         window = ind.iloc[: i + 2]
         sig, reason = get_signal_with_reason(
-            window, timeframe_mode='single', timeframe='15min',
+            window, timeframe_mode='single', timeframe=strategy_timeframe,
             strategy_type=strategy_type, filters=filters, strategy_config=strategy_config,
         )
         if sig not in ('BUY', 'SELL'):
@@ -149,7 +157,7 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
             i += 1
             continue
 
-        plan, _ = build_trade_plan(window, sig, strategy_config, strategy_type)
+        plan, _ = build_trade_plan(window, sig, strategy_config, strategy_type, strategy_timeframe)
         if not plan:
             i += 1
             continue
@@ -271,17 +279,21 @@ def main():
     ap.add_argument('--margin', type=float, default=50.0)
     ap.add_argument('--leverage', type=int, default=5)
     ap.add_argument('--no-trailing', action='store_true', help='تریلینگ‌استاپ را خاموش کن (برای مقایسه)')
+    ap.add_argument('--strategy-timeframe', default=None, choices=list(TIMEFRAME_PARAM_ADJUST.keys()),
+                     help='کلید تایم‌فریم برای آستانه‌های ADX/امتیاز/R:R (پیش‌فرض: نگاشت خودکار از --timeframe)')
     ap.add_argument('--csv', default=None, help='مسیر خروجی CSV اختیاری برای لیست کامل معاملات')
     args = ap.parse_args()
 
+    strategy_tf = args.strategy_timeframe or CCXT_TO_STRATEGY_TF.get(args.timeframe, '1hour')
     print(f'⏳ دریافت داده {args.symbol} | {args.timeframe} | {args.start} تا {args.end} از CoinEx ...')
     df = fetch_ohlcv_coinex(args.symbol, args.timeframe, args.start, args.end)
-    print(f'✅ {len(df)} کندل دریافت شد.')
+    print(f'✅ {len(df)} کندل دریافت شد. | آستانه‌های استراتژی بر اساس تایم‌فریم: {strategy_tf}')
 
     trades = run_backtest(
         df, strategy_type=args.strategy, side=args.side,
         margin_usdt=args.margin, leverage=args.leverage,
         use_trailing=not args.no_trailing,
+        strategy_timeframe=strategy_tf,
     )
     summarize(trades)
 

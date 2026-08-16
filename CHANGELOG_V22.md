@@ -33,6 +33,15 @@
 - Default strategy filters/config use min ADX 24, minimum score 82, no-short enabled, target cap 1.8R.
 - Existing audit, AI, UI, public multi-user test access, and full watchlist are preserved.
 
+## V24.2 — آستانه‌های وابسته به تایم‌فریم + واچ‌لیست کامل (فاز تست هفتگی)
+- سخت‌گیری کلی کاهش یافت: `min_adx` 24→20، `min_trade_score` 82→74، `min_rr`/`min_target_r` 1.35→1.20 (پیش‌فرض پایه).
+- جدول `TIMEFRAME_PARAM_ADJUST` اضافه شد: روی همین پایه، تایم‌فریم‌های کوتاه‌تر (نویزی‌تر) سخت‌گیرتر و تایم‌فریم‌های بالاتر شل‌ترند (دلتای ADX/امتیاز/R:R برای هرکدام از 5min تا multi جداست).
+- رفع باگ: `strategy_breakout` قبلاً مستقل از تایم‌فریم واقعی، همیشه آستانه معادل `"5min"` هاردکد را می‌گرفت (هم در `get_strategy_params` و هم در گیت `adx >= 24.0` خط به خط)؛ اکنون تایم‌فریم واقعی جلسه را می‌گیرد و اثر می‌گذارد.
+- `build_trade_plan` اکنون آرگومان `timeframe` می‌گیرد و امتیاز/R:R را بر همان اساس تنظیم می‌کند؛ فراخوانی‌های آن در bot.py و backtest.py به‌روزرسانی شدند.
+- گزارش تشخیصی «عدم ورود» (`_breakout_filter_diagnostics`) که یک کپی مستقل از منطق گیت‌ها بود و هم‌گام نبود، اکنون از همان `get_strategy_params` استفاده می‌کند تا با تصمیم واقعی مطابق باشد.
+- `backtest.py`: به‌جای هاردکد `timeframe='15min'`، اکنون از تایم‌فریم CLI (`--timeframe`) نگاشت خودکار به کلید استراتژی می‌شود (قابل بازنویسی دستی با `--strategy-timeframe`).
+- **واچ‌لیست**: برای فاز تست هفتگی، `WINNING_WATCHLISTS` و `WINNING_SHORT_WATCHLISTS` به کل `ALL_SYMBOLS` برای هر ۵ تایم‌فریم تغییر کردند (شامل کلید `15min` که قبلاً اصلاً وجود نداشت و بی‌صدا به واچ‌لیست 5min سقوط می‌کرد).
+
 ## V24 — تشخیص خودکار جهت بازار (Auto Long/Short/No-Trade)
 - تابع `refresh_market_regime` اضافه شد: جهت قطعی کل بازار را از هم‌راستایی BTC و ETH روی تایم‌فریم ۴ ساعته (قابل تنظیم با `MARKET_REGIME_TIMEFRAME`/`MARKET_REGIME_MIN_ADX`) تعیین می‌کند. فقط وقتی هر دو لیدر هم‌جهت باشند رژیم قطعی است؛ در غیر این صورت NEUTRAL و **هیچ معامله‌ای انجام نمی‌شود**.
 - `strategy_dynamic` اکنون بر اساس این رژیم بین سیگنال‌های Long (شکست صعودی) و Short (شکست نزولی) سوییچ می‌کند؛ در NEUTRAL هیچ سیگنالی صادر نمی‌کند. این فقط استراتژی `dynamic` را تحت تأثیر قرار می‌دهد؛ سایر استراتژی‌ها (روندی/شکست/بازگشت/چندزمانه) بدون تغییرند.

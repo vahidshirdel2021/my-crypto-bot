@@ -66,21 +66,14 @@ DEFAULT_ACTIVE_SYMBOLS = ALL_SYMBOLS[:]
 LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC','LINK','DOT','AVAX','ATOM','NEAR','TRX','ETC','FIL','UNI','AAVE','MATIC','XTZ']
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه','multi':'مولتی'}
-# واچ‌لیست‌های برنده حاصل از تست کاربر؛ اسکن فقط از لیست متناظر تایم‌فریم استفاده می‌کند.
-WINNING_WATCHLISTS = {
-    '5min': ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT'],
-    '1hour': ['UNI','ZEC','ADA','CRV','GALA','DOT','EGLD'],
-    '4hour': ['BCH','TRX','EGLD','ATOM','NEAR','ZEC','GALA','WAVES','RUNE','KSM','HNT','UNI','DYDX','THETA','ETC','STORJ'],
-    'multi': ['UNI','STORJ','BCH','ATOM','TRX','HOT','ZEC','EGLD','WAVES','QTUM','SHIB','HNT','GALA','ADA','DOT','RUNE','THETA'],
-}
+# V24.2: برای فاز تست هفتگی، واچ‌لیست هر تایم‌فریم به کل Universe (ALL_SYMBOLS) باز شده تا
+# استراتژی بدون تعصب واچ‌لیست‌های «برنده» قبلی سنجیده شود. کلید '15min' هم اضافه شد چون قبلاً
+# اصلاً وجود نداشت و اسکن آن بی‌صدا از لیست 5min استفاده می‌کرد.
+_ALL_TF_KEYS = ('5min', '15min', '1hour', '4hour', 'multi')
+WINNING_WATCHLISTS = {tf: list(ALL_SYMBOLS) for tf in _ALL_TF_KEYS}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
-# واچ‌لیست‌های برنده SHORT (کاربر) — وقتی رژیم بازار نزولی تشخیص داده شود، اسکن از این لیست‌ها استفاده می‌کند.
-WINNING_SHORT_WATCHLISTS = {
-    '5min': ['IOTA','ALGO','MASK','NEO','UNI','STORJ','BTC','DASH','RUNE','COMP','BNB','ONE','GALA','AR','LUNA','MANA','ETH','ETC','SOL','SUSHI','LINK','SKL','CHZ','TRB','EGLD','BTT','VET'],
-    '1hour': ['NEAR','SLP','ANKR','ADA','ZIL','BCH','AAVE','DYDX','RVN','RUNE','EGLD','SOL','CHZ','SHIB','TRX','ATOM','SUSHI','ENJ','WAVES','ZEC'],
-    '4hour': ['ATOM','BCH','XTZ','IOTA','AVAX','AXS','WAVES','ETH','NEAR','SNX','SOL','TRB','SKL','STORJ','NEO','BTT','KSM','GALA','COMP','RVN','ADA','SAND','RSR','ZIL','ZRX','CHZ','RAY','QTUM','BTC','ENJ'],
-    'multi': ['SOL','CHZ','IOTA','BCH','ATOM','NEAR','NEO','STORJ','COMP','RUNE','ADA','BTC','ETH','ZIL','GALA','RVN','WAVES','SKL','TRB','BTT','EGLD','SUSHI','ENJ'],
-}
+# واچ‌لیست SHORT هم برای فاز تست همان Universe کامل است — وقتی رژیم بازار نزولی باشد از همین لیست می‌خواند.
+WINNING_SHORT_WATCHLISTS = {tf: list(ALL_SYMBOLS) for tf in _ALL_TF_KEYS}
 LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
@@ -1664,12 +1657,12 @@ def update_positions(chat_id):
     save_session(chat_id)
 
 
-def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
+def _breakout_filter_diagnostics(df, filters=None, strategy_config=None, timeframe='5min'):
     """Independent read-only diagnostic of the exact V4 breakout gates.
 
     This function does not change strategy decisions; it only counts whether each
     gate would pass on the latest closed candle so the no-entry report can identify
-    the real bottleneck.
+    the real bottleneck. Kept in sync with strategy_breakout's timeframe-aware ADX gate.
     """
     out = {
         'adx_ok': False, 'volume_breakout_ok': False, 'body_ok': False,
@@ -1691,14 +1684,15 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
         channel_low = curr.get('channel_low')
         if pd.isna(channel_high) or pd.isna(channel_low):
             return out
-        min_adx = float(cfg.get('min_adx', 24.0))
+        p = get_strategy_params(timeframe, cfg)
+        min_adx = p['adx']
         out['adx_ok'] = adx >= max(15.0, min_adx - 5.0)
         out['volume_breakout_ok'] = (not f.get('volume_filter', True)) or vr >= 1.15
         out['body_ok'] = body_ratio >= 0.55
         out['trend_buy_ok'] = bool(curr['close'] > curr['ema20'] > curr['ema50'] and curr['plus_di'] > curr['minus_di'])
         out['trend_sell_ok'] = bool(curr['close'] < curr['ema20'] < curr['ema50'] and curr['minus_di'] > curr['plus_di'])
-        out['breakout_buy_ok'] = bool(curr['close'] > channel_high and prev['close'] <= prev.get('channel_high', float('inf')) and out['trend_buy_ok'] and adx >= 24.0)
-        out['breakout_sell_ok'] = bool(curr['close'] < channel_low and prev['close'] >= prev.get('channel_low', -float('inf')) and out['trend_sell_ok'] and adx >= 24.0)
+        out['breakout_buy_ok'] = bool(curr['close'] > channel_high and prev['close'] <= prev.get('channel_high', float('inf')) and out['trend_buy_ok'] and adx >= min_adx)
+        out['breakout_sell_ok'] = bool(curr['close'] < channel_low and prev['close'] >= prev.get('channel_low', -float('inf')) and out['trend_sell_ok'] and adx >= min_adx)
 
         if not f.get('volume_filter', True):
             out['candle_volume_ok'] = True
@@ -1926,12 +1920,12 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
-    sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'],regime if strat=='dynamic' else None)
+    sig,reason=get_signal_with_reason(primary,md,mode,tf,strat,s['filters'],s['strategy_config'],regime if strat=='dynamic' else None)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
-    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if strat == 'dynamic' else {}
+    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config'], tf) if strat == 'dynamic' else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat, tf)
     if not plan:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -2252,7 +2246,7 @@ def analyze(chat_id,symbol):
         return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.'
     d=calculate_indicators(d); c=d.iloc[-2]
     a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config'])
-    b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
+    b,r2=strategy_breakout(d,s['filters'],s['strategy_config'],tf)
     m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
 
     adx=float(c.adx or 0)
