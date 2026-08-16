@@ -12,15 +12,15 @@ FILTER_DEFAULTS = {
 }
 
 STRATEGY_DEFAULTS = {
-    "min_adx": 24.0,
+    "min_adx": 20.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
     "dynamic_exits": True,
-    "min_trade_score": 82.0,
-    "min_rr": 1.35,
+    "min_trade_score": 74.0,
+    "min_rr": 1.20,
     "max_sl_atr": 2.50,
-    "min_target_r": 1.35,
+    "min_target_r": 1.20,
     "max_target_r": 1.8,
 }
 
@@ -336,8 +336,8 @@ def strategy_breakout(df, filters=None, strategy_config=None):
         return None, "قدرت بدنه کافی نیست"
     trend_buy = curr["close"] > curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
     trend_sell = curr["close"] < curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= 24.0
-    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= 24.0
+    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= p["adx"]
+    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= p["adx"]
     if not (bull or bear):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
