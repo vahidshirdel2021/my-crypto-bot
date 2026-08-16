@@ -32,3 +32,12 @@
 - Dynamic strategy updated to V4 candidate: strong bullish breakout only.
 - Default strategy filters/config use min ADX 24, minimum score 82, no-short enabled, target cap 1.8R.
 - Existing audit, AI, UI, public multi-user test access, and full watchlist are preserved.
+
+## V24 — تشخیص خودکار جهت بازار (Auto Long/Short/No-Trade)
+- تابع `refresh_market_regime` اضافه شد: جهت قطعی کل بازار را از هم‌راستایی BTC و ETH روی تایم‌فریم ۴ ساعته (قابل تنظیم با `MARKET_REGIME_TIMEFRAME`/`MARKET_REGIME_MIN_ADX`) تعیین می‌کند. فقط وقتی هر دو لیدر هم‌جهت باشند رژیم قطعی است؛ در غیر این صورت NEUTRAL و **هیچ معامله‌ای انجام نمی‌شود**.
+- `strategy_dynamic` اکنون بر اساس این رژیم بین سیگنال‌های Long (شکست صعودی) و Short (شکست نزولی) سوییچ می‌کند؛ در NEUTRAL هیچ سیگنالی صادر نمی‌کند. این فقط استراتژی `dynamic` را تحت تأثیر قرار می‌دهد؛ سایر استراتژی‌ها (روندی/شکست/بازگشت/چندزمانه) بدون تغییرند.
+- واچ‌لیست SHORT کاربر (`WINNING_SHORT_WATCHLISTS`) اضافه شد؛ در رژیم نزولی اسکن به‌جای واچ‌لیست LONG از این لیست استفاده می‌کند.
+- نمادهای `LUNA` و `WAVES` (که در واچ‌لیست‌های ارسالی و حتی واچ‌لیست LONG قبلی بودند ولی در `ALL_SYMBOLS` نبودند) پس از تأیید وجودشان در CoinEx Futures اضافه شدند.
+- `leader_correlation_guard` جهت‌دار شد: در جهت Long فقط جلوی ورود در سقوط تأییدشده لیدرها را می‌گیرد؛ در جهت Short، به‌طور متقارن جلوی ورود در جهش تأییدشده لیدرها را می‌گیرد (قبلاً این محافظ به‌طور یکسان هر دو جهت را در سقوط لیدرها مسدود می‌کرد که برای Short نادرست بود).
+- گزارش «داشبورد بازار» رژیم قطعی فعلی برای استراتژی Dynamic را هم نمایش می‌دهد.
+- ⚠️ برای فعال شدن ورودهای SHORT، فیلترهای `no_short_filter` و `no_buy_filter` باید از منوی فیلترها بررسی/تنظیم شوند (این فیلترها دستی هستند و به‌صورت خودکار تغییر داده نشدند).

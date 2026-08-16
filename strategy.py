@@ -5,7 +5,9 @@ FILTER_DEFAULTS = {
     "volume_filter": True,
     "trailing_stop": True,
     "candlestick_filter": True,
-    "no_short_filter": True,
+    # V24.1: استراتژی dynamic به‌صورت خودکار بین Long/Short سوییچ می‌کند (بر اساس رژیم بازار)،
+    # پس فیلتر مسدودکننده SHORT دیگر به‌صورت پیش‌فرض روشن نیست.
+    "no_short_filter": False,
     "no_buy_filter": False,
 }
 
@@ -399,16 +401,22 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
     return (sig, f"چندزمانه | {reason}") if sig else (None, reason)
 
 
-def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None):
-    # V4: keep only the strongest observed regime from the baseline tests:
-    # bullish breakout with a strong candle. Long-only by design for this candidate.
+def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
+    # V4: keep only the strongest observed regime from the baseline tests: bullish breakout
+    # with a strong candle (Long) mirrored for confirmed bearish markets (Short).
+    # جهت معامله را رژیم قطعی بازار (تشخیص‌داده‌شده از هم‌راستایی BTC/ETH) تعیین می‌کند؛
+    # اگر رژیم نامشخص (NEUTRAL) باشد، اصلاً سیگنالی صادر نمی‌شود (NO TRADE).
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
-    if break_sig == "BUY":
+    if regime == "BULLISH" and break_sig == "BUY":
         return "BUY", f"[شکست-قوی] {break_reason}"
-    return None, break_reason if break_reason else "No strong bullish breakout"
+    if regime == "BEARISH" and break_sig == "SELL":
+        return "SELL", f"[شکست-قوی] {break_reason}"
+    if regime not in ("BULLISH", "BEARISH"):
+        return None, "رژیم بازار قطعی نیست (NEUTRAL) — بدون معامله"
+    return None, break_reason if break_reason else "No strong breakout aligned with market regime"
 
 
-def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None):
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
@@ -421,10 +429,10 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
     if st == "dynamic":
-        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config)
+        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
 
-def get_signal(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None):
-    sig, _ = get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config)
+def get_signal(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None):
+    sig, _ = get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime)
     return sig

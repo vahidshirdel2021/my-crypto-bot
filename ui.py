@@ -69,7 +69,7 @@ def get_performance_keyboard():
 
 
 def get_positions_keyboard(positions):
-    k = [[{"text": f"❌ بستن {p['symbol']}", "callback_data": f"/close_{p['symbol']}"}, {"text": "🤖 تحلیل AI", "callback_data": f"/ai_pos_{p['symbol']}"}] for p in positions]
+    k = [[{"text": f"❌ بستن {p['symbol']}", "callback_data": f"/close_{p['symbol']}"}] for p in positions]
     if any("BUY" in p["side"] for p in positions):
         k.append([{"text": "❌ بستن همه خرید", "callback_data": "/close_longs"}])
     if any("SELL" in p["side"] for p in positions):
@@ -114,19 +114,12 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
-         {"text": "📊 استراتژی", "callback_data": "/strategies_menu"}],
-        [{"text": "⚙️ فیلترها", "callback_data": "/filters_menu"},
-         {"text": "🎛️ پارامترها", "callback_data": "/params_menu"}],
+         {"text": "⚙️ فیلترها", "callback_data": "/filters_menu"}],
         [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"},
          {"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}],
         [{"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"},
-         {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
-        [{"text": "🧠 پیشنهاد تایم‌فریم", "callback_data": "/timeframe_advice"},
-         {"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
-        [{"text": "💬 گفت‌وگو با هوش مصنوعی", "callback_data": "/ai_chat"}],
-        [{"text": "🤖 تحلیل هوشمند بازار", "callback_data": "/ai_market"},
-         {"text": "🤖 تحلیل هوشمند عملکرد", "callback_data": "/ai_performance"}],
-        [{"text": "🧠 تنظیمات هوش مصنوعی", "callback_data": "/ai_settings"}],
+         {"text": "🧠 پیشنهاد تایم‌فریم", "callback_data": "/timeframe_advice"}],
+        [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
     ]}
 
 
@@ -150,19 +143,3 @@ def get_strategies_menu_keyboard():
 def get_watchlist_manage_keyboard():
     return {"inline_keyboard": [[{"text": "➕ افزودن", "callback_data": "/add_symbol_prompt"}, {"text": "➖ حذف", "callback_data": "/remove_symbol_prompt"}], [{"text": "📋 لیست", "callback_data": "/watchlist_list"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
-
-def get_ai_chat_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "🗑 پاک کردن گفت‌وگو", "callback_data": "/ai_chat_clear"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
-    ]}
-
-
-def get_ai_settings_keyboard(session=None):
-    s=session or {}; provider=s.get('ai_provider','off')
-    def mark(name): return '✅ ' if provider==name else ''
-    return {'inline_keyboard': [
-        [{"text": f"{mark('gemini')}🟢 Gemini", "callback_data": "/ai_provider_gemini"}, {"text": f"{mark('openai')}🔵 OpenAI", "callback_data": "/ai_provider_openai"}],
-        [{"text": f"{mark('off')}⏸️ خاموش", "callback_data": "/ai_provider_off"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
-    ]}

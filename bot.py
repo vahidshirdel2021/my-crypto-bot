@@ -21,7 +21,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
-    get_performance_keyboard, get_ai_settings_keyboard, get_ai_chat_keyboard, get_entry_diag_keyboard,
+    get_performance_keyboard, get_entry_diag_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -29,7 +29,7 @@ PORT = int(os.environ.get('PORT', '10000'))
 DB_PATH = os.environ.get('BOT_DB_PATH', 'trader_bot.sqlite3')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
-NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
+NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '1800')))
 DATA_CACHE_SECONDS = max(5, int(os.environ.get('DATA_CACHE_SECONDS', '20')))
 MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
@@ -45,15 +45,6 @@ ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0
 PAPER_CONSERVATIVE_OHLC = os.environ.get('PAPER_CONSERVATIVE_OHLC', 'true').lower() not in ('0', 'false', 'no')
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
-# AI Multi-Provider (analysis only; never controls orders or risk)
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
-OPENAI_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-5.6').strip()
-GEMINI_API_KEY = (os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY') or '').strip()
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.5-flash').strip()
-AI_TIMEOUT_SECONDS = max(10, int(os.environ.get('AI_TIMEOUT_SECONDS', '45')))
-AI_CACHE = {}
-AI_CACHE_TTL = 120
-
 
 # Multi-user REAL account mapping. Example:
 # COINEX_ACCOUNTS_JSON='{"123456":{"apiKey":"KEY_A","secret":"SECRET_A"},"987654":{"apiKey":"KEY_B","secret":"SECRET_B"}}'
@@ -67,7 +58,7 @@ ALLOWED_CHAT_IDS_RAW = os.environ.get('ALLOWED_CHAT_IDS', '').strip()
 ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
 
 ALL_SYMBOLS = [
-    'BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI'
+    'BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI','LUNA','WAVES'
 ]
 # واچ‌لیست پیش‌فرض محدود نیست؛ تمام نمادهای تعریف‌شده در ALL_SYMBOLS در اسکن اولیه در دسترس هستند.
 # کاربر همچنان می‌تواند از منوی «واچ‌لیست» نمادها را کم/زیاد کند، اما کاربر جدید با کل Universe شروع می‌کند.
@@ -83,6 +74,13 @@ WINNING_WATCHLISTS = {
     'multi': ['UNI','STORJ','BCH','ATOM','TRX','HOT','ZEC','EGLD','WAVES','QTUM','SHIB','HNT','GALA','ADA','DOT','RUNE','THETA'],
 }
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
+# واچ‌لیست‌های برنده SHORT (کاربر) — وقتی رژیم بازار نزولی تشخیص داده شود، اسکن از این لیست‌ها استفاده می‌کند.
+WINNING_SHORT_WATCHLISTS = {
+    '5min': ['IOTA','ALGO','MASK','NEO','UNI','STORJ','BTC','DASH','RUNE','COMP','BNB','ONE','GALA','AR','LUNA','MANA','ETH','ETC','SOL','SUSHI','LINK','SKL','CHZ','TRB','EGLD','BTT','VET'],
+    '1hour': ['NEAR','SLP','ANKR','ADA','ZIL','BCH','AAVE','DYDX','RVN','RUNE','EGLD','SOL','CHZ','SHIB','TRX','ATOM','SUSHI','ENJ','WAVES','ZEC'],
+    '4hour': ['ATOM','BCH','XTZ','IOTA','AVAX','AXS','WAVES','ETH','NEAR','SNX','SOL','TRB','SKL','STORJ','NEO','BTT','KSM','GALA','COMP','RVN','ADA','SAND','RSR','ZIL','ZRX','CHZ','RAY','QTUM','BTC','ENJ'],
+    'multi': ['SOL','CHZ','IOTA','BCH','ATOM','NEAR','NEO','STORJ','COMP','RUNE','ADA','BTC','ETH','ZIL','GALA','RVN','WAVES','SKL','TRB','BTT','EGLD','SUSHI','ENJ'],
+}
 LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
@@ -247,7 +245,6 @@ def default_session():
         'scan_stats': {'scans': 0, 'symbols': 0, 'signals': 0, 'entries': 0, 'blocked': 0, 'data_errors': 0, 'reason_counts': {}},
         'cooldowns': {},
         'user_state': None,
-        'ai_chat_history': [],
         'active_symbols': DEFAULT_ACTIVE_SYMBOLS[:],
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': STRATEGY_DEFAULTS.copy(),
@@ -263,7 +260,6 @@ def default_session():
         # گزارش تشخیصی عدم ورود در تلگرام به‌صورت پیش‌فرض فعال است.
         # لاگ سرور ENTRY_DIAG مستقل از این گزینه و همیشه فعال می‌ماند.
         'entry_diag_enabled': True,
-        'ai_provider': ('gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')),
     }
 
 
@@ -279,7 +275,6 @@ def normalize_session(data):
     s['scan_stats'] = {**default_session()['scan_stats'], **ss}
     s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
-    s['ai_chat_history'] = list(data.get('ai_chat_history') or [])[-12:]
     stored_symbols = list(data.get('active_symbols') or [])
     # Sessionهای قدیمی که دقیقاً از واچ‌لیست پیش‌فرض ۲۰ نمادی استفاده می‌کردند
     # به Universe کامل مهاجرت می‌کنند. انتخاب‌های سفارشی کاربر دست‌نخورده می‌مانند.
@@ -296,8 +291,13 @@ def normalize_session(data):
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
     s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
-    if s.get('ai_provider') not in ('gemini','openai','off'):
-        s['ai_provider'] = 'gemini' if GEMINI_API_KEY else ('openai' if OPENAI_API_KEY else 'off')
+    # V24.1 one-time migration: قبلاً no_short_filter پیش‌فرضش True بود و معاملات SHORT را
+    # مسدود می‌کرد، در حالی که استراتژی dynamic از V24 به بعد قرار بود خودکار Short هم بزند.
+    # برای Sessionهای قدیمی که این مقدار قبلاً (به‌صورت پیش‌فرض قدیمی) True ذخیره شده، فقط یک‌بار
+    # آن را باز می‌کنیم؛ اگر کاربر خودش دوباره از منو ببندد، دفعات بعد دست‌نخورده می‌ماند.
+    if not s.get('short_filter_migrated_v1'):
+        s['filters']['no_short_filter'] = False
+        s['short_filter_migrated_v1'] = True
     return s
 
 
@@ -437,259 +437,6 @@ def send_photo(chat_id, img, caption='', markup=None):
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
 
-
-def ai_extract_text(data):
-    if not isinstance(data, dict): return ''
-    if isinstance(data.get('output_text'), str) and data.get('output_text').strip():
-        return data['output_text'].strip()
-    chunks=[]
-    for item in data.get('output', []) or []:
-        for content in item.get('content', []) or []:
-            text=content.get('text')
-            if isinstance(text, str) and text.strip(): chunks.append(text.strip())
-    if chunks: return '\n'.join(chunks).strip()
-    for cand in data.get('candidates', []) or []:
-        content=cand.get('content') or {}
-        for part in content.get('parts', []) or []:
-            text=part.get('text')
-            if isinstance(text, str) and text.strip(): chunks.append(text.strip())
-    return '\n'.join(chunks).strip()
-
-
-def ai_provider_status(s):
-    provider=s.get('ai_provider','off')
-    if provider=='gemini': return 'Gemini' if GEMINI_API_KEY else 'Gemini — کلید تنظیم نشده'
-    if provider=='openai': return 'OpenAI' if OPENAI_API_KEY else 'OpenAI — کلید تنظیم نشده'
-    return 'خاموش'
-
-
-def ai_settings_text(chat_id):
-    s=get_session(chat_id)
-    return ('🤖 *تنظیمات هوش مصنوعی*\n\n'
-            f'ارائه‌دهنده فعلی: *{ai_provider_status(s)}*\n\n'
-            f'Gemini: {"🟢 آماده" if GEMINI_API_KEY else "🔴 کلید ندارد"}\n'
-            f'OpenAI: {"🟢 آماده" if OPENAI_API_KEY else "🔴 کلید ندارد"}\n\n'
-            '🔐 کلیدها فقط از محیط اجرای ربات خوانده می‌شوند و در تلگرام نمایش داده نمی‌شوند.\n'
-            '🛡️ هوش مصنوعی فقط تحلیل می‌کند و اجازه اجرای معامله یا تغییر ریسک را ندارد.')
-
-
-def _ai_system_prompt():
-    return (
-        'تو تحلیل‌گر کمکی یک ربات معامله‌گری فارسی‌زبان هستی. '
-        'خروجی نهایی باید ۱۰۰٪ فارسی و راست‌خوان باشد و نباید هیچ جمله انگلیسی داشته باشد. '
-        'فقط نام نمادها و اصطلاحات فنی استاندارد مانند BTC، ETH، SOL، EMA50، RSI، ADX، ATR، Entry، SL، TP و R:R '
-        'می‌توانند به همان شکل انگلیسی باقی بمانند. '
-        'هر پاسخ را با یک جمله کامل فارسی شروع کن و هرگز پاسخ را از وسط یک جمله یا سناریو آغاز نکن. '
-        'ساختار پیشنهادی: خلاصه تحلیل، وضعیت بازار، سناریوهای محتمل، نکات ریسک. '
-        'اگر داده ناقص است صریحاً بگو. هرگز تضمین سود نده و هرگز دستور قطعی خرید/فروش صادر نکن. '
-        'وظیفه تو تحلیل و توضیح است، نه اجرای معامله. هیچ پارامتری را خودکار تغییر نده. '
-        'اگر درباره معامله نظر می‌دهی Entry/SL/TP/R:R و شرایط بازار را جداگانه بررسی کن و در پایان سطح ریسک را بگو. '
-        'مهم: حتی اگر بخشی از ورودی انگلیسی باشد، خروجی را به فارسی روان بازنویسی کن و متن انگلیسی ورودی را کپی نکن.'
-    )
-
-
-def _ai_needs_persian_rewrite(text):
-    """تشخیص می‌دهد آیا پاسخ AI عملاً انگلیسی/ناقص است و باید دوباره بازنویسی شود."""
-    if not text or len(text.strip()) < 25:
-        return True
-    import re
-    fa = len(re.findall(r'[\u0600-\u06FF]', text))
-    latin = len(re.findall(r'[A-Za-z]', text))
-    # اگر فارسی بسیار کم باشد، پاسخ احتمالاً انگلیسی است. اصطلاحات فنی کوتاه مجازند.
-    if fa == 0:
-        return True
-    if latin > max(45, fa * 0.65):
-        return True
-    # پاسخ نباید با یک قطعه انگلیسی یا جمله نیمه‌کاره شروع شود.
-    first = text.strip().splitlines()[0].strip()
-    if re.match(r'^[A-Za-z0-9].{8,}', first) and not re.match(r'^(BTC|ETH|SOL|BNB|XRP|DOGE|ADA)\b', first):
-        return True
-    return False
-
-
-def _gemini_persian_rewrite(draft):
-    """یک بار پاسخ Gemini را در همان مدل، به فارسی روان و کامل بازنویسی می‌کند."""
-    instruction = (
-        'متن زیر پیش‌نویس تحلیل است. آن را از نو و بدون حذف اطلاعات مهم به فارسی روان، کامل و حرفه‌ای بازنویسی کن. '
-        'هیچ جمله انگلیسی باقی نگذار؛ فقط نمادها و اصطلاحات فنی استاندارد مانند EMA50، RSI، ADX، ATR، Entry، SL، TP و R:R مجازند. '
-        'پاسخ باید با یک جمله کامل فارسی شروع شود و از وسط جمله شروع نشود. هیچ توضیحی درباره فرایند بازنویسی نده.\n\n'
-        f'پیش‌نویس:\n{draft}'
-    )
-    body = {
-        'systemInstruction': {'parts':[{'text': _ai_system_prompt()}]},
-        'contents':[{'role':'user','parts':[{'text': instruction}]}],
-        'generationConfig': {'maxOutputTokens': 1400, 'temperature': 0.2},
-    }
-    url=f'https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent'
-    try:
-        r=requests.post(url, headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'}, json=body, timeout=AI_TIMEOUT_SECONDS)
-        if r.status_code == 200:
-            rewritten=ai_extract_text(r.json())
-            if rewritten:
-                return rewritten
-        logger.warning('Gemini Persian rewrite failed: %s', r.status_code)
-    except Exception:
-        logger.exception('Gemini Persian rewrite failed')
-    return draft
-
-
-def ai_call_gemini(payload):
-    if not GEMINI_API_KEY:
-        return None, '⚠️ کلید Gemini تنظیم نشده است. متغیر GEMINI_API_KEY را در محیط اجرا قرار دهید.'
-    body={'systemInstruction': {'parts':[{'text':_ai_system_prompt()}]},
-          'contents':[{'role':'user','parts':[{'text':json.dumps(payload,ensure_ascii=False,indent=2,default=str)}]}],
-          'generationConfig': {'maxOutputTokens':1200}}
-    url=f'https://generativelanguage.googleapis.com/v1/models/{GEMINI_MODEL}:generateContent'
-    try:
-        r=requests.post(url,headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},json=body,timeout=AI_TIMEOUT_SECONDS)
-        if r.status_code!=200:
-            logger.warning('Gemini API error %s: %s',r.status_code,r.text[:700])
-            if GEMINI_API_KEY.startswith('AQ') and r.status_code in (401,403):
-                return None, '❌ Gemini کلید AQ فعلاً توسط API پذیرفته نشد (401/403). کلید را در AI Studio بررسی و در صورت نیاز کلید جدید بسازید.'
-            return None, f'❌ ارتباط با Gemini ناموفق بود. کد خطا: {r.status_code}'
-        text=ai_extract_text(r.json())
-        if not text:
-            return None,'❌ Gemini پاسخی تولید نکرد.'
-        # اگر مدل برخلاف دستور، انگلیسی یا ناقص جواب داد، یک بار همان پاسخ را
-        # با دستور سخت‌گیرانه به فارسی روان بازنویسی می‌کنیم.
-        if _ai_needs_persian_rewrite(text):
-            text=_gemini_persian_rewrite(text)
-        return (text,None) if text else (None,'❌ Gemini پاسخی تولید نکرد.')
-    except Exception:
-        logger.exception('Gemini call failed')
-        return None,'❌ خطا در ارتباط با Gemini. اتصال اینترنت و کلید API را بررسی کنید.'
-
-
-def ai_call_openai(payload):
-    if not OPENAI_API_KEY: return None,'⚠️ کلید OpenAI تنظیم نشده است.'
-    body={'model':OPENAI_MODEL,'input':[{'role':'system','content':_ai_system_prompt()},
-          {'role':'user','content':json.dumps(payload,ensure_ascii=False,indent=2,default=str)}], 'max_output_tokens':1200}
-    try:
-        r=requests.post('https://api.openai.com/v1/responses',headers={'Authorization':f'Bearer {OPENAI_API_KEY}','Content-Type':'application/json'},json=body,timeout=AI_TIMEOUT_SECONDS)
-        if r.status_code!=200:
-            logger.warning('OpenAI API error %s: %s',r.status_code,r.text[:500])
-            return None,f'❌ ارتباط با OpenAI ناموفق بود. کد خطا: {r.status_code}'
-        text=ai_extract_text(r.json())
-        return (text,None) if text else (None,'❌ OpenAI پاسخی تولید نکرد.')
-    except Exception:
-        logger.exception('OpenAI call failed')
-        return None,'❌ خطا در ارتباط با OpenAI. کلید و اتصال را بررسی کنید.'
-
-
-def ai_call(chat_id,purpose,payload,force=False):
-    s=get_session(chat_id); provider=s.get('ai_provider','off')
-    if provider=='off': return '🤖 هوش مصنوعی خاموش است. از «تنظیمات هوش مصنوعی» یک ارائه‌دهنده را انتخاب کنید.'
-    key=hashlib.sha256((str(chat_id)+'|'+provider+'|'+purpose+'|'+json.dumps(payload,ensure_ascii=False,sort_keys=True,default=str)).encode()).hexdigest()
-    cached=AI_CACHE.get(key)
-    if not force and cached and time.time()-cached['ts']<AI_CACHE_TTL: return cached['text']
-    text,err=(ai_call_gemini(payload) if provider=='gemini' else ai_call_openai(payload))
-    if err: return err
-    result='🤖 *تحلیل هوش مصنوعی*\n\n'+text
-    AI_CACHE[key]={'ts':time.time(),'text':result}
-    return result
-
-
-def ai_market_report(chat_id):
-    s=get_session(chat_id); tf='5min' if s['timeframe']=='multi' else s['timeframe']; rows=[]
-    for sym in ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA']:
-        d=get_klines(sym,tf,140)
-        if d.empty: continue
-        ind=calculate_indicators(d); c=ind.iloc[-2]
-        rows.append({'نماد':sym,'قیمت':float(c.close),'EMA20':float(c.ema20),'EMA50':float(c.ema50),'ADX':float(c.adx),'RSI':float(c.rsi),'ATR':float(c.atr),'بالای EMA50':bool(c.close>c.ema50)})
-    return ai_call(chat_id,'market',{'نوع':'گزارش کلی بازار','تایم‌فریم':TF_DISPLAY.get(s['timeframe'],s['timeframe']),'داده':rows,'استراتژی فعال':s['active_strategy'],'حداکثر پوزیشن':s['max_open_positions'],'ریسک هر معامله':s['risk_per_trade_pct']},force=True)
-
-
-def ai_performance_report(chat_id):
-    s=get_session(chat_id); closed=s['closed_positions']; pnls=[float(p.get('pnl_usdt',0)) for p in closed]; wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
-    payload={'تعداد معاملات':len(closed),'برد':len(wins),'باخت':len(losses),'Win Rate':(len(wins)/len(closed)*100 if closed else 0),'سود ناخالص':sum(wins),'زیان ناخالص':sum(losses),'PnL خالص':sum(pnls),'موجودی فعلی':s.get('paper_balance')}
-    return ai_call(chat_id,'performance',{'نوع':'تحلیل عملکرد ربات','داده':payload},force=True)
-
-
-def ai_position_report(chat_id,pos):
-    payload={'نوع':'بررسی یک پوزیشن باز','نماد':pos.get('symbol'),'سمت':pos.get('side'),'ورود':pos.get('entry_price'),'حد ضرر':pos.get('sl'),'حد سود':pos.get('tp'),'مارجین':pos.get('margin'),'اهرم':pos.get('leverage'),'استراتژی':pos.get('strategy'),'امتیاز':pos.get('score'),'دلیل سیگنال':pos.get('signal_reason'),'زمان ورود':pos.get('opened_at')}
-    return ai_call(chat_id,'position',payload,force=True)
-
-def ai_chat_market_snapshot(chat_id):
-    """آخرین داده بازار را از منبع داده خود ربات برای چت AI آماده می‌کند."""
-    s=get_session(chat_id)
-    tf='5min' if s.get('timeframe')=='multi' else s.get('timeframe','15min')
-    symbols=list(s.get('active_symbols') or [])[:8]
-    if not symbols:
-        symbols=['BTC','ETH','SOL','BNB']
-    rows=[]
-    for sym in symbols:
-        try:
-            d=get_klines(sym,tf,80)
-            if d is None or d.empty: continue
-            ind=calculate_indicators(d)
-            c=ind.iloc[-2] if len(ind)>=2 else ind.iloc[-1]
-            close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
-            adx=float(c.adx); rsi=float(c.rsi)
-            rows.append({
-                'نماد':sym,
-                'قیمت':round(close,8),
-                'وضعیت نسبت به EMA20':'بالای EMA20' if close>ema20 else 'پایین EMA20',
-                'وضعیت نسبت به EMA50':'بالای EMA50' if close>ema50 else 'پایین EMA50',
-                'قدرت روند':'قوی' if adx>=25 else 'متوسط' if adx>=20 else 'ضعیف',
-                'RSI وضعیت':'اشباع خرید' if rsi>=70 else 'اشباع فروش' if rsi<=30 else 'متعادل',
-            })
-        except Exception as exc:
-            logger.debug('AI market snapshot %s failed: %s', sym, exc)
-    return {'تایم‌فریم':TF_DISPLAY.get(tf,tf),'نمادها':rows}
-
-
-def ai_chat_context(chat_id):
-    s=get_session(chat_id)
-    positions=[]
-    for p in s.get('paper_positions',[])[:10]:
-        positions.append({
-            'نماد':p.get('symbol'),'سمت':p.get('side'),'ورود':p.get('entry_price'),
-            'حد ضرر':p.get('sl'),'حد سود':p.get('tp'),'PnL':p.get('pnl_usdt'),
-            'استراتژی':p.get('strategy'),'امتیاز':p.get('score')
-        })
-    return {
-        'نوع':'گفت‌وگوی مستقیم با کاربر',
-        'وضعیت ربات':'فعال' if s.get('is_bot_active') else 'متوقف',
-        'نوع حساب':'واقعی' if s.get('trading_mode')=='REAL' else 'کاغذی',
-        'ارائه‌دهنده هوش مصنوعی':ai_provider_status(s),
-        'استراتژی':s.get('active_strategy'),
-        'تایم‌فریم':TF_DISPLAY.get(s.get('timeframe'),s.get('timeframe')),
-        'پوزیشن‌های باز':positions,
-        'تعداد پوزیشن‌های باز':len(positions),
-        'ریسک هر معامله':s.get('risk_per_trade_pct'),
-        'حداکثر پوزیشن':s.get('max_open_positions'),
-        'موجودی کاغذی':s.get('paper_balance'),
-        'آخرین وضعیت بازار':ai_chat_market_snapshot(chat_id),
-    }
-
-def ai_chat_reply(chat_id, user_text):
-    s=get_session(chat_id)
-    provider=s.get('ai_provider','off')
-    if provider=='off':
-        return '🤖 هوش مصنوعی خاموش است. ابتدا از «تنظیمات هوش مصنوعی» یک ارائه‌دهنده را فعال کنید.'
-    text=(user_text or '').strip()
-    if not text:
-        return '💬 سؤال یا درخواستت را بنویس.'
-    history=s.get('ai_chat_history',[])
-    history.append({'نقش':'کاربر','متن':text})
-    history=history[-12:]
-    payload={
-        'نوع':'چت تعاملی و پاسخ به سؤال کاربر',
-        'دستور مهم':'فقط پاسخ و توضیح بده؛ هیچ معامله، تنظیمات، ریسک یا پارامتری را اجرا یا تغییر نده.',
-        'درخواست فعلی':text,
-        'زمینه ربات':ai_chat_context(chat_id),
-        'گفت‌وگوی اخیر':history,
-    }
-    raw,err=(ai_call_gemini(payload) if provider=='gemini' else ai_call_openai(payload))
-    if err:
-        return err
-    reply=(raw or '').strip()
-    if not reply:
-        return '❌ هوش مصنوعی پاسخی تولید نکرد.'
-    history.append({'نقش':'هوش مصنوعی','متن':reply})
-    s['ai_chat_history']=history[-12:]
-    save_session(chat_id)
-    return '🤖 *پاسخ هوش مصنوعی*\n\n'+reply
 
 def fmt(v):
     try:
@@ -1593,13 +1340,62 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     return True
 
 
-def scan_watchlist_for_timeframe(timeframe):
-    """Return the fixed winning watchlist for the selected timeframe."""
+def scan_watchlist_for_timeframe(timeframe, regime=None):
+    """Return the fixed winning watchlist for the selected timeframe and market regime.
+    regime='BEARISH' -> واچ‌لیست SHORT، در غیر این صورت (BULLISH یا نامشخص) -> واچ‌لیست LONG."""
+    if regime == 'BEARISH':
+        return list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))
     return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
 
 
-async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe):
-    """Final entry gate: block correlated altcoin entries during a confirmed BTC+ETH selloff."""
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'ttl': 90}
+MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '22'))
+MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
+
+
+async def refresh_market_regime(http):
+    """جهت قطعی کل بازار را از هم‌راستایی BTC و ETH روی یک تایم‌فریم بالاتر (پیش‌فرض 4 ساعته) تعیین می‌کند.
+    فقط وقتی هر دو لیدر هم‌جهت باشند (هر دو صعودی یا هر دو نزولی) رژیم قطعی اعلام می‌شود؛
+    در غیر این صورت (اختلاف‌نظر لیدرها، روند ضعیف، یا نبود داده) رژیم NEUTRAL است و معامله‌ای انجام نمی‌شود.
+    نتیجه برای چند ثانیه کش می‌شود تا در هر چرخه اسکن، برای همه کاربران یکسان و بدون درخواست تکراری باشد."""
+    now = time.time()
+    if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
+        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail']
+    tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
+    states = {}
+    for leader in LEADER_SYMBOLS:
+        try:
+            d = await get_klines_async(http, leader, tf, 120)
+            if d is None or d.empty or len(d) < 60:
+                detail = f'داده کافی برای {leader} در دسترس نیست'
+                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
+                return 'NEUTRAL', detail
+            x = calculate_indicators(d).iloc[-2]
+            adx = float(x.get('adx') or 0)
+            bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            bearish = bool(x['close'] < x['ema20'] < x['ema50'] and x['minus_di'] > x['plus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
+        except Exception as exc:
+            logger.warning('MARKET_REGIME leader=%s error=%s', leader, exc)
+            detail = f'خطا در دریافت داده {leader}: {exc}'
+            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
+            return 'NEUTRAL', detail
+    detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
+    unique_dirs = {v[0] for v in states.values()}
+    if unique_dirs == {'BULLISH'}:
+        regime = 'BULLISH'
+    elif unique_dirs == {'BEARISH'}:
+        regime = 'BEARISH'
+    else:
+        regime = 'NEUTRAL'
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail)
+    return regime, detail
+
+
+async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
+    """Final entry gate: block correlated altcoin entries against a confirmed BTC+ETH move.
+    side='BUY' مسدود می‌شود اگر لیدرها هم‌زمان نزولی/سقوط باشند؛ side='SELL' مسدود می‌شود اگر
+    لیدرها هم‌زمان صعودی/جهش باشند — یعنی فقط در جهت هم‌راستا با لیدرها اجازه ورود داده می‌شود."""
     if symbol.upper() in LEADER_SYMBOLS:
         return True, 'لیدر بازار است'
     try:
@@ -1629,25 +1425,35 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe)
             change_1 = (float(c.close) / float(frame.iloc[-3].close) - 1.0) * 100 if float(frame.iloc[-3].close) else 0.0
             change_3 = (float(c.close) / float(frame.iloc[-5].close) - 1.0) * 100 if float(frame.iloc[-5].close) else 0.0
             bearish = bool(float(c.close) < float(c.ema20) < float(c.ema50) and float(c.adx) >= 20 and change_3 <= -0.8)
+            bullish = bool(float(c.close) > float(c.ema20) > float(c.ema50) and float(c.adx) >= 20 and change_3 >= 0.8)
             crash = bool(change_1 <= -1.0 or change_3 <= -2.0)
-            leader_states.append((leader, bearish, crash, change_1, change_3))
+            pump = bool(change_1 >= 1.0 or change_3 >= 2.0)
+            leader_states.append((leader, bearish, crash, change_1, change_3, bullish, pump))
 
         both_bearish = all(x[1] for x in leader_states)
+        both_bullish = all(x[5] for x in leader_states)
         any_crash = any(x[2] for x in leader_states)
+        any_pump = any(x[6] for x in leader_states)
         max_corr = max(abs(x[1]) for x in correlations) if correlations else 0.0
         avg_positive_corr = sum(max(0.0, x[1]) for x in correlations) / len(correlations) if correlations else 0.0
 
-        # سقوط هم‌زمان هر دو لیدر: اگر ارز با حداقل یکی از لیدرها همبستگی مثبت معنادار داشته باشد، ورود مسدود است.
-        if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
-            detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
-            return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
-
-        # سقوط شدید یکی از لیدرها نیز برای ارزهای به‌شدت همبسته ورود را متوقف می‌کند.
-        if any_crash and max_corr >= 0.65:
-            detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
-            return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
-
+        is_long = side_long(side)
         detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+        if is_long:
+            # سقوط هم‌زمان هر دو لیدر: اگر ارز با حداقل یکی از لیدرها همبستگی مثبت معنادار داشته باشد، ورود Long مسدود است.
+            if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
+            # سقوط شدید یکی از لیدرها نیز برای ارزهای به‌شدت همبسته ورود Long را متوقف می‌کند.
+            if any_crash and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+        else:
+            # جهش هم‌زمان هر دو لیدر: اگر ارز با حداقل یکی از لیدرها همبستگی مثبت معنادار داشته باشد، ورود Short مسدود است.
+            if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
+            # جهش شدید یکی از لیدرها نیز برای ارزهای به‌شدت همبسته ورود Short را متوقف می‌کند.
+            if any_pump and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+
         return True, f'محافظ بازار عبور کرد | BTC: {leader_states[0][4]:+.2f}%/3c | ETH: {leader_states[1][4]:+.2f}%/3c | همبستگی: {detail}'
     except Exception as exc:
         logger.warning('LEADER_GUARD chat=%s symbol=%s error=%s', chat_id, symbol, exc)
@@ -1858,7 +1664,72 @@ def update_positions(chat_id):
     save_session(chat_id)
 
 
-def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None):
+def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
+    """Independent read-only diagnostic of the exact V4 breakout gates.
+
+    This function does not change strategy decisions; it only counts whether each
+    gate would pass on the latest closed candle so the no-entry report can identify
+    the real bottleneck.
+    """
+    out = {
+        'adx_ok': False, 'volume_breakout_ok': False, 'body_ok': False,
+        'trend_buy_ok': False, 'trend_sell_ok': False,
+        'breakout_buy_ok': False, 'breakout_sell_ok': False,
+        'candle_volume_ok': False, 'candle_buy_ok': False, 'candle_sell_ok': False,
+        'final_buy_ok': False, 'final_sell_ok': False,
+    }
+    try:
+        if df is None or df.empty or len(df) < 60:
+            return out
+        curr, prev = df.iloc[-2], df.iloc[-3]
+        cfg = strategy_config if isinstance(strategy_config, dict) else STRATEGY_DEFAULTS
+        f = filters if isinstance(filters, dict) else FILTER_DEFAULTS
+        adx = float(curr.get('adx', 0) or 0)
+        vr = float(curr.get('volume_ratio', 0) or 0)
+        body_ratio = float(curr.get('body_ratio', 0) or 0)
+        channel_high = curr.get('channel_high')
+        channel_low = curr.get('channel_low')
+        if pd.isna(channel_high) or pd.isna(channel_low):
+            return out
+        min_adx = float(cfg.get('min_adx', 24.0))
+        out['adx_ok'] = adx >= max(15.0, min_adx - 5.0)
+        out['volume_breakout_ok'] = (not f.get('volume_filter', True)) or vr >= 1.15
+        out['body_ok'] = body_ratio >= 0.55
+        out['trend_buy_ok'] = bool(curr['close'] > curr['ema20'] > curr['ema50'] and curr['plus_di'] > curr['minus_di'])
+        out['trend_sell_ok'] = bool(curr['close'] < curr['ema20'] < curr['ema50'] and curr['minus_di'] > curr['plus_di'])
+        out['breakout_buy_ok'] = bool(curr['close'] > channel_high and prev['close'] <= prev.get('channel_high', float('inf')) and out['trend_buy_ok'] and adx >= 24.0)
+        out['breakout_sell_ok'] = bool(curr['close'] < channel_low and prev['close'] >= prev.get('channel_low', -float('inf')) and out['trend_sell_ok'] and adx >= 24.0)
+
+        if not f.get('volume_filter', True):
+            out['candle_volume_ok'] = True
+        else:
+            out['candle_volume_ok'] = vr >= 1.0
+
+        if not f.get('candlestick_filter', True):
+            out['candle_buy_ok'] = True
+            out['candle_sell_ok'] = True
+        else:
+            body = abs(float(curr['close']) - float(curr['open']))
+            rng = max(float(curr['high']) - float(curr['low']), 1e-12)
+            upper = float(curr['high']) - max(float(curr['close']), float(curr['open']))
+            lower = min(float(curr['close']), float(curr['open'])) - float(curr['low'])
+            bullish_pin = lower >= 2 * max(body, 1e-12) and upper <= max(body * 1.2, 1e-12) and curr['close'] > curr['open']
+            bearish_pin = upper >= 2 * max(body, 1e-12) and lower <= max(body * 1.2, 1e-12) and curr['close'] < curr['open']
+            prev_body = abs(float(prev['close']) - float(prev['open']))
+            bull_engulf = prev['close'] < prev['open'] and curr['close'] > curr['open'] and curr['close'] >= prev['open'] and curr['open'] <= prev['close'] and body > prev_body
+            bear_engulf = prev['close'] > prev['open'] and curr['close'] < curr['open'] and curr['close'] <= prev['open'] and curr['open'] >= prev['close'] and body > prev_body
+            strong_bull = curr['close'] > curr['open'] and body / rng >= 0.60
+            strong_bear = curr['close'] < curr['open'] and body / rng >= 0.60
+            out['candle_buy_ok'] = bool(bullish_pin or strong_bull)
+            out['candle_sell_ok'] = bool(bearish_pin or strong_bear)
+        out['final_buy_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_buy_ok'] and out['candle_volume_ok'] and (out['candle_buy_ok'] or not f.get('candlestick_filter', True)))
+        out['final_sell_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_sell_ok'] and out['candle_volume_ok'] and (out['candle_sell_ok'] or not f.get('candlestick_filter', True)))
+    except Exception:
+        pass
+    return out
+
+
+def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None, diagnostics=None):
     return {
         'chat_id': chat_id,
         'symbol': symbol,
@@ -1866,6 +1737,7 @@ def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None
         'reason': str(reason or '').strip(),
         'stage': stage,
         'signal': signal,
+        'diagnostics': diagnostics or {},
         'ts': time.time(),
     }
 
@@ -1906,6 +1778,31 @@ def _entry_diag_report(chat_id, results, elapsed):
     data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
     blocked = sum(1 for x in results if x.get('status') in ('blocked','risk_blocked','trade_plan_blocked','execute_blocked'))
 
+    # Aggregate the exact breakout gates independently of the final reason text.
+    diag_items = [x.get('diagnostics') or {} for x in results if x.get('diagnostics')]
+    diag_lines = []
+    if diag_items:
+        def _rate(key):
+            total = len(diag_items)
+            passed = sum(1 for d in diag_items if d.get(key))
+            return passed, total
+        for key, label in (
+            ('adx_ok', 'ADX حداقل لازم'),
+            ('volume_breakout_ok', 'حجم شکست ≥ 1.15x'),
+            ('body_ok', 'قدرت بدنه ≥ 0.55'),
+            ('trend_buy_ok', 'روند صعودی EMA/DI'),
+            ('breakout_buy_ok', 'شکست صعودی واقعی'),
+            ('trend_sell_ok', 'روند نزولی EMA/DI'),
+            ('breakout_sell_ok', 'شکست نزولی واقعی'),
+            ('candle_volume_ok', 'حجم تأیید کندلی ≥ 1.0x'),
+            ('candle_buy_ok', 'تأیید کندل صعودی'),
+            ('candle_sell_ok', 'تأیید کندل نزولی'),
+            ('final_buy_ok', 'تمام شروط BUY'),
+            ('final_sell_ok', 'تمام شروط SELL'),
+        ):
+            passed, total = _rate(key)
+            diag_lines.append(f'• {label}: `{passed}/{total}`')
+
     counts = {}
     for x in results:
         if x.get('status') == 'entry_opened':
@@ -1934,6 +1831,9 @@ def _entry_diag_report(chat_id, results, elapsed):
         lines.append('\n*دلایل اصلی عدم ورود:*')
         for label, n in top:
             lines.append(f'• `{n}×` {label}')
+    if diag_lines:
+        lines.append('\n*تشخیص دقیق فیلترهای Breakout:*')
+        lines.extend(diag_lines)
     else:
         lines.append('\n• هنوز دلیل مشخصی از اسکن‌ها ثبت نشده است.')
 
@@ -1982,7 +1882,7 @@ def _entry_diag_batch_update(chat_id, results):
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
-async def scan_symbol(http,chat_id,symbol):
+async def scan_symbol(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
@@ -2026,10 +1926,11 @@ async def scan_symbol(http,chat_id,symbol):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
-    sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'])
+    sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'],regime if strat=='dynamic' else None)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
+    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if strat == 'dynamic' else {}
     if not sig:
-        return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal')
+        return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
     if not plan:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
@@ -2037,7 +1938,7 @@ async def scan_symbol(http,chat_id,symbol):
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     full_reason=f"{reason} | {plan_reason}"[:500]
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=plan_ok signal=%s entry=%s sl=%s tp=%s detail=%s', chat_id, symbol, sig, entry, sl, tp, plan_reason)
-    guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf)
+    guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=leader_guard ok=%s reason=%s', chat_id, symbol, guard_ok, guard_reason)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
@@ -2426,7 +2327,7 @@ def analyze(chat_id,symbol):
 def menu(chat_id,message_id=None):
     s=get_session(chat_id); bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']; maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`  |  🤖 هوش مصنوعی: `{ai_provider_status(s)}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'روندی' if s['active_strategy']=='trend' else 'شکست' if s['active_strategy']=='breakout' else 'بازگشت به میانگین' if s['active_strategy']=='mean_reversion' else 'چندزمانه'}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'روندی' if s['active_strategy']=='trend' else 'شکست' if s['active_strategy']=='breakout' else 'بازگشت به میانگین' if s['active_strategy']=='mean_reversion' else 'چندزمانه'}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True)),message_id)
 
 
@@ -2668,6 +2569,8 @@ def market_report(chat_id):
         f"• داینامیک: {fit['dynamic'][0]} — {fit['dynamic'][1]}",
     ]
     bar = '█' * round(market_score / 10) + '░' * (10 - round(market_score / 10))
+    dyn_regime = MARKET_REGIME_CACHE.get('regime', 'NEUTRAL')
+    dyn_label = {'BULLISH': '🟢 صعودی قطعی → استراتژی LONG فعال', 'BEARISH': '🔴 نزولی قطعی → استراتژی SHORT فعال', 'NEUTRAL': '⚪ نامشخص → بدون معامله (NO TRADE)'}.get(dyn_regime, dyn_regime)
     lines = [
         '🌐 *داشبورد حرفه‌ای بازار*',
         f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}` | بررسی: `{len(results)}` نماد",
@@ -2675,6 +2578,7 @@ def market_report(chat_id):
         f"🎯 *امتیاز کیفیت بازار: `{market_score}/100`* — {score_label}",
         f"`{bar}`",
         f"🧭 رژیم بازار: {regime}",
+        f"🎛 رژیم قطعی برای استراتژی Dynamic (بر اساس BTC+ETH): {dyn_label}",
         f"📈 پهنا: `{bullish}` صعودی | `{bearish}` نزولی | `{neutral}` خنثی | `{breadth*100:.0f}%` صعودی",
         f"💪 قدرت روند: ADX میانگین `{avg_adx:.1f}` | RSI میانگین `{avg_rsi:.1f}`",
         f"🌪 ریسک نوسان: {vol_label} | ATR `{avg_atr:.2f}%`",
@@ -2781,7 +2685,7 @@ def process_command(cmd,chat_id,message_id=None):
         profile={'/profile_conservative':'conservative','/profile_balanced':'balanced','/profile_opportunity':'opportunity'}[cl]
         label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
         edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*\n\n🎯 حداقل کیفیت: `{score:.0f}/100`\n⚖️ حداقل سود به ضرر: `{rr:.2f}R`\n🛡️ ریسک هر معامله: `{risk:.2f}%`\n\nجزئیات فنی مثل ADX و ATR پشت صحنه مدیریت می‌شوند.',get_params_menu_keyboard(s),message_id); return
-    sensitive_prefixes=('/ai_provider_','/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/profile_','/learn_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
+    sensitive_prefixes=('/mode_paper','/mode_real','/set_bal_','/set_margin_','/set_lev_','/set_max_','/set_tf_','/set_strat_','/profile_','/learn_','/toggle_','/adx_','/sl_','/tp_','/add_symbol_','/remove_symbol_','/watchlist_')
     if s['is_bot_active'] and (
         cl.startswith(sensitive_prefixes)
         or any(k in c for k in (
@@ -2844,51 +2748,6 @@ def process_command(cmd,chat_id,message_id=None):
             msg = "\n".join(lines)
         send_message(chat_id, msg, get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), parse_mode='Markdown')
         return
-    if cl in ('/ai_settings','🤖 تنظیمات هوش مصنوعی'):
-        edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id); return
-    if cl.startswith('/ai_provider_'):
-        provider=cl.replace('/ai_provider_','')
-        if provider in ('gemini','openai','off'):
-            s['ai_provider']=provider; save_session(chat_id); edit_page(chat_id, ai_settings_text(chat_id), get_ai_settings_keyboard(s), message_id)
-        return
-    if cl in ('/ai_chat','💬 گفت‌وگو با هوش مصنوعی'):
-        s['user_state']='AI_CHAT'; save_session(chat_id)
-        send_message(chat_id, '💬 *گفت‌وگو با هوش مصنوعی*\n\nهر سؤالی درباره بازار، وضعیت ربات، پوزیشن‌ها یا تحلیل‌ها داری بنویس.\n\n🔐 این گفتگو فقط برای تحلیل و پاسخ است و خودش هیچ معامله یا تنظیماتی را اجرا نمی‌کند.', get_ai_chat_keyboard(), parse_mode='Markdown')
-        return
-    if cl=='/ai_chat_clear':
-        s['ai_chat_history']=[]; s['user_state']='AI_CHAT'; save_session(chat_id)
-        send_message(chat_id,'🗑 گفت‌وگو پاک شد. سؤال جدیدت را بنویس.',get_ai_chat_keyboard(),parse_mode=None)
-        return
-    if cl in ('/ai_market','🤖 تحلیل هوشمند بازار'):
-        wait_res = tg('sendMessage', {
-            'chat_id': chat_id,
-            'text': '⏳ تحلیل هوشمند بازار در حال آماده‌سازی است…\nداده‌های بازار را دریافت و برای تحلیل پردازش می‌کنم؛ لطفاً چند لحظه صبر کن.',
-        }, 10)
-        wait_id = ((wait_res or {}).get('result') or {}).get('message_id')
-        tg('sendChatAction', {'chat_id': chat_id, 'action': 'typing'}, 5)
-        result = ai_market_report(chat_id)
-        if wait_id:
-            send_message(chat_id, result, message_id=wait_id, parse_mode=None)
-        else:
-            send_message(chat_id, result, parse_mode=None)
-        return
-    if cl in ('/ai_performance','🤖 تحلیل هوشمند عملکرد'):
-        wait_res = tg('sendMessage', {
-            'chat_id': chat_id,
-            'text': '⏳ تحلیل هوشمند عملکرد در حال آماده‌سازی است…\nسابقه معاملات و آمار عملکرد را بررسی می‌کنم؛ لطفاً چند لحظه صبر کن.',
-        }, 10)
-        wait_id = ((wait_res or {}).get('result') or {}).get('message_id')
-        tg('sendChatAction', {'chat_id': chat_id, 'action': 'typing'}, 5)
-        result = ai_performance_report(chat_id)
-        if wait_id:
-            send_message(chat_id, result, message_id=wait_id, parse_mode=None)
-        else:
-            send_message(chat_id, result, parse_mode=None)
-        return
-    if cl.startswith('/ai_pos_'):
-        sym=cl.replace('/ai_pos_','').upper(); pos=next((p for p in s['paper_positions'] if p.get('symbol','').upper()==sym),None)
-        if not pos: send_message(chat_id,'❌ این پوزیشن دیگر باز نیست.'); return
-        send_message(chat_id, ai_position_report(chat_id,pos), parse_mode=None); return
     if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id, message_id); return
     if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
         stop_scan(chat_id, 'manual')
@@ -2911,6 +2770,9 @@ def process_command(cmd,chat_id,message_id=None):
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
         s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
     if cl=='/mode_real':
+        if not ALLOWED_CHAT_IDS:
+            send_message(chat_id,'🚫 *ورود به حالت REAL مسدود است.*\n\n`ALLOWED_CHAT_IDS` در متغیرهای محیطی تنظیم نشده، یعنی در حال حاضر هر کسی که توکن ربات را پیدا کند می‌تواند با آن تعامل کند. برای معامله با پول واقعی، ابتدا `ALLOWED_CHAT_IDS` را با شناسه‌های چت مجاز پر کنید و ربات را دوباره اجرا کنید؛ سپس حالت REAL در دسترس خواهد بود.')
+            return
         if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
         if not get_exchange(chat_id): send_message(chat_id,'❌ حساب CoinEx این کاربر در `COINEX_ACCOUNTS_JSON` تنظیم نشده یا اتصال ناموفق است.'); return
         bal=exchange_balance(chat_id)
@@ -3045,40 +2907,17 @@ def handle_text(chat_id,text):
         '📊 وضعیت بازار':'/market_report',
         '⚙️ تنظیمات فیلترها':'/filters_menu',
         'تنظیمات فیلترها':'/filters_menu',
-        '🎛️ تنظیم پارامترها':'/params_menu',
-        'تنظیم پارامترها':'/params_menu',
         '⚙️ تنظیمات معامله':'/check_wizard',
         'تنظیمات معامله':'/check_wizard',
-        '📊 استراتژی':'/strategies_menu',
-        'استراتژی':'/strategies_menu',
         '📋 واچ‌لیست':'/manage_watchlist',
         'واچ‌لیست':'/manage_watchlist',
-        '❌ بستن همه':'/close_all_prompt',
-        'بستن همه':'/close_all_prompt',
         '🔍 تحلیل ارز':'/analyze_single',
         'تحلیل ارز':'/analyze_single',
-        '💬 گفت‌وگو با هوش مصنوعی':'/ai_chat',
-        'گفت‌وگو با هوش مصنوعی':'/ai_chat',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id)
         return
     s=get_session(chat_id); val=raw.upper()
-    if s['user_state']=='AI_CHAT':
-        # پاسخ AI ممکن است چند ثانیه زمان ببرد؛ اول یک پیام انتظار واقعی نشان بده.
-        wait_res=tg('sendMessage', {
-            'chat_id':chat_id,
-            'text':'⏳ در حال بررسی درخواستت…\nداده‌های فعلی بازار و وضعیت ربات را بررسی می‌کنم؛ لطفاً چند لحظه صبر کن.',
-            'reply_markup':get_ai_chat_keyboard()
-        }, 10)
-        wait_id=((wait_res or {}).get('result') or {}).get('message_id')
-        tg('sendChatAction', {'chat_id':chat_id, 'action':'typing'}, 5)
-        reply=ai_chat_reply(chat_id, raw)
-        if wait_id:
-            send_message(chat_id, reply, get_ai_chat_keyboard(), message_id=wait_id, parse_mode=None)
-        else:
-            send_message(chat_id, reply, get_ai_chat_keyboard(), parse_mode=None)
-        return
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
     if s['user_state']=='ADD_SYMBOL':
         if val not in s['active_symbols'] and len(val)<=12 and not get_klines(val,'5min',60).empty: s['active_symbols'].append(val); send_message(chat_id,f'✅ `{val}` اضافه شد.')
@@ -3150,6 +2989,13 @@ async def scan_loop():
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
+                # فقط اگر حداقل یک کاربر فعال از استراتژی 'dynamic' استفاده می‌کند رژیم بازار را محاسبه کن؛
+                # سایر استراتژی‌ها (روندی/شکست/بازگشت/چندزمانه) بدون تغییر و بدون وابستگی به رژیم کار می‌کنند.
+                need_regime = any(
+                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic'
+                    for s in USER_SESSIONS.values()
+                )
+                regime, regime_detail = (await refresh_market_regime(http)) if need_regime else (None, '')
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
@@ -3157,8 +3003,13 @@ async def scan_loop():
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
                         continue
-                    for sym in scan_watchlist_for_timeframe(s.get('timeframe','5min')):
-                        tasks.append(scan_symbol(http,cid,sym))
+                    is_dynamic = s.get('active_strategy')=='dynamic'
+                    if is_dynamic and regime not in ('BULLISH','BEARISH'):
+                        logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=market_regime_neutral detail=%s', cid, regime_detail)
+                        continue
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), regime if is_dynamic else None)
+                    for sym in watchlist:
+                        tasks.append(scan_symbol(http,cid,sym,regime if is_dynamic else None))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
@@ -3189,6 +3040,8 @@ def main():
     init_db(); load_telegram_offset(); load_sessions(); logger.info('Loaded %s sessions',len(USER_SESSIONS))
     if not ALLOWED_CHAT_IDS:
         logger.warning('ALLOWED_CHAT_IDS تنظیم نشده؛ دسترسی Telegram در حالت تست عمومی باز است. برای REAL استفاده از whitelist توصیه می‌شود.')
+        if COINEX_ACCOUNTS:
+            logger.critical('COINEX_ACCOUNTS_JSON حاوی حساب واقعی است ولی ALLOWED_CHAT_IDS خالی است! سوییچ به REAL از داخل ربات مسدود شده تا این مقدار تنظیم شود.')
     configure_telegram_native_menu()
     Thread(target=telegram_listener,daemon=True,name='telegram').start(); Thread(target=lambda:(time.sleep(3),asyncio.run(scan_loop())),daemon=True,name='scanner').start()
     app.run(host='0.0.0.0',port=PORT,threaded=True)
