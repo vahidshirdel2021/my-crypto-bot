@@ -1613,7 +1613,7 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
 
 
 MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'ttl': 90}
-MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '22'))
+MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
 MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
 
 
@@ -1646,9 +1646,11 @@ async def refresh_market_regime(http):
             return 'NEUTRAL', detail
     detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
     unique_dirs = {v[0] for v in states.values()}
-    if unique_dirs == {'BULLISH'}:
+    # قطعی: هر دو لیدر هم‌جهت. یا: یک لیدر قوی + لیدر دیگر خنثی (نه در جهت مخالف).
+    # اگر لیدرها دقیقاً در تضاد باشند (یکی BULLISH و دیگری BEARISH) همچنان NEUTRAL می‌ماند.
+    if unique_dirs == {'BULLISH'} or unique_dirs == {'BULLISH', 'NEUTRAL'}:
         regime = 'BULLISH'
-    elif unique_dirs == {'BEARISH'}:
+    elif unique_dirs == {'BEARISH'} or unique_dirs == {'BEARISH', 'NEUTRAL'}:
         regime = 'BEARISH'
     else:
         regime = 'NEUTRAL'
@@ -3343,6 +3345,8 @@ async def scan_loop():
                     is_dynamic = s.get('active_strategy')=='dynamic'
                     if is_dynamic and regime not in ('BULLISH','BEARISH'):
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=market_regime_neutral detail=%s', cid, regime_detail)
+                        synthetic = [_entry_diag_result(cid, None, 'no_signal', f'رژیم بازار نامشخص است (NEUTRAL) — {regime_detail}', 'regime')]
+                        _entry_diag_batch_update(cid, synthetic)
                         continue
                     watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), regime if is_dynamic else None)
                     for sym in watchlist:
