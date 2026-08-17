@@ -1932,12 +1932,17 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
-    sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'],regime if strat=='dynamic' else None)
-    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
-    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if strat == 'dynamic' else {}
+    # Multi timeframe is controlled by the user's timeframe selection, not by a separate strategy button.
+    # Keep all existing strategy code intact; only route the selected `multi` timeframe through the
+    # already-existing strategy_multi_tf implementation.
+    effective_strategy = 'multi' if tf == 'multi' else strat
+    effective_regime = regime if strat == 'dynamic' and tf != 'multi' else None
+    sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,effective_strategy,s['filters'],s['strategy_config'],effective_regime)
+    logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s effective_strategy=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350], effective_strategy)
+    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if effective_strategy == 'dynamic' else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], effective_strategy)
     if not plan:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -3016,31 +3021,42 @@ async def scan_loop():
                     for s in USER_SESSIONS.values()
                 )
                 regime, regime_detail = (await refresh_market_regime(http)) if need_regime else (None, '')
+                diag_active_chats = {}
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
-                    if not risk_guard(cid): continue
-                    # If capacity is full there is no point launching scanner tasks.
+                    diag_active_chats[cid] = None
+                    if not risk_guard(cid):
+                        diag_active_chats[cid] = [_entry_diag_result(cid, '—', 'risk_blocked', 'محدودیت ریسک اجازه اسکن این چرخه را نداد', 'risk')]
+                        continue
+                    # If capacity is full there is no point launching scanner tasks, but keep a diagnostic heartbeat.
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
+                        diag_active_chats[cid] = [_entry_diag_result(cid, '—', 'blocked', f'ظرفیت پوزیشن‌ها پر است ({len(s["paper_positions"])}/{s["max_open_positions"]})', 'precheck')]
                         continue
                     is_dynamic = s.get('active_strategy')=='dynamic'
-                    if is_dynamic and regime not in ('BULLISH','BEARISH'):
+                    if is_dynamic and s.get('timeframe') != 'multi' and regime not in ('BULLISH','BEARISH'):
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=market_regime_neutral detail=%s', cid, regime_detail)
+                        diag_active_chats[cid] = [_entry_diag_result(cid, '—', 'blocked', f'رژیم بازار قطعی نیست: {regime_detail or "NEUTRAL"}', 'market_regime')]
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), regime if is_dynamic else None)
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), regime if is_dynamic and s.get('timeframe') != 'multi' else None)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,regime if is_dynamic else None))
+                        tasks.append(scan_symbol(http,cid,sym,regime if is_dynamic and s.get('timeframe') != 'multi' else None))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
-                    by_chat = {}
                     for item in batch:
                         if isinstance(item, Exception):
                             logger.warning('ENTRY_DIAG scan task failed: %s', item)
                             continue
                         if isinstance(item, dict) and item.get('chat_id') is not None:
-                            by_chat.setdefault(item['chat_id'], []).append(item)
-                    for cid, results in by_chat.items():
-                        _entry_diag_batch_update(cid, results)
+                            cid=item['chat_id']
+                            if diag_active_chats.get(cid) is None:
+                                diag_active_chats[cid]=[]
+                            diag_active_chats[cid].append(item)
+                # Always feed the diagnostic state once per active scan cycle. This makes the 10-minute
+                # Telegram report independent of whether a cycle produced scanner tasks/results.
+                for cid in diag_active_chats:
+                    results = diag_active_chats[cid] or [_entry_diag_result(cid, '—', 'scan_cycle', 'این چرخه اسکن بدون نتیجه جدید تکمیل شد', 'heartbeat')]
+                    _entry_diag_batch_update(cid, results)
         except Exception as exc: logger.exception('scan loop: %s',exc)
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
