@@ -10,17 +10,41 @@ FILTER_DEFAULTS = {
 }
 
 STRATEGY_DEFAULTS = {
-    "min_adx": 18.0,
+    "min_adx": 24.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
     "dynamic_exits": True,
-    "min_trade_score": 70.0,
-    "min_rr": 1.25,
+    "min_trade_score": 82.0,
+    "min_rr": 1.35,
     "max_sl_atr": 2.50,
-    "min_target_r": 1.25,
+    "min_target_r": 1.35,
     "max_target_r": 1.8,
+    "min_volume_ratio": 1.15,
+    "min_body_ratio": 0.55,
 }
+
+# پارامترهای ورود مخصوص هر تایم‌فریم — به‌جای یک آستانه‌ی ثابت و خیلی سخت‌گیرانه برای همه.
+# نسبت به STRATEGY_DEFAULTS شل‌تر شده‌اند تا در روز حداقل چند سیگنال معتبر صادر شود،
+# اما همچنان زیر حداقل‌های منطقی رد می‌شوند (کیفیت صفر نمی‌شود، فقط واقع‌بینانه‌تر است).
+# تایم‌فریم‌های پایین‌تر (نویزی‌تر) کمی محتاط‌ترند؛ تایم‌فریم‌های بالاتر کمی بازتر.
+TIMEFRAME_STRATEGY_PRESETS = {
+    "5min":  {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
+              "min_trade_score": 62.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8},
+    "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
+              "min_trade_score": 60.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.0},
+    "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
+              "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
+    "4hour": {"min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
+              "min_trade_score": 54.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.5},
+    "multi": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
+              "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
+}
+
+
+def get_timeframe_preset(timeframe):
+    """پیکربندی کامل استراتژی برای یک تایم‌فریم مشخص (پایه + تنظیمات مخصوص آن تایم‌فریم)."""
+    return {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
 
 # Legacy compatibility only. Production code passes per-user dictionaries.
 FILTERS = FILTER_DEFAULTS.copy()
@@ -105,6 +129,8 @@ def get_strategy_params(timeframe="5min", strategy_config=None):
         "adx": float(c.get("min_adx", 20.0)),
         "sl": float(c.get("sl_multiplier", 1.5)),
         "tp": float(c.get("tp_multiplier", 2.0)),
+        "volume_ratio": float(c.get("min_volume_ratio", 1.15)),
+        "body_ratio": float(c.get("min_body_ratio", 0.55)),
     }
 
 
@@ -328,13 +354,12 @@ def strategy_breakout(df, filters=None, strategy_config=None):
     if adx < max(15.0, p["adx"] - 5):
         return None, f"ADX پایین است ({adx:.1f})"
     vr = _safe_float(curr.get("volume_ratio"), 0)
-    if f.get("volume_filter", True) and vr < 1.08:
+    if f.get("volume_filter", True) and vr < p["volume_ratio"]:
         return None, f"حجم شکست کافی نیست ({vr:.2f}x)"
-    if _safe_float(curr.get("body_ratio"), 0) < 0.50:
+    if _safe_float(curr.get("body_ratio"), 0) < p["body_ratio"]:
         return None, "قدرت بدنه کافی نیست"
     trend_buy = curr["close"] > curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
     trend_sell = curr["close"] < curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    # قبلاً اینجا آستانه ۲۴ به‌صورت هاردکد بود و به p["adx"] (تنظیمات کاربر) گوش نمی‌داد.
     bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= p["adx"]
     bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= p["adx"]
     if not (bull or bear):
