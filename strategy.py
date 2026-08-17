@@ -5,45 +5,26 @@ FILTER_DEFAULTS = {
     "volume_filter": True,
     "trailing_stop": True,
     "candlestick_filter": True,
-    # V24.1: استراتژی dynamic به‌صورت خودکار بین Long/Short سوییچ می‌کند (بر اساس رژیم بازار)،
-    # پس فیلتر مسدودکننده SHORT دیگر به‌صورت پیش‌فرض روشن نیست.
-    "no_short_filter": False,
+    "no_short_filter": True,
     "no_buy_filter": False,
 }
 
 STRATEGY_DEFAULTS = {
-    "min_adx": 20.0,
+    "min_adx": 24.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
     "dynamic_exits": True,
-    "min_trade_score": 74.0,
-    "min_rr": 1.20,
+    "min_trade_score": 82.0,
+    "min_rr": 1.35,
     "max_sl_atr": 2.50,
-    "min_target_r": 1.20,
+    "min_target_r": 1.35,
     "max_target_r": 1.8,
 }
 
 # Legacy compatibility only. Production code passes per-user dictionaries.
 FILTERS = FILTER_DEFAULTS.copy()
 STRATEGY_CONFIG = STRATEGY_DEFAULTS.copy()
-
-
-# V24.2: تنظیم سخت‌گیری بر اساس تایم‌فریم. تایم‌فریم‌های کوتاه‌تر نویز بیشتری دارند
-# پس آستانه سخت‌گیرتری می‌گیرند؛ تایم‌فریم‌های بالاتر (ساختار روند تمیزتر) شل‌ترند.
-# این مقادیر روی پایه‌ی strategy_config کاربر (که با /adx_up و مشابه تغییر می‌کند) جمع می‌شوند،
-# پس اگر کاربر دستی تنظیمات را عوض کند، این دلتاها همچنان نسبت به مقدار جدید او اعمال می‌شوند.
-TIMEFRAME_PARAM_ADJUST = {
-    "5min":  {"adx": 4.0, "score": 6.0, "rr": 0.10},
-    "15min": {"adx": 2.0, "score": 3.0, "rr": 0.05},
-    "1hour": {"adx": 0.0, "score": 0.0, "rr": 0.00},
-    "4hour": {"adx": -2.0, "score": -3.0, "rr": -0.05},
-    "multi": {"adx": -3.0, "score": -4.0, "rr": -0.05},
-}
-
-
-def _tf_adjust(timeframe):
-    return TIMEFRAME_PARAM_ADJUST.get(timeframe, TIMEFRAME_PARAM_ADJUST["1hour"])
 
 
 def _safe_float(value, default=0.0):
@@ -120,16 +101,14 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def get_strategy_params(timeframe="5min", strategy_config=None):
     c = _cfg(strategy_config)
-    adj = _tf_adjust(timeframe)
-    adx = max(10.0, float(c.get("min_adx", 20.0)) + adj["adx"])
     return {
-        "adx": adx,
+        "adx": float(c.get("min_adx", 20.0)),
         "sl": float(c.get("sl_multiplier", 1.5)),
         "tp": float(c.get("tp_multiplier", 2.0)),
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", timeframe="5min"):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     """Build a volatility + market-structure exit plan and a 0-100 trade-quality score.
 
     This is a decision filter, not a probability forecast.  The plan uses the closed
@@ -148,10 +127,9 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         return None, "ATR یا قیمت ورود نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    adj = _tf_adjust(timeframe)
-    min_score = max(50.0, min(95.0, float(cfg.get("min_trade_score", 68.0)) + adj["score"]))
-    min_rr = max(1.05, float(cfg.get("min_rr", 1.30)) + adj["rr"])
-    min_r = max(min_rr, float(cfg.get("min_target_r", 1.30)) + adj["rr"])
+    min_score = float(cfg.get("min_trade_score", 68.0))
+    min_rr = float(cfg.get("min_rr", 1.30))
+    min_r = max(min_rr, float(cfg.get("min_target_r", 1.30)))
     max_r = max(min_r, float(cfg.get("max_target_r", 2.20)))
     max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 2.50)))
 
@@ -340,12 +318,12 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
     return None, "شرایط روندی برقرار نیست"
 
 
-def strategy_breakout(df, filters=None, strategy_config=None, timeframe="5min"):
+def strategy_breakout(df, filters=None, strategy_config=None):
     curr, prev = df.iloc[-2], df.iloc[-3]
     if pd.isna(curr.get("channel_high")) or pd.isna(curr.get("channel_low")):
         return None, "کانال آماده نیست"
     f = _flt(filters)
-    p = get_strategy_params(timeframe, strategy_config)
+    p = get_strategy_params("5min", strategy_config)
     adx = _safe_float(curr.get("adx"))
     if adx < max(15.0, p["adx"] - 5):
         return None, f"ADX پایین است ({adx:.1f})"
@@ -356,8 +334,8 @@ def strategy_breakout(df, filters=None, strategy_config=None, timeframe="5min"):
         return None, "قدرت بدنه کافی نیست"
     trend_buy = curr["close"] > curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
     trend_sell = curr["close"] < curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= p["adx"]
-    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= p["adx"]
+    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= 24.0
+    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= 24.0
     if not (bull or bear):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
@@ -426,7 +404,7 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
     # with a strong candle (Long) mirrored for confirmed bearish markets (Short).
     # جهت معامله را رژیم قطعی بازار (تشخیص‌داده‌شده از هم‌راستایی BTC/ETH) تعیین می‌کند؛
     # اگر رژیم نامشخص (NEUTRAL) باشد، اصلاً سیگنالی صادر نمی‌شود (NO TRADE).
-    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config, timeframe)
+    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if regime == "BULLISH" and break_sig == "BUY":
         return "BUY", f"[شکست-قوی] {break_reason}"
     if regime == "BEARISH" and break_sig == "SELL":
@@ -443,7 +421,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if st == "trend":
         return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
     if st == "breakout":
-        return strategy_breakout(df_primary, filters, strategy_config, timeframe)
+        return strategy_breakout(df_primary, filters, strategy_config)
     if st == "mean_reversion":
         return strategy_mean_reversion(df_primary, filters, strategy_config)
     if st == "multi":
