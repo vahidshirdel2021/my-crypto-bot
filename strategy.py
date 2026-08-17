@@ -425,19 +425,52 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
     return (sig, f"چندزمانه | {reason}") if sig else (None, reason)
 
 
+def _htf_trend_aligned(df, want_bullish):
+    """آیا این تایم‌فریم بالاتر هم‌جهت با سیگنال شکست تایم‌فریم پایین است؟
+    None یعنی داده کافی نیست (نه تأیید، نه رد) — تصمیم نهایی به‌عهده‌ی صدازننده است."""
+    if df is None or df.empty or len(df) < 55:
+        return None
+    try:
+        c = df.iloc[-2]
+        if want_bullish:
+            return bool(c["close"] > c["ema20"] > c["ema50"] and c["plus_di"] > c["minus_di"])
+        return bool(c["close"] < c["ema20"] < c["ema50"] and c["minus_di"] > c["plus_di"])
+    except Exception:
+        return None
+
+
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
     # V4: keep only the strongest observed regime from the baseline tests: bullish breakout
     # with a strong candle (Long) mirrored for confirmed bearish markets (Short).
     # جهت معامله را رژیم قطعی بازار (تشخیص‌داده‌شده از هم‌راستایی BTC/ETH) تعیین می‌کند؛
     # اگر رژیم نامشخص (NEUTRAL) باشد، اصلاً سیگنالی صادر نمی‌شود (NO TRADE).
-    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
-    if regime == "BULLISH" and break_sig == "BUY":
-        return "BUY", f"[شکست-قوی] {break_reason}"
-    if regime == "BEARISH" and break_sig == "SELL":
-        return "SELL", f"[شکست-قوی] {break_reason}"
     if regime not in ("BULLISH", "BEARISH"):
         return None, "رژیم بازار قطعی نیست (NEUTRAL) — بدون معامله"
-    return None, break_reason if break_reason else "No strong breakout aligned with market regime"
+    want_bullish = regime == "BULLISH"
+    expected_sig = "BUY" if want_bullish else "SELL"
+
+    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
+    if break_sig != expected_sig:
+        return None, break_reason if break_reason else "No strong breakout aligned with market regime"
+
+    # حالت مولتی‌تایم‌فریم: نقطه‌ی دقیق ورود همچنان از تایم‌فریم پایین (شکست) می‌آید، اما قبل از
+    # پذیرش آن، هم‌راستایی روند در تایم‌فریم‌های بالاتر (4h و 1h) هم واقعاً بررسی می‌شود — این
+    # همان تأیید چندتایم‌فریمی واقعی است (قبلاً market_data_dict دریافت می‌شد ولی استفاده نمی‌شد).
+    if isinstance(market_data_dict, dict) and ("4h" in market_data_dict or "1h" in market_data_dict):
+        checks = []
+        for key in ("4h", "1h"):
+            aligned = _htf_trend_aligned(market_data_dict.get(key), want_bullish)
+            if aligned is not None:
+                checks.append((key, aligned))
+        if not checks:
+            return None, "داده تایم‌فریم بالاتر برای تأیید چندتایم‌فریمی کافی نیست"
+        not_aligned = [k for k, ok in checks if not ok]
+        if not_aligned:
+            return None, f"شکست تأیید نشد چون روند {', '.join(not_aligned)} هم‌جهت نیست"
+        confirmed = ", ".join(k for k, _ in checks)
+        return expected_sig, f"[شکست-قوی + تأیید {confirmed}] {break_reason}"
+
+    return expected_sig, f"[شکست-قوی] {break_reason}"
 
 
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None):

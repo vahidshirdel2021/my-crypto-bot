@@ -120,11 +120,11 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
-        [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}],
-        [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"},
-         {"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}],
-        [{"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"},
-         {"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
+        [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
+         {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
+        [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
+         {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
+        [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
     ]}
 
