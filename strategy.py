@@ -13,6 +13,7 @@ STRATEGY_DEFAULTS = {
     "min_adx": 24.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
+    # Dynamic exits use these as safe bounds/baselines rather than fixed exits.
     "dynamic_exits": True,
     "min_trade_score": 82.0,
     "min_rr": 1.35,
@@ -21,23 +22,32 @@ STRATEGY_DEFAULTS = {
     "max_target_r": 1.8,
     "min_volume_ratio": 1.15,
     "min_body_ratio": 0.55,
-    "sweep_min_distance_atr": 0.15,
+    # --- پارامترهای اختصاصی استراتژی Liquidity Sweep (فقط تایم‌فریم 5 دقیقه) ---
+    # این دو مقدار عمداً افزایش یافته‌اند (قبلاً 0.05 و 0.15 بودند): مقادیر قبلی سیگنال‌هایی
+    # با نفوذ/SL بسیار کوچک تولید می‌کردند که ریسک دلاری‌شان آن‌قدر ناچیز بود که کارمزد ثابت
+    # رفت‌وبرگشت (round_trip_fee_usdt در bot.py) نسبت بزرگی از آن را می‌بلعید (تا بیش از ۱۰۰٪
+    # در برخی نمادهای کم‌نوسان مثل SHIB/BCH/ANKR/THETA). بزرگ‌تر کردن این آستانه‌ها هم سیگنال‌های
+    # واقعی‌تر (نه نویز اطراف سطح) تولید می‌کند، هم ریسک دلاری هر معامله را بزرگ‌تر و منطقی‌تر می‌کند.
+    "sweep_min_distance_atr": 0.15,   # حداقل عمق نفوذ از سطح روز قبل، نسبت به ATR
     "sweep_require_reclaim": True,
     "sweep_require_reversal_candle": True,
-    "sweep_stop_buffer_atr": 0.25,
+    "sweep_stop_buffer_atr": 0.25,    # فاصله اضافه SL پشت نقطه Sweep، نسبت به ATR
     "sweep_risk_reward": 1.8,
-    "sweep_enable_retest_continuation": True,
-    "retest_lookback_candles": 48,
-    "retest_tolerance_atr": 0.25,
+    "sweep_enable_retest_continuation": True,  # الگوی مکمل: شکست معتبر + پولبک + ادامه مسیر
+    "retest_lookback_candles": 48,    # چند کندل قبل (۴ ساعت روی 5د) برای یافتن شکست قبلی بررسی شود
+    "retest_tolerance_atr": 0.25,     # چقدر نزدیکی به سطح به‌عنوان «پولبک واقعی» قبول شود، نسبت به ATR
 }
 
+# پارامترهای ورود مخصوص هر تایم‌فریم — به‌جای یک آستانه‌ی ثابت و خیلی سخت‌گیرانه برای همه.
+# نسبت به STRATEGY_DEFAULTS شل‌تر شده‌اند تا در روز حداقل چند سیگنال معتبر صادر شود،
+# اما همچنان زیر حداقل‌های منطقی رد می‌شوند (کیفیت صفر نمی‌شود، فقط واقع‌بینانه‌تر است).
+# تایم‌فریم‌های پایین‌تر (نویزی‌تر) کمی محتاط‌ترند؛ تایم‌فریم‌های بالاتر کمی بازتر.
 TIMEFRAME_STRATEGY_PRESETS = {
     "5min":  {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
               "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
               "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
     "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.9,
-              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
+              "min_trade_score": 60.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.0},
     "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
               "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
     "4hour": {"min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
@@ -48,9 +58,10 @@ TIMEFRAME_STRATEGY_PRESETS = {
 
 
 def get_timeframe_preset(timeframe):
+    """پیکربندی کامل استراتژی برای یک تایم‌فریم مشخص (پایه + تنظیمات مخصوص آن تایم‌فریم)."""
     return {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
 
-
+# Legacy compatibility only. Production code passes per-user dictionaries.
 FILTERS = FILTER_DEFAULTS.copy()
 STRATEGY_CONFIG = STRATEGY_DEFAULTS.copy()
 
@@ -139,14 +150,20 @@ def get_strategy_params(timeframe="5min", strategy_config=None):
 
 
 def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
+    """Build a volatility + market-structure exit plan and a 0-100 trade-quality score.
+
+    This is a decision filter, not a probability forecast.  The plan uses the closed
+    candle only, ATR for volatility, recent swing structure for invalidation, and
+    a dynamic reward target.  A trade is rejected when the resulting R:R is below
+    the configured floor or the quality score is too low.
+    """
     if strategy_type == "liquidity_sweep":
         return build_sweep_trade_plan(df, signal, strategy_config)
     if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     c = df.iloc[-2]
     try:
-        entry = float(c["close"])
-        atr = float(c["atr"])
+        entry = float(c["close"]); atr = float(c["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
@@ -168,6 +185,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     plus_di = _safe_float(c.get("plus_di"), 0)
     minus_di = _safe_float(c.get("minus_di"), 0)
 
+    # Volatility regime is relative to recent ATR, not a hard-coded % that
+    # would behave badly across BTC, altcoins and different timeframes.
     recent_atr = pd.to_numeric(df["atr"].iloc[-32:-2], errors="coerce").dropna()
     atr_ratio = atr / max(float(recent_atr.median()) if len(recent_atr) else atr, 1e-12)
 
@@ -176,7 +195,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     rsi_ok = (48 <= rsi <= 68) if signal == "BUY" else (32 <= rsi <= 52)
 
     if strategy_type == "mean_reversion":
-        trend_score = 22.0 if adx < float(cfg.get("min_adx", 20.0)) else 0.0
+        # Mean reversion intentionally prefers a non-trending regime and RSI extremes.
+        trend_score = 22.0 if adx < float(cfg.get("min_adx",20.0)) else 0.0
         rsi_score = 10.0 if ((signal == "BUY" and rsi <= 35) or (signal == "SELL" and rsi >= 65)) else 2.0
     else:
         trend_score = 25.0 if trend_ok else (12.0 if direction_di else 0.0)
@@ -187,6 +207,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     vol_score = 15.0 * max(0.0, 1.0 - min(abs(np.log(max(atr_ratio, 1e-9))), 1.0))
     score = int(round(max(0.0, min(100.0, trend_score + adx_score + volume_score + candle_score + rsi_score + vol_score))))
 
+    # Adaptive stop: start from ATR, then respect the most recent structural
+    # invalidation.  The cap prevents a distant swing from creating oversized risk.
     lookback = df.iloc[-12:-2]
     if signal == "BUY":
         swing = float(pd.to_numeric(lookback["low"], errors="coerce").min())
@@ -225,10 +247,13 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست"
 
+    # Stronger setups earn a larger target, but never below the configured floor.
     target_r = min_r + (max_r - min_r) * (score / 100.0)
     target_r = max(min_r, min(max_r, target_r))
     tp = entry + direction * risk_dist * target_r
 
+    # If a meaningful structure level lies before the target, use it only when
+    # it still leaves enough reward. Otherwise keep the volatility-based target.
     if direction == 1 and resistance > entry:
         candidate = resistance - atr * 0.10
         if candidate > entry and (candidate - entry) / risk_dist >= min_rr:
@@ -256,7 +281,17 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     return plan, plan["reason"]
 
 
+# ============================================================
+# استراتژی اختصاصی 5 دقیقه: Liquidity Sweep روی High/Low روز قبل
+# ============================================================
+# برخلاف strategy_breakout که دنباله‌رو روند است، این یک الگوی برگشتی درون‌روزی است:
+# وقتی قیمت سطح روز قبل را می‌شکند (نقدینگی را جارو می‌کند) ولی بلافاصله برمی‌گردد،
+# احتمال برگشت به داخل رنج بالاست. بنابراین عمداً به رژیم کلی بازار (BTC/ETH) وابسته نیست.
+
 def _compute_prev_day_levels(df):
+    """High/Low روز معاملاتی قبل را از کندل‌های تایم‌فریم پایین محاسبه می‌کند.
+    خروجی: (دیتافریم کامل با ستون تاریخ/PDH/PDL, PDH, PDL) یا (None, None, None) اگر داده کافی نباشد.
+    کندل آخر بسته‌شده از طریق d.iloc[-2] در دسترس است."""
     if df is None or len(df) < 100 or "timestamp" not in df.columns:
         return None, None, None
     d = df.copy()
@@ -279,6 +314,9 @@ def _compute_prev_day_levels(df):
 
 
 def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
+    """در بازه‌ی «امروز» و حداکثر `lookback` کندل قبل از before_idx، آخرین کندلی را پیدا می‌کند
+    که واقعاً (با Close، نه فقط سایه) از PDH یا PDL رد شده — یعنی شکست معتبر، نه فقط یک سایه.
+    خروجی: ('UP'|'DOWN', سطح) یا (None, None)."""
     start = max(0, before_idx - lookback)
     window = d.iloc[start:before_idx]
     if window.empty:
@@ -291,6 +329,7 @@ def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
     down = same_day[same_day["close"] < pdl]
     up_last = up.index.max() if not up.empty else None
     down_last = down.index.max() if not down.empty else None
+    # هرکدام که دیرتر (نزدیک‌تر به الان) اتفاق افتاده، وضعیت غالب فعلی است.
     if up_last is not None and (down_last is None or up_last > down_last):
         return "UP", pdh
     if down_last is not None:
@@ -299,6 +338,9 @@ def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
 
 
 def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
+    """الگوی مکمل: شکست معتبر قبلی همان روز از سطح + پولبک به همان سطح + ادامه مسیر (نه برگشت).
+    برخلاف Sweep+Reclaim که هر دو در یک کندل رخ می‌دهند، اینجا شکست قبلاً تثبیت‌شده و الان
+    فقط پولبک و تأیید ادامه‌ی روند بررسی می‌شود."""
     lookback = int(cfg.get("retest_lookback_candles", 48))
     direction, level = _find_recent_breakout(d, before_idx, pdh, pdl, lookback)
     if direction is None:
@@ -322,9 +364,18 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
 
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
+    """دو الگوی مستقل و مکمل روی سطوح روز قبل — مستقل از رژیم کلی بازار (BTC/ETH):
+
+    1) Sweep + Reclaim فوری: قیمت از سطح رد می‌شود و همان کندل دوباره داخل رنج بسته می‌شود
+       (برگشتی — همان چیزی که کاربر اولیه فرستاد).
+    2) شکست معتبر + پولبک + ادامه: قیمت قبلاً همان روز واقعاً (با Close) از سطح رد شده،
+       بعداً به همان سطح پولبک می‌زند و دوباره در همان جهت ادامه می‌دهد (دنباله‌روی، نه برگشت).
+       بدون این الگو، وقتی شکست واقعی رخ می‌داد و برنمی‌گشت، هیچ سیگنالی صادر نمی‌شد و
+       فرصت کامل از دست می‌رفت.
+    """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
-        return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
+        return None, "داده کافی برای محاسبه High/Low روز قبل نیست (~2 روز کندل 5 دقیقه لازم است)"
     if pdh is None or pdl is None:
         return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
     curr = d.iloc[-2]
@@ -342,6 +393,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
 
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
 
+    # الگوی ۱: Sweep + Reclaim فوری
     if h >= pdh + min_sweep:
         reclaimed = (not require_reclaim) or (c < pdh)
         reversal = (not require_reversal) or (c < o)
@@ -354,6 +406,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
         if reclaimed and reversal:
             return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی"
 
+    # الگوی ۲: شکست معتبر قبلی + پولبک + ادامه مسیر (مکمل، نه جایگزین الگوی ۱)
     if bool(cfg.get("sweep_enable_retest_continuation", True)):
         sig, reason = _detect_retest_continuation(d, len(d) - 2, pdh, pdl, atr, cfg)
         if sig:
@@ -363,6 +416,9 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
 
 
 def build_sweep_trade_plan(df, signal, strategy_config=None):
+    """SL/TP و امتیاز کیفیت مخصوص Liquidity Sweep: SL پشت اکسترمم کندل سیگنال (نه ATR روند).
+    این فرمول برای هر دو الگو (Sweep+Reclaim و شکست+پولبک+ادامه) یکسان و معتبر است، چون در
+    هر دو حالت SL منطقی همان‌جایی است که اگر قیمت به آن برسد، فرض سیگنال باطل شده است."""
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -370,8 +426,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         return None, "سطوح روز قبل هنوز آماده نیست"
     curr = d.iloc[-2]
     try:
-        entry = float(curr["close"])
-        atr = float(curr["atr"])
+        entry = float(curr["close"]); atr = float(curr["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
@@ -409,6 +464,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
 
+    # امتیاز کیفیت مخصوص Sweep: عمق ریکلیم + قدرت کندل برگشتی + تأیید حجم + کیفیت R:R
+    # (نه روند/ADX، چون این یک الگوی برگشتی است و روند قوی لزوماً به نفعش نیست)
     reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
     candle_score = min(30.0, max(0.0, body_ratio * 40.0))
     volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
@@ -430,10 +487,10 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
 
 
 def get_strategy_description(timeframe="5min", strategy_config=None, filters=None, simple=False):
-    p = get_strategy_params(timeframe, strategy_config)
-    f = _flt(filters)
+    p=get_strategy_params(timeframe,strategy_config)
+    f=_flt(filters)
     if simple:
-        return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود."
+        return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود.\n\n💡 لازم نیست ADX یا ATR را بدانید؛ ربات از آن‌ها به‌عنوان ابزار داخلی استفاده می‌کند."
     return (f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
             f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter',True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter',True) else '🔴'}`")
 
@@ -591,6 +648,8 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
 
 
 def _htf_trend_aligned(df, want_bullish):
+    """آیا این تایم‌فریم بالاتر هم‌جهت با سیگنال شکست تایم‌فریم پایین است؟
+    None یعنی داده کافی نیست (نه تأیید، نه رد) — تصمیم نهایی به‌عهده‌ی صدازننده است."""
     if df is None or df.empty or len(df) < 55:
         return None
     try:
@@ -603,6 +662,13 @@ def _htf_trend_aligned(df, want_bullish):
 
 
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
+    # V24.3: دیگر منتظر تأیید رژیم کلی بازار (هم‌راستایی BTC/ETH) نمی‌مانیم. این مرحله برای
+    # تایم‌فریم‌های غیر از 5 دقیقه بیش‌ازحد سخت‌گیرانه بود: وقتی BTC/ETH هم‌جهت نبودند (که در
+    # عمل بخش زیادی از زمان اتفاق می‌افتاد)، رژیم NEUTRAL می‌شد و اصلاً هیچ اسکنی برای این
+    # تایم‌فریم‌ها انجام نمی‌شد — صرف‌نظر از اینکه خودِ نماد سیگنال شکست معتبری داشت یا نه.
+    # جهت معامله اکنون مستقیماً از خودِ سیگنال شکست (strategy_breakout) می‌آید. تأیید تایم‌فریم
+    # بالاتر (4h/1h) که در ادامه انجام می‌شود، مستقل از BTC/ETH و مختص روند خودِ همان نماد است،
+    # پس همچنان به‌عنوان یک لایه تأیید معنادار باقی می‌ماند.
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if break_sig not in ("BUY", "SELL"):
         return None, break_reason
@@ -628,12 +694,6 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
-    if st == "dynamic":
-        # دسته ۱: اسکالپینگ (5m و 15m) — استراتژی شکار نقدینگی و سطوح روز قبل
-        if timeframe in ("5min", "15min") and timeframe_mode != "multi":
-            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
-        # دسته ۲: سوئینگ و روندی (1h, 4h, multi) — استراتژی شکست روندی با تأیید HTF
-        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     if st == "trend":
         return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
     if st == "breakout":
@@ -642,6 +702,13 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return strategy_mean_reversion(df_primary, filters, strategy_config)
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
+    if st == "dynamic":
+        # استراتژی اختصاصی 5 دقیقه فقط وقتی تایم‌فریم مستقیماً 5 دقیقه انتخاب شده فعال می‌شود؛
+        # در حالت «مولتی» هم داده اصلی 5 دقیقه‌ای است ولی باید همان منطق شکست+تأیید چندتایم‌فریمی
+        # اجرا شود، نه Sweep — بنابراین حالت multi صراحتاً استثنا شده است.
+        if timeframe == "5min" and timeframe_mode != "multi":
+            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
+        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
 

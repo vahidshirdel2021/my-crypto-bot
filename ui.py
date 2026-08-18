@@ -110,17 +110,12 @@ def get_max_positions_keyboard():
 
 
 def get_timeframe_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
-        [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "📈 دسته ۲: روندی / چندزمانه (تأیید روند و شکست)", "callback_data": "/dummy"}],
-        [{"text": "⏱ ۱ ساعته", "callback_data": "/set_tf_1h"}, {"text": "⏱ ۴ ساعته", "callback_data": "/set_tf_4h"}],
-        [{"text": "🌊 چندزمانه (مولتی)", "callback_data": "/set_tf_multi"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
-    ]}
+    return {"inline_keyboard": [[{"text": "5م", "callback_data": "/set_tf_5m"}, {"text": "15م", "callback_data": "/set_tf_15m"}], [{"text": "1س", "callback_data": "/set_tf_1h"}, {"text": "4س", "callback_data": "/set_tf_4h"}], [{"text": "مولتی", "callback_data": "/set_tf_multi"}]]}
 
 
 def get_main_menu_keyboard(active, entry_diag_enabled=True):
+    # منوی اصلی به‌صورت شبکه‌ای و گروه‌بندی‌شده طراحی شده تا خواناتر از منوی خطی باشد.
+    diag_label = "🟢 لاگ ورود: فعال" if entry_diag_enabled else "🔴 لاگ ورود: خاموش"
     return {"inline_keyboard": [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
@@ -158,7 +153,8 @@ def get_watchlist_manage_keyboard():
 
 def get_manual_side_keyboard():
     return {"inline_keyboard": [
-        [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_buy"},
-         {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_sell"}],
+        [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_BUY"},
+         {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_SELL"}],
         [{"text": "❌ انصراف", "callback_data": "/cancel"}],
     ]}
+
