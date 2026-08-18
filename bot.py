@@ -1,4 +1,5 @@
-import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, threading, re
+import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, threading, re
+import urllib.parse as urlparse
 from threading import Thread, RLock
 from typing import Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -26,6 +27,9 @@ from ui import (
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
+# دامنه‌ی HTTPS که همین سرویس روی آن قابل دسترسی است (برای دکمه‌های web_app تلگرام الزامی است؛
+# تلگرام فقط URL با https:// را برای Mini App می‌پذیرد). مثال: https://your-app.onrender.com
+MINIAPP_BASE_URL = os.environ.get('MINIAPP_BASE_URL', '').strip().rstrip('/')
 PORT = int(os.environ.get('PORT', '10000'))
 DB_PATH = os.environ.get('BOT_DB_PATH', 'trader_bot.sqlite3')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
@@ -852,11 +856,13 @@ def historical_expectancy_r(chat_id, min_samples=10):
     return sum(vals)/len(vals), len(vals)
 
 
-def trade_action_keyboard(symbol):
-    return {'inline_keyboard': [
-        [{'text':'📊 مدیریت معامله','callback_data':f'/manage_{symbol}'}, {'text':'🔴 بستن معامله','callback_data':f'/close_prompt_{symbol}'}],
-        [{'text':'🔄 بروزرسانی','callback_data':f'/manage_{symbol}'}]
-    ]}
+def trade_action_keyboard(symbol, chart_url=None):
+    rows = []
+    if chart_url:
+        rows.append([{'text':'📈 مشاهده چارت','web_app':{'url':chart_url}}])
+    rows.append([{'text':'📊 مدیریت معامله','callback_data':f'/manage_{symbol}'}, {'text':'🔴 بستن معامله','callback_data':f'/close_prompt_{symbol}'}])
+    rows.append([{'text':'🔄 بروزرسانی','callback_data':f'/manage_{symbol}'}])
+    return {'inline_keyboard': rows}
 
 def close_confirm_keyboard(symbol):
     return {'inline_keyboard': [
@@ -1167,6 +1173,11 @@ def chart(chat_id,symbol,df,trade):
             quality_line=f"\n• امتیاز کیفیت معامله: `{trade.get('quality_score')}/100` — {trade.get('quality_label','')}"
         if hist_r is not None:
             quality_line+=f"\n• امیدریاضی تاریخی: `{hist_r:+.2f}R` بر اساس `{hist_n}` معامله"
+        try:
+            _s = get_session(chat_id)
+            _chart_tf = '5min' if _s.get('timeframe') == 'multi' else _s.get('timeframe', '5min')
+        except Exception:
+            _chart_tf = '5min'
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *معامله جدید [{mode}]*\n"
@@ -1179,7 +1190,7 @@ def chart(chat_id,symbol,df,trade):
             f"{quality_line}"
             f"{warning}\n\n"
             f"ℹ️ سود/زیان بالا قبل از کارمزد و Funding است.",
-            trade_action_keyboard(symbol)
+            trade_action_keyboard(symbol, miniapp_chart_url(symbol, _chart_tf))
         )
     except Exception:
         logger.exception('chart error')
@@ -1392,11 +1403,18 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
 
 
 def scan_watchlist_for_timeframe(timeframe, regime=None):
-    """Return the fixed winning watchlist for the selected timeframe and market regime.
-    regime='BEARISH' -> واچ‌لیست SHORT، در غیر این صورت (BULLISH یا نامشخص) -> واچ‌لیست LONG."""
+    """Return the watchlist to scan for the selected timeframe.
+    regime='BEARISH' -> فقط واچ‌لیست SHORT، regime='BULLISH' -> فقط واچ‌لیست LONG.
+    regime=None (حالت فعلی dynamic از V24.3 به بعد): چون جهت معامله دیگر از رژیم کلی
+    بازار تعیین نمی‌شود و کاملاً به سیگنال شکست خودِ نماد بستگی دارد، هر دو لیست با هم
+    ادغام می‌شوند تا نمادهای منحصر به یکی از دو لیست هم برای هر دو جهت بررسی شوند."""
     if regime == 'BEARISH':
         return list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))
-    return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
+    if regime == 'BULLISH':
+        return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
+    long_list = WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min'])
+    short_list = WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min'])
+    return list(dict.fromkeys(list(long_list) + list(short_list)))
 
 
 MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'ttl': 90}
@@ -1531,15 +1549,18 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
         return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation)
 
 
-def execute_manual_trade(chat_id,symbol,side,sl,tp):
+def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
     """باز کردن پوزیشن دستی — برخلاف execute_trade نیازی به فعال‌بودن اسکن ندارد،
-    ولی همچنان محدودیت ریسک روزانه و قفل ورود همزمان را رعایت می‌کند."""
+    ولی همچنان محدودیت ریسک روزانه و قفل ورود همزمان را رعایت می‌کند.
+    entry_price: اگر کاربر نقطه ورود دستی مشخص کرده باشد، همان به‌عنوان قیمت ورود پوزیشن
+    ثبت می‌شود (مخصوص PAPER)؛ در غیر این صورت قیمت لحظه‌ای بازار استفاده می‌شود."""
     s=get_session(chat_id)
     if s['daily_stopped']:
         return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
-    price=latest_price(symbol)
-    if not price:
+    live_price=latest_price(symbol)
+    if not live_price:
         return False, f'قیمت لحظه‌ای `{symbol}` دریافت نشد.'
+    price=float(entry_price) if entry_price else live_price
     generation=int(s.get('scan_generation',0))
     lock=get_entry_lock(chat_id)
     with lock:
@@ -2914,8 +2935,10 @@ def process_command(cmd,chat_id,message_id=None):
         if not tmp.get('symbol'):
             send_message(chat_id,'⚠️ ابتدا نماد را ارسال کنید.'); s['user_state']='WAIT_MANUAL_SYMBOL'; save_session(chat_id); return
         tmp['side']='BUY' if cl=='/manual_side_buy' else 'SELL'
-        s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
-        edit_page(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}` {'خرید (Long)' if tmp['side']=='BUY' else 'فروش (Short)'}\n\nقیمت SL (حد ضرر) را به‌صورت عدد ارسال کنید.",None,message_id)
+        s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
+        live=latest_price(tmp['symbol'])
+        price_line=f"قیمت لحظه‌ای `{tmp['symbol']}`: `{fmt(live)}`\n\n" if live else ''
+        edit_page(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}` {'خرید (Long)' if tmp['side']=='BUY' else 'فروش (Short)'}\n\n{price_line}قیمت ورود (Entry) را ارسال کنید.\nبرای استفاده از قیمت لحظه‌ای، کلمه `بازار` را تایپ کنید یا همان عدد بالا را بفرستید.",None,message_id)
         return
     if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
         if not s['paper_positions']: send_message(chat_id,'پوزیشن بازی وجود ندارد.'); return
@@ -2955,7 +2978,8 @@ def process_command(cmd,chat_id,message_id=None):
         sym=cl.replace('/manage_','').upper()
         for p in s['paper_positions']:
             if p['symbol']==sym:
-                send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym)); return
+                _chart_tf='5min' if s.get('timeframe')=='multi' else s.get('timeframe','5min')
+                send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym,_chart_tf))); return
         send_message(chat_id,f'❌ پوزیشن باز `{sym}` در وضعیت ربات پیدا نشد.'); return
     if cl.startswith('/close_prompt_'):
         sym=cl.replace('/close_prompt_','').upper()
@@ -3039,7 +3063,26 @@ def handle_text(chat_id,text):
         if latest_price(sym) is None:
             send_message(chat_id,f'⚠️ قیمت `{sym}` دریافت نشد؛ نماد را بررسی و دوباره ارسال کنید.'); return
         s['_manual_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
-        send_message(chat_id,f'🖐 جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
+        live=latest_price(sym)
+        price_line=f"💰 قیمت لحظه‌ای `{sym}`: `{fmt(live)}`\n\n" if live else ''
+        send_message(chat_id,f'🖐 {price_line}جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
+    if s['user_state']=='WAIT_MANUAL_ENTRY':
+        tmp=s.get('_manual_tmp') or {}
+        symbol=tmp.get('symbol')
+        if not (symbol and tmp.get('side')):
+            send_message(chat_id,'⚠️ اطلاعات معامله ناقص بود؛ از ابتدا شروع کنید: `/manual_trade`'); s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id); return
+        live=latest_price(symbol)
+        if raw.strip() in ('بازار','بازاری','market','Market','MARKET'):
+            if not live:
+                send_message(chat_id,f'⚠️ قیمت لحظه‌ای `{symbol}` در دسترس نیست. یک عدد برای ورود ارسال کنید.'); return
+            entry=live
+        else:
+            try: entry=float(raw.replace(',','').strip())
+            except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست. قیمت ورود را دوباره ارسال کنید یا `بازار` را تایپ کنید.'); return
+            if entry<=0: send_message(chat_id,'⚠️ قیمت ورود باید مثبت باشد. دوباره ارسال کنید.'); return
+        tmp['entry']=entry; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
+        live_line=f" (قیمت لحظه‌ای: `{fmt(live)}`)" if live else ''
+        send_message(chat_id,f'✅ قیمت ورود: `{fmt(entry)}`{live_line}\n\nقیمت SL (حد ضرر) را به‌صورت عدد ارسال کنید.'); return
     if s['user_state']=='WAIT_MANUAL_SL':
         tmp=s.get('_manual_tmp') or {}
         try: sl=float(raw.replace(',','').strip())
@@ -3052,18 +3095,17 @@ def handle_text(chat_id,text):
         try: tp=float(raw.replace(',','').strip())
         except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست. قیمت TP را دوباره ارسال کنید.'); return
         if tp<=0: send_message(chat_id,'⚠️ قیمت TP باید مثبت باشد. دوباره ارسال کنید.'); return
-        symbol=tmp.get('symbol'); side=tmp.get('side'); sl=tmp.get('sl')
+        symbol=tmp.get('symbol'); side=tmp.get('side'); sl=tmp.get('sl'); entry=tmp.get('entry')
         s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id)
-        if not (symbol and side and sl):
+        if not (symbol and side and sl and entry):
             send_message(chat_id,'⚠️ اطلاعات معامله ناقص بود؛ از ابتدا شروع کنید: `/manual_trade`'); return
-        price=latest_price(symbol) or 0
         is_long = side=='BUY'
-        valid = (is_long and sl<price<tp) or ((not is_long) and tp<price<sl)
+        valid = (is_long and sl<entry<tp) or ((not is_long) and tp<entry<sl)
         if not valid:
-            send_message(chat_id,f'⚠️ SL/TP با جهت `{"خرید" if is_long else "فروش"}` و قیمت لحظه‌ای (`{fmt(price)}`) همخوانی ندارد.\nSL باید {"زیر" if is_long else "بالای"} قیمت و TP باید {"بالای" if is_long else "زیر"} قیمت باشد.\nاز ابتدا شروع کنید: `/manual_trade`')
+            send_message(chat_id,f'⚠️ SL/TP با جهت `{"خرید" if is_long else "فروش"}` و قیمت ورود (`{fmt(entry)}`) همخوانی ندارد.\nSL باید {"زیر" if is_long else "بالای"} قیمت ورود و TP باید {"بالای" if is_long else "زیر"} قیمت ورود باشد.\nاز ابتدا شروع کنید: `/manual_trade`')
             return
-        ok,err=execute_manual_trade(chat_id,symbol,'BUY (Long)' if is_long else 'SELL (Short)',sl,tp)
-        if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
+        ok,err=execute_manual_trade(chat_id,symbol,'BUY (Long)' if is_long else 'SELL (Short)',sl,tp,entry_price=entry)
+        if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` در قیمت `{fmt(entry)}` باز شد.')
         else: send_message(chat_id,f'❌ معامله دستی باز نشد: {err}')
         return
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()): send_message(chat_id,analyze(chat_id,val))
@@ -3128,14 +3170,16 @@ async def scan_loop():
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
-                # فقط اگر حداقل یک کاربر فعال از استراتژی 'dynamic' با تایم‌فریمی غیر از 5 دقیقه استفاده
-                # می‌کند رژیم بازار را محاسبه کن؛ تایم‌فریم 5 دقیقه از استراتژی اختصاصی Liquidity Sweep
-                # استفاده می‌کند که مستقل از رژیم کلی بازار است.
+                # V24.3: رژیم بازار (BTC/ETH) دیگر گیت ورودی نیست — فقط برای نمایش اطلاعاتی در
+                # گزارش وضعیت به‌روز نگه داشته می‌شود. قبلاً وقتی BTC/ETH هم‌جهت نبودند، تمام
+                # تایم‌فریم‌های dynamic غیر از 5 دقیقه کاملاً از اسکن حذف می‌شدند، صرف‌نظر از
+                # اینکه خودِ نماد سیگنال شکست معتبری داشت یا نه — این بیش‌ازحد سخت‌گیرانه بود.
                 need_regime = any(
-                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic' and s.get('timeframe') != '5min'
+                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic'
                     for s in USER_SESSIONS.values()
                 )
-                regime, regime_detail = (await refresh_market_regime(http)) if need_regime else (None, '')
+                if need_regime:
+                    await refresh_market_regime(http)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
@@ -3145,18 +3189,9 @@ async def scan_loop():
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=max_open_positions open=%s max=%s', cid, len(s['paper_positions']), s['max_open_positions'])
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    is_dynamic = s.get('active_strategy')=='dynamic'
-                    # تایم‌فریم 5 دقیقه (Liquidity Sweep) به تشخیص رژیم بازار نیاز ندارد؛ فقط سایر
-                    # تایم‌فریم‌های dynamic (که همچنان از شکست+رژیم استفاده می‌کنند) این گیت را دارند.
-                    uses_regime_gate = is_dynamic and s.get('timeframe') != '5min'
-                    if uses_regime_gate and regime not in ('BULLISH','BEARISH'):
-                        logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=market_regime_neutral detail=%s', cid, regime_detail)
-                        _entry_diag_batch_update(cid, [{'status':'blocked','reason':'رژیم بازار قطعی نیست (BTC و ETH هم‌جهت نبودند) — اسکن این دور انجام نشد'}])
-                        continue
-                    scan_regime = regime if uses_regime_gate else None
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), scan_regime)
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), None)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,scan_regime))
+                        tasks.append(scan_symbol(http,cid,sym,None))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
@@ -3183,7 +3218,372 @@ def status():
     return {'status':'ok','sessions':len(USER_SESSIONS),'active_bots':sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active')),'multi_user_real':bool(COINEX_ACCOUNTS)},200
 
 
-def main():
+# ============================================================
+# مینی‌اپ تلگرام — فاز ۱: نمایش چارت | فاز ۲: drag خطوط SL/TP روی PAPER
+# ============================================================
+
+def _validate_telegram_webapp_initdata(init_data: str, max_age_seconds: int = 3600):
+    """اعتبارسنجی initData طبق مستندات رسمی تلگرام (HMAC-SHA256 با کلید WebAppData).
+    خروجی: دیکشنری user (شامل id) اگر معتبر باشد، وگرنه None.
+    این تنها راه امنی است که مطمئن شویم درخواست واقعاً از همان کاربر تلگرام آمده،
+    نه از یک chat_id جعلی که در URL/بدنه‌ی درخواست فرستاده شده."""
+    if not init_data or not TELEGRAM_TOKEN:
+        return None
+    try:
+        pairs = urlparse.parse_qsl(init_data, keep_blank_values=True)
+        data = dict(pairs)
+        received_hash = data.pop('hash', None)
+        if not received_hash:
+            return None
+        check_string = '\n'.join(f'{k}={v}' for k, v in sorted(data.items()))
+        secret_key = hmac.new(b'WebAppData', TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(computed_hash, received_hash):
+            return None
+        auth_date = int(data.get('auth_date', '0') or '0')
+        if auth_date and (time.time() - auth_date) > max_age_seconds:
+            return None
+        user_raw = data.get('user')
+        if not user_raw:
+            return None
+        return json.loads(user_raw)
+    except Exception as exc:
+        logger.debug('initData validation failed: %s', exc)
+        return None
+
+
+def _miniapp_find_position(chat_id, symbol):
+    s = USER_SESSIONS.get(int(chat_id))
+    if not s:
+        return None
+    for p in s.get('paper_positions', []):
+        if p.get('symbol', '').upper() == symbol.upper():
+            return p
+    return None
+
+
+_MINIAPP_CHART_HTML = """<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>چارت پوزیشن</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#0e0e12;color:#eaeaea;font-family:-apple-system,Tahoma,sans-serif;height:100%;}
+  #info{padding:10px 12px;font-size:13px;line-height:1.9;border-bottom:1px solid #23232b;}
+  #chart{width:100%;height:calc(100% - 96px);position:relative;touch-action:none;}
+  .row{display:flex;justify-content:space-between;}
+  .buy{color:#26a69a;} .sell{color:#ef5350;}
+  #err{padding:14px;color:#ef5350;font-size:13px;}
+  #hint{padding:6px 12px;font-size:11px;color:#8a8a95;border-top:1px solid #23232b;}
+  #dragBadge{position:absolute;display:none;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;color:#0e0e12;pointer-events:none;z-index:5;transform:translateY(-50%);}
+  #toast{position:fixed;left:50%;bottom:14px;transform:translateX(-50%);background:#23232b;color:#eaeaea;padding:8px 14px;border-radius:8px;font-size:12px;display:none;z-index:10;max-width:85%;text-align:center;}
+</style>
+</head>
+<body>
+<div id="info">در حال بارگذاری...</div>
+<div id="chart"><div id="dragBadge"></div></div>
+<div id="hint"></div>
+<div id="toast"></div>
+<div id="err"></div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const params = new URLSearchParams(window.location.search);
+const symbol = params.get('symbol') || '';
+const tf = params.get('tf') || '5min';
+const initData = tg ? tg.initData : '';
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(showToast._h);
+  showToast._h = setTimeout(() => { t.style.display = 'none'; }, 2200);
+}
+
+async function load() {
+  try {
+    const res = await fetch('/miniapp/api/data', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({initData, symbol, tf})
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      document.getElementById('err').textContent = data.error || 'خطا در دریافت داده';
+      document.getElementById('info').textContent = '';
+      return;
+    }
+    let p = data.position;
+    const sideLabel = p ? (p.side.includes('BUY') ? 'خرید (Long)' : 'فروش (Short)') : '—';
+    const sideClass = p && p.side.includes('BUY') ? 'buy' : 'sell';
+    const infoEl = document.getElementById('info');
+    function renderInfo() {
+      infoEl.innerHTML = `
+        <div class="row"><span>نماد</span><b>${data.symbol}</b></div>
+        ${p ? `
+        <div class="row"><span>جهت</span><b class="${sideClass}">${sideLabel}</b></div>
+        <div class="row"><span>ورود</span><b>${p.entry_price}</b></div>
+        <div class="row"><span>حد ضرر (SL)</span><b class="sell">${p.sl}</b></div>
+        <div class="row"><span>حد سود (TP)</span><b class="buy">${p.tp}</b></div>
+        ` : '<div class="row"><span>پوزیشن باز فعالی برای این نماد نیست</span></div>'}
+      `;
+    }
+    renderInfo();
+
+    const chartEl = document.getElementById('chart');
+    const dragBadge = document.getElementById('dragBadge');
+    const chart = LightweightCharts.createChart(chartEl, {
+      width: chartEl.clientWidth, height: chartEl.clientHeight,
+      layout: {background:{color:'#0e0e12'}, textColor:'#c8c8d0'},
+      grid: {vertLines:{color:'#1c1c24'}, horzLines:{color:'#1c1c24'}},
+      timeScale: {timeVisible:true, secondsVisible:false},
+      rightPriceScale: {borderColor:'#2a2a33'},
+      handleScroll: true, handleScale: true,
+    });
+    const series = chart.addCandlestickSeries({
+      upColor:'#26a69a', downColor:'#ef5350', borderVisible:false,
+      wickUpColor:'#26a69a', wickDownColor:'#ef5350',
+    });
+    series.setData(data.candles);
+
+    let entryLine=null, slLine=null, tpLine=null;
+    const canDrag = !!(p && !p.is_real);
+
+    function drawLines() {
+      if (entryLine) { series.removePriceLine(entryLine); entryLine=null; }
+      if (slLine) { series.removePriceLine(slLine); slLine=null; }
+      if (tpLine) { series.removePriceLine(tpLine); tpLine=null; }
+      if (!p) return;
+      entryLine = series.createPriceLine({price: p.entry_price, color:'#f0c419', lineWidth:1, lineStyle:2, title:'ورود'});
+      slLine = series.createPriceLine({price: p.sl, color:'#ef5350', lineWidth:2, lineStyle:0, title: canDrag ? 'SL (drag)' : 'SL'});
+      tpLine = series.createPriceLine({price: p.tp, color:'#26a69a', lineWidth:2, lineStyle:0, title: canDrag ? 'TP (drag)' : 'TP'});
+    }
+    drawLines();
+    chart.timeScale().fitContent();
+
+    const hintEl = document.getElementById('hint');
+    hintEl.textContent = p
+      ? (canDrag ? '↕️ خطوط SL/TP را می‌توانید با انگشت یا ماوس روی چارت جابه‌جا کنید (فقط PAPER).' : 'ℹ️ این پوزیشن REAL است؛ SL/TP فقط از طریق ربات قابل تغییر است.')
+      : '';
+
+    // ---------------- فاز ۲: drag خطوط SL/TP (فقط PAPER) ----------------
+    let dragging = null; // 'sl' | 'tp'
+    let dragStartValue = null;
+    const HIT_PX = 10;
+
+    function clientYFromEvent(e) {
+      if (e.touches && e.touches.length) return e.touches[0].clientY;
+      if (e.changedTouches && e.changedTouches.length) return e.changedTouches[0].clientY;
+      return e.clientY;
+    }
+
+    function pickLineAt(y) {
+      if (!canDrag || !p) return null;
+      const slY = series.priceToCoordinate(p.sl);
+      const tpY = series.priceToCoordinate(p.tp);
+      if (slY !== null && Math.abs(y - slY) <= HIT_PX) return 'sl';
+      if (tpY !== null && Math.abs(y - tpY) <= HIT_PX) return 'tp';
+      return null;
+    }
+
+    function updateBadge(y, price, field) {
+      dragBadge.style.display = 'block';
+      dragBadge.style.top = y + 'px';
+      dragBadge.style.right = '4px';
+      dragBadge.style.background = field === 'sl' ? '#ef5350' : '#26a69a';
+      dragBadge.textContent = (field === 'sl' ? 'SL: ' : 'TP: ') + price;
+    }
+
+    function onDown(e) {
+      const rect = chartEl.getBoundingClientRect();
+      const y = clientYFromEvent(e) - rect.top;
+      const field = pickLineAt(y);
+      if (!field) return;
+      dragging = field;
+      dragStartValue = p[field];
+      chart.applyOptions({handleScroll:false, handleScale:false});
+      e.preventDefault();
+    }
+
+    function onMove(e) {
+      if (!dragging) return;
+      const rect = chartEl.getBoundingClientRect();
+      const y = clientYFromEvent(e) - rect.top;
+      const newPrice = series.coordinateToPrice(y);
+      if (newPrice === null) return;
+      const rounded = Number(newPrice.toPrecision(8));
+      p[dragging] = rounded;
+      (dragging === 'sl' ? slLine : tpLine).applyOptions({price: rounded});
+      renderInfo();
+      updateBadge(y, rounded, dragging);
+      e.preventDefault();
+    }
+
+    async function onUp(e) {
+      if (!dragging) { chart.applyOptions({handleScroll:true, handleScale:true}); return; }
+      const field = dragging;
+      const finalValue = p[field];
+      dragging = null;
+      dragBadge.style.display = 'none';
+      chart.applyOptions({handleScroll:true, handleScale:true});
+      if (finalValue === dragStartValue) return;
+      try {
+        const res = await fetch('/miniapp/api/update_sltp', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({initData, symbol: data.symbol, field, value: finalValue})
+        });
+        const out = await res.json();
+        if (!res.ok || out.error) {
+          p[field] = dragStartValue;
+          (field === 'sl' ? slLine : tpLine).applyOptions({price: dragStartValue});
+          renderInfo();
+          showToast('❌ ' + (out.error || 'ذخیره نشد؛ به مقدار قبلی برگشت'));
+        } else {
+          showToast('✅ ' + field.toUpperCase() + ' جدید ذخیره شد: ' + finalValue);
+        }
+      } catch (err) {
+        p[field] = dragStartValue;
+        (field === 'sl' ? slLine : tpLine).applyOptions({price: dragStartValue});
+        renderInfo();
+        showToast('❌ خطای شبکه؛ به مقدار قبلی برگشت');
+      }
+    }
+
+    if (canDrag) {
+      chartEl.addEventListener('mousedown', onDown);
+      chartEl.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      chartEl.addEventListener('touchstart', onDown, {passive:false});
+      chartEl.addEventListener('touchmove', onMove, {passive:false});
+      window.addEventListener('touchend', onUp);
+    }
+
+    window.addEventListener('resize', () => chart.applyOptions({width: chartEl.clientWidth, height: chartEl.clientHeight}));
+  } catch (e) {
+    document.getElementById('err').textContent = 'خطای شبکه: ' + e;
+  }
+}
+load();
+</script>
+</body>
+</html>"""
+
+
+@app.get('/miniapp/chart')
+def miniapp_chart_page():
+    return _MINIAPP_CHART_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@app.post('/miniapp/api/data')
+def miniapp_api_data():
+    body = request.get_json(silent=True) or {}
+    init_data = body.get('initData', '')
+    symbol = str(body.get('symbol', '')).strip().upper()
+    tf = str(body.get('tf', '5min')).strip()
+    if not symbol:
+        return {'error': 'نماد مشخص نشده'}, 400
+    user = _validate_telegram_webapp_initdata(init_data)
+    if not user or not user.get('id'):
+        return {'error': 'احراز هویت تلگرام نامعتبر است'}, 401
+    chat_id = user['id']
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        return {'error': 'دسترسی مجاز نیست'}, 403
+    try:
+        df = get_klines(symbol, tf, 200)
+    except Exception as exc:
+        logger.debug('miniapp klines error: %s', exc)
+        df = pd.DataFrame()
+    if df.empty:
+        return {'error': 'داده کندل برای این نماد در دسترس نیست'}, 404
+    candles = [
+        {'time': int(row['timestamp']) // 1000 if row['timestamp'] > 1e12 else int(row['timestamp']),
+         'open': float(row['open']), 'high': float(row['high']), 'low': float(row['low']), 'close': float(row['close'])}
+        for _, row in df.iterrows()
+    ]
+    pos = _miniapp_find_position(chat_id, symbol)
+    position = None
+    if pos:
+        position = {
+            'side': pos['side'],
+            'entry_price': round(float(pos['entry_price']), 8),
+            'sl': round(float(pos['sl']), 8),
+            'tp': round(float(pos['tp']), 8),
+            # فاز ۲: فقط پوزیشن‌های PAPER قابل drag هستند؛ برای REAL باید از طریق صرافی
+            # سفارش تغییر کند، پس فرانت باید drag را برای is_real=true غیرفعال کند.
+            'is_real': bool(pos.get('is_real', False)),
+        }
+    return {'symbol': symbol, 'candles': candles, 'position': position}, 200
+
+
+@app.post('/miniapp/api/update_sltp')
+def miniapp_api_update_sltp():
+    """فاز ۲: به‌روزرسانی SL/TP پوزیشن PAPER از طریق drag روی چارت مینی‌اپ.
+    فقط برای پوزیشن‌های PAPER (is_real=False) مجاز است؛ پوزیشن REAL باید از مسیر صرافی
+    مدیریت شود و اینجا رد می‌شود تا کاربر تصور غلط از هماهنگی با بروکر نداشته باشد."""
+    body = request.get_json(silent=True) or {}
+    init_data = body.get('initData', '')
+    symbol = str(body.get('symbol', '')).strip().upper()
+    field = str(body.get('field', '')).strip().lower()
+    if field not in ('sl', 'tp'):
+        return {'error': 'فیلد نامعتبر است'}, 400
+    try:
+        value = float(body.get('value'))
+    except Exception:
+        return {'error': 'مقدار نامعتبر است'}, 400
+    if value <= 0:
+        return {'error': 'مقدار باید مثبت باشد'}, 400
+    if not symbol:
+        return {'error': 'نماد مشخص نشده'}, 400
+    user = _validate_telegram_webapp_initdata(init_data)
+    if not user or not user.get('id'):
+        return {'error': 'احراز هویت تلگرام نامعتبر است'}, 401
+    chat_id = user['id']
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS:
+        return {'error': 'دسترسی مجاز نیست'}, 403
+    s = USER_SESSIONS.get(int(chat_id))
+    if not s:
+        return {'error': 'سشن کاربر یافت نشد'}, 404
+    pos = _miniapp_find_position(chat_id, symbol)
+    if not pos:
+        return {'error': 'پوزیشن بازی برای این نماد نیست'}, 404
+    if pos.get('is_real'):
+        return {'error': 'پوزیشن REAL از طریق چارت قابل تغییر نیست'}, 403
+    entry = float(pos['entry_price'])
+    is_long = side_long(pos['side'])
+    other_field = 'tp' if field == 'sl' else 'sl'
+    other_val = float(pos[other_field])
+    if field == 'sl':
+        valid = value < entry if is_long else value > entry
+    else:
+        valid = value > entry if is_long else value < entry
+    if not valid:
+        return {'error': f'مقدار {field.upper()} با جهت پوزیشن و قیمت ورود ({round(entry,8)}) همخوانی ندارد'}, 400
+    with STATE_LOCK:
+        s = USER_SESSIONS.get(int(chat_id))
+        if not s:
+            return {'error': 'سشن کاربر یافت نشد'}, 404
+        pos2 = _miniapp_find_position(chat_id, symbol)
+        if not pos2 or pos2.get('is_real'):
+            return {'error': 'پوزیشن بازی برای این نماد نیست'}, 404
+        pos2[field] = round(value, 8)
+    save_session(chat_id)
+    logger.info('MINIAPP_DRAG chat=%s symbol=%s field=%s value=%s', chat_id, symbol, field, value)
+    return {'ok': True, 'symbol': symbol, field: round(value, 8), 'other_field': other_field, other_field: round(other_val, 8)}, 200
+
+
+def miniapp_chart_url(symbol, timeframe='5min'):
+    """اگر MINIAPP_BASE_URL تنظیم نشده باشد None برمی‌گرداند تا صدازننده بتواند دکمه را حذف کند
+    (تلگرام برای دکمه‌های web_app فقط URL با https:// واقعی را قبول می‌کند)."""
+    if not MINIAPP_BASE_URL:
+        return None
+    return f'{MINIAPP_BASE_URL}/miniapp/chart?symbol={symbol}&tf={timeframe}'
+
+
+
     init_db(); load_telegram_offset(); load_sessions(); logger.info('Loaded %s sessions',len(USER_SESSIONS))
     if not ALLOWED_CHAT_IDS:
         logger.warning('ALLOWED_CHAT_IDS تنظیم نشده؛ دسترسی Telegram در حالت تست عمومی باز است. برای REAL استفاده از whitelist توصیه می‌شود.')

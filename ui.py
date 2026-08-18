@@ -68,7 +68,7 @@ def get_performance_keyboard():
 
 
 def get_positions_keyboard(positions):
-    k = [[{"text": f"❌ بستن {p['symbol']}", "callback_data": f"/close_prompt_{p['symbol']}"}] for p in positions]
+    k = [[{"text": f"{'🟢' if 'BUY' in p['side'] else '🔴'} {p['symbol']} — مدیریت", "callback_data": f"/manage_{p['symbol']}"}] for p in positions]
     if any("BUY" in p["side"] for p in positions):
         k.append([{"text": "❌ بستن همه خرید", "callback_data": "/close_longs_prompt"}])
     if any("SELL" in p["side"] for p in positions):
