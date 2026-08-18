@@ -2178,9 +2178,10 @@ def handle_text(chat_id,text):
         process_command(fixed_buttons[raw],chat_id); return
 
     s=get_session(chat_id); val=raw.upper()
+    current_state = str(s.get('user_state') or '')
 
-    if s.get('user_state', '').startswith('WAIT_EDIT_SL_'):
-        sym = s['user_state'].replace('WAIT_EDIT_SL_', '')
+    if current_state.startswith('WAIT_EDIT_SL_'):
+        sym = current_state.replace('WAIT_EDIT_SL_', '')
         s['user_state'] = None
         save_session(chat_id)
         try:
@@ -2207,8 +2208,8 @@ def handle_text(chat_id,text):
         send_message(chat_id, f"✅ حد ضرر پوزیشن `{sym}` به `{fmt(new_sl)}` تغییر یافت.", trade_action_keyboard(sym))
         return
 
-    if s.get('user_state', '').startswith('WAIT_EDIT_TP_'):
-        sym = s['user_state'].replace('WAIT_EDIT_TP_', '')
+    if current_state.startswith('WAIT_EDIT_TP_'):
+        sym = current_state.replace('WAIT_EDIT_TP_', '')
         s['user_state'] = None
         save_session(chat_id)
         try:
@@ -2235,13 +2236,13 @@ def handle_text(chat_id,text):
         send_message(chat_id, f"✅ حد سود پوزیشن `{sym}` به `{fmt(new_tp)}` تغییر یافت.", trade_action_keyboard(sym))
         return
 
-    if s['user_state']=='WAIT_MANUAL_SYMBOL':
+    if current_state == 'WAIT_MANUAL_SYMBOL':
         sym=re.sub(r'[^A-Z0-9]','',val)
         if not (2<=len(sym)<=12) or latest_price(sym) is None:
             send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
         s['_manual_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
         send_message(chat_id,f'🖐 جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
-    if s['user_state']=='WAIT_MANUAL_ENTRY':
+    if current_state == 'WAIT_MANUAL_ENTRY':
         tmp=s.get('_manual_tmp') or {}
         symbol=tmp.get('symbol')
         live=latest_price(symbol)
@@ -2252,13 +2253,13 @@ def handle_text(chat_id,text):
             except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
         tmp['entry']=entry; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
         send_message(chat_id,f'✅ قیمت ورود: `{fmt(entry)}`\nقیمت حد ضرر (SL) را ارسال کنید:'); return
-    if s['user_state']=='WAIT_MANUAL_SL':
+    if current_state == 'WAIT_MANUAL_SL':
         tmp=s.get('_manual_tmp') or {}
         try: sl=float(raw.replace(',','').strip())
         except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
         tmp['sl']=sl; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_TP'; save_session(chat_id)
         send_message(chat_id,'قیمت حد سود (TP) را ارسال کنید:'); return
-    if s['user_state']=='WAIT_MANUAL_TP':
+    if current_state == 'WAIT_MANUAL_TP':
         tmp=s.get('_manual_tmp') or {}
         try: tp=float(raw.replace(',','').strip())
         except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
