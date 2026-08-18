@@ -45,7 +45,6 @@ REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in (
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
 
-# نوع سفارش ورود: پیش‌فرض روی limit تنظیم شده است
 ENTRY_ORDER_TYPE = os.environ.get('ENTRY_ORDER_TYPE', 'limit').lower()
 ORDER_CONFIRM_RETRIES = max(1, int(os.environ.get('ORDER_CONFIRM_RETRIES', '6')))
 ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0')))
@@ -866,6 +865,44 @@ def format_trade_status(p, price=None):
     return '\n'.join(lines)
 
 
+def _fa_num(x, digits=2):
+    try:
+        return f"{float(x):,.{digits}f}"
+    except Exception:
+        return "—"
+
+def _closed_trades(s):
+    return [t for t in s.get('trade_history', []) if t.get('closed_at')]
+
+def _performance_dashboard(chat_id):
+    s = get_session(chat_id)
+    trades = _closed_trades(s)
+    wins = [t for t in trades if float(t.get('pnl', 0) or 0) > 0]
+    losses = [t for t in trades if float(t.get('pnl', 0) or 0) < 0]
+    breakeven = [t for t in trades if abs(float(t.get('pnl', 0) or 0)) < 1e-9]
+
+    buys = [t for t in trades if side_long(t.get('side',''))]
+    sells = [t for t in trades if not side_long(t.get('side',''))]
+
+    tp_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('tp','take_profit','target'))
+    sl_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('sl','stop_loss','stop'))
+    manual_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('manual','user','manual_close'))
+
+    net = sum(float(t.get('pnl', 0) or 0) for t in trades)
+    gross_profit = sum(max(float(t.get('pnl', 0) or 0), 0) for t in trades)
+    gross_loss = abs(sum(min(float(t.get('pnl', 0) or 0), 0) for t in trades))
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0)
+
+    win_rate = (len(wins)/len(trades)*100) if trades else 0
+
+    lines = []
+    lines.append("📊 *داشبورد عملکرد معاملات*")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"• کل معاملات: `{len(trades)}` | 🎯 نرخ برد: `{win_rate:.1f}%`")
+    lines.append(f"• سود خالص: `{net:+,.2f} USDT` | ضریب سود: `{profit_factor:.2f}`")
+    send_message(chat_id, "\n".join(lines), get_performance_keyboard(), parse_mode='Markdown')
+
+
 def chart(chat_id, symbol, df, trade):
     try:
         if df.empty or len(df) < 5:
@@ -1087,7 +1124,6 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
         try:
             norm_price = normalize_price(chat_id, symbol, price)
-            # ثبت سفارش ورود بر اساس تنظیم ENTRY_ORDER_TYPE (پیش‌فرض Limit)
             if ENTRY_ORDER_TYPE == 'limit':
                 order = ex.create_order(sym, 'limit', 'buy' if side_long(side) else 'sell', amount, norm_price)
             else:
@@ -1108,12 +1144,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             if confirmed is None: confirmed = order
             filled = float(confirmed.get('filled') or 0)
 
-            # اگر سفارش Limit پس از تایم‌اوت پر نشد، لغو می‌شود تا مارجین قفل نشود
             if filled <= 0:
                 if order_id:
                     try:
                         ex.cancel_order(order_id, sym)
-                        logger.info('Cancelled unfilled entry order %s for %s', order_id, symbol)
                     except Exception:
                         pass
                 live = find_position(chat_id, symbol)
@@ -1121,7 +1155,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                     filled = float(live['amount'])
                     exec_price = float(live.get('entry_price') or norm_price)
                 else:
-                    send_message(chat_id, f'⏱ سفارش Limit نماد `{symbol}` در قیمت `{fmt(norm_price)}` پر نشد و لغو گردید.')
+                    send_message(chat_id, f'⏱ سفارش Limit نماد `{symbol}` در قیمت `{fmt(norm_price)}` پر نشد و لغو شد.')
                     return False
             else:
                 exec_price = float(confirmed.get('average') or confirmed.get('price') or norm_price)
@@ -1734,6 +1768,31 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
 
 
+def timeframe_advice(chat_id):
+    s=get_session(chat_id)
+    benchmark=['BTC','ETH','BNB','SOL','XRP']
+    scores=[]
+    for tf in ['5min','1hour','4hour']:
+        results=[]
+        for sym in benchmark:
+            try:
+                item=_market_snapshot(sym, tf)
+                if item: results.append(item)
+            except Exception: continue
+        if results:
+            avg_adx=sum(x['adx'] for x in results)/len(results)
+            avg_rsi=sum(x['rsi'] for x in results)/len(results)
+            avg_atr=sum(x['atr_pct'] for x in results)/len(results)
+            avg_vol=sum(x['volume_ratio'] for x in results)/len(results)
+            score,_=_market_score(results, avg_adx, avg_rsi, avg_atr, avg_vol)
+            scores.append((score, tf))
+    if not scores:
+        return "🧠 داده کافی برای پیشنهاد تایم‌فریم دریافت نشد."
+    scores.sort(reverse=True)
+    suggested=scores[0][1]
+    return f"💡 پیشنهاد سیستم بر اساس کیفیت بازار: *{TF_DISPLAY[suggested]}* (امتیاز: `{scores[0][0]}/100`)"
+
+
 def performance_period_report(chat_id, period='all'):
     s=get_session(chat_id)
     closed=list(s.get('closed_positions') or [])
@@ -1872,6 +1931,17 @@ def _market_snapshot(symbol, tf):
         return None
 
 
+def _market_score(results, avg_adx, avg_rsi, avg_atr, avg_vol):
+    if not results: return 0, 'نامشخص'
+    bullish = sum(1 for x in results if x['score'] > 0)
+    breadth = bullish / len(results)
+    trend = max(0.0, min(100.0, (avg_adx - 10.0) * 4.0))
+    rsi_quality = max(0.0, 100.0 - abs(avg_rsi - 50.0) * 1.6)
+    score = round(trend * 0.40 + breadth * 30.0 + rsi_quality * 0.30)
+    label = 'خوب' if score >= 65 else ('متوسط' if score >= 45 else 'ضعیف')
+    return max(0, min(100, score)), label
+
+
 def market_report(chat_id):
     s = get_session(chat_id)
     tf = '5min' if s['timeframe'] == 'multi' else s['timeframe']
@@ -1907,12 +1977,42 @@ def runtime_audit(chat_id):
     )
 
 
+def learning_text(topic):
+    texts={
+        'adx':"📈 *ADX چیست؟*\n\nADX برای سنجش *قدرت روند* است، نه جهت آن.",
+        'atr':"🌪 *ATR چیست؟*\n\nATR میزان *نوسان معمول قیمت* را اندازه می‌گیرد.",
+        'rsi':"📊 *RSI چیست؟*\n\nRSI وضعیت اشباع خرید یا فروش را مشخص می‌کند.",
+        'rr':"⚖️ *R:R چیست؟*\n\nنسبت پاداش به ریسک احتمالی معامله.",
+        'why':"🧠 *چرا این شاخص‌ها؟*\n\nبرای ارزیابی چندبعدی بازار پیش از ورود."
+    }
+    return texts.get(topic,texts['why'])
+
+def apply_user_profile(s, profile):
+    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(68.0,1.30,0.50,20.0,'متعادل'),'opportunity':(62.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
+    score,rr,risk,adx,label=presets[profile]
+    s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
+    return label,score,rr,risk
+
+
 def process_command(cmd,chat_id,message_id=None):
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
         send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
     if cmd in ('/audit','audit','🧪 ممیزی ربات'):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active'])); return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
+
+    if cl in ('/learn_menu','learn','🎓 آموزش مفاهیم'):
+        edit_page(chat_id,'🎓 *آموزش ساده مفاهیم ربات*',get_learn_menu_keyboard(),message_id); return
+    if cl in ('/learn_adx','/learn_atr','/learn_rsi','/learn_rr','/learn_why'):
+        edit_page(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard(),message_id); return
+    if cl=='/profile_advanced':
+        s['user_experience']='advanced'; save_session(chat_id); edit_page(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*',get_params_menu_keyboard(s),message_id); return
+    if cl=='/profile_simple':
+        s['user_experience']='simple'; save_session(chat_id); edit_page(chat_id,'🟢 *حالت ساده فعال شد.*',get_params_menu_keyboard(s),message_id); return
+    if cl in ('/profile_conservative','/profile_balanced','/profile_opportunity'):
+        profile={'/profile_conservative':'conservative','/profile_balanced':'balanced','/profile_opportunity':'opportunity'}[cl]
+        label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
+        edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*',get_params_menu_keyboard(s),message_id); return
 
     if cl.startswith('/view_chart_'):
         sym = cl.replace('/view_chart_', '').upper()

@@ -2,6 +2,8 @@ from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
+    # Reply Keyboard پایین چت عمداً حذف شده است.
+    # منوی اصلی فقط از Menu بومی تلگرام (کنار کادر پیام) باز می‌شود.
     return {"remove_keyboard": True}
 
 
@@ -18,44 +20,41 @@ def get_filters_menu_keyboard(session=None):
 
 
 def get_params_menu_keyboard(session=None):
-    s = session or {}
-    c = s.get("strategy_config", STRATEGY_DEFAULTS)
-    if s.get("user_experience", "simple") != "advanced":
-        return {"inline_keyboard": [
-            [{"text": "🟢 حالت متعادل ⭐", "callback_data": "/profile_balanced"}],
-            [{"text": "🛡️ محافظه‌کارانه", "callback_data": "/profile_conservative"}, {"text": "⚡ فرصت‌های بیشتر", "callback_data": "/profile_opportunity"}],
-            [{"text": "🎓 حالت حرفه‌ای / جزئیات", "callback_data": "/profile_advanced"}],
-            [{"text": "❓ آموزش مفاهیم", "callback_data": "/learn_menu"}],
-            [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    s=session or {}; c=s.get("strategy_config", STRATEGY_DEFAULTS)
+    if s.get("user_experience","simple") != "advanced":
+        return {"inline_keyboard":[
+            [{"text":"🟢 حالت متعادل ⭐","callback_data":"/profile_balanced"}],
+            [{"text":"🛡️ محافظه‌کارانه","callback_data":"/profile_conservative"},{"text":"⚡ فرصت‌های بیشتر","callback_data":"/profile_opportunity"}],
+            [{"text":"🎓 حالت حرفه‌ای / جزئیات","callback_data":"/profile_advanced"}],
+            [{"text":"❓ آموزش مفاهیم","callback_data":"/learn_menu"}],
+            [{"text":"🏠 منوی اصلی","callback_data":"/menu"}],
         ]}
-    return {"inline_keyboard": [
-        [{"text": "🔵 حالت ساده", "callback_data": "/profile_simple"}],
-        [{"text": "❓ ADX چیست؟", "callback_data": "/learn_adx"}, {"text": "❓ ATR چیست؟", "callback_data": "/learn_atr"}],
-        [{"text": "❓ RSI چیست؟", "callback_data": "/learn_rsi"}, {"text": "❓ R:R چیست؟", "callback_data": "/learn_rr"}],
-        [{"text": f"🎯 ADX: {float(c.get('min_adx', 20)):.1f}", "callback_data": "/dummy"}],
-        [{"text": "➕ ADX +۱", "callback_data": "/adx_up"}, {"text": "➖ ADX -۱", "callback_data": "/adx_down"}],
-        [{"text": f"🛡️ ضریب حد ضرر: {float(c.get('sl_multiplier', 1.5)):.1f}x", "callback_data": "/dummy"}],
-        [{"text": "➕ حد ضرر +۰٫۲", "callback_data": "/sl_up"}, {"text": "➖ حد ضرر -۰٫۲", "callback_data": "/sl_down"}],
-        [{"text": f"🎯 ضریب حد سود پایه: {float(c.get('tp_multiplier', 2.0)):.1f}x", "callback_data": "/dummy"}],
-        [{"text": "➕ حد سود پایه +۰٫۵", "callback_data": "/tp_up"}, {"text": "➖ حد سود -۰٫۵", "callback_data": "/tp_down"}],
-        [{"text": f"🧠 خروج پویا: {'🟢 فعال' if c.get('dynamic_exits', True) else '🔴 خاموش'}", "callback_data": "/dummy"}],
-        [{"text": f"📊 حداقل کیفیت: {float(c.get('min_trade_score', 68)):.0f}/100", "callback_data": "/dummy"}],
-        [{"text": f"⚖️ حداقل R:R: {float(c.get('min_rr', 1.3)):.2f}R", "callback_data": "/dummy"}],
-        [{"text": f"⚠️ ریسک: {float(s.get('risk_per_trade_pct', 0.5)):.2f}%", "callback_data": "/dummy"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    return {"inline_keyboard":[
+        [{"text":"🔵 حالت ساده","callback_data":"/profile_simple"}],
+        [{"text":"❓ ADX چیست؟","callback_data":"/learn_adx"},{"text":"❓ ATR چیست؟","callback_data":"/learn_atr"}],
+        [{"text":"❓ RSI چیست؟","callback_data":"/learn_rsi"},{"text":"❓ R:R چیست؟","callback_data":"/learn_rr"}],
+        [{"text":f"🎯 ADX: {float(c.get('min_adx',20)):.1f}","callback_data":"/dummy"}],
+        [{"text":"➕ ADX +۱","callback_data":"/adx_up"},{"text":"➖ ADX -۱","callback_data":"/adx_down"}],
+        [{"text":f"🛡️ ضریب حد ضرر: {float(c.get('sl_multiplier',1.5)):.1f}x","callback_data":"/dummy"}],
+        [{"text":"➕ حد ضرر +۰٫۲","callback_data":"/sl_up"},{"text":"➖ حد ضرر -۰٫۲","callback_data":"/sl_down"}],
+        [{"text":f"🎯 ضریب حد سود پایه: {float(c.get('tp_multiplier',2.0)):.1f}x","callback_data":"/dummy"}],
+        [{"text":"➕ حد سود پایه +۰٫۵","callback_data":"/tp_up"},{"text":"➖ حد سود -۰٫۵","callback_data":"/tp_down"}],
+        [{"text":f"🧠 خروج پویا: {'🟢 فعال' if c.get('dynamic_exits',True) else '🔴 خاموش'}","callback_data":"/dummy"}],
+        [{"text":f"📊 حداقل کیفیت: {float(c.get('min_trade_score',68)):.0f}/100","callback_data":"/dummy"}],
+        [{"text":f"⚖️ حداقل R:R: {float(c.get('min_rr',1.3)):.2f}R","callback_data":"/dummy"}],
+        [{"text":f"⚠️ ریسک: {float(s.get('risk_per_trade_pct',0.5)):.2f}%","callback_data":"/dummy"}],
+        [{"text":"🏠 منوی اصلی","callback_data":"/menu"}],
     ]}
-
 
 def get_learn_menu_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "📈 ADX — قدرت روند", "callback_data": "/learn_adx"}],
-        [{"text": "🌪 ATR — نوسان بازار", "callback_data": "/learn_atr"}],
-        [{"text": "📊 RSI — قدرت حرکت", "callback_data": "/learn_rsi"}],
-        [{"text": "⚖️ R:R — سود به ضرر", "callback_data": "/learn_rr"}],
-        [{"text": "🧠 چرا ربات این‌ها را می‌بیند؟", "callback_data": "/learn_why"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    return {"inline_keyboard":[
+        [{"text":"📈 ADX — قدرت روند","callback_data":"/learn_adx"}],
+        [{"text":"🌪 ATR — نوسان بازار","callback_data":"/learn_atr"}],
+        [{"text":"📊 RSI — قدرت حرکت","callback_data":"/learn_rsi"}],
+        [{"text":"⚖️ R:R — سود به ضرر","callback_data":"/learn_rr"}],
+        [{"text":"🧠 چرا ربات این‌ها را می‌بیند؟","callback_data":"/learn_why"}],
+        [{"text":"🏠 منوی اصلی","callback_data":"/menu"}],
     ]}
-
 
 def get_performance_keyboard():
     return {"inline_keyboard": [
@@ -112,17 +111,16 @@ def get_max_positions_keyboard():
 
 def get_timeframe_keyboard():
     return {"inline_keyboard": [
-        [{"text": "⚡ دسته اول: اسکالپینگ (شکار نقدینگی و پولبک)", "callback_data": "/dummy"}],
+        [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "📈 دسته دوم: روندی و سوئینگ (شکست معتبر و تأیید HTF)", "callback_data": "/dummy"}],
+        [{"text": "📈 دسته ۲: روندی / چندزمانه (تأیید روند و شکست)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۱ ساعته", "callback_data": "/set_tf_1h"}, {"text": "⏱ ۴ ساعته", "callback_data": "/set_tf_4h"}],
-        [{"text": "🌊 چندزمانه (مولتی‌تایم)", "callback_data": "/set_tf_multi"}],
+        [{"text": "🌊 چندزمانه (مولتی)", "callback_data": "/set_tf_multi"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
 
 def get_main_menu_keyboard(active, entry_diag_enabled=True):
-    diag_label = "🟢 لاگ ورود: فعال" if entry_diag_enabled else "🔴 لاگ ورود: خاموش"
     return {"inline_keyboard": [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
@@ -160,7 +158,7 @@ def get_watchlist_manage_keyboard():
 
 def get_manual_side_keyboard():
     return {"inline_keyboard": [
-        [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_BUY"},
-         {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_SELL"}],
+        [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_buy"},
+         {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_sell"}],
         [{"text": "❌ انصراف", "callback_data": "/cancel"}],
     ]}

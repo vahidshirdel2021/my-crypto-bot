@@ -36,7 +36,7 @@ TIMEFRAME_STRATEGY_PRESETS = {
               "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
               "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
     "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.0,
+              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.9,
               "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
     "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
               "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
@@ -145,7 +145,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     c = df.iloc[-2]
     try:
-        entry = float(c["close"]); atr = float(c["atr"])
+        entry = float(c["close"])
+        atr = float(c["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
@@ -323,7 +324,7 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
-        return None, "داده کافی برای محاسبه High/Low روز قبل نیست (~2 روز کندل لازم است)"
+        return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
     if pdh is None or pdl is None:
         return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
     curr = d.iloc[-2]
@@ -369,7 +370,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         return None, "سطوح روز قبل هنوز آماده نیست"
     curr = d.iloc[-2]
     try:
-        entry = float(curr["close"]); atr = float(curr["atr"])
+        entry = float(curr["close"])
+        atr = float(curr["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
@@ -433,7 +435,7 @@ def get_strategy_description(timeframe="5min", strategy_config=None, filters=Non
     if simple:
         return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود."
     return (f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
-            f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter', True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter', True) else '🔴'}`")
+            f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter',True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter',True) else '🔴'}`")
 
 
 def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
@@ -626,6 +628,12 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
+    if st == "dynamic":
+        # دسته ۱: اسکالپینگ (5m و 15m) — استراتژی شکار نقدینگی و سطوح روز قبل
+        if timeframe in ("5min", "15min") and timeframe_mode != "multi":
+            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
+        # دسته ۲: سوئینگ و روندی (1h, 4h, multi) — استراتژی شکست روندی با تأیید HTF
+        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     if st == "trend":
         return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
     if st == "breakout":
@@ -634,12 +642,6 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return strategy_mean_reversion(df_primary, filters, strategy_config)
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
-    if st == "dynamic":
-        # دسته ۱: اسکالپینگ (5m و 15m) — استراتژی شکار نقدینگی و پولبک سطوح روز قبل
-        if timeframe in ("5min", "15min") and timeframe_mode != "multi":
-            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
-        # دسته ۲: روندی و سوئینگ (1h, 4h, multi) — استراتژی شکست روندی همراه با تأیید HTF
-        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
 
