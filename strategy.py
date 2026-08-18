@@ -23,10 +23,15 @@ STRATEGY_DEFAULTS = {
     "min_volume_ratio": 1.15,
     "min_body_ratio": 0.55,
     # --- پارامترهای اختصاصی استراتژی Liquidity Sweep (فقط تایم‌فریم 5 دقیقه) ---
-    "sweep_min_distance_atr": 0.05,   # حداقل عمق نفوذ از سطح روز قبل، نسبت به ATR
+    # این دو مقدار عمداً افزایش یافته‌اند (قبلاً 0.05 و 0.15 بودند): مقادیر قبلی سیگنال‌هایی
+    # با نفوذ/SL بسیار کوچک تولید می‌کردند که ریسک دلاری‌شان آن‌قدر ناچیز بود که کارمزد ثابت
+    # رفت‌وبرگشت (round_trip_fee_usdt در bot.py) نسبت بزرگی از آن را می‌بلعید (تا بیش از ۱۰۰٪
+    # در برخی نمادهای کم‌نوسان مثل SHIB/BCH/ANKR/THETA). بزرگ‌تر کردن این آستانه‌ها هم سیگنال‌های
+    # واقعی‌تر (نه نویز اطراف سطح) تولید می‌کند، هم ریسک دلاری هر معامله را بزرگ‌تر و منطقی‌تر می‌کند.
+    "sweep_min_distance_atr": 0.15,   # حداقل عمق نفوذ از سطح روز قبل، نسبت به ATR
     "sweep_require_reclaim": True,
     "sweep_require_reversal_candle": True,
-    "sweep_stop_buffer_atr": 0.15,    # فاصله اضافه SL پشت نقطه Sweep، نسبت به ATR
+    "sweep_stop_buffer_atr": 0.25,    # فاصله اضافه SL پشت نقطه Sweep، نسبت به ATR
     "sweep_risk_reward": 1.8,
     "sweep_enable_retest_continuation": True,  # الگوی مکمل: شکست معتبر + پولبک + ادامه مسیر
     "retest_lookback_candles": 48,    # چند کندل قبل (۴ ساعت روی 5د) برای یافتن شکست قبلی بررسی شود
@@ -39,8 +44,8 @@ STRATEGY_DEFAULTS = {
 # تایم‌فریم‌های پایین‌تر (نویزی‌تر) کمی محتاط‌ترند؛ تایم‌فریم‌های بالاتر کمی بازتر.
 TIMEFRAME_STRATEGY_PRESETS = {
     "5min":  {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 55.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
-              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.15, "sweep_min_distance_atr": 0.05},
+              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
+              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
     "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
               "min_trade_score": 60.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.0},
     "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
@@ -475,6 +480,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
+        "pdh": float(pdh), "pdl": float(pdl),
         "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R"
     }
     return plan, plan["reason"]

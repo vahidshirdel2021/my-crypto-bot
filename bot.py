@@ -14,6 +14,7 @@ from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     get_strategy_params, get_strategy_description, strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
+    _compute_prev_day_levels,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -21,7 +22,7 @@ from ui import (
     get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
     get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
-    get_performance_keyboard, get_entry_diag_keyboard,
+    get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -37,6 +38,11 @@ RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
 # کارمزد Taker هر طرف معامله (درصد)؛ برای محاسبه هزینه تخمینی رفت‌وبرگشت در PnL استفاده می‌شود.
 TAKER_FEE_PCT = max(0.0, float(os.environ.get('TAKER_FEE_PCT', '0.05')))
+# حداقل نسبت ریسک دلاری به کارمزد رفت‌وبرگشت. اگر ریسک معامله (بر اساس فاصله SL) کمتر از
+# (کارمزد × این ضریب) باشد، معامله رد می‌شود؛ چون در آن حالت کارمزد ثابت بخش نامتناسبی از
+# ریسک/سود واقعی معامله را می‌بلعد و منطق R:R را بی‌معنی می‌کند (مثلاً یک SL خیلی تنگ روی
+# نمادی با ریسک دلاری ۰.۳ دلار در برابر کارمزد ثابت ۰.۵ دلار).
+MIN_RISK_TO_FEE_RATIO = max(0.0, float(os.environ.get('MIN_RISK_TO_FEE_RATIO', '3.0')))
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -250,6 +256,9 @@ def default_session():
         'trade_audit': [],
         'scan_stats': {'scans': 0, 'symbols': 0, 'signals': 0, 'entries': 0, 'blocked': 0, 'data_errors': 0, 'reason_counts': {}},
         'cooldowns': {},
+        # سطوح PDH/PDL که امروز روی آن‌ها معامله باز شده (مخصوص استراتژی Liquidity Sweep 5 دقیقه)؛
+        # جدا از cooldown است تا یک سطح ثابت که تا آخر روز تغییر نمی‌کند بیش از یک‌بار معامله نشود.
+        'traded_levels': {},
         'user_state': None,
         'active_symbols': DEFAULT_ACTIVE_SYMBOLS[:],
         'filters': FILTER_DEFAULTS.copy(),
@@ -280,6 +289,7 @@ def normalize_session(data):
     s['scan_stats'] = {**default_session()['scan_stats'], **ss}
     s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
+    s['traded_levels'] = dict(data.get('traded_levels') or {})
     stored_symbols = list(data.get('active_symbols') or [])
     # Sessionهای قدیمی که دقیقاً از واچ‌لیست پیش‌فرض ۲۰ نمادی استفاده می‌کردند
     # به Universe کامل مهاجرت می‌کنند. انتخاب‌های سفارشی کاربر دست‌نخورده می‌مانند.
@@ -709,7 +719,7 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long):
 def reset_daily_if_needed(chat_id, equity):
     s=get_session(chat_id); today=time.strftime('%Y-%m-%d',time.gmtime())
     if s.get('daily_start_date')!=today:
-        s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; save_session(chat_id)
+        s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; s['traded_levels']={}; save_session(chat_id)
 
 
 def current_paper_equity(s):
@@ -1047,7 +1057,21 @@ def chart(chat_id,symbol,df,trade):
         if df.empty or len(df) < 5:
             return
 
-        d = df.tail(60).copy().reset_index(drop=True)
+        # امروز را از روی _compute_prev_day_levels پیدا می‌کنیم تا نمودار از ابتدای روز جاری
+        # کندل‌ها را نشان دهد (نه صرفاً ۶۰ کندل آخر ثابت) و PDH/PDL هم قابل ترسیم باشد.
+        # اگر داده کافی برای تشخیص روز/سطوح نبود (مثلاً تایم‌فریم‌های بالاتر با کندل کم)،
+        # به همان رفتار قبلی (۶۰ کندل آخر، بدون PDH/PDL) برمی‌گردیم.
+        pdh = pdl = None
+        try:
+            dated_df, pdh, pdl = _compute_prev_day_levels(df)
+        except Exception:
+            dated_df = None
+        if dated_df is not None and '_date' in dated_df.columns:
+            today_date = dated_df['_date'].iloc[-1]
+            today_df = dated_df[dated_df['_date'] == today_date]
+            d = today_df.copy().reset_index(drop=True) if len(today_df) >= 5 else df.tail(60).copy().reset_index(drop=True)
+        else:
+            d = df.tail(60).copy().reset_index(drop=True)
         fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
         fig.patch.set_facecolor('#0f172a')
         ax.set_facecolor('#0f172a')
@@ -1079,6 +1103,11 @@ def chart(chat_id,symbol,df,trade):
             (tp, '#22c55e', 'TP', '--', 2.0),
             (sl, '#ef4444', 'SL', '--', 2.0),
         ]
+        # سقف/کف روز قبل — خط نارنجی، جدا از Entry/TP/SL.
+        if pdh is not None:
+            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
+        if pdl is not None:
+            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
         x_right = len(d) + 1.8
         for value, color, label, style, width in levels:
             ax.axhline(value, color=color, linestyle=style, linewidth=width, alpha=0.95, zorder=1)
@@ -1113,7 +1142,8 @@ def chart(chat_id,symbol,df,trade):
         ax.set_xlim(-1, len(d) + 5.5)
         ymin = float(d['low'].min()); ymax = float(d['high'].max())
         pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
-        ax.set_ylim(min(ymin, sl, tp) - pad, max(ymax, sl, tp) + pad)
+        extra_vals = [v for v in (pdh, pdl) if v is not None]
+        ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
         ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
         ax.grid(False, axis='x')
         ax.tick_params(axis='both', colors='#94a3b8', labelsize=8.5)
@@ -1190,7 +1220,7 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1200,9 +1230,15 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
     if m_rr:
         planned_rr=float(m_rr.group(1))
+    # سطح PDH/PDL که سیگنال روی آن صادر شده (فقط استراتژی Liquidity Sweep 5 دقیقه) — برای
+    # جلوگیری از معامله‌ی تکراری روی همان سطح ثابت در طول روز، مستقل از cooldown زمانی.
+    level_key = None
+    m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
+    if m_level:
+        level_key = f"{symbol}:{m_level.group(1)}:{m_level.group(2)}"
     logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=entry_start side=%s mode=%s', chat_id, symbol, trade_id, side, s.get('trading_mode'))
     audit_event(chat_id, trade_id, 'signal_and_plan', {'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp, 'reason': reason, 'timeframe': s.get('timeframe'), 'strategy': s.get('active_strategy'), 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
-    if not s['is_bot_active'] or s['daily_stopped'] or not risk_guard(chat_id):
+    if (require_active and not s['is_bot_active']) or s['daily_stopped'] or not risk_guard(chat_id):
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=bot_inactive_or_daily_risk', chat_id, symbol)
         return False
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
@@ -1210,6 +1246,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=cooldown remaining=%.1fs', chat_id, symbol, cd-now)
         return False
     s['cooldowns'].pop(symbol,None)
+    if level_key and level_key in s.get('traded_levels', {}):
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=level_already_traded level=%s', chat_id, symbol, level_key)
+        return False
     is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
     # در استراتژی dynamic، جهت معامله قبلاً به‌طور قطعی توسط رژیم بازار (BTC+ETH) تعیین شده؛
     # این دو فیلتر دستی مخصوص محدود کردن جهت در استراتژی‌های ثابت (روندی/شکست/بازگشت/چندزمانه) هستند
@@ -1241,6 +1280,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
+    fee_estimate=round_trip_fee_usdt(margin,leverage)
+    if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+        logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=fee_risk_ratio risk_usdt=%.4f fee=%.4f min_required=%.4f', chat_id, symbol, risk_usdt, fee_estimate, fee_estimate*MIN_RISK_TO_FEE_RATIO)
+        return False
     trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0}
 
     if s['trading_mode']=='REAL':
@@ -1317,7 +1360,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 return False
             # If STOP happened while the order was in-flight, do not leave a fresh position running.
             current=get_session(chat_id)
-            if not current['is_bot_active'] or int(current.get('scan_generation',0)) != generation:
+            if (require_active and not current['is_bot_active']) or int(current.get('scan_generation',0)) != generation:
                 try: ex.close_position(sym,None,{'type':'market','amount':filled})
                 except Exception as close_exc:
                     _halt_real_trading(chat_id,f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
@@ -1337,9 +1380,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         s['paper_positions'].append(trade); save_session(chat_id)
 
     if trade.get('is_real'): s['paper_positions'].append(trade); save_session(chat_id)
+    if level_key:
+        s['traded_levels'][level_key] = time.strftime('%Y-%m-%d', time.gmtime())
+        save_session(chat_id)
     logger.info('ENTRY_DIAG chat=%s symbol=%s trade_id=%s stage=entry_success side=%s entry=%s sl=%s tp=%s amount=%s mode=%s', chat_id, symbol, trade_id, side, trade['entry_price'], trade['sl'], trade['tp'], trade['amount'], s['trading_mode'])
     audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
-    df=get_klines(symbol,'5min' if s['timeframe']=='multi' else s['timeframe'],80)
+    chart_tf='5min' if s['timeframe']=='multi' else s['timeframe']
+    df=get_klines(symbol,chart_tf,650 if chart_tf=='5min' else 200)
     if not df.empty: chart(chat_id,symbol,calculate_indicators(df),trade)
     return True
 
@@ -1482,6 +1529,27 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
         return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation)
+
+
+def execute_manual_trade(chat_id,symbol,side,sl,tp):
+    """باز کردن پوزیشن دستی — برخلاف execute_trade نیازی به فعال‌بودن اسکن ندارد،
+    ولی همچنان محدودیت ریسک روزانه و قفل ورود همزمان را رعایت می‌کند."""
+    s=get_session(chat_id)
+    if s['daily_stopped']:
+        return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
+    price=latest_price(symbol)
+    if not price:
+        return False, f'قیمت لحظه‌ای `{symbol}` دریافت نشد.'
+    generation=int(s.get('scan_generation',0))
+    lock=get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if s['daily_stopped']:
+            return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
+        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,'معامله دستی کاربر',generation,require_active=False)
+    if ok:
+        return True, ''
+    return False, 'ورود دستی رد شد (ممکن است ظرفیت پوزیشن پر باشد، نماد از قبل باز باشد، یا حجم/ریسک معتبر نباشد).'
 
 
 
@@ -2838,6 +2906,17 @@ def process_command(cmd,chat_id,message_id=None):
         else: c['tp_multiplier']=max(.5,round(c['tp_multiplier']-.5,1))
         save_session(chat_id); edit_page(chat_id,'🎛️ *پارامترها*',get_params_menu_keyboard(s),message_id); return
     if cl=='/analyze_single': s['user_state']='WAIT_SYMBOL'; save_session(chat_id); send_message(chat_id,'🔍 نماد را ارسال کنید، مثال `BTC`'); return
+    if cl in ('/manual_trade','🖐 معامله دستی','معامله دستی'):
+        s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
+        send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
+    if cl in ('/manual_side_buy','/manual_side_sell'):
+        tmp=s.get('_manual_tmp') or {}
+        if not tmp.get('symbol'):
+            send_message(chat_id,'⚠️ ابتدا نماد را ارسال کنید.'); s['user_state']='WAIT_MANUAL_SYMBOL'; save_session(chat_id); return
+        tmp['side']='BUY' if cl=='/manual_side_buy' else 'SELL'
+        s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
+        edit_page(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}` {'خرید (Long)' if tmp['side']=='BUY' else 'فروش (Short)'}\n\nقیمت SL (حد ضرر) را به‌صورت عدد ارسال کنید.",None,message_id)
+        return
     if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
         if not s['paper_positions']: send_message(chat_id,'پوزیشن بازی وجود ندارد.'); return
         lines=[f'🔄 *پوزیشن‌ها ({len(s["paper_positions"])})*']
@@ -2945,12 +3024,48 @@ def handle_text(chat_id,text):
         'بستن همه':'/close_all_prompt',
         '🔍 تحلیل ارز':'/analyze_single',
         'تحلیل ارز':'/analyze_single',
+        '🖐 معامله دستی':'/manual_trade',
+        'معامله دستی':'/manual_trade',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id)
         return
     s=get_session(chat_id); val=raw.upper()
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
+    if s['user_state']=='WAIT_MANUAL_SYMBOL':
+        sym=re.sub(r'[^A-Z0-9]','',val)
+        if not (2<=len(sym)<=12):
+            send_message(chat_id,'⚠️ نماد نامعتبر است. دوباره ارسال کنید، مثال `BTC`'); return
+        if latest_price(sym) is None:
+            send_message(chat_id,f'⚠️ قیمت `{sym}` دریافت نشد؛ نماد را بررسی و دوباره ارسال کنید.'); return
+        s['_manual_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
+        send_message(chat_id,f'🖐 جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
+    if s['user_state']=='WAIT_MANUAL_SL':
+        tmp=s.get('_manual_tmp') or {}
+        try: sl=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست. قیمت SL را دوباره ارسال کنید.'); return
+        if sl<=0: send_message(chat_id,'⚠️ قیمت SL باید مثبت باشد. دوباره ارسال کنید.'); return
+        tmp['sl']=sl; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_TP'; save_session(chat_id)
+        send_message(chat_id,'قیمت TP (حد سود) را به‌صورت عدد ارسال کنید.'); return
+    if s['user_state']=='WAIT_MANUAL_TP':
+        tmp=s.get('_manual_tmp') or {}
+        try: tp=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست. قیمت TP را دوباره ارسال کنید.'); return
+        if tp<=0: send_message(chat_id,'⚠️ قیمت TP باید مثبت باشد. دوباره ارسال کنید.'); return
+        symbol=tmp.get('symbol'); side=tmp.get('side'); sl=tmp.get('sl')
+        s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id)
+        if not (symbol and side and sl):
+            send_message(chat_id,'⚠️ اطلاعات معامله ناقص بود؛ از ابتدا شروع کنید: `/manual_trade`'); return
+        price=latest_price(symbol) or 0
+        is_long = side=='BUY'
+        valid = (is_long and sl<price<tp) or ((not is_long) and tp<price<sl)
+        if not valid:
+            send_message(chat_id,f'⚠️ SL/TP با جهت `{"خرید" if is_long else "فروش"}` و قیمت لحظه‌ای (`{fmt(price)}`) همخوانی ندارد.\nSL باید {"زیر" if is_long else "بالای"} قیمت و TP باید {"بالای" if is_long else "زیر"} قیمت باشد.\nاز ابتدا شروع کنید: `/manual_trade`')
+            return
+        ok,err=execute_manual_trade(chat_id,symbol,'BUY (Long)' if is_long else 'SELL (Short)',sl,tp)
+        if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
+        else: send_message(chat_id,f'❌ معامله دستی باز نشد: {err}')
+        return
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()): send_message(chat_id,analyze(chat_id,val))
     else: process_command(text,chat_id)
 

@@ -124,6 +124,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
          {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
+        [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
     ]}
@@ -148,4 +149,12 @@ def get_strategies_menu_keyboard():
 
 def get_watchlist_manage_keyboard():
     return {"inline_keyboard": [[{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
+
+
+def get_manual_side_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_BUY"},
+         {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_SELL"}],
+        [{"text": "❌ انصراف", "callback_data": "/cancel"}],
+    ]}
 
