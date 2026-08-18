@@ -28,6 +28,9 @@ STRATEGY_DEFAULTS = {
     "sweep_require_reversal_candle": True,
     "sweep_stop_buffer_atr": 0.15,    # فاصله اضافه SL پشت نقطه Sweep، نسبت به ATR
     "sweep_risk_reward": 1.8,
+    "sweep_enable_retest_continuation": True,  # الگوی مکمل: شکست معتبر + پولبک + ادامه مسیر
+    "retest_lookback_candles": 48,    # چند کندل قبل (۴ ساعت روی 5د) برای یافتن شکست قبلی بررسی شود
+    "retest_tolerance_atr": 0.25,     # چقدر نزدیکی به سطح به‌عنوان «پولبک واقعی» قبول شود، نسبت به ATR
 }
 
 # پارامترهای ورود مخصوص هر تایم‌فریم — به‌جای یک آستانه‌ی ثابت و خیلی سخت‌گیرانه برای همه.
@@ -282,7 +285,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
 
 def _compute_prev_day_levels(df):
     """High/Low روز معاملاتی قبل را از کندل‌های تایم‌فریم پایین محاسبه می‌کند.
-    خروجی: (کندل آخر بسته‌شده, PDH, PDL) یا (None, None, None) اگر داده کافی نباشد."""
+    خروجی: (دیتافریم کامل با ستون تاریخ/PDH/PDL, PDH, PDL) یا (None, None, None) اگر داده کافی نباشد.
+    کندل آخر بسته‌شده از طریق d.iloc[-2] در دسترس است."""
     if df is None or len(df) < 100 or "timestamp" not in df.columns:
         return None, None, None
     d = df.copy()
@@ -296,20 +300,80 @@ def _compute_prev_day_levels(df):
     daily["_pdh"] = daily["_day_high"].shift(1)
     daily["_pdl"] = daily["_day_low"].shift(1)
     d = d.merge(daily[["_pdh", "_pdl"]], left_on="_date", right_index=True, how="left")
+    d = d.reset_index(drop=True)
     curr = d.iloc[-2]
     pdh, pdl = curr.get("_pdh"), curr.get("_pdl")
     if pd.isna(pdh) or pd.isna(pdl):
-        return curr, None, None
-    return curr, float(pdh), float(pdl)
+        return d, None, None
+    return d, float(pdh), float(pdl)
+
+
+def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
+    """در بازه‌ی «امروز» و حداکثر `lookback` کندل قبل از before_idx، آخرین کندلی را پیدا می‌کند
+    که واقعاً (با Close، نه فقط سایه) از PDH یا PDL رد شده — یعنی شکست معتبر، نه فقط یک سایه.
+    خروجی: ('UP'|'DOWN', سطح) یا (None, None)."""
+    start = max(0, before_idx - lookback)
+    window = d.iloc[start:before_idx]
+    if window.empty:
+        return None, None
+    today = d.loc[before_idx, "_date"]
+    same_day = window[window["_date"] == today]
+    if same_day.empty:
+        return None, None
+    up = same_day[same_day["close"] > pdh]
+    down = same_day[same_day["close"] < pdl]
+    up_last = up.index.max() if not up.empty else None
+    down_last = down.index.max() if not down.empty else None
+    # هرکدام که دیرتر (نزدیک‌تر به الان) اتفاق افتاده، وضعیت غالب فعلی است.
+    if up_last is not None and (down_last is None or up_last > down_last):
+        return "UP", pdh
+    if down_last is not None:
+        return "DOWN", pdl
+    return None, None
+
+
+def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
+    """الگوی مکمل: شکست معتبر قبلی همان روز از سطح + پولبک به همان سطح + ادامه مسیر (نه برگشت).
+    برخلاف Sweep+Reclaim که هر دو در یک کندل رخ می‌دهند، اینجا شکست قبلاً تثبیت‌شده و الان
+    فقط پولبک و تأیید ادامه‌ی روند بررسی می‌شود."""
+    lookback = int(cfg.get("retest_lookback_candles", 48))
+    direction, level = _find_recent_breakout(d, before_idx, pdh, pdl, lookback)
+    if direction is None:
+        return None, None
+    curr = d.iloc[before_idx]
+    tol = atr * max(0.0, float(cfg.get("retest_tolerance_atr", 0.25)))
+    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+    if direction == "UP":
+        touched = l <= level + tol
+        held = c > level
+        bullish = c > o
+        if touched and held and bullish:
+            return "BUY", f"شکست معتبر قبلی سقف روز قبل (PDH={level:.6g}) + پولبک موفق + ادامه صعودی"
+    else:
+        touched = h >= level - tol
+        held = c < level
+        bearish = c < o
+        if touched and held and bearish:
+            return "SELL", f"شکست معتبر قبلی کف روز قبل (PDL={level:.6g}) + پولبک موفق + ادامه نزولی"
+    return None, None
 
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
-    """Sweep نقدینگی روی سقف/کف روز قبل + کندل ریکلیم برگشتی — مستقل از رژیم کلی بازار."""
-    curr, pdh, pdl = _compute_prev_day_levels(df)
-    if curr is None:
+    """دو الگوی مستقل و مکمل روی سطوح روز قبل — مستقل از رژیم کلی بازار (BTC/ETH):
+
+    1) Sweep + Reclaim فوری: قیمت از سطح رد می‌شود و همان کندل دوباره داخل رنج بسته می‌شود
+       (برگشتی — همان چیزی که کاربر اولیه فرستاد).
+    2) شکست معتبر + پولبک + ادامه: قیمت قبلاً همان روز واقعاً (با Close) از سطح رد شده،
+       بعداً به همان سطح پولبک می‌زند و دوباره در همان جهت ادامه می‌دهد (دنباله‌روی، نه برگشت).
+       بدون این الگو، وقتی شکست واقعی رخ می‌داد و برنمی‌گشت، هیچ سیگنالی صادر نمی‌شد و
+       فرصت کامل از دست می‌رفت.
+    """
+    d, pdh, pdl = _compute_prev_day_levels(df)
+    if d is None:
         return None, "داده کافی برای محاسبه High/Low روز قبل نیست (~2 روز کندل 5 دقیقه لازم است)"
     if pdh is None or pdl is None:
         return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
+    curr = d.iloc[-2]
     try:
         atr = float(curr.get("atr") or 0)
     except Exception:
@@ -324,6 +388,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
 
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
 
+    # الگوی ۱: Sweep + Reclaim فوری
     if h >= pdh + min_sweep:
         reclaimed = (not require_reclaim) or (c < pdh)
         reversal = (not require_reversal) or (c < o)
@@ -336,16 +401,25 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
         if reclaimed and reversal:
             return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی"
 
-    return None, "Sweep یا Reclaim معتبر روی سطح روز قبل شناسایی نشد"
+    # الگوی ۲: شکست معتبر قبلی + پولبک + ادامه مسیر (مکمل، نه جایگزین الگوی ۱)
+    if bool(cfg.get("sweep_enable_retest_continuation", True)):
+        sig, reason = _detect_retest_continuation(d, len(d) - 2, pdh, pdl, atr, cfg)
+        if sig:
+            return sig, reason
+
+    return None, "Sweep/Reclaim یا پولبک+ادامه معتبری روی سطح روز قبل شناسایی نشد"
 
 
 def build_sweep_trade_plan(df, signal, strategy_config=None):
-    """SL/TP و امتیاز کیفیت مخصوص Liquidity Sweep: SL پشت نقطه Sweep (نه ATR روند)."""
+    """SL/TP و امتیاز کیفیت مخصوص Liquidity Sweep: SL پشت اکسترمم کندل سیگنال (نه ATR روند).
+    این فرمول برای هر دو الگو (Sweep+Reclaim و شکست+پولبک+ادامه) یکسان و معتبر است، چون در
+    هر دو حالت SL منطقی همان‌جایی است که اگر قیمت به آن برسد، فرض سیگنال باطل شده است."""
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
-    curr, pdh, pdl = _compute_prev_day_levels(df)
-    if curr is None or pdh is None or pdl is None:
+    d, pdh, pdl = _compute_prev_day_levels(df)
+    if d is None or pdh is None or pdl is None:
         return None, "سطوح روز قبل هنوز آماده نیست"
+    curr = d.iloc[-2]
     try:
         entry = float(curr["close"]); atr = float(curr["atr"])
     except Exception:
