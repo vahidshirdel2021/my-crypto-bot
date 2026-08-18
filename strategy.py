@@ -22,6 +22,12 @@ STRATEGY_DEFAULTS = {
     "max_target_r": 1.8,
     "min_volume_ratio": 1.15,
     "min_body_ratio": 0.55,
+    # --- پارامترهای اختصاصی استراتژی Liquidity Sweep (فقط تایم‌فریم 5 دقیقه) ---
+    "sweep_min_distance_atr": 0.05,   # حداقل عمق نفوذ از سطح روز قبل، نسبت به ATR
+    "sweep_require_reclaim": True,
+    "sweep_require_reversal_candle": True,
+    "sweep_stop_buffer_atr": 0.15,    # فاصله اضافه SL پشت نقطه Sweep، نسبت به ATR
+    "sweep_risk_reward": 1.8,
 }
 
 # پارامترهای ورود مخصوص هر تایم‌فریم — به‌جای یک آستانه‌ی ثابت و خیلی سخت‌گیرانه برای همه.
@@ -30,7 +36,8 @@ STRATEGY_DEFAULTS = {
 # تایم‌فریم‌های پایین‌تر (نویزی‌تر) کمی محتاط‌ترند؛ تایم‌فریم‌های بالاتر کمی بازتر.
 TIMEFRAME_STRATEGY_PRESETS = {
     "5min":  {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 62.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8},
+              "min_trade_score": 55.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
+              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.15, "sweep_min_distance_atr": 0.05},
     "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
               "min_trade_score": 60.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.0},
     "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
@@ -142,6 +149,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
     a dynamic reward target.  A trade is rejected when the resulting R:R is below
     the configured floor or the quality score is too low.
     """
+    if strategy_type == "liquidity_sweep":
+        return build_sweep_trade_plan(df, signal, strategy_config)
     if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     c = df.iloc[-2]
@@ -260,6 +269,139 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         "atr": atr, "atr_ratio": float(atr_ratio), "adx": adx,
         "rsi": rsi, "volume_ratio": vr,
         "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | ATR نسبت به میانه {atr_ratio:.2f}x | R:R {rr:.2f}R"
+    }
+    return plan, plan["reason"]
+
+
+# ============================================================
+# استراتژی اختصاصی 5 دقیقه: Liquidity Sweep روی High/Low روز قبل
+# ============================================================
+# برخلاف strategy_breakout که دنباله‌رو روند است، این یک الگوی برگشتی درون‌روزی است:
+# وقتی قیمت سطح روز قبل را می‌شکند (نقدینگی را جارو می‌کند) ولی بلافاصله برمی‌گردد،
+# احتمال برگشت به داخل رنج بالاست. بنابراین عمداً به رژیم کلی بازار (BTC/ETH) وابسته نیست.
+
+def _compute_prev_day_levels(df):
+    """High/Low روز معاملاتی قبل را از کندل‌های تایم‌فریم پایین محاسبه می‌کند.
+    خروجی: (کندل آخر بسته‌شده, PDH, PDL) یا (None, None, None) اگر داده کافی نباشد."""
+    if df is None or len(df) < 100 or "timestamp" not in df.columns:
+        return None, None, None
+    d = df.copy()
+    ts = pd.to_numeric(d["timestamp"], errors="coerce")
+    if ts.isna().all():
+        return None, None, None
+    unit = "ms" if float(ts.median()) > 1e12 else "s"
+    d["_dt"] = pd.to_datetime(ts, unit=unit, utc=True)
+    d["_date"] = d["_dt"].dt.date
+    daily = d.groupby("_date").agg(_day_high=("high", "max"), _day_low=("low", "min"))
+    daily["_pdh"] = daily["_day_high"].shift(1)
+    daily["_pdl"] = daily["_day_low"].shift(1)
+    d = d.merge(daily[["_pdh", "_pdl"]], left_on="_date", right_index=True, how="left")
+    curr = d.iloc[-2]
+    pdh, pdl = curr.get("_pdh"), curr.get("_pdl")
+    if pd.isna(pdh) or pd.isna(pdl):
+        return curr, None, None
+    return curr, float(pdh), float(pdl)
+
+
+def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
+    """Sweep نقدینگی روی سقف/کف روز قبل + کندل ریکلیم برگشتی — مستقل از رژیم کلی بازار."""
+    curr, pdh, pdl = _compute_prev_day_levels(df)
+    if curr is None:
+        return None, "داده کافی برای محاسبه High/Low روز قبل نیست (~2 روز کندل 5 دقیقه لازم است)"
+    if pdh is None or pdl is None:
+        return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
+    try:
+        atr = float(curr.get("atr") or 0)
+    except Exception:
+        atr = 0.0
+    if not np.isfinite(atr) or atr <= 0:
+        return None, "ATR نامعتبر است"
+
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.05)))
+    require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
+    require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
+
+    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+
+    if h >= pdh + min_sweep:
+        reclaimed = (not require_reclaim) or (c < pdh)
+        reversal = (not require_reversal) or (c < o)
+        if reclaimed and reversal:
+            return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی"
+
+    if l <= pdl - min_sweep:
+        reclaimed = (not require_reclaim) or (c > pdl)
+        reversal = (not require_reversal) or (c > o)
+        if reclaimed and reversal:
+            return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی"
+
+    return None, "Sweep یا Reclaim معتبر روی سطح روز قبل شناسایی نشد"
+
+
+def build_sweep_trade_plan(df, signal, strategy_config=None):
+    """SL/TP و امتیاز کیفیت مخصوص Liquidity Sweep: SL پشت نقطه Sweep (نه ATR روند)."""
+    if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
+        return None, "داده کافی برای طراحی معامله وجود ندارد"
+    curr, pdh, pdl = _compute_prev_day_levels(df)
+    if curr is None or pdh is None or pdl is None:
+        return None, "سطوح روز قبل هنوز آماده نیست"
+    try:
+        entry = float(curr["close"]); atr = float(curr["atr"])
+    except Exception:
+        return None, "ATR یا قیمت ورود نامعتبر است"
+    if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
+        return None, "ATR یا قیمت ورود نامعتبر است"
+
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    min_rr = float(cfg.get("min_rr", 1.20))
+    target_rr = max(min_rr, float(cfg.get("sweep_risk_reward", 1.8)))
+    buffer_atr = max(0.0, float(cfg.get("sweep_stop_buffer_atr", 0.15)))
+    body_ratio = _safe_float(curr.get("body_ratio"), 0)
+    vr = _safe_float(curr.get("volume_ratio"), 1)
+
+    if signal == "SELL":
+        sweep_extreme = float(curr["high"])
+        sl = sweep_extreme + atr * buffer_atr
+        risk_dist = sl - entry
+        if risk_dist <= 0:
+            return None, "فاصله حد ضرر معتبر نیست"
+        reclaim_depth = (sweep_extreme - entry) / risk_dist
+        tp = entry - risk_dist * target_rr
+        if pdl < entry and (entry - pdl) / risk_dist >= min_rr:
+            tp = max(tp, pdl)
+    else:
+        sweep_extreme = float(curr["low"])
+        sl = sweep_extreme - atr * buffer_atr
+        risk_dist = entry - sl
+        if risk_dist <= 0:
+            return None, "فاصله حد ضرر معتبر نیست"
+        reclaim_depth = (entry - sweep_extreme) / risk_dist
+        tp = entry + risk_dist * target_rr
+        if pdh > entry and (pdh - entry) / risk_dist >= min_rr:
+            tp = min(tp, pdh)
+
+    rr = abs(tp - entry) / risk_dist
+    if rr < min_rr:
+        return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
+
+    # امتیاز کیفیت مخصوص Sweep: عمق ریکلیم + قدرت کندل برگشتی + تأیید حجم + کیفیت R:R
+    # (نه روند/ADX، چون این یک الگوی برگشتی است و روند قوی لزوماً به نفعش نیست)
+    reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
+    candle_score = min(30.0, max(0.0, body_ratio * 40.0))
+    volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
+    rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
+    score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score))))
+
+    min_score = float(cfg.get("min_trade_score", 55.0))
+    quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
+    if score < min_score:
+        return None, f"امتیاز کیفیت پایین است ({score}/100)"
+
+    plan = {
+        "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
+        "quality_label": quality_label, "rr": float(rr),
+        "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R"
     }
     return plan, plan["reason"]
 
@@ -486,6 +628,11 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
     if st == "dynamic":
+        # استراتژی اختصاصی 5 دقیقه فقط وقتی تایم‌فریم مستقیماً 5 دقیقه انتخاب شده فعال می‌شود؛
+        # در حالت «مولتی» هم داده اصلی 5 دقیقه‌ای است ولی باید همان منطق شکست+تأیید چندتایم‌فریمی
+        # اجرا شود، نه Sweep — بنابراین حالت multi صراحتاً استثنا شده است.
+        if timeframe == "5min" and timeframe_mode != "multi":
+            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
         return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 

@@ -147,5 +147,5 @@ def get_strategies_menu_keyboard():
 
 
 def get_watchlist_manage_keyboard():
-    return {"inline_keyboard": [[{"text": "➕ افزودن", "callback_data": "/add_symbol_prompt"}, {"text": "➖ حذف", "callback_data": "/remove_symbol_prompt"}], [{"text": "📋 لیست", "callback_data": "/watchlist_list"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
+    return {"inline_keyboard": [[{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 

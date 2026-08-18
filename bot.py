@@ -1386,9 +1386,14 @@ async def refresh_market_regime(http):
             return 'NEUTRAL', detail
     detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
     unique_dirs = {v[0] for v in states.values()}
-    if unique_dirs == {'BULLISH'}:
+    # قبلاً: هر دو لیدر باید مستقل BULLISH (یا هر دو BEARISH) باشند — در بازار واقعی این خیلی
+    # به‌ندرت هم‌زمان رخ می‌دهد (مثلاً BTC روند دارد ولی ETH فقط رنج است، نه مخالف).
+    # الان: کافی است حداقل یکی از لیدرها روند واضح داشته باشد و دیگری با آن مخالف نباشد؛
+    # رژیم فقط وقتی NEUTRAL می‌شود که یا هیچ‌کدام روند واضح ندارند، یا واقعاً مخالف هم‌اند
+    # (یکی BULLISH و دیگری BEARISH) — که همان حالت واقعاً پرریسک است.
+    if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
         regime = 'BULLISH'
-    elif unique_dirs == {'BEARISH'}:
+    elif 'BEARISH' in unique_dirs and 'BULLISH' not in unique_dirs:
         regime = 'BEARISH'
     else:
         regime = 'NEUTRAL'
@@ -1913,7 +1918,10 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         primary_tf='5min'; mode='multi'
     else:
         try:
-            d=await get_klines_async(http,symbol,tf,160)
+            # استراتژی Liquidity Sweep تایم‌فریم 5 دقیقه به High/Low روز قبل نیاز دارد؛
+            # برای این باید حدود 2.5 روز کندل (~650 عدد) بگیریم، نه فقط 160 کندل (~13 ساعت).
+            klimit = 650 if tf == '5min' else 160
+            d=await get_klines_async(http,symbol,tf,klimit)
         except Exception as exc:
             logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=data_error error=%s', chat_id, symbol, exc)
             return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده بازار: {exc}', 'data')
@@ -1932,12 +1940,13 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=scan_blocked reason=state_changed_after_risk_check', chat_id, symbol)
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
+    is_5m_sweep = (strat == 'dynamic' and primary_tf == '5min' and mode != 'multi')
     sig,reason=get_signal_with_reason(primary,md,mode,primary_tf,strat,s['filters'],s['strategy_config'],regime if strat=='dynamic' else None)
     logger.info('ENTRY_DIAG chat=%s symbol=%s stage=signal_result signal=%s reason=%s', chat_id, symbol, sig or 'NONE', str(reason or 'بدون دلیل')[:350])
-    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if strat == 'dynamic' else {}
+    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_5m_sweep) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], strat)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], 'liquidity_sweep' if is_5m_sweep else strat)
     if not plan:
         logger.info('ENTRY_DIAG chat=%s symbol=%s stage=entry_blocked reason=trade_plan detail=%s', chat_id, symbol, plan_reason)
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -2854,10 +2863,15 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/reset_stats_confirm':
         ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
-    if cl=='/manage_watchlist': edit_page(chat_id,f'📋 واچ‌لیست: `{len(s["active_symbols"])}`',get_watchlist_manage_keyboard(),message_id); return
-    if cl=='/watchlist_list': edit_page(chat_id,'📋 *واچ‌لیست*\n\n`'+', '.join(s['active_symbols'])+'`',get_watchlist_manage_keyboard(),message_id); return
-    if cl=='/add_symbol_prompt': s['user_state']='ADD_SYMBOL'; save_session(chat_id); send_message(chat_id,'➕ نماد را بفرستید'); return
-    if cl=='/remove_symbol_prompt': s['user_state']='REMOVE_SYMBOL'; save_session(chat_id); send_message(chat_id,'➖ نماد را بفرستید'); return
+    if cl in ('/manage_watchlist','/watchlist_list'):
+        text = (
+            f"📋 *واچ‌لیست واقعی اسکن*\n\n"
+            f"این‌ها همان نمادهایی هستند که واقعاً اسکن می‌شوند (نه یک لیست شخصی قابل‌ویرایش):\n\n"
+            f"🟢 *Long — {len(SHARED_LONG_WATCHLIST)} نماد* (تایم‌فریم‌های 15د/1س/4س/مولتی در رژیم صعودی، و 5 دقیقه چون Liquidity Sweep جهت‌محور نیست):\n`{', '.join(SHARED_LONG_WATCHLIST)}`\n\n"
+            f"🔴 *Short — {len(SHARED_SHORT_WATCHLIST)} نماد* (تایم‌فریم‌های 15د/1س/4س/مولتی فقط در رژیم نزولی):\n`{', '.join(SHARED_SHORT_WATCHLIST)}`\n\n"
+            f"ℹ️ این لیست‌ها ثابت و مشترک بین همه کاربران هستند؛ از این منو قابل افزودن/حذف نیستند."
+        )
+        edit_page(chat_id,text,get_watchlist_manage_keyboard(),message_id); return
     if cl.startswith('/manage_'):
         sym=cl.replace('/manage_','').upper()
         for p in s['paper_positions']:
@@ -2937,14 +2951,6 @@ def handle_text(chat_id,text):
         return
     s=get_session(chat_id); val=raw.upper()
     if s['user_state']=='WAIT_SYMBOL': s['user_state']=None; save_session(chat_id); send_message(chat_id,analyze(chat_id,val)); return
-    if s['user_state']=='ADD_SYMBOL':
-        if val not in s['active_symbols'] and len(val)<=12 and not get_klines(val,'5min',60).empty: s['active_symbols'].append(val); send_message(chat_id,f'✅ `{val}` اضافه شد.')
-        else: send_message(chat_id,'❌ نماد معتبر نیست یا قبلاً وجود دارد.')
-        s['user_state']=None; save_session(chat_id); return
-    if s['user_state']=='REMOVE_SYMBOL':
-        if val in s['active_symbols']: s['active_symbols'].remove(val); send_message(chat_id,f'✅ `{val}` حذف شد.')
-        else: send_message(chat_id,'❌ نماد در واچ‌لیست نیست.')
-        s['user_state']=None; save_session(chat_id); return
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()): send_message(chat_id,analyze(chat_id,val))
     else: process_command(text,chat_id)
 
@@ -3007,10 +3013,11 @@ async def scan_loop():
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
-                # فقط اگر حداقل یک کاربر فعال از استراتژی 'dynamic' استفاده می‌کند رژیم بازار را محاسبه کن؛
-                # سایر استراتژی‌ها (روندی/شکست/بازگشت/چندزمانه) بدون تغییر و بدون وابستگی به رژیم کار می‌کنند.
+                # فقط اگر حداقل یک کاربر فعال از استراتژی 'dynamic' با تایم‌فریمی غیر از 5 دقیقه استفاده
+                # می‌کند رژیم بازار را محاسبه کن؛ تایم‌فریم 5 دقیقه از استراتژی اختصاصی Liquidity Sweep
+                # استفاده می‌کند که مستقل از رژیم کلی بازار است.
                 need_regime = any(
-                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic'
+                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic' and s.get('timeframe') != '5min'
                     for s in USER_SESSIONS.values()
                 )
                 regime, regime_detail = (await refresh_market_regime(http)) if need_regime else (None, '')
@@ -3024,13 +3031,17 @@ async def scan_loop():
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
                     is_dynamic = s.get('active_strategy')=='dynamic'
-                    if is_dynamic and regime not in ('BULLISH','BEARISH'):
+                    # تایم‌فریم 5 دقیقه (Liquidity Sweep) به تشخیص رژیم بازار نیاز ندارد؛ فقط سایر
+                    # تایم‌فریم‌های dynamic (که همچنان از شکست+رژیم استفاده می‌کنند) این گیت را دارند.
+                    uses_regime_gate = is_dynamic and s.get('timeframe') != '5min'
+                    if uses_regime_gate and regime not in ('BULLISH','BEARISH'):
                         logger.info('ENTRY_DIAG chat=%s stage=scan_batch_skipped reason=market_regime_neutral detail=%s', cid, regime_detail)
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':'رژیم بازار قطعی نیست (BTC و ETH هم‌جهت نبودند) — اسکن این دور انجام نشد'}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), regime if is_dynamic else None)
+                    scan_regime = regime if uses_regime_gate else None
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), scan_regime)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,regime if is_dynamic else None))
+                        tasks.append(scan_symbol(http,cid,sym,scan_regime))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
