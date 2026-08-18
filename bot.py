@@ -3583,7 +3583,7 @@ def miniapp_chart_url(symbol, timeframe='5min'):
     return f'{MINIAPP_BASE_URL}/miniapp/chart?symbol={symbol}&tf={timeframe}'
 
 
-
+def main():
     init_db(); load_telegram_offset(); load_sessions(); logger.info('Loaded %s sessions',len(USER_SESSIONS))
     if not ALLOWED_CHAT_IDS:
         logger.warning('ALLOWED_CHAT_IDS تنظیم نشده؛ دسترسی Telegram در حالت تست عمومی باز است. برای REAL استفاده از whitelist توصیه می‌شود.')
