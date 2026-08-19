@@ -1,20 +1,8 @@
-from strategy import FILTER_DEFAULTS, STRATEGY_DEFAULTS
+from strategy import STRATEGY_DEFAULTS
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
     return {"remove_keyboard": True}
-
-
-def get_filters_menu_keyboard(session=None):
-    f = (session or {}).get("filters", FILTER_DEFAULTS)
-    return {"inline_keyboard": [
-        [{"text": f"فیلتر حجم: {'🟢 فعال' if f.get('volume_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_vol"}],
-        [{"text": f"حد ضرر دنبال‌کننده: {'🟢 فعال' if f.get('trailing_stop', True) else '🔴 خاموش'}", "callback_data": "/toggle_trail"}],
-        [{"text": f"تأیید کندل: {'🟢 فعال' if f.get('candlestick_filter', True) else '🔴 خاموش'}", "callback_data": "/toggle_candle"}],
-        [{"text": f"توقف فروش: {'🟢 بله' if f.get('no_short_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_short"}],
-        [{"text": f"توقف خرید: {'🟢 بله' if f.get('no_buy_filter', False) else '🔴 خیر'}", "callback_data": "/toggle_buy"}],
-        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
-    ]}
 
 
 def get_params_menu_keyboard(session=None):
@@ -143,14 +131,6 @@ def get_entry_diag_keyboard(enabled=True):
         [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
-
-
-def get_strategies_selection_keyboard():
-    return {"inline_keyboard": [[{"text": "⚡ پویا", "callback_data": "/set_strat_dynamic"}], [{"text": "📈 روندی", "callback_data": "/set_strat_trend"}], [{"text": "🚀 شکست", "callback_data": "/set_strat_breakout"}], [{"text": "🔄 بازگشت به میانگین", "callback_data": "/set_strat_mean_reversion"}], [{"text": "🌊 چندزمانه", "callback_data": "/set_strat_multi"}], [{"text": "📚 توضیح", "callback_data": "/strategy_desc_menu"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
-
-
-def get_strategies_menu_keyboard():
-    return {"inline_keyboard": [[{"text": "5 دقیقه", "callback_data": "/desc_5min"}, {"text": "15 دقیقه", "callback_data": "/desc_15min"}], [{"text": "1 ساعت", "callback_data": "/desc_1hour"}, {"text": "مولتی", "callback_data": "/desc_multi"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
 def get_watchlist_manage_keyboard():

@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import time
 
 FILTER_DEFAULTS = {
     "volume_filter": True,
@@ -33,6 +32,10 @@ STRATEGY_DEFAULTS = {
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
+    # --- مدیریت هوشمند هدف سود (PDL/PDH) ---
+    "extend_tp_to_pdl": True,       # هدف اصلی معامله = سقف/کف روز قبل، به‌جای هدف کوتاه RR ثابت
+    "weakness_exit_min_r": 0.8,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
+    "weakness_exit_score": 45.0,    # آستانه امتیاز ضعف برای بستن زودهنگام با سود
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -70,10 +73,6 @@ TIMEFRAME_PARAM_ADJUST = TIMEFRAME_STRATEGY_PRESETS
 
 def get_timeframe_preset(timeframe):
     return {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
-
-
-FILTERS = FILTER_DEFAULTS.copy()
-STRATEGY_CONFIG = STRATEGY_DEFAULTS.copy()
 
 
 def _safe_float(value, default=0.0):
@@ -420,6 +419,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     body_ratio = _safe_float(curr.get("body_ratio"), 0)
     vr = _safe_float(curr.get("volume_ratio"), 1)
 
+    extend_to_structure = bool(cfg.get("extend_tp_to_pdl", True))
+
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
         sl = sweep_extreme + (atr * buffer_atr)
@@ -429,8 +430,12 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
         reclaim_depth = (sweep_extreme - entry) / risk_dist
-        tp = entry - (risk_dist * target_rr)
-        if pdl < entry and (entry - pdl) / risk_dist >= min_rr:
+        soft_tp = entry - (risk_dist * target_rr)
+        tp = soft_tp
+        # هدف اصلی: کف روز قبل (PDL) - اگر با فاصله حداقل RR قابل قبول باشد
+        if extend_to_structure and pdl < entry and (entry - pdl) / risk_dist >= min_rr:
+            tp = pdl
+        elif pdl < entry and (entry - pdl) / risk_dist >= min_rr:
             tp = max(tp, pdl)
     else:
         sweep_extreme = float(curr["low"])
@@ -441,8 +446,12 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
         reclaim_depth = (entry - sweep_extreme) / risk_dist
-        tp = entry + (risk_dist * target_rr)
-        if pdh > entry and (pdh - entry) / risk_dist >= min_rr:
+        soft_tp = entry + (risk_dist * target_rr)
+        tp = soft_tp
+        # هدف اصلی: سقف روز قبل (PDH) - اگر با فاصله حداقل RR قابل قبول باشد
+        if extend_to_structure and pdh > entry and (pdh - entry) / risk_dist >= min_rr:
+            tp = pdh
+        elif pdh > entry and (pdh - entry) / risk_dist >= min_rr:
             tp = min(tp, pdh)
 
     # فیلتر کارمزد به ریسک دلاری
@@ -470,19 +479,78 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
-        "pdh": float(pdh), "pdl": float(pdl),
+        "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
+        "structural_target": bool(tp == pdl or tp == pdh),
         "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R"
     }
     return plan, plan["reason"]
 
 
-def get_strategy_description(timeframe="5min", strategy_config=None, filters=None, simple=False):
-    p = get_strategy_params(timeframe, strategy_config)
-    f = _flt(filters)
-    if simple:
-        return "📊 *استراتژی فعال*\n\n🤖 ربات قدرت روند، نوسان، حرکت قیمت و حجم را پشت صحنه بررسی می‌کند.\n\n🎯 حد سود و ضرر با شرایط بازار هماهنگ می‌شوند.\n⚖️ کیفیت و نسبت سود به ریسک قبل از ورود بررسی می‌شود."
-    return (f"📊 *استراتژی فعال ({'مولتی' if timeframe == 'multi' else timeframe})*\n\n"
-            f"• ADX: `{p['adx']:.1f}`\n• SL: `{p['sl']:.1f} ATR`\n• TP: `{p['tp']:.1f} ATR`\n• حجم: `{'🟢' if f.get('volume_filter',True) else '🔴'}`\n• کندل: `{'🟢' if f.get('candlestick_filter',True) else '🔴'}`")
+def evaluate_trend_weakness(df, side, strategy_config=None):
+    """
+    بررسی می‌کند که آیا روند معامله باز، در حال از دست دادن قدرت است یا نه.
+    برای استفاده در مدیریت خودکار پوزیشن: وقتی معامله سود دارد ولی هنوز به هدف
+    ساختاری (PDH/PDL) نرسیده، این تابع علائم ضعف را روی آخرین کندل بسته‌شده
+    می‌سنجد تا در صورت لزوم با سود بسته شود؛ در غیر این صورت اجازه می‌دهد
+    معامله تا رسیدن به هدف ادامه یابد.
+
+    df باید از قبل با calculate_indicators پردازش شده باشد (حداقل ۶۰ کندل).
+    side: 'BUY'/'LONG' یا 'SELL'/'SHORT'
+
+    خروجی: (is_weak: bool, score: int 0-100, reasons: list[str])
+    """
+    if df is None or len(df) < 20:
+        return False, 0, []
+    required_cols = {"adx", "rsi", "ema20", "plus_di", "minus_di", "body_ratio", "volume_ratio"}
+    if not required_cols.issubset(df.columns):
+        return False, 0, []
+
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    curr = df.iloc[-2]
+    prev = df.iloc[-3] if len(df) >= 3 else curr
+    is_long = isinstance(side, str) and ("BUY" in side.upper() or "LONG" in side.upper())
+
+    adx = _safe_float(curr.get("adx"), 0)
+    prev_adx = _safe_float(prev.get("adx"), adx)
+    rsi = _safe_float(curr.get("rsi"), 50)
+    plus_di = _safe_float(curr.get("plus_di"), 0)
+    minus_di = _safe_float(curr.get("minus_di"), 0)
+    ema20 = _safe_float(curr.get("ema20"), 0)
+    close = _safe_float(curr.get("close"), 0)
+    open_ = _safe_float(curr.get("open"), 0)
+    body_ratio = _safe_float(curr.get("body_ratio"), 0)
+    vr = _safe_float(curr.get("volume_ratio"), 1)
+
+    score = 0.0
+    reasons = []
+
+    if is_long:
+        if minus_di > plus_di:
+            score += 30.0; reasons.append("DI منفی از DI مثبت عبور کرد (تغییر جهت روند)")
+        if adx < prev_adx and adx < 22:
+            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
+        if close < ema20:
+            score += 20.0; reasons.append("قیمت زیر EMA20 بسته شد")
+        if rsi < 45:
+            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
+        if close < open_ and body_ratio >= 0.55 and vr >= 1.0:
+            score += 20.0; reasons.append("کندل نزولی قدرتمند مخالف روند با حجم بالا")
+    else:
+        if plus_di > minus_di:
+            score += 30.0; reasons.append("DI مثبت از DI منفی عبور کرد (تغییر جهت روند)")
+        if adx < prev_adx and adx < 22:
+            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
+        if close > ema20:
+            score += 20.0; reasons.append("قیمت بالای EMA20 بسته شد")
+        if rsi > 55:
+            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
+        if close > open_ and body_ratio >= 0.55 and vr >= 1.0:
+            score += 20.0; reasons.append("کندل صعودی قدرتمند مخالف روند با حجم بالا")
+
+    score = max(0.0, min(100.0, score))
+    threshold = float(cfg.get("weakness_exit_score", 45.0))
+    is_weak = score >= threshold
+    return is_weak, int(round(score)), reasons
 
 
 def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
@@ -688,8 +756,3 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if st == "multi":
         return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
     return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-
-
-def get_signal(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None):
-    sig, _ = get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime)
-    return sig

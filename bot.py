@@ -1,7 +1,7 @@
-import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, threading, re, importlib
+import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re, importlib
 import urllib.parse as urlparse
 from threading import Thread, RLock
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -14,16 +14,16 @@ from flask import Flask, request
 import strategy
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
-    get_strategy_params, get_strategy_description, strategy_trend_following,
+    strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels,
+    _compute_prev_day_levels, evaluate_trend_weakness,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
-    get_watchlist_manage_keyboard, get_strategies_selection_keyboard,
-    get_filters_menu_keyboard, get_params_menu_keyboard, get_positions_keyboard,
-    get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_strategies_menu_keyboard, get_learn_menu_keyboard,
+    get_watchlist_manage_keyboard,
+    get_params_menu_keyboard, get_positions_keyboard,
+    get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_learn_menu_keyboard,
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
 )
@@ -105,8 +105,6 @@ ASYNC_SEMAPHORE = None
 ENTRY_LOCKS: Dict[int, RLock] = {}
 ENTRY_LOCKS_GUARD = RLock()
 TELEGRAM_OFFSET = 0
-MARKET_REPORT_CACHE = {}
-MARKET_REPORT_CACHE_LOCK = RLock()
 
 class ExchangeStateError(RuntimeError):
     pass
@@ -118,6 +116,7 @@ def json_default(obj):
 
 
 def init_db():
+    db_existed_before = os.path.exists(DB_PATH)
     with DB_LOCK:
         conn = sqlite3.connect(DB_PATH, timeout=15)
         try:
@@ -129,6 +128,20 @@ def init_db():
             conn.commit()
         finally:
             conn.close()
+    # هشدار سطح کد برای جلوگیری از تکرار بی‌صدای مشکل «پاک شدن پوزیشن‌ها/عملکرد بعد از Restart»:
+    # اگر BOT_DB_PATH صریحاً تنظیم نشده باشد، دیتابیس روی مسیر محلی پیش‌فرض کنار کد قرار می‌گیرد که
+    # در اغلب پلتفرم‌های هاست (بدون Persistent Disk/Volume جداگانه) با هر Deploy/Restart از بین می‌رود.
+    if not os.environ.get('BOT_DB_PATH', '').strip():
+        logger.warning(
+            'هشدار ماندگاری داده: BOT_DB_PATH تنظیم نشده؛ دیتابیس روی مسیر پیش‌فرض محلی (%s) ذخیره '
+            'می‌شود. اگر هاست شما دیسک دائمی جداگانه (Persistent Disk/Volume) نداشته باشد، این فایل با '
+            'هر Restart/Deploy پاک می‌شود و تمام پوزیشن‌ها، تاریخچه و آمار عملکرد از بین می‌رود.', DB_PATH
+        )
+    if not db_existed_before:
+        logger.warning(
+            'فایل دیتابیس (%s) هم‌اکنون از صفر ساخته شد. اگر قبلاً سشن یا پوزیشنی برای کاربران وجود '
+            'داشته، این یعنی فایل قبلی از بین رفته — احتمالاً چون روی دیسک غیردائمی بوده.', DB_PATH
+        )
 
 
 def save_session(chat_id):
@@ -866,36 +879,6 @@ def format_trade_status(p, price=None):
     return '\n'.join(lines)
 
 
-def _fa_num(x, digits=2):
-    try:
-        return f"{float(x):,.{digits}f}"
-    except Exception:
-        return "—"
-
-def _closed_trades(s):
-    return [t for t in s.get('trade_history', []) if t.get('closed_at')]
-
-def _performance_dashboard(chat_id):
-    s = get_session(chat_id)
-    trades = _closed_trades(s)
-    wins = [t for t in trades if float(t.get('pnl', 0) or 0) > 0]
-    losses = [t for t in trades if float(t.get('pnl', 0) or 0) < 0]
-
-    gross_profit = sum(max(float(t.get('pnl', 0) or 0), 0) for t in trades)
-    gross_loss = abs(sum(min(float(t.get('pnl', 0) or 0), 0) for t in trades))
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0)
-
-    win_rate = (len(wins)/len(trades)*100) if trades else 0
-    net = sum(float(t.get('pnl', 0) or 0) for t in trades)
-
-    lines = []
-    lines.append("📊 *داشبورد عملکرد معاملات*")
-    lines.append("━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"• کل معاملات: `{len(trades)}` | 🎯 نرخ برد: `{win_rate:.1f}%`")
-    lines.append(f"• سود خالص: `{net:+,.2f} USDT` | ضریب سود: `{profit_factor:.2f}`")
-    send_message(chat_id, "\n".join(lines), get_performance_keyboard(), parse_mode='Markdown')
-
-
 def chart(chat_id, symbol, df, trade):
     try:
         if df.empty or len(df) < 5:
@@ -1467,6 +1450,34 @@ def reconcile_real(chat_id):
     s['last_reconcile']=time.time(); save_session(chat_id); return True
 
 
+def _weakness_exit_check(chat_id, s, p, current_r):
+    """
+    وقتی معامله سود مناسبی دارد ولی هنوز به هدف ساختاری (PDL/PDH) نرسیده،
+    این تابع علائم ضعف روند را بررسی می‌کند تا در صورت لزوم پوزیشن با سود
+    بسته شود؛ در غیر این صورت اجازه می‌دهد معامله تا رسیدن به TP ادامه یابد.
+    خروجی: (should_exit: bool, reasons: list[str])
+    """
+    try:
+        cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
+        min_r = float(cfg.get('weakness_exit_min_r', 0.8))
+        if current_r < min_r:
+            return False, []
+        tf = p.get('timeframe', '5min')
+        if tf == 'multi':
+            tf = '5min'
+        wdf = get_klines(p['symbol'], tf, 150)
+        if wdf.empty or len(wdf) < 60:
+            return False, []
+        wdf = calculate_indicators(wdf)
+        if wdf.empty or len(wdf) < 60:
+            return False, []
+        is_weak, wscore, wreasons = evaluate_trend_weakness(wdf, p['side'], cfg)
+        return bool(is_weak), wreasons
+    except Exception as exc:
+        logger.debug('weakness exit check failed trade=%s symbol=%s: %s', p.get('trade_id'), p.get('symbol'), exc)
+        return False, []
+
+
 def update_positions(chat_id):
     s=get_session(chat_id)
     if not s['paper_positions']: return
@@ -1485,10 +1496,10 @@ def update_positions(chat_id):
                     update_trade_excursions(p, float(edf['high'].max()), float(edf['low'].min()))
             except Exception as exc:
                 logger.debug('real excursion sample failed symbol=%s: %s', p.get('symbol'), exc)
+            risk_distance=p.get('risk_distance')
+            if not risk_distance and not p.get('trailing_activated'):
+                risk_distance=abs(entry-float(p.get('sl',entry)))
             if s['filters'].get('trailing_stop',True):
-                risk_distance=p.get('risk_distance')
-                if not risk_distance and not p.get('trailing_activated'):
-                    risk_distance=abs(entry-float(p.get('sl',entry)))
                 lr=trailing_locked_r(entry,risk_distance,price,side_long(p['side'])) if risk_distance else None
                 if lr is not None:
                     new_sl=entry+(lr*risk_distance if side_long(p['side']) else -lr*risk_distance)
@@ -1499,6 +1510,11 @@ def update_positions(chat_id):
                             first_activation=float(p.get('trailing_locked_r') or 0.0)==0.0
                             p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
                             if first_activation: send_message(chat_id,f"🛡️ حد ضرر دنبال‌کننده فعال شد: `{p['symbol']}` (قفل روی {lr:.1f}R)")
+            current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance) if risk_distance else 0.0
+            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r)
+            if should_exit:
+                p['weakness_exit_reasons']=wreasons
+                close_position(chat_id,p,price,'مدیریت هوشمند (ضعف روند)')
         save_session(chat_id); return
     for p in s['paper_positions'][:]:
         df=get_klines(p['symbol'],p.get('timeframe','5min') if p.get('timeframe')!='multi' else '5min',5)
@@ -1518,17 +1534,23 @@ def update_positions(chat_id):
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=float(p['sl']); reason='SL'
             pnl=float(p['margin'])*((float(p['entry_price'])-close)/float(p['entry_price']))*float(p['leverage'])
+        entry_p=float(p['entry_price'])
+        risk_distance=p.get('risk_distance')
+        if not risk_distance and not p.get('trailing_activated'):
+            risk_distance=abs(entry_p-float(p.get('sl',entry_p)))
         if s['filters'].get('trailing_stop',True):
-            entry_p=float(p['entry_price'])
-            risk_distance=p.get('risk_distance')
-            if not risk_distance and not p.get('trailing_activated'):
-                risk_distance=abs(entry_p-float(p.get('sl',entry_p)))
             lr=trailing_locked_r(entry_p,risk_distance,close,side_long(p['side'])) if risk_distance else None
             if lr is not None:
                 new_sl=entry_p+(lr*risk_distance if side_long(p['side']) else -lr*risk_distance)
                 is_better=(new_sl>float(p['sl'])) if side_long(p['side']) else (new_sl<float(p['sl']))
                 if is_better and lr>float(p.get('trailing_locked_r') or 0.0):
                     p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
+        if reason is None and risk_distance:
+            current_r=(close-entry_p)/risk_distance if side_long(p['side']) else (entry_p-close)/risk_distance
+            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r)
+            if should_exit:
+                exit_price=close; reason='مدیریت هوشمند (ضعف روند)'
+                p['weakness_exit_reasons']=wreasons
         if reason: close_position(chat_id,p,exit_price,reason)
     save_session(chat_id)
 
@@ -1910,17 +1932,6 @@ def _market_snapshot(symbol, tf):
         return {'symbol': symbol, 'close': close, 'adx': adx, 'rsi': rsi, 'atr_pct': atr / close * 100 if close else 0.0, 'volume_ratio': vol_ratio, 'score': score}
     except Exception:
         return None
-
-
-def _market_score(results, avg_adx, avg_rsi, avg_atr, avg_vol):
-    if not results: return 0, 'نامشخص'
-    bullish = sum(1 for x in results if x['score'] > 0)
-    breadth = bullish / len(results)
-    trend = max(0.0, min(100.0, (avg_adx - 10.0) * 4.0))
-    rsi_quality = max(0.0, 100.0 - abs(avg_rsi - 50.0) * 1.6)
-    score = round(trend * 0.40 + breadth * 30.0 + rsi_quality * 0.30)
-    label = 'خوب' if score >= 65 else ('متوسط' if score >= 45 else 'ضعیف')
-    return max(0, min(100, score)), label
 
 
 def market_report(chat_id):
@@ -2512,11 +2523,38 @@ def miniapp_chart_url(symbol, timeframe='5min'):
     return f'{MINIAPP_BASE_URL}/miniapp/chart?symbol={symbol}&tf={timeframe}'
 
 
+def _notify_boot_status():
+    """بعد از هر بالا آمدن پروسه، به کاربران شناخته‌شده اطلاع می‌دهد چند سشن و پوزیشن باز بارگذاری
+    شد. هدف این است که اگر دیتابیس به هر دلیل (مثلاً دیسک غیردائمی) خالی بارگذاری شود، کاربر همان
+    لحظه متوجه شود، نه اینکه بعداً و تصادفی بفهمد پوزیشن‌ها و آمارش پاک شده‌اند."""
+    try:
+        targets = set(ALLOWED_CHAT_IDS) | set(USER_SESSIONS.keys())
+        if not targets:
+            return
+        total_open = sum(len(s.get('paper_positions') or []) for s in USER_SESSIONS.values())
+        total_closed = sum(len(s.get('closed_positions') or []) for s in USER_SESSIONS.values())
+        for cid in targets:
+            s = USER_SESSIONS.get(cid)
+            open_n = len(s.get('paper_positions') or []) if s else 0
+            closed_n = len(s.get('closed_positions') or []) if s else 0
+            msg = f"🔄 *ربات بالا آمد.*\nپوزیشن‌های باز شما: `{open_n}` | تاریخچه بسته‌شده: `{closed_n}`"
+            if s is None or (open_n == 0 and closed_n == 0):
+                msg += "\n\n⚠️ اگر انتظار داشتید اینجا داده‌ای باشد، ممکن است دیتابیس ری‌ست شده باشد (مشکل ماندگاری دیسک هاست)."
+            try:
+                send_message(cid, msg)
+            except Exception:
+                pass
+        logger.info('Boot status: sessions=%s total_open_positions=%s total_closed_positions=%s', len(USER_SESSIONS), total_open, total_closed)
+    except Exception:
+        logger.exception('boot status notification failed')
+
+
 def main():
     init_db()
     load_telegram_offset()
     load_sessions()
     logger.info('Loaded %s sessions', len(USER_SESSIONS))
+    _notify_boot_status()
     configure_telegram_native_menu()
     Thread(target=telegram_listener, daemon=True, name='telegram').start()
     Thread(target=lambda: (time.sleep(3), asyncio.run(scan_loop())), daemon=True, name='scanner').start()
