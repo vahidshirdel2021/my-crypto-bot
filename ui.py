@@ -1,8 +1,16 @@
 from strategy import STRATEGY_DEFAULTS
 
+CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
+
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
-    return {"remove_keyboard": True}
+    # کیبورد سفارشی سبک، فقط برای اینکه راهنمای باکس پیام (placeholder) همیشه ثابت بماند
+    return {
+        "keyboard": [[{"text": "📊 وضعیت بازار"}, {"text": "📋 واچ‌لیست"}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+        "input_field_placeholder": CHAT_INPUT_PLACEHOLDER,
+    }
 
 
 def get_params_menu_keyboard(session=None):

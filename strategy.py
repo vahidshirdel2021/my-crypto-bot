@@ -9,6 +9,140 @@ FILTER_DEFAULTS = {
     "no_buy_filter": False,
 }
 
+def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candles=2):
+    """
+    استاپ‌لاس را بر اساس آخرین سوینگ معاملاتی (کف/سقف تأییدشده اخیر) محاسبه می‌کند،
+    نه یک فاصله ثابت ATR. کندل‌های خیلی اخیر (confirm_candles) کنار گذاشته می‌شوند
+    تا سوینگ استفاده‌شده واقعاً «شکل‌گرفته» باشد نه یک نوسان لحظه‌ای.
+
+    خروجی: (sl, swing_level) یا (None, None) اگر داده کافی نبود.
+    """
+    if df is None or df.empty:
+        return None, None
+    need = lookback + confirm_candles
+    if len(df) < need + 1:
+        return None, None
+    if "atr" not in df.columns:
+        return None, None
+    atr = pd.to_numeric(df["atr"], errors="coerce").iloc[-1]
+    if not np.isfinite(atr) or atr <= 0:
+        return None, None
+    end = -confirm_candles if confirm_candles > 0 else None
+    start = -(lookback + confirm_candles)
+    window = df.iloc[start:end]
+    if window.empty:
+        return None, None
+    if is_long:
+        swing = float(pd.to_numeric(window["low"], errors="coerce").min())
+        if not np.isfinite(swing):
+            return None, None
+        sl = swing - atr * buffer_atr
+    else:
+        swing = float(pd.to_numeric(window["high"], errors="coerce").max())
+        if not np.isfinite(swing):
+            return None, None
+        sl = swing + atr * buffer_atr
+    return float(sl), float(swing)
+
+
+def _candle_metrics(c):
+    o, cl, h, l = float(c["open"]), float(c["close"]), float(c["high"]), float(c["low"])
+    body = abs(cl - o)
+    full_range = max(h - l, 1e-12)
+    upper_wick = h - max(cl, o)
+    lower_wick = min(cl, o) - l
+    return o, cl, h, l, body, full_range, upper_wick, lower_wick
+
+
+def detect_candlestick_patterns(df):
+    """
+    الگوهای معروف کندلی را روی آخرین کندل تأییدشده (و ۲ کندل قبل از آن برای الگوهای
+    چندکندلی) شناسایی می‌کند. کندل در حال شکل‌گیری (آخرین ردیف df) استفاده نمی‌شود -
+    دقیقاً مثل بقیه منطق build_trade_plan که از df.iloc[-2] به‌عنوان کندل تأییدشده استفاده می‌کند.
+
+    خروجی: لیستی از تاپل (نام_فارسی, جهت, قدرت) - جهت: +1 صعودی، -1 نزولی، 0 خنثی/بی‌تصمیم.
+    """
+    if df is None or len(df) < 4:
+        return []
+    c0, c1, c2 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
+    o0, cl0, h0, l0, body0, range0, uw0, lw0 = _candle_metrics(c0)
+    body_ratio0 = body0 / range0
+    bull0, bear0 = cl0 > o0, cl0 < o0
+
+    patterns = []
+
+    if body_ratio0 >= 0.85:
+        patterns.append(("مارابوزو", 1 if bull0 else -1, 0.55))
+
+    if body_ratio0 <= 0.35 and lw0 >= 2.0 * max(body0, 1e-12) and uw0 <= body0 * 0.6:
+        patterns.append(("چکش / پین‌بار صعودی", 1, 0.70))
+
+    if body_ratio0 <= 0.35 and uw0 >= 2.0 * max(body0, 1e-12) and lw0 <= body0 * 0.6:
+        patterns.append(("ستاره تیرانداز / پین‌بار نزولی", -1, 0.70))
+
+    if body_ratio0 <= 0.12:
+        patterns.append(("دوجی", 0, 0.40))
+
+    o1, cl1, h1, l1, body1, range1, uw1, lw1 = _candle_metrics(c1)
+    bull1, bear1 = cl1 > o1, cl1 < o1
+    if body1 > 1e-12:
+        if bull0 and bear1 and cl0 >= o1 and o0 <= cl1 and body0 > body1:
+            patterns.append(("انگالفینگ صعودی", 1, 0.80))
+        if bear0 and bull1 and o0 >= cl1 and cl0 <= o1 and body0 > body1:
+            patterns.append(("انگالفینگ نزولی", -1, 0.80))
+
+    o2, cl2, h2, l2, body2, range2, uw2, lw2 = _candle_metrics(c2)
+    bull2, bear2 = cl2 > o2, cl2 < o2
+    if body2 > 1e-12:
+        mid_small = body1 <= 0.4 * body2
+        if bear2 and mid_small and bull0 and cl0 > (o2 + cl2) / 2.0:
+            patterns.append(("ستاره صبحگاهی", 1, 0.75))
+        if bull2 and mid_small and bear0 and cl0 < (o2 + cl2) / 2.0:
+            patterns.append(("ستاره عصرگاهی", -1, 0.75))
+
+    return patterns
+
+
+def candle_pattern_score(df, signal, regime="mixed", near_structure=False, max_points=10.0):
+    """
+    امتیاز کمکی (نه فیلتر سخت) بر اساس الگوهای کندلی شناخته‌شده - همسو با جهت سیگنال و
+    منطبق با رژیم فعلی بازار (روند / رنج) وزن می‌گیرد:
+      - الگوهای برگشتی (چکش، ستاره تیرانداز، انگالفینگ، مورنینگ/ایونینگ استار) در رژیم رنج
+        یا نزدیک یک سطح ساختاری (سوینگ/PDH/PDL) وزن کامل می‌گیرند.
+      - همان الگوهای برگشتی وسط یک روند قوی و دور از سطح ساختاری، با احتیاط و وزن نصف
+        اعمال می‌شوند (چون می‌توانند تله باشند).
+      - الگوی ادامه‌دهنده (مارابوزو هم‌جهت با سیگنال) در رژیم روند/بریک‌اوت وزن کامل می‌گیرد.
+      - دوجی در وسط روند قوی (بی‌تصمیمی خلاف تداوم) کمی امتیاز منفی می‌دهد؛ نزدیک سطح
+        ساختاری خنثی تا کمی مثبت است.
+      - الگوی خلاف جهت سیگنال، امتیاز را کم می‌کند (رد نمی‌کند - فقط هشدار احتیاط).
+    خروجی: (امتیاز بین -max_points تا +max_points, نام الگوی غالب یا None)
+    """
+    patterns = detect_candlestick_patterns(df)
+    if not patterns:
+        return 0.0, None
+    wanted_dir = 1 if signal == "BUY" else -1
+    best_name, best_weight = None, 0.0
+    for name, direction, strength in patterns:
+        if direction == 0:
+            weight = 0.3 if near_structure else (-0.3 if regime == "trend" else 0.0)
+        elif direction == wanted_dir:
+            if regime == "range" or near_structure:
+                weight = strength
+            elif regime == "trend" and name == "مارابوزو":
+                weight = strength
+            elif regime == "trend":
+                weight = strength * 0.5
+            else:
+                weight = strength * 0.7
+        else:
+            weight = -0.4 * strength
+        if abs(weight) > abs(best_weight):
+            best_name, best_weight = name, weight
+    if best_name is None:
+        return 0.0, None
+    return max(-max_points, min(max_points, best_weight * max_points)), best_name
+
+
 STRATEGY_DEFAULTS = {
     "min_adx": 20.0,
     "sl_multiplier": 1.5,
@@ -32,6 +166,10 @@ STRATEGY_DEFAULTS = {
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
+    # --- استاپ‌لاس بر اساس سوینگ ساختاری ---
+    "swing_lookback": 12,           # تعداد کندل قبل برای یافتن آخرین سوینگ معاملاتی
+    "swing_confirm_candles": 2,     # این تعداد کندل آخر نادیده گرفته می‌شود تا سوینگ «تأییدشده» باشد
+    "swing_buffer_atr": 0.40,       # فاصله اضافه (بر حسب ATR) زیر/بالای سوینگ برای جلوگیری از شکار استاپ
     # --- مدیریت هوشمند هدف سود (PDL/PDH) ---
     "extend_tp_to_pdl": True,       # هدف اصلی معامله = سقف/کف روز قبل، به‌جای هدف کوتاه RR ثابت
     "weakness_exit_min_r": 0.8,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
@@ -147,7 +285,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_strategy_params(timeframe="5min", strategy_config=None):
+def get_strategy_params(strategy_config=None):
+    # توجه: این تابع فقط بر اساس strategy_config کار می‌کند (که خودش قبلاً بر اساس
+    # تایم‌فریم واقعی جلسه، در get_timeframe_preset ساخته شده)؛ به همین دلیل دیگر
+    # آرگومان جداگانه‌ی timeframe نمی‌گیرد تا در فراخوانی‌ها گمراه‌کننده نباشد.
     c = _cfg(strategy_config)
     return {
         "adx": float(c.get("min_adx", 20.0)),
@@ -197,6 +338,15 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     direction_di = plus_di > minus_di if signal == "BUY" else minus_di > plus_di
     rsi_ok = (48 <= rsi <= 68) if signal == "BUY" else (32 <= rsi <= 52)
 
+    swing_lookback_n = int(cfg.get("swing_lookback", 12))
+    swing_confirm_n = int(cfg.get("swing_confirm_candles", 2))
+    swing_buffer_atr = float(cfg.get("swing_buffer_atr", 0.40))
+    swing_sl, swing_level = compute_swing_stop(
+        df, signal == "BUY", swing_lookback_n, swing_buffer_atr, swing_confirm_n
+    )
+    near_structure = swing_level is not None and abs(entry - swing_level) <= atr * 1.2
+    regime = "range" if strategy_type == "mean_reversion" else ("trend" if trend_ok else "mixed")
+
     if strategy_type == "mean_reversion":
         trend_score = 22.0 if adx < float(cfg.get("min_adx", 20.0)) else 0.0
         rsi_score = 10.0 if ((signal == "BUY" and rsi <= 35) or (signal == "SELL" and rsi >= 65)) else 2.0
@@ -205,20 +355,22 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         rsi_score = 10.0 if rsi_ok else max(0.0, 10.0 - abs(rsi - (58 if signal == "BUY" else 42)) * 0.25)
     adx_score = min(20.0, max(0.0, (adx - 15.0) * 1.0))
     volume_score = min(15.0, max(0.0, (vr - 0.85) * 25.0))
-    candle_score = min(15.0, max(0.0, body_ratio * 18.0))
-    vol_score = 15.0 * max(0.0, 1.0 - min(abs(np.log(max(atr_ratio, 1e-9))), 1.0))
-    score = int(round(max(0.0, min(100.0, trend_score + adx_score + volume_score + candle_score + rsi_score + vol_score))))
+    candle_score = min(10.0, max(0.0, body_ratio * 12.0))
+    vol_score = 10.0 * max(0.0, 1.0 - min(abs(np.log(max(atr_ratio, 1e-9))), 1.0))
+    pattern_score, pattern_name = candle_pattern_score(df, signal, regime, near_structure, max_points=10.0)
+    score = int(round(max(0.0, min(100.0,
+        trend_score + adx_score + volume_score + candle_score + rsi_score + vol_score + pattern_score
+    ))))
 
-    lookback = df.iloc[-12:-2]
     if signal == "BUY":
-        swing = float(pd.to_numeric(lookback["low"], errors="coerce").min())
         base_mult = float(cfg.get("sl_multiplier", 1.5))
         if atr_ratio > 1.35: base_mult += 0.20
         elif atr_ratio < 0.80: base_mult -= 0.10
         base_mult = max(1.25, min(max_sl_atr, base_mult))
         atr_sl = entry - atr * base_mult
-        structure_sl = swing - atr * 0.40 if np.isfinite(swing) else atr_sl
-        sl = min(atr_sl, structure_sl)
+        # اولویت با استاپ ساختاری (زیر آخرین سوینگ) است؛ فقط اگر سوینگ معتبر نبود یا
+        # پشت قیمت ورود نبود، به فاصله مبتنی بر ATR برمی‌گردیم.
+        sl = swing_sl if (swing_sl is not None and swing_sl < entry) else atr_sl
         if (entry - sl) / entry < min_sl_pct:
             sl = entry * (1.0 - min_sl_pct)
         if entry - sl > atr * max_sl_atr:
@@ -229,14 +381,12 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
             resistance = 0
         direction = 1
     else:
-        swing = float(pd.to_numeric(lookback["high"], errors="coerce").max())
         base_mult = float(cfg.get("sl_multiplier", 1.5))
         if atr_ratio > 1.35: base_mult += 0.20
         elif atr_ratio < 0.80: base_mult -= 0.10
         base_mult = max(1.25, min(max_sl_atr, base_mult))
         atr_sl = entry + atr * base_mult
-        structure_sl = swing + atr * 0.40 if np.isfinite(swing) else atr_sl
-        sl = max(atr_sl, structure_sl)
+        sl = swing_sl if (swing_sl is not None and swing_sl > entry) else atr_sl
         if (sl - entry) / entry < min_sl_pct:
             sl = entry * (1.0 + min_sl_pct)
         if sl - entry > atr * max_sl_atr:
@@ -284,7 +434,9 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         "risk_atr": float(risk_dist / atr), "target_r": float(rr),
         "atr": atr, "atr_ratio": float(atr_ratio), "adx": adx,
         "rsi": rsi, "volume_ratio": vr,
-        "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | R:R {rr:.2f}R"
+        "swing_level": float(swing_level) if swing_level is not None and np.isfinite(swing_level) else None,
+        "pattern": pattern_name,
+        "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
     }
     return plan, plan["reason"]
 
@@ -466,10 +618,13 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
 
     reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
-    candle_score = min(30.0, max(0.0, body_ratio * 40.0))
+    candle_score = min(20.0, max(0.0, body_ratio * 27.0))
     volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
     rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
-    score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score))))
+    # این استراتژی خودش یک برگشت روی سطح کلیدی (PDH/PDL) است، پس همیشه «نزدیک سطح ساختاری»
+    # و رژیم «رنج/برگشتی» در نظر گرفته می‌شود؛ کندل ریکلیم با الگوهای شناخته‌شده تقویت/تضعیف می‌شود.
+    pattern_score, pattern_name = candle_pattern_score(df, signal, regime="range", near_structure=True, max_points=10.0)
+    score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
 
     min_score = float(cfg.get("min_trade_score", 58.0))
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
@@ -481,7 +636,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         "quality_label": quality_label, "rr": float(rr),
         "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
         "structural_target": bool(tp == pdl or tp == pdh),
-        "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R"
+        "pattern": pattern_name,
+        "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
     }
     return plan, plan["reason"]
 
@@ -599,7 +755,7 @@ def check_candlestick_confirmation(df, filters=None, strategy_config=None):
 
 def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config=None):
     curr, prev = df.iloc[-2], df.iloc[-3]
-    p = get_strategy_params(timeframe, strategy_config)
+    p = get_strategy_params(strategy_config)
     adx, atr = _safe_float(curr.get("adx")), _safe_float(curr.get("atr"))
     if atr <= 0 or adx < p["adx"]:
         return None, f"روند ضعیف است (ADX={adx:.1f})"
@@ -630,7 +786,7 @@ def strategy_breakout(df, filters=None, strategy_config=None):
     if pd.isna(curr.get("channel_high")) or pd.isna(curr.get("channel_low")):
         return None, "کانال آماده نیست"
     f = _flt(filters)
-    p = get_strategy_params("5min", strategy_config)
+    p = get_strategy_params(strategy_config)
     adx = _safe_float(curr.get("adx"))
     if adx < max(15.0, p["adx"] - 5):
         return None, f"ADX پایین است ({adx:.1f})"
@@ -658,7 +814,7 @@ def strategy_breakout(df, filters=None, strategy_config=None):
 def strategy_mean_reversion(df, filters=None, strategy_config=None):
     curr = df.iloc[-2]
     rsi, adx = _safe_float(curr.get("rsi"), 50), _safe_float(curr.get("adx"), 50)
-    p = get_strategy_params("5min", strategy_config)
+    p = get_strategy_params(strategy_config)
     if adx >= p["adx"]:
         return None, f"روند برای Mean Reversion قوی است (ADX={adx:.1f})"
     atr = _safe_float(curr.get("atr"), 0)
@@ -696,7 +852,7 @@ def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=No
     for tf in required:
         h = market_data_dict[tf].iloc[-2]
         h_adx = _safe_float(h.get("adx"))
-        if h_adx < max(15.0, get_strategy_params(timeframe, strategy_config)["adx"] - 5):
+        if h_adx < max(15.0, get_strategy_params(strategy_config)["adx"] - 5):
             return None, f"ADX تایم {tf} ضعیف است ({h_adx:.1f})"
         if up and not (h["close"] > h["ema50"] and h["ema20"] >= h["ema50"] and h["plus_di"] >= h["minus_di"]):
             return None, f"عدم هم‌راستایی Long در {tf}"
@@ -724,9 +880,9 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
         return None, break_reason
     want_bullish = break_sig == "BUY"
 
-    if isinstance(market_data_dict, dict) and ("4h" in market_data_dict or "1h" in market_data_dict):
+    if isinstance(market_data_dict, dict) and any(k in market_data_dict for k in ("4h", "1h", "1d")):
         checks = []
-        for key in ("4h", "1h"):
+        for key in ("1d", "4h", "1h"):
             aligned = _htf_trend_aligned(market_data_dict.get(key), want_bullish)
             if aligned is not None:
                 checks.append((key, aligned))

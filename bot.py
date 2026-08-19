@@ -1,8 +1,13 @@
-import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re, importlib
+import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
 from threading import Thread, RLock
 from typing import Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 import pandas as pd
 import ccxt
@@ -11,12 +16,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
-import strategy
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, evaluate_trend_weakness,
+    _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -39,6 +43,22 @@ DATA_CACHE_SECONDS = max(5, int(os.environ.get('DATA_CACHE_SECONDS', '20')))
 MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
+# تایم‌فریم‌هایی که هرگز نباید معامله‌شان به روز بعد منتقل شود (چه با سود چه با ضرر)
+NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
+DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
+
+
+def _seconds_to_local_day_end():
+    """ثانیه‌های باقی‌مانده تا پایان روز جاری بر اساس منطقه‌زمانی DAILY_CLOSE_TZ."""
+    tz = None
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(DAILY_CLOSE_TZ)
+        except Exception:
+            tz = None
+    now = datetime.now(tz) if tz else datetime.utcnow()
+    day_end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (day_end - now).total_seconds()
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
 TAKER_FEE_PCT = max(0.0, float(os.environ.get('TAKER_FEE_PCT', '0.05')))
 MIN_RISK_TO_FEE_RATIO = max(0.0, float(os.environ.get('MIN_RISK_TO_FEE_RATIO', '3.0')))
@@ -690,6 +710,72 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long):
     return max(0.0, step-1.0)
 
 
+def _check_swing_trailing_stop(chat_id, s, p, price):
+    """
+    استاپ‌لاس را بر اساس آخرین سوینگ معاملاتی تأییدشده بازبینی می‌کند (هر بار که پوزیشن
+    چک می‌شود، یعنی هر SCAN_INTERVAL_SECONDS). اگر سوینگ جدیدی شکل گرفته باشد و جابه‌جایی
+    استاپ به آن، وضعیت را بهتر کند (هرگز بازتر نمی‌شود)، استاپ جابه‌جا شده و پیام اطلاع‌رسانی
+    ارسال می‌شود.
+    """
+    try:
+        tf = p.get('timeframe', '5min')
+        if tf == 'multi':
+            tf = '5min'
+        sdf = get_klines(p['symbol'], tf, 100)
+        if sdf.empty:
+            return
+        sdf = calculate_indicators(sdf)
+        if sdf.empty or 'atr' not in sdf.columns:
+            return
+        is_long = side_long(p['side'])
+        cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
+        lookback_n = int(cfg.get('swing_lookback', 12))
+        confirm_n = int(cfg.get('swing_confirm_candles', 2))
+        buffer_atr = float(cfg.get('swing_buffer_atr', 0.40))
+        new_sl, swing_level = compute_swing_stop(sdf, is_long, lookback_n, buffer_atr, confirm_n)
+        if new_sl is None or swing_level is None:
+            return
+        cur_sl = float(p['sl'])
+        if is_long:
+            behind_price = new_sl < price
+            improved = new_sl > cur_sl
+        else:
+            behind_price = new_sl > price
+            improved = new_sl < cur_sl
+        if not (behind_price and improved):
+            return
+        prev_level = p.get('swing_sl_level')
+        if prev_level is not None and math.isclose(swing_level, prev_level, rel_tol=1e-9, abs_tol=1e-9):
+            return
+        if p.get('is_real'):
+            ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], new_sl))
+            if not ok:
+                logger.warning('swing SL move failed symbol=%s: %s', p['symbol'], err)
+                return
+        old_sl = cur_sl
+        p['sl'] = new_sl
+        p['swing_sl_level'] = swing_level
+        p['trailing_activated'] = True
+        send_message(chat_id, f"🔄 استاپ‌لاس *{p['symbol']}* به‌دلیل تشکیل سوینگ جدید تغییر کرد\n• قبلی: `{fmt(old_sl)}`\n• جدید: `{fmt(new_sl)}`")
+    except Exception as exc:
+        logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
+
+
+def _maybe_close_before_day_end(chat_id, p, price):
+    """
+    برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
+    چه با ضرر. اگر تا پایان روز (بر اساس DAILY_CLOSE_TZ) کمتر از یک چرخه اسکن باقی مانده
+    باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
+    """
+    tf = p.get('timeframe', '5min')
+    if tf not in NO_OVERNIGHT_TIMEFRAMES:
+        return False
+    if _seconds_to_local_day_end() > SCAN_INTERVAL_SECONDS:
+        return False
+    close_position(chat_id, p, price, 'پایان روز - بستن اجباری (معاملات ۵ و ۱۵ دقیقه هرگز به روز بعد منتقل نمی‌شوند)')
+    return True
+
+
 def reset_daily_if_needed(chat_id, equity):
     s=get_session(chat_id); today=time.strftime('%Y-%m-%d',time.gmtime())
     if s.get('daily_start_date')!=today:
@@ -805,12 +891,29 @@ def expected_trade_metrics(trade):
         return {'tp_pnl':0.0,'sl_pnl':0.0,'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
 
 
-def trade_action_keyboard(symbol, chart_url=None):
+TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1day': 'D', 'multi': '15'}
+
+
+def tradingview_chart_url(symbol, timeframe='5min'):
+    """
+    لینک چارت TradingView برای نماد/تایم‌فریم فعال می‌سازد (نماد پرپچوال روی CoinEx،
+    همان صرافی‌ای که ربات معامله می‌کند: COINEX:{SYMBOL}USDT.P).
+    این یک لینک معمولی tradingview.com است؛ تلگرام و سیستم‌عامل موبایل به‌صورت خودکار
+    اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
+    وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
+    """
+    sym = symbol.upper().replace('USDT', '').replace('/', '')
+    interval = TV_INTERVAL_MAP.get(timeframe, '15')
+    tv_symbol = urlparse.quote(f'COINEX:{sym}USDT.P', safe='')
+    return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
+
+
+def trade_action_keyboard(symbol, chart_url=None, timeframe='5min'):
     rows = []
     if chart_url:
         rows.append([{'text':'🌐 چارت تعاملی (MiniApp)','web_app':{'url':chart_url}}])
     rows.append([
-        {'text':'🖼 دریافت تصویر چارت','callback_data':f'/view_chart_{symbol}'}
+        {'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, timeframe)}
     ])
     rows.append([
         {'text':'🛑 تغییر حد ضرر (SL)','callback_data':f'/edit_sl_{symbol}'},
@@ -987,7 +1090,7 @@ def chart(chat_id, symbol, df, trade):
             f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`",
-            trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf))
+            trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf)
         )
     except Exception:
         logger.exception('chart error')
@@ -1080,7 +1183,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
-    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0}
+    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1495,6 +1598,8 @@ def update_positions(chat_id):
             entry=float(p['entry_price']); pnl=float(p.get('margin',0))*(((price-entry)/entry) if side_long(p['side']) else ((entry-price)/entry))*float(p['leverage'])
             p['last_unrealized_pnl']=pnl
             p['last_price']=float(price)
+            if _maybe_close_before_day_end(chat_id, p, price):
+                continue
             try:
                 edf=get_klines(p['symbol'],p.get('timeframe','5min') if p.get('timeframe')!='multi' else '5min',3)
                 if not edf.empty:
@@ -1515,6 +1620,7 @@ def update_positions(chat_id):
                             first_activation=float(p.get('trailing_locked_r') or 0.0)==0.0
                             p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
                             if first_activation: send_message(chat_id,f"🛡️ حد ضرر دنبال‌کننده فعال شد: `{p['symbol']}` (قفل روی {lr:.1f}R)")
+            _check_swing_trailing_stop(chat_id, s, p, price)
             current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance) if risk_distance else 0.0
             should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r)
             if should_exit:
@@ -1527,6 +1633,8 @@ def update_positions(chat_id):
         c=df.iloc[-1]; high=float(c['high']); low=float(c['low']); close=float(c['close']); exit_price=None; reason=None
         update_trade_excursions(p, high, low)
         p['last_price']=close
+        if _maybe_close_before_day_end(chat_id, p, close):
+            continue
         if side_long(p['side']):
             hit_tp=high>=float(p['tp']); hit_sl=low<=float(p['sl'])
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC: exit_price=float(p['sl']); reason='SL (same candle)'
@@ -1548,6 +1656,8 @@ def update_positions(chat_id):
                 is_better=(new_sl>float(p['sl'])) if side_long(p['side']) else (new_sl<float(p['sl']))
                 if is_better and lr>float(p.get('trailing_locked_r') or 0.0):
                     p['sl']=new_sl; p['trailing_activated']=True; p['trailing_locked_r']=lr
+        if reason is None:
+            _check_swing_trailing_stop(chat_id, s, p, close)
         if reason is None and risk_distance:
             current_r=(close-entry_p)/risk_distance if side_long(p['side']) else (entry_p-close)/risk_distance
             should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r)
@@ -1760,6 +1870,16 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         if d.empty:
             return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
         primary=calculate_indicators(d); primary_tf=tf; mode='single'
+        # برای استراتژی dynamic روی 1h/4h، تایم‌فریم بالاتر را هم می‌گیریم تا
+        # تأیید هم‌جهتی HTF در strategy_dynamic (که به md['4h']/['1h']/['1d']
+        # نیاز دارد) واقعاً اجرا شود، نه اینکه به‌خاطر خالی بودن md نادیده گرفته شود.
+        if strat == 'dynamic' and tf in ('1hour', '4hour'):
+            htf_key, htf_tf = ('4h', '4hour') if tf == '1hour' else ('1d', '1day')
+            try:
+                hd=await get_klines_async(http,symbol,htf_tf,160)
+                if not hd.empty: md[htf_key]=calculate_indicators(hd)
+            except Exception as exc:
+                logger.warning('ENTRY_DIAG chat=%s symbol=%s htf=%s data_error=%s', chat_id, symbol, htf_tf, exc)
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات هنگام اسکن تغییر کرد', 'state')
@@ -1804,8 +1924,20 @@ def performance_period_report(chat_id, period='all'):
             risk=float(p.get('risk_usdt') or 0); pnl=float(p.get('pnl_usdt') or 0)
             if risk>0: rvals.append(pnl/risk)
         except Exception: pass
+
+    longs=[p for p in closed if side_long(p.get('side'))]
+    shorts=[p for p in closed if not side_long(p.get('side'))]
+    long_wins=sum(1 for p in longs if float(p.get('pnl_usdt',0) or 0)>0)
+    short_wins=sum(1 for p in shorts if float(p.get('pnl_usdt',0) or 0)>0)
+    long_net=sum(float(p.get('pnl_usdt',0) or 0) for p in longs)
+    short_net=sum(float(p.get('pnl_usdt',0) or 0) for p in shorts)
+
     lines=['📊 *گزارش عملکرد '+label+'*','━━━━━━━━━━━━━━━━━━━━',f'معاملات بسته‌شده: `{n}`',f'موفق: `{len(wins)}` | ناموفق: `{len(losses)}`',f'نرخ موفقیت: `{(len(wins)/n*100 if n else 0):.1f}%`',f'سود/زیان خالص: `{net:+.2f} USDT`',f'Profit Factor: `{("∞" if pf==float("inf") else f"{pf:.2f}")}`']
+    lines.append('━━━━━━━━━━━━━━━━━━━━')
+    lines.append(f"🟢 خرید (Long): `{len(longs)}` معامله | موفق: `{long_wins}` | ناموفق: `{len(longs)-long_wins}` | نرخ موفقیت: `{(long_wins/len(longs)*100 if longs else 0):.1f}%` | سود/زیان: `{long_net:+.2f} USDT`")
+    lines.append(f"🔴 فروش (Short): `{len(shorts)}` معامله | موفق: `{short_wins}` | ناموفق: `{len(shorts)-short_wins}` | نرخ موفقیت: `{(short_wins/len(shorts)*100 if shorts else 0):.1f}%` | سود/زیان: `{short_net:+.2f} USDT`")
     if rvals:
+        lines.append('━━━━━━━━━━━━━━━━━━━━')
         lines.append(f'📐 R واقعی میانگین: `{sum(rvals)/len(rvals):+.2f}R`')
     return '\n'.join(lines)
 
@@ -1858,14 +1990,32 @@ def analyze(chat_id,symbol):
     b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
     m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
 
-    adx=float(c.adx or 0); rsi=float(c.rsi or 50)
+    close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
+    adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
+
+    if close>ema20>ema50 and plus_di>minus_di and adx>=MARKET_REGIME_MIN_ADX:
+        trend_text='📈 صعودی'
+    elif close<ema20<ema50 and minus_di>plus_di and adx>=MARKET_REGIME_MIN_ADX:
+        trend_text='📉 نزولی'
+    else:
+        trend_text='➡️ رنج (بدون روند مشخص)'
+
+    good_entry=bool(a or b or m)
+    if good_entry:
+        strategy_text='✅ موقعیت مناسب برای ورود بر اساس استراتژی'
+    else:
+        reason=r1 or r2 or r3 or 'شرایط استراتژی هنوز کامل نشده است'
+        strategy_text=f'⚠️ موقعیت مناسب ورود نیست\n_({reason})_'
+
+    live_price=latest_price(symbol)
+    price_to_show=live_price if live_price is not None else close
+
     return (
         f"🔍 *تحلیل {symbol}*\n\n"
-        f"قدرت روند (ADX): `{adx:.1f}`\n"
-        f"مومنتوم (RSI): `{rsi:.1f}`\n"
-        f"روندی: {'فعال' if a else 'غیرفعال'}\n"
-        f"شکست: {'فعال' if b else 'غیرفعال'}\n"
-        f"بازگشت به میانگین: {'فعال' if m else 'غیرفعال'}"
+        f"💰 قیمت لحظه‌ای: `{fmt(price_to_show)}`\n"
+        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
+        f"📊 روند: {trend_text}\n"
+        f"🎯 وضعیت نسبت به استراتژی: {strategy_text}"
     )
 
 
@@ -1913,15 +2063,25 @@ def start_scan(chat_id,message_id=None):
 
 
 def reload_and_restart_scan(chat_id, message_id=None):
+    """
+    توجه: این تابع فقط تنظیمات استراتژی (strategy_config) را بر اساس تایم‌فریم
+    فعلی همین اکانت بازسازی و اسکن را دوباره فعال می‌کند. عمداً importlib.reload
+    حذف شد — در بات چندکاربره‌ای که چند اکانت روی یک پردازه اجرا می‌شوند، بازخوانی
+    زنده‌ی ماژول strategy نه اثر واقعی داشت (چون bot.py توابع را یک‌بار در ابتدای
+    اجرا import کرده و دیگر آپدیت نمی‌شدند) و نه بی‌خطر بود (می‌توانست هم‌زمان با
+    اجرای اسکن سایر اکانت‌ها تداخل ایجاد کند). timeframe و تنظیمات این اکانت دست
+    نخورده باقی می‌ماند؛ اگر بعد از این دکمه بازهم تنظیمات به‌طور کامل به حالت
+    پیش‌فرض برگشت، علتش خارج از این تابع است — احتمالاً ری‌استارت کل پردازه/کانتینر
+    میزبان و نبودِ دیسک دائمی برای BOT_DB_PATH (به هشدار init_db مراجعه کنید).
+    """
     try:
-        importlib.reload(strategy)
         s = get_session(chat_id)
         s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
         save_session(chat_id)
         start_scan(chat_id, message_id)
-        send_message(chat_id, "🔄 *استراتژی مجدداً بارگذاری شد و اسکن با تنظیمات به‌روز فعال گردید.*")
+        send_message(chat_id, "🔄 *تنظیمات استراتژی بر اساس تایم‌فریم فعلی بازسازی شد و اسکن فعال گردید.*")
     except Exception as exc:
-        send_message(chat_id, f"❌ خطا در بارگذاری مجدد استراتژی: `{exc}`")
+        send_message(chat_id, f"❌ خطا در بازسازی تنظیمات استراتژی: `{exc}`")
 
 
 def _market_snapshot(symbol, tf):
@@ -1949,15 +2109,23 @@ def market_report(chat_id):
             if item: results.append(item)
     if not results:
         return '❌ داده کافی برای ساخت داشبورد بازار دریافت نشد.'
+    total = len(results)
     bullish = sum(1 for x in results if x['score'] > 0)
     bearish = sum(1 for x in results if x['score'] < 0)
-    avg_adx = sum(x['adx'] for x in results) / len(results)
-    avg_rsi = sum(x['rsi'] for x in results) / len(results)
+    ranged = total - bullish - bearish
+
+    if bullish > bearish and bullish >= total * 0.5:
+        overall = '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.'
+    elif bearish > bullish and bearish >= total * 0.5:
+        overall = '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.'
+    else:
+        overall = '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.'
+
     return (
         '🌐 *داشبورد بازار*\n'
-        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`\n"
-        f"📈 وضعیت: `{bullish}` صعودی | `{bearish}` نزولی\n"
-        f"💪 میانگین ADX: `{avg_adx:.1f}` | میانگین RSI: `{avg_rsi:.1f}`"
+        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`\n\n"
+        f"{overall}\n"
+        f"📊 از بین {total} ارز بررسی‌شده: {bullish} صعودی، {bearish} نزولی، {ranged} رنج"
     )
 
 
@@ -2104,11 +2272,20 @@ def process_command(cmd,chat_id,message_id=None):
         lines=[f'🔄 *پوزیشن‌ها ({len(s["paper_positions"])})*']
         for p in s['paper_positions']: lines.append(f"{'🟢' if side_long(p['side']) else '🔴'} `{p['symbol']}` | Entry `{fmt(p['entry_price'])}` | SL `{fmt(p['sl'])}` | TP `{fmt(p['tp'])}`")
         send_message(chat_id,'\n'.join(lines),get_positions_keyboard(s['paper_positions'])); return
+    if cl in ('/manage_watchlist','/watchlist_list'):
+        long_list='، '.join(SHARED_LONG_WATCHLIST)
+        short_list='، '.join(SHARED_SHORT_WATCHLIST)
+        edit_page(
+            chat_id,
+            f"📋 *واچ‌لیست فعال*\n\n"
+            f"🟢 *Long* ({len(SHARED_LONG_WATCHLIST)} نماد):\n`{long_list}`\n\n"
+            f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`",
+            get_watchlist_manage_keyboard(),message_id); return
     if cl.startswith('/manage_'):
         sym=cl.replace('/manage_','').upper()
         for p in s['paper_positions']:
             if p['symbol']==sym:
-                send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym, p.get('timeframe','5min')))); return
+                send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym, p.get('timeframe','5min')), p.get('timeframe','5min'))); return
         send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
     if cl.startswith('/close_prompt_'):
         sym=cl.replace('/close_prompt_','').upper()
@@ -2155,8 +2332,6 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl=='/reset_stats_confirm':
             ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
         return
-    if cl in ('/manage_watchlist','/watchlist_list'):
-        edit_page(chat_id,f"📋 واچ‌لیست فعال:\nLong ({len(SHARED_LONG_WATCHLIST)} نماد)\nShort ({len(SHARED_SHORT_WATCHLIST)} نماد)",get_watchlist_manage_keyboard(),message_id); return
 
 
 def handle_text(chat_id,text):
@@ -2202,7 +2377,7 @@ def handle_text(chat_id,text):
                 return
         pos['sl'] = new_sl
         save_session(chat_id)
-        send_message(chat_id, f"✅ حد ضرر پوزیشن `{sym}` به `{fmt(new_sl)}` تغییر یافت.", trade_action_keyboard(sym))
+        send_message(chat_id, f"✅ حد ضرر پوزیشن `{sym}` به `{fmt(new_sl)}` تغییر یافت.", trade_action_keyboard(sym, timeframe=pos.get('timeframe','5min')))
         return
 
     if current_state.startswith('WAIT_EDIT_TP_'):
@@ -2230,7 +2405,7 @@ def handle_text(chat_id,text):
                 return
         pos['tp'] = new_tp
         save_session(chat_id)
-        send_message(chat_id, f"✅ حد سود پوزیشن `{sym}` به `{fmt(new_tp)}` تغییر یافت.", trade_action_keyboard(sym))
+        send_message(chat_id, f"✅ حد سود پوزیشن `{sym}` به `{fmt(new_tp)}` تغییر یافت.", trade_action_keyboard(sym, timeframe=pos.get('timeframe','5min')))
         return
 
     if current_state == 'WAIT_MANUAL_SYMBOL':
