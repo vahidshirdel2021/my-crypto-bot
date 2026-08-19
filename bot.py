@@ -1,4 +1,4 @@
-import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, threading, re
+import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, threading, re, importlib
 import urllib.parse as urlparse
 from threading import Thread, RLock
 from typing import Optional, Dict, Any
@@ -11,6 +11,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
+import strategy
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     get_strategy_params, get_strategy_description, strategy_trend_following,
@@ -879,21 +880,13 @@ def _performance_dashboard(chat_id):
     trades = _closed_trades(s)
     wins = [t for t in trades if float(t.get('pnl', 0) or 0) > 0]
     losses = [t for t in trades if float(t.get('pnl', 0) or 0) < 0]
-    breakeven = [t for t in trades if abs(float(t.get('pnl', 0) or 0)) < 1e-9]
 
-    buys = [t for t in trades if side_long(t.get('side',''))]
-    sells = [t for t in trades if not side_long(t.get('side',''))]
-
-    tp_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('tp','take_profit','target'))
-    sl_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('sl','stop_loss','stop'))
-    manual_count = sum(1 for t in trades if str(t.get('exit_reason','')).lower() in ('manual','user','manual_close'))
-
-    net = sum(float(t.get('pnl', 0) or 0) for t in trades)
     gross_profit = sum(max(float(t.get('pnl', 0) or 0), 0) for t in trades)
     gross_loss = abs(sum(min(float(t.get('pnl', 0) or 0), 0) for t in trades))
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0)
 
     win_rate = (len(wins)/len(trades)*100) if trades else 0
+    net = sum(float(t.get('pnl', 0) or 0) for t in trades)
 
     lines = []
     lines.append("📊 *داشبورد عملکرد معاملات*")
@@ -1426,7 +1419,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
     pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
     update_trade_excursions(pos, float(price), float(price))
     audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'fee_usdt': fee, 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
-    s['cooldowns'][pos['symbol']]=time.time()+300; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
+    cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
+    s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
     est=' تقریبی' if pos.get('pnl_is_estimate') else ''
     fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
     send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL{est}: `{pnl:+.2f} USDT`{fee_line}\n• علت: `{reason}`")
@@ -1466,7 +1460,8 @@ def reconcile_real(chat_id):
             p['close_reason']='external TP/SL or exchange close'
             p['duration_seconds']=max(0, p['close_timestamp']-float(p.get('opened_at',p['close_timestamp'])))
             p['realized_r']=(float(p.get('pnl_usdt') or 0.0)/float(p.get('risk_usdt') or 0.0)) if float(p.get('risk_usdt') or 0.0)>0 else None
-            s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+300
+            cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
+            s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+cooldown_len
             audit_event(chat_id, p.get('trade_id') or new_trade_id(chat_id, sym), 'position_closed', {'close_price': p.get('close_price'), 'pnl_usdt': p.get('pnl_usdt'), 'reason': p.get('close_reason'), 'duration_seconds': p.get('duration_seconds'), 'realized_r': p.get('realized_r'), 'mfe_usdt': p.get('mfe_usdt',0.0), 'mae_usdt': p.get('mae_usdt',0.0), 'external': True})
             send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
     s['last_reconcile']=time.time(); save_session(chat_id); return True
@@ -1559,9 +1554,9 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
         channel_low = curr.get('channel_low')
         if pd.isna(channel_high) or pd.isna(channel_low):
             return out
-        min_adx = float(cfg.get('min_adx', 24.0))
-        min_vr = float(cfg.get('min_volume_ratio', 1.15))
-        min_body = float(cfg.get('min_body_ratio', 0.55))
+        min_adx = float(cfg.get('min_adx', 20.0))
+        min_vr = float(cfg.get('min_volume_ratio', 1.05))
+        min_body = float(cfg.get('min_body_ratio', 0.45))
         out['adx_ok'] = adx >= max(15.0, min_adx - 5.0)
         out['volume_breakout_ok'] = (not f.get('volume_filter', True)) or vr >= min_vr
         out['body_ok'] = body_ratio >= min_body
@@ -1754,7 +1749,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], 'liquidity_sweep' if is_scalp_strategy else strat)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], 'liquidity_sweep' if is_scalp_strategy else strat, strategy_timeframe=primary_tf)
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
@@ -1766,31 +1761,6 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
-
-
-def timeframe_advice(chat_id):
-    s=get_session(chat_id)
-    benchmark=['BTC','ETH','BNB','SOL','XRP']
-    scores=[]
-    for tf in ['5min','1hour','4hour']:
-        results=[]
-        for sym in benchmark:
-            try:
-                item=_market_snapshot(sym, tf)
-                if item: results.append(item)
-            except Exception: continue
-        if results:
-            avg_adx=sum(x['adx'] for x in results)/len(results)
-            avg_rsi=sum(x['rsi'] for x in results)/len(results)
-            avg_atr=sum(x['atr_pct'] for x in results)/len(results)
-            avg_vol=sum(x['volume_ratio'] for x in results)/len(results)
-            score,_=_market_score(results, avg_adx, avg_rsi, avg_atr, avg_vol)
-            scores.append((score, tf))
-    if not scores:
-        return "🧠 داده کافی برای پیشنهاد تایم‌فریم دریافت نشد."
-    scores.sort(reverse=True)
-    suggested=scores[0][1]
-    return f"💡 پیشنهاد سیستم بر اساس کیفیت بازار: *{TF_DISPLAY[suggested]}* (امتیاز: `{scores[0][0]}/100`)"
 
 
 def performance_period_report(chat_id, period='all'):
@@ -1820,7 +1790,6 @@ def trade_audit_report(chat_id):
     allp=closed+positions
     if not allp: return '🔎 *ممیزی معامله*\n\nهنوز معامله‌ای برای بررسی ثبت نشده است.'
     p=max(allp,key=lambda x: float(x.get('opened_at',0) or 0)); tid=p.get('trade_id','—')
-    events=[e for e in s.get('trade_audit',[]) if e.get('trade_id')==tid]
     lines=['🔎 *ممیزی صفر تا صد آخرین پوزیشن*','━━━━━━━━━━━━━━━━━━━━',f'🆔 شناسه: `{tid}`',f'🪙 نماد: `{p.get("symbol")}` | {"LONG" if side_long(p.get("side")) else "SHORT"}',f'⏱ تایم‌فریم: `{TF_DISPLAY.get(p.get("timeframe"),p.get("timeframe"))}`',f'🎯 Entry: `{fmt(p.get("entry_price",0))}` | SL: `{fmt(p.get("sl",0))}` | TP: `{fmt(p.get("tp",0))}`',f'📦 وضعیت: `{"بسته‌شده" if p in closed else "باز"}`']
     if p in closed:
         lines += [f'🚪 خروج: `{fmt(p.get("close_price",0))}`',f'💰 PnL: `{float(p.get("pnl_usdt",0) or 0):+.2f} USDT`',f'📝 علت خروج: `{p.get("close_reason","—")}`']
@@ -1918,6 +1887,18 @@ def start_scan(chat_id,message_id=None):
     sync_bottom_keyboard(chat_id, "🟢 اسکن فعال شد.\n🔒 تنظیمات حساس تا توقف اسکن قفل هستند.")
 
 
+def reload_and_restart_scan(chat_id, message_id=None):
+    try:
+        importlib.reload(strategy)
+        s = get_session(chat_id)
+        s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
+        save_session(chat_id)
+        start_scan(chat_id, message_id)
+        send_message(chat_id, "🔄 *استراتژی مجدداً بارگذاری شد و اسکن با تنظیمات به‌روز فعال گردید.*")
+    except Exception as exc:
+        send_message(chat_id, f"❌ خطا در بارگذاری مجدد استراتژی: `{exc}`")
+
+
 def _market_snapshot(symbol, tf):
     try:
         d = get_klines(symbol, tf, 160)
@@ -1987,8 +1968,9 @@ def learning_text(topic):
     }
     return texts.get(topic,texts['why'])
 
+
 def apply_user_profile(s, profile):
-    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(68.0,1.30,0.50,20.0,'متعادل'),'opportunity':(62.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
+    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(65.0,1.30,0.50,20.0,'متعادل'),'opportunity':(60.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
     score,rr,risk,adx,label=presets[profile]
     s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
     return label,score,rr,risk
@@ -2062,6 +2044,7 @@ def process_command(cmd,chat_id,message_id=None):
         stop_scan(chat_id, 'manual'); menu(chat_id,message_id)
         sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند."); return
     if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن'): start_scan(chat_id,message_id); return
+    if cl == '/reload_and_start': reload_and_restart_scan(chat_id, message_id); return
     if cl=='/mode_paper':
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
         s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
