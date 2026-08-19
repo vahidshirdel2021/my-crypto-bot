@@ -4,9 +4,12 @@ CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد �
 
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
-    # کیبورد سفارشی سبک، فقط برای اینکه راهنمای باکس پیام (placeholder) همیشه ثابت بماند
+    # کیبورد سفارشی سبک و ثابت (پایین صفحه) - همیشه در دسترس، مستقل از منوی این‌لاین
     return {
-        "keyboard": [[{"text": "📊 وضعیت بازار"}, {"text": "📋 واچ‌لیست"}]],
+        "keyboard": [
+            [{"text": "📊 وضعیت بازار"}, {"text": "🔄 پوزیشن‌ها"}],
+            [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
+        ],
         "resize_keyboard": True,
         "is_persistent": True,
         "input_field_placeholder": CHAT_INPUT_PLACEHOLDER,
@@ -75,6 +78,10 @@ def get_positions_keyboard(positions):
 
 def get_confirm_close_all_keyboard():
     return {"inline_keyboard": [[{"text": "✅ بله، همه را ببند", "callback_data": "/confirm_close_all"}], [{"text": "❌ انصراف", "callback_data": "/cancel"}]]}
+
+
+def get_confirm_emergency_close_keyboard():
+    return {"inline_keyboard": [[{"text": "🆘 بله، فوراً همه را ببند", "callback_data": "/confirm_emergency_close_all"}], [{"text": "❌ انصراف", "callback_data": "/cancel"}]]}
 
 
 def get_confirm_close_longs_keyboard():

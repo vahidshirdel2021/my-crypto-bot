@@ -28,6 +28,7 @@ from ui import (
     get_watchlist_manage_keyboard,
     get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_learn_menu_keyboard,
+    get_confirm_emergency_close_keyboard,
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
 )
@@ -1314,15 +1315,19 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
     return list(dict.fromkeys(list(long_list) + list(short_list)))
 
 
-MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'ttl': 90}
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90}
 MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
+# آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
+# انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
+# فعال می‌شود و باعث بلاک‌شدن معاملات خلاف‌جهت (fade/sweep) می‌شود.
+MARKET_REGIME_EXTREME_ADX = float(os.environ.get('MARKET_REGIME_EXTREME_ADX', '30'))
 MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
 
 
 async def refresh_market_regime(http):
     now = time.time()
     if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
-        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail']
+        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail'], MARKET_REGIME_CACHE['extreme']
     tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
     states = {}
     for leader in LEADER_SYMBOLS:
@@ -1330,8 +1335,8 @@ async def refresh_market_regime(http):
             d = await get_klines_async(http, leader, tf, 120)
             if d is None or d.empty or len(d) < 60:
                 detail = f'داده کافی برای {leader} در دسترس نیست'
-                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
-                return 'NEUTRAL', detail
+                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+                return 'NEUTRAL', detail, None
             x = calculate_indicators(d).iloc[-2]
             adx = float(x.get('adx') or 0)
             bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
@@ -1339,8 +1344,8 @@ async def refresh_market_regime(http):
             states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
         except Exception as exc:
             detail = f'خطا در دریافت داده {leader}: {exc}'
-            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
-            return 'NEUTRAL', detail
+            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+            return 'NEUTRAL', detail, None
     detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
     unique_dirs = {v[0] for v in states.values()}
     if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
@@ -1349,8 +1354,13 @@ async def refresh_market_regime(http):
         regime = 'BEARISH'
     else:
         regime = 'NEUTRAL'
-    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail)
-    return regime, detail
+    # حالت «شدید»: همه‌ی لیدرها هم‌جهت و با ADX بالای آستانه‌ی سخت‌گیرانه - فقط همین حالت
+    # باعث بلاک شدن معاملات خلاف‌جهت می‌شود، نه regime عادی بالا (که صرفاً برای واچ‌لیست است)
+    extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme)
+    return regime, detail, extreme
 
 
 async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
@@ -1890,7 +1900,9 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
 
     is_scalp_strategy = (strat == 'dynamic' and primary_tf in ('5min', '15min') and mode != 'multi')
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime if strat == 'dynamic' else None)
+    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
+    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
@@ -2304,6 +2316,17 @@ def process_command(cmd,chat_id,message_id=None):
         stop_scan(chat_id, 'close-all')
         for p in s['paper_positions'][:]: close_position(chat_id,p,reason='close_all')
         menu(chat_id); return
+    if cl=='/emergency_close_all':
+        n = len(s['paper_positions'])
+        if n==0: send_message(chat_id,'❌ پوزیشن بازی وجود ندارد.'); return
+        send_message(chat_id,f'🆘 *تأیید بستن اضطراری*\n\n{n} پوزیشن فوراً با قیمت بازار بسته می‌شود و اسکن متوقف می‌شود.',get_confirm_emergency_close_keyboard()); return
+    if cl=='/confirm_emergency_close_all':
+        # بدون تأخیر: اسکن را متوقف می‌کند تا معامله جدیدی باز نشود و همه پوزیشن‌ها را می‌بندد
+        stop_scan(chat_id, 'emergency-close-all')
+        n = len(s['paper_positions'])
+        for p in s['paper_positions'][:]: close_position(chat_id,p,reason='emergency_close_all')
+        send_message(chat_id, f'🆘 *بستن اضطراری انجام شد*\n\n{n} پوزیشن بسته شد و اسکن متوقف شد.')
+        return
     if cl=='/close_longs_prompt':
         n=sum(1 for p in s['paper_positions'] if side_long(p['side']))
         if n==0: send_message(chat_id,'❌ پوزیشن خریدی وجود ندارد.'); return
@@ -2339,11 +2362,13 @@ def handle_text(chat_id,text):
     fixed_buttons={
         '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu',
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
+        '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
         '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
         '📊 وضعیت بازار':'/market_report', 'وضعیت بازار':'/market_report',
         '⚙️ تنظیمات معامله':'/check_wizard', 'تنظیمات معامله':'/check_wizard',
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
+        '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', 'معامله دستی':'/manual_trade',
     }
     if raw in fixed_buttons:
@@ -2505,20 +2530,22 @@ async def scan_loop():
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
                 need_regime = any(
-                    s.get('is_bot_active') and not s.get('daily_stopped') and s.get('active_strategy') == 'dynamic'
+                    s.get('is_bot_active') and not s.get('daily_stopped')
                     for s in USER_SESSIONS.values()
                 )
                 if need_regime:
                     await refresh_market_regime(http)
+                loose_regime = MARKET_REGIME_CACHE['regime']
+                extreme_regime = MARKET_REGIME_CACHE['extreme']
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), None)
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,None))
+                        tasks.append(scan_symbol(http,cid,sym,extreme_regime))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}

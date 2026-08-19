@@ -902,14 +902,29 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     st = strategy_type
     if st == "dynamic":
         if timeframe in ("5min", "15min") and timeframe_mode != "multi":
-            return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
-        return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
-    if st == "trend":
-        return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-    if st == "breakout":
-        return strategy_breakout(df_primary, filters, strategy_config)
-    if st == "mean_reversion":
-        return strategy_mean_reversion(df_primary, filters, strategy_config)
-    if st == "multi":
-        return strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
-    return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
+        else:
+            sig, reason = strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+    elif st == "trend":
+        sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
+    elif st == "breakout":
+        sig, reason = strategy_breakout(df_primary, filters, strategy_config)
+    elif st == "mean_reversion":
+        sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
+    elif st == "multi":
+        sig, reason = strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
+    else:
+        sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
+
+    # --- محافظ روند به‌شدت یک‌طرفه ---
+    # regime این‌جا فقط وقتی 'BULLISH' یا 'BEARISH' است که هر دو لیدر بازار (مثلاً BTC/ETH)
+    # هم‌جهت و با ADX بسیار بالا باشند (نگاه کنید به MARKET_REGIME_EXTREME_ADX در bot.py).
+    # این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت خنثی یا روند معمولی هیچ تاثیری
+    # ندارد و کاملاً شفاف است؛ فقط دقیقاً همان سناریویی را می‌گیرد که معامله *خلاف* یک روند
+    # به‌شدت قدرتمند باز می‌شود (مثل فروش/fade وسط یک رالی شدید صعودی).
+    if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH"):
+        if regime == "BULLISH" and sig == "SELL":
+            return None, f"بازار به‌شدت صعودی است (لیدرها هم‌جهت + ADX بالا) - سیگنال فروش خلاف روند نادیده گرفته شد | {reason}"
+        if regime == "BEARISH" and sig == "BUY":
+            return None, f"بازار به‌شدت نزولی است (لیدرها هم‌جهت + ADX بالا) - سیگنال خرید خلاف روند نادیده گرفته شد | {reason}"
+    return sig, reason
