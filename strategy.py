@@ -565,11 +565,12 @@ def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
     return True, f"حجم تأیید شد ({ratio:.2f}x)"
 
 
-def check_candlestick_confirmation(df, filters=None):
+def check_candlestick_confirmation(df, filters=None, strategy_config=None):
     f = _flt(filters)
     curr = df.iloc[-2]
     prev = df.iloc[-3]
-    vol_ok, vol_reason = check_volume(df, -2, f, 1.0)
+    min_ratio = float(_cfg(strategy_config).get("min_volume_ratio", 1.0)) if strategy_config else 1.0
+    vol_ok, vol_reason = check_volume(df, -2, f, min_ratio)
     if not vol_ok:
         return None, vol_reason
     if not f.get("candlestick_filter", True):
@@ -611,15 +612,15 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
 
     if up and touch_buy and curr["close"] > curr["ema20"]:
         if not f.get("candlestick_filter", True):
-            ok, reason = check_volume(df, -2, f)
+            ok, reason = check_volume(df, -2, f, float(p["volume_ratio"]))
             return ("BUY", f"روندی خرید | {reason}") if ok else (None, reason)
-        sig, reason = check_candlestick_confirmation(df, f)
+        sig, reason = check_candlestick_confirmation(df, f, strategy_config)
         return ("BUY", f"روندی خرید + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
     if down and touch_sell and curr["close"] < curr["ema20"]:
         if not f.get("candlestick_filter", True):
-            ok, reason = check_volume(df, -2, f)
+            ok, reason = check_volume(df, -2, f, float(p["volume_ratio"]))
             return ("SELL", f"روندی فروش | {reason}") if ok else (None, reason)
-        sig, reason = check_candlestick_confirmation(df, f)
+        sig, reason = check_candlestick_confirmation(df, f, strategy_config)
         return ("SELL", f"روندی فروش + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
     return None, "شرایط روندی برقرار نیست"
 
@@ -646,7 +647,7 @@ def strategy_breakout(df, filters=None, strategy_config=None):
         return None, "شکست جدیدی ثبت نشد"
     if not f.get("candlestick_filter", True):
         return ("BUY", "شکست صعودی تأیید شد") if bull else ("SELL", "شکست نزولی تأیید شد")
-    sig, reason = check_candlestick_confirmation(df, f)
+    sig, reason = check_candlestick_confirmation(df, f, strategy_config)
     if bull and sig in ("BUY_CONFIRMED", "CONFIRMED"):
         return "BUY", f"شکست صعودی + {reason}"
     if bear and sig in ("SELL_CONFIRMED", "CONFIRMED"):

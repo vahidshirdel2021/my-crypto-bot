@@ -25,11 +25,19 @@
         --start 2025-02-01 --end 2025-03-01 \
         --strategy breakout --side short
 
-استراتژی‌های قابل انتخاب: trend | breakout | mean_reversion
-(دقیقاً همان‌هایی که در منوی ربات هستند. dynamic چون به رژیم لحظه‌ای بازار
-[هم‌راستایی BTC/ETH] وابسته است، در اینجا معادل breakout با فیلتر جهت دستی
-شبیه‌سازی می‌شود؛ یعنی --strategy breakout --side long/short همان رفتار
-dynamic را در یک رژیم قطعی شبیه‌سازی می‌کند.)
+مثال اجرا — تست استراتژی واقعی زنده (Liquidity Sweep روی 5 دقیقه‌ای، همان
+چیزی که در ربات با active_strategy=dynamic اجرا می‌شود، شامل هدف PDH/PDL و
+خروج زودهنگام روی ضعف روند):
+    python backtest.py --symbol DOT/USDT:USDT --timeframe 5m \
+        --start 2026-07-01 --end 2026-08-01 \
+        --strategy dynamic --side both
+
+استراتژی‌های قابل انتخاب: trend | breakout | mean_reversion | dynamic
+(دقیقاً همان‌هایی که در منوی ربات هستند. برای 5m/15m، dynamic دقیقاً همان
+منطق Liquidity Sweep + هدف PDH/PDL + خروج زودهنگام روی ضعف روند را که در
+bot.py فعال است شبیه‌سازی می‌کند. برای تایم‌فریم‌های بالاتر [1h/4h]، dynamic
+معادل breakout با فیلتر جهت دستی شبیه‌سازی می‌شود؛ یعنی --strategy breakout
+--side long/short همان رفتار dynamic را در یک رژیم قطعی شبیه‌سازی می‌کند.)
 """
 
 import argparse
@@ -39,6 +47,7 @@ import pandas as pd
 
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan,
+    evaluate_trend_weakness,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
@@ -111,6 +120,7 @@ def fetch_ohlcv_coinex(symbol, timeframe, start_iso, end_iso, market_type='swap'
         raise RuntimeError('داده‌ای از CoinEx دریافت نشد؛ نماد/تایم‌فریم/بازه را بررسی کنید.')
     df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
     df = df[(df['ts'] >= since) & (df['ts'] <= until)].drop_duplicates('ts').reset_index(drop=True)
+    df['timestamp'] = df['ts']  # strategy.py برای محاسبه PDH/PDL روزانه ستون 'timestamp' را انتظار دارد
     return df
 
 
@@ -204,6 +214,22 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
                         cur_sl = new_sl
                         locked_r = lr
                         trailing_activated = True
+
+            # --- مدیریت هوشمند: خروج زودهنگام با سود اگر علائم ضعف روند دیده شود
+            # (دقیقاً همان منطق _weakness_exit_check در bot.py) ---
+            current_r = ((close - entry) / risk_distance) if is_long else ((entry - close) / risk_distance)
+            weak_min_r = float(strategy_config.get('weakness_exit_min_r', 0.8))
+            if current_r >= weak_min_r:
+                wdf = ind.iloc[: j + 2]
+                if len(wdf) >= 60:
+                    is_weak, _wscore, _wreasons = evaluate_trend_weakness(
+                        wdf, 'BUY' if is_long else 'SELL', strategy_config
+                    )
+                    if is_weak:
+                        exit_price, exit_reason = close, 'مدیریت هوشمند (ضعف روند)'
+                        exit_idx = j
+                        break
+
             j += 1
 
         if exit_price is None:
@@ -271,7 +297,7 @@ def main():
     ap.add_argument('--timeframe', default='15m', help='5m, 15m, 1h, 4h ...')
     ap.add_argument('--start', required=True, help='YYYY-MM-DD')
     ap.add_argument('--end', required=True, help='YYYY-MM-DD')
-    ap.add_argument('--strategy', default='breakout', choices=['trend', 'breakout', 'mean_reversion'])
+    ap.add_argument('--strategy', default='breakout', choices=['trend', 'breakout', 'mean_reversion', 'dynamic'])
     ap.add_argument('--side', default='both', choices=['long', 'short', 'both'])
     ap.add_argument('--margin', type=float, default=50.0)
     ap.add_argument('--leverage', type=int, default=5)

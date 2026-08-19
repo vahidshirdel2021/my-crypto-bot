@@ -653,7 +653,7 @@ def move_stop_loss(chat_id, symbol, sl):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
     try:
-        call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],{'market':market_name(symbol),'market_type':'FUTURES','stop_loss_type':'mark_price','stop_loss_price':str(sl)})
+        call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],{'market':market_name(symbol),'market_type':'FUTURES','stop_loss_type':PROTECTION_TRIGGER,'stop_loss_price':str(sl)})
         return True,'OK'
     except Exception as e: return False,str(e)
 
@@ -1027,7 +1027,7 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1061,9 +1061,14 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
 
     price=latest_price(symbol) or float(signal_price)
-    gap_sl=abs(float(signal_price)-float(sl)); gap_tp=abs(float(tp)-float(signal_price))
-    if side_long(side): sl=price-gap_sl; tp=price+gap_tp
-    else: sl=price+gap_sl; tp=price-gap_tp
+    gap_sl=abs(float(signal_price)-float(sl))
+    gap_tp=abs(float(tp)-float(signal_price))
+    if side_long(side):
+        sl=price-gap_sl
+        tp=float(tp) if (structural_tp and float(tp)>price) else price+gap_tp
+    else:
+        sl=price+gap_sl
+        tp=float(tp) if (structural_tp and float(tp)<price) else price-gap_tp
     s['_symbol_tmp']=symbol
     margin, amount_or_reason=safe_size(chat_id,s,price,sl)
     s.pop('_symbol_tmp',None)
@@ -1305,7 +1310,7 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -1315,7 +1320,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason=''):
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -1527,13 +1532,11 @@ def update_positions(chat_id):
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC: exit_price=float(p['sl']); reason='SL (same candle)'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=float(p['sl']); reason='SL'
-            pnl=float(p['margin'])*((close-float(p['entry_price']))/float(p['entry_price']))*float(p['leverage'])
         else:
             hit_tp=low<=float(p['tp']); hit_sl=high>=float(p['sl'])
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC: exit_price=float(p['sl']); reason='SL (same candle)'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=float(p['sl']); reason='SL'
-            pnl=float(p['margin'])*((float(p['entry_price'])-close)/float(p['entry_price']))*float(p['leverage'])
         entry_p=float(p['entry_price'])
         risk_distance=p.get('risk_distance')
         if not risk_distance and not p.get('trailing_activated'):
@@ -1779,7 +1782,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason)
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
