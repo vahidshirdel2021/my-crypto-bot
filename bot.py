@@ -90,7 +90,14 @@ LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه','multi':'مولتی'}
 
-SHARED_LONG_WATCHLIST = ['AAVE','ADA','ANKR','ATOM','AVAX','BCH','BNB','BTC','BTT','CRV','DASH','DOGE','DOT','DYDX','EGLD','ETC','ETH','FIL','GALA','HNT','HOT','KSM','LINK','LTC','MATIC','NEAR','QTUM','RUNE','SHIB','SOL','STORJ','THETA','TRX','UNI','WAVES','XRP','XTZ','ZEC']
+SHARED_WATCHLIST = ['BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI']
+# ۵ نماد SRM / BZRX / ALPHA / TOMO / NU از فایل ورودی عمداً حذف شدند: این‌ها تنها نمادهایی
+# بودند که قبلاً (در ALL_SYMBOLS اصلی) نبودند و به‌شدت محتمل است دلیل خطاهای «داده بازار
+# خالی دریافت شد» باشند (SRM/BZRX دیگر معامله نمی‌شوند، ALPHA/NU ری‌برند شده‌اند و TOMO
+# حجم/پشتیبانی بسیار کمی روی CoinEx/KuCoin دارد).
+# واچ‌لیست خرید و فروش عمداً یکی و مشترک است (طبق درخواست کاربر) - در همه‌ی تایم‌فریم‌ها
+# دقیقاً همین ۱۲۸ نماد هم برای Long و هم برای Short بررسی می‌شوند.
+SHARED_LONG_WATCHLIST = SHARED_WATCHLIST
 WINNING_WATCHLISTS = {
     '5min': SHARED_LONG_WATCHLIST,
     '15min': SHARED_LONG_WATCHLIST,
@@ -99,7 +106,7 @@ WINNING_WATCHLISTS = {
     'multi': SHARED_LONG_WATCHLIST,
 }
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
-SHARED_SHORT_WATCHLIST = ['AAVE','ADA','ALGO','ANKR','AR','ATOM','AVAX','AXS','BCH','BNB','BTC','BTT','CHZ','COMP','DASH','DOGE','DOT','DYDX','EGLD','ENJ','ETC','ETH','FIL','GALA','IOTA','KSM','LINK','LTC','LUNA','MANA','MASK','MATIC','NEAR','NEO','ONE','QTUM','RAY','RSR','RUNE','RVN','SAND','SHIB','SKL','SLP','SNX','SOL','STORJ','SUSHI','TRB','TRX','UNI','VET','WAVES','XRP','XTZ','ZEC','ZIL','ZRX']
+SHARED_SHORT_WATCHLIST = SHARED_WATCHLIST
 WINNING_SHORT_WATCHLISTS = {
     '5min': SHARED_SHORT_WATCHLIST,
     '15min': SHARED_SHORT_WATCHLIST,
@@ -1996,7 +2003,7 @@ def analyze(chat_id,symbol):
     tf=s['timeframe'] if s['timeframe']!='multi' else '5min'
     d=get_klines(symbol,tf,160)
     if d.empty:
-        return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.'
+        return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.', None
     d=calculate_indicators(d); c=d.iloc[-2]
     a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config'])
     b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
@@ -2022,13 +2029,18 @@ def analyze(chat_id,symbol):
     live_price=latest_price(symbol)
     price_to_show=live_price if live_price is not None else close
 
-    return (
+    text = (
         f"🔍 *تحلیل {symbol}*\n\n"
         f"💰 قیمت لحظه‌ای: `{fmt(price_to_show)}`\n"
         f"⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
         f"📊 روند: {trend_text}\n"
         f"🎯 وضعیت نسبت به استراتژی: {strategy_text}"
     )
+    keyboard = {'inline_keyboard': [
+        [{'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, tf)}],
+        [{'text':'🏠 منوی اصلی','callback_data':'/menu'}],
+    ]}
+    return text, keyboard
 
 
 def menu(chat_id,message_id=None):
@@ -2268,6 +2280,21 @@ def process_command(cmd,chat_id,message_id=None):
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
         edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled']), message_id); return
+    if cl == '/entry_diag_log':
+        window = list((ENTRY_DIAG_STATE.get(chat_id) or {}).get('window_results') or [])
+        if not window:
+            edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        data_errs = [x for x in window if x.get('status') in ('data_error', 'insufficient_data')]
+        lines = ['📋 *آخرین موارد خطای داده (نماد مشخص)*', '━━━━━━━━━━━━━━━━━━━━']
+        if data_errs:
+            seen_syms = {}
+            for x in reversed(data_errs):
+                seen_syms.setdefault(x.get('symbol', '?'), x.get('reason', ''))
+            for sym, reason in list(seen_syms.items())[:20]:
+                lines.append(f'• `{sym}` — {reason}')
+        else:
+            lines.append('موردی یافت نشد.')
+        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
     if cl in ('/manual_trade','🖐 معامله دستی'):
         s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
         send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
@@ -2469,7 +2496,9 @@ def handle_text(chat_id,text):
         if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
         else: send_message(chat_id,f'❌ باز نشد: {err}')
         return
-    if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()): send_message(chat_id,analyze(chat_id,val))
+    if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()):
+        atext, akeyboard = analyze(chat_id,val)
+        send_message(chat_id,atext,akeyboard)
     else: process_command(text,chat_id)
 
 
