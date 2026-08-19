@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import time
 
 FILTER_DEFAULTS = {
     "volume_filter": True,
@@ -10,41 +11,61 @@ FILTER_DEFAULTS = {
 }
 
 STRATEGY_DEFAULTS = {
-    "min_adx": 24.0,
+    "min_adx": 20.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     "dynamic_exits": True,
-    "min_trade_score": 82.0,
+    "min_trade_score": 65.0,
     "min_rr": 1.35,
-    "max_sl_atr": 2.50,
+    "max_sl_atr": 3.00,
     "min_target_r": 1.35,
     "max_target_r": 1.8,
-    "min_volume_ratio": 1.15,
-    "min_body_ratio": 0.55,
-    "sweep_min_distance_atr": 0.15,
+    "min_volume_ratio": 1.05,
+    "min_body_ratio": 0.45,
+    "sweep_min_distance_atr": 0.10,
     "sweep_require_reclaim": True,
     "sweep_require_reversal_candle": True,
-    "sweep_stop_buffer_atr": 0.25,
+    "sweep_stop_buffer_atr": 0.40,
     "sweep_risk_reward": 1.8,
     "sweep_enable_retest_continuation": True,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
+    "min_sl_percent": 0.005,
+    "max_fee_risk_ratio": 0.20,
+    "cooldown_seconds": 1200,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
-    "5min":  {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.8,
-              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
-    "15min": {"min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-              "min_trade_score": 58.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 1.9,
-              "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.25, "sweep_min_distance_atr": 0.15},
-    "1hour": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
-              "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
-    "4hour": {"min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
-              "min_trade_score": 54.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.5},
-    "multi": {"min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
-              "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2},
+    "5min":  {
+        "min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
+        "min_trade_score": 60.0, "min_rr": 1.30, "min_target_r": 1.30, "max_target_r": 1.8,
+        "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.45, "sweep_min_distance_atr": 0.10,
+        "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
+    },
+    "15min": {
+        "min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
+        "min_trade_score": 60.0, "min_rr": 1.30, "min_target_r": 1.30, "max_target_r": 1.9,
+        "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.40, "sweep_min_distance_atr": 0.10,
+        "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
+    },
+    "1hour": {
+        "min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
+        "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2,
+        "min_sl_percent": 0.006, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1800
+    },
+    "4hour": {
+        "min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
+        "min_trade_score": 54.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.5,
+        "min_sl_percent": 0.008, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 3600
+    },
+    "multi": {
+        "min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
+        "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2,
+        "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
+    },
 }
+
+TIMEFRAME_PARAM_ADJUST = TIMEFRAME_STRATEGY_PRESETS
 
 
 def get_timeframe_preset(timeframe):
@@ -133,13 +154,13 @@ def get_strategy_params(timeframe="5min", strategy_config=None):
         "adx": float(c.get("min_adx", 20.0)),
         "sl": float(c.get("sl_multiplier", 1.5)),
         "tp": float(c.get("tp_multiplier", 2.0)),
-        "volume_ratio": float(c.get("min_volume_ratio", 1.15)),
-        "body_ratio": float(c.get("min_body_ratio", 0.55)),
+        "volume_ratio": float(c.get("min_volume_ratio", 1.05)),
+        "body_ratio": float(c.get("min_body_ratio", 0.45)),
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
-    if strategy_type == "liquidity_sweep":
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min"):
+    if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):
         return build_sweep_trade_plan(df, signal, strategy_config)
     if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
@@ -153,11 +174,13 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         return None, "ATR یا قیمت ورود نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_score = float(cfg.get("min_trade_score", 68.0))
+    min_score = float(cfg.get("min_trade_score", 60.0))
     min_rr = float(cfg.get("min_rr", 1.30))
     min_r = max(min_rr, float(cfg.get("min_target_r", 1.30)))
     max_r = max(min_r, float(cfg.get("max_target_r", 2.20)))
-    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 2.50)))
+    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
+    min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
+    max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
 
     adx = _safe_float(c.get("adx"), 0)
     rsi = _safe_float(c.get("rsi"), 50)
@@ -195,8 +218,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         elif atr_ratio < 0.80: base_mult -= 0.10
         base_mult = max(1.25, min(max_sl_atr, base_mult))
         atr_sl = entry - atr * base_mult
-        structure_sl = swing - atr * 0.15 if np.isfinite(swing) else atr_sl
+        structure_sl = swing - atr * 0.40 if np.isfinite(swing) else atr_sl
         sl = min(atr_sl, structure_sl)
+        if (entry - sl) / entry < min_sl_pct:
+            sl = entry * (1.0 - min_sl_pct)
         if entry - sl > atr * max_sl_atr:
             sl = entry - atr * max_sl_atr
         risk_dist = entry - sl
@@ -211,8 +236,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         elif atr_ratio < 0.80: base_mult -= 0.10
         base_mult = max(1.25, min(max_sl_atr, base_mult))
         atr_sl = entry + atr * base_mult
-        structure_sl = swing + atr * 0.15 if np.isfinite(swing) else atr_sl
+        structure_sl = swing + atr * 0.40 if np.isfinite(swing) else atr_sl
         sl = max(atr_sl, structure_sl)
+        if (sl - entry) / entry < min_sl_pct:
+            sl = entry * (1.0 + min_sl_pct)
         if sl - entry > atr * max_sl_atr:
             sl = entry + atr * max_sl_atr
         risk_dist = sl - entry
@@ -224,6 +251,13 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
 
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست"
+
+    # فیلتر کارمزد به ریسک دلاری
+    risk_pct = risk_dist / entry
+    est_risk_usdt = 500.0 * risk_pct
+    if est_risk_usdt > 0:
+        if (0.50 / est_risk_usdt) > max_fee_ratio:
+            return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
 
     target_r = min_r + (max_r - min_r) * (score / 100.0)
     target_r = max(min_r, min(max_r, target_r))
@@ -251,7 +285,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic"):
         "risk_atr": float(risk_dist / atr), "target_r": float(rr),
         "atr": atr, "atr_ratio": float(atr_ratio), "adx": adx,
         "rsi": rsi, "volume_ratio": vr,
-        "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | ATR نسبت به میانه {atr_ratio:.2f}x | R:R {rr:.2f}R"
+        "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | R:R {rr:.2f}R"
     }
     return plan, plan["reason"]
 
@@ -336,7 +370,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
         return None, "ATR نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.05)))
+    min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
 
@@ -378,32 +412,45 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
         return None, "ATR یا قیمت ورود نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_rr = float(cfg.get("min_rr", 1.20))
+    min_rr = float(cfg.get("min_rr", 1.30))
     target_rr = max(min_rr, float(cfg.get("sweep_risk_reward", 1.8)))
-    buffer_atr = max(0.0, float(cfg.get("sweep_stop_buffer_atr", 0.15)))
+    buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
+    min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
+    max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
     body_ratio = _safe_float(curr.get("body_ratio"), 0)
     vr = _safe_float(curr.get("volume_ratio"), 1)
 
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
-        sl = sweep_extreme + atr * buffer_atr
+        sl = sweep_extreme + (atr * buffer_atr)
+        if (sl - entry) / entry < min_sl_pct:
+            sl = entry * (1.0 + min_sl_pct)
         risk_dist = sl - entry
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
         reclaim_depth = (sweep_extreme - entry) / risk_dist
-        tp = entry - risk_dist * target_rr
+        tp = entry - (risk_dist * target_rr)
         if pdl < entry and (entry - pdl) / risk_dist >= min_rr:
             tp = max(tp, pdl)
     else:
         sweep_extreme = float(curr["low"])
-        sl = sweep_extreme - atr * buffer_atr
+        sl = sweep_extreme - (atr * buffer_atr)
+        if (entry - sl) / entry < min_sl_pct:
+            sl = entry * (1.0 - min_sl_pct)
         risk_dist = entry - sl
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
         reclaim_depth = (entry - sweep_extreme) / risk_dist
-        tp = entry + risk_dist * target_rr
+        tp = entry + (risk_dist * target_rr)
         if pdh > entry and (pdh - entry) / risk_dist >= min_rr:
             tp = min(tp, pdh)
+
+    # فیلتر کارمزد به ریسک دلاری
+    risk_pct = risk_dist / entry
+    est_risk_usdt = 500.0 * risk_pct
+    if est_risk_usdt > 0:
+        if (0.50 / est_risk_usdt) > max_fee_ratio:
+            return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
 
     rr = abs(tp - entry) / risk_dist
     if rr < min_rr:
@@ -415,7 +462,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
     score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score))))
 
-    min_score = float(cfg.get("min_trade_score", 55.0))
+    min_score = float(cfg.get("min_trade_score", 58.0))
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
     if score < min_score:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
@@ -629,10 +676,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return None, "داده کافی نیست"
     st = strategy_type
     if st == "dynamic":
-        # دسته ۱: اسکالپینگ (5m و 15m) — استراتژی شکار نقدینگی و سطوح روز قبل
         if timeframe in ("5min", "15min") and timeframe_mode != "multi":
             return strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
-        # دسته ۲: سوئینگ و روندی (1h, 4h, multi) — استراتژی شکست روندی با تأیید HTF
         return strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     if st == "trend":
         return strategy_trend_following(df_primary, timeframe, filters, strategy_config)
