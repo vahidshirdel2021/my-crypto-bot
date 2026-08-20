@@ -3674,7 +3674,16 @@ def _live_positions_loop():
             logger.exception('live position refresh failed')
         time.sleep(10)
 
+TELEGRAM_COMMANDS = [{'command':'menu','description':'منوی اصلی'}]
 
+def configure_telegram_native_menu():
+    if not TELEGRAM_TOKEN:
+        return
+    try:
+        tg('setMyCommands', {'commands': TELEGRAM_COMMANDS}, 10)
+        tg('setChatMenuButton', {'menu_button': {'type':'commands'}}, 10)
+    except Exception:
+        pass
 def main():
     init_db()
     migrate_legacy_sqlite_to_postgres()
