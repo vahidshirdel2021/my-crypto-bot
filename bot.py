@@ -477,6 +477,14 @@ def tg(method, payload=None, timeout=10):
     except Exception: return None
 
 
+TELEGRAM_COMMANDS = [{'command':'menu','description':'منوی اصلی'}]
+
+def configure_telegram_native_menu():
+    if not TELEGRAM_TOKEN: return
+    tg('setMyCommands', {'commands': TELEGRAM_COMMANDS}, 10)
+    tg('setChatMenuButton', {'menu_button': {'type':'commands'}}, 10)
+
+
 def answer_callback(cid):
     if cid: tg('answerCallbackQuery', {'callback_query_id':cid}, 5)
 
@@ -505,6 +513,17 @@ def sync_bottom_keyboard(chat_id, status_message=None):
     active = bool(s.get('is_bot_active'))
     text = status_message or ("🟢 اسکن فعال است." if active else "🔴 اسکن متوقف است.")
     return send_message(chat_id, text, get_bottom_menu_keyboard(active), parse_mode=None)
+
+
+def send_photo(chat_id, img, caption='', markup=None):
+    if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
+    s = get_session(chat_id)
+    if markup is None:
+        markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
+    try:
+        r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
+        return r.status_code == 200
+    except Exception: return False
 
 
 def fmt(v):
