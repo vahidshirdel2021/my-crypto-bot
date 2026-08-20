@@ -3071,11 +3071,11 @@ def apply_user_profile(s, profile):
 
 
 
-def manual_signal_scan(chat_id):
-    """اسکن دستی نمادها با همان منطق سیگنال فعلی و فقط ارائه پیشنهاد ورود."""
+def manual_signal_scan(chat_id, symbol=None):
+    """بررسی دستی یک نماد انتخابی کاربر با منطق سیگنال فعلی."""
     s = get_session(chat_id)
     tf = s.get('timeframe', '5min')
-    symbols = scan_watchlist_for_timeframe(tf)
+    symbols = [symbol.upper()] if symbol else scan_watchlist_for_timeframe(tf)
     results = []
     send_message(chat_id, f"⏳ لطفاً منتظر بمانید...\nدر حال بررسی {len(symbols)} نماد با تایم‌فریم {TF_DISPLAY.get(tf, tf)}")
     async def _run():
@@ -3117,7 +3117,9 @@ def process_command(cmd,chat_id,message_id=None):
     if cmd == '/backtest_start':
         start_backtest_flow(chat_id); return
     if cmd == '/scan_signal_start':
-        manual_signal_scan(chat_id); return
+        s=get_session(chat_id); s['user_state']='WAIT_SCAN_SYMBOL'; save_session(chat_id)
+        send_message(chat_id,'🔍 لطفاً نماد مورد نظر برای بررسی با استراتژی فعال را وارد کنید.\nمثال: BTC یا ETH')
+        return
     # Admin revenue / fee management commands.
     if str(cmd).startswith('/set_fee '):
         admin_set_fee_command(chat_id, cmd)
@@ -3419,6 +3421,12 @@ def handle_text(chat_id,text):
         elif current_state=='/REMOVE_SHORT_SYMBOL' and sym in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.remove(sym)
         s['user_state']=None; save_session(chat_id)
         send_message(chat_id,'✅ واچ‌لیست اصلاح شد.')
+        return
+
+    if current_state == 'WAIT_SCAN_SYMBOL':
+        s['user_state']=None; save_session(chat_id)
+        sym=raw.upper().replace('USDT','')+'USDT' if '/' not in raw else raw.upper()
+        manual_signal_scan(chat_id, sym)
         return
 
     if current_state == 'WAIT_BACKTEST_SYMBOL':
@@ -3845,7 +3853,7 @@ def _notify_boot_status():
             closed_n = len(s.get('closed_positions') or []) if s else 0
             msg = f"🔄 *ربات بالا آمد.*\nپوزیشن‌های باز شما: `{open_n}` | تاریخچه بسته‌شده: `{closed_n}`"
             if s is None or (open_n == 0 and closed_n == 0):
-                msg += "\n\n⚠️ اگر انتظار داشتید اینجا داده‌ای باشد، ممکن است دیتابیس ری‌ست شده باشد (مشکل ماندگاری دیسک هاست)."
+                msg += "\n\n🏠 برای شروع کار به منوی اصلی بروید و روی دکمه 🔄 بارگذاری مجدد و شروع اسکن بزنید."
             try:
                 send_message(cid, msg)
             except Exception:
