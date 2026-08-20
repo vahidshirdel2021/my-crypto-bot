@@ -63,10 +63,10 @@ DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 # تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
 # این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
-    '5min': '1min',
-    '15min': '5min',
-    '1hour': '15min',
-    '4hour': '1hour',
+    '5min': '5min',
+    '15min': '15min',
+    '1hour': '1hour',
+    '4hour': '4hour',
 }
 POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
 POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
@@ -2115,34 +2115,36 @@ def reconcile_real(chat_id):
 
 
 def _position_management_timeframe(p):
-    """
-    تایم‌فریم سریع مدیریت پوزیشن را بر اساس تایم‌فریم اصلی معامله تعیین می‌کند.
-    این تابع عمداً از TIMEFRAME_MAP ورود جداست تا منطق ورود هیچ تغییری نکند.
+    """Use the position's execution timeframe for weakness confirmation.
+
+    Profit-protection/trailing may react to live price, but indicator-based weakness
+    must not be evaluated on a noisier, lower timeframe than the setup that created
+    the trade. This keeps entries and discretionary exits on the same market context.
     """
     primary = str(p.get('timeframe') or '5min')
-    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, '1min')
+    return primary
 
 
 def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
     """Fast multi-timeframe position protection; entries remain untouched."""
     try:
         cfg=s.get('strategy_config') or STRATEGY_DEFAULTS
-        min_profit_r=float(cfg.get('weakness_exit_min_r',0.8))
+        min_profit_r=float(cfg.get('weakness_exit_min_r',1.0))
+        min_profit_r=max(1.0, min_profit_r)
         primary_tf=str(p.get('timeframe') or '5min')
         management_tf=_position_management_timeframe(p)
         p['management_timeframe']=management_tf
         peak_r=float(p.get('mfe_r') or 0.0)
 
-        # Profit protection independent of indicators. It reacts to live price/MFE,
-        # so a fast reversal does not need to wait for a slow candle close.
+        # Fast profit protection is based on live price/MFE and remains independent
+        # of indicator weakness. Indicator weakness starts only after a real profit
+        # buffer (>= 1R), so normal pullbacks cannot close a marginally profitable trade.
         if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
             return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
 
-        # Do not cut normal liquidity-sweep pullbacks. Early loss-cut is only
-        # considered once the trade has materially deteriorated (<= -0.50R).
-        loss_score = 35.0 if current_r <= -0.50 else 999.0
-
-        need_weakness = current_r>=min_profit_r or current_r<=-0.50
+        early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',False))
+        loss_score = 55.0 if early_loss_enabled and current_r <= -0.50 else 999.0
+        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=-0.50)
         if not need_weakness:
             return False,[]
         if wdf is None:
@@ -2154,11 +2156,11 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
             return False,[]
         is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
 
-        # A mild but confirmed weakness can cut a deep loss; profitable trades keep
-        # the stricter threshold to avoid exiting normal pullbacks.
+        # Profitable trades can use confirmed weakness; the optional early-loss path
+        # is explicitly disabled by default because the hard SL already defines risk.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if current_r<=-0.50 and wscore>=loss_score:
+        if early_loss_enabled and current_r<=-0.50 and wscore>=loss_score:
             return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         return False,[]
     except Exception as exc:
@@ -2677,15 +2679,22 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if d.empty:
         return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
     primary=calculate_indicators(d); primary_tf=tf; mode='single'
-    # برای استراتژی dynamic روی 1h/4h، تایم‌فریم بالاتر را هم می‌گیریم تا
-    # تأیید هم‌جهتی HTF در strategy_dynamic واقعاً اجرا شود.
-    if strat == 'dynamic' and tf in ('1hour', '4hour'):
-        htf_key, htf_tf = ('4h', '4hour') if tf == '1hour' else ('1d', '1day')
-        try:
-            hd=await get_klines_async(http,symbol,htf_tf,160)
-            if not hd.empty: md[htf_key]=calculate_indicators(hd)
-        except Exception as exc:
-            logger.warning('ENTRY_DIAG chat=%s symbol=%s htf=%s data_error=%s', chat_id, symbol, htf_tf, exc)
+    # V2 نیاز به context واقعی HTF دارد: اجرای 5m/15m با 1h/4h،
+    # 1h با 4h/1d و 4h با 1d بررسی می‌شود. HTF فقط filter است و execution نیست.
+    if strat == 'dynamic':
+        htf_specs = {
+            '5min': [('1h', '1hour'), ('4h', '4hour')],
+            '15min': [('1h', '1hour'), ('4h', '4hour')],
+            '1hour': [('4h', '4hour'), ('1d', '1day')],
+            '4hour': [('1d', '1day')],
+        }.get(tf, [])
+        for htf_key, htf_tf in htf_specs:
+            try:
+                hd=await get_klines_async(http,symbol,htf_tf,160)
+                if not hd.empty:
+                    md[htf_key]=calculate_indicators(hd)
+            except Exception as exc:
+                logger.warning('ENTRY_DIAG chat=%s symbol=%s htf=%s data_error=%s', chat_id, symbol, htf_tf, exc)
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات هنگام اسکن تغییر کرد', 'state')

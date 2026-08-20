@@ -207,8 +207,12 @@ STRATEGY_DEFAULTS = {
     "swing_buffer_atr": 0.40,       # فاصله اضافه (بر حسب ATR) زیر/بالای سوینگ برای جلوگیری از شکار استاپ
     # --- مدیریت هوشمند هدف سود (PDL/PDH) ---
     "extend_tp_to_pdl": True,       # هدف اصلی معامله = سقف/کف روز قبل، به‌جای هدف کوتاه RR ثابت
-    "weakness_exit_min_r": 0.8,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
-    "weakness_exit_score": 45.0,    # آستانه امتیاز ضعف برای بستن زودهنگام با سود
+    "weakness_exit_min_r": 1.0,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
+    "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
+    "weakness_profit_lock_min_r": 1.0,
+    "early_loss_weakness_exit_enabled": False,
+    "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
+    "early_loss_weakness_exit_enabled": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -893,9 +897,13 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     if idx < 1 or idx >= len(d):
         return None, "شاخص ستاپ معتبر نیست"
     curr = d.iloc[idx]
+    # Active setup: the liquidity anchor/extreme belongs to the original setup candle,
+    # but risk must be sized from the latest closed candle because entry is current.
+    risk_idx = len(d) - 2 if setup_index is not None else idx
+    risk_row = d.iloc[risk_idx]
     try:
         entry = float(live_price) if (setup_index is not None and live_price is not None) else float(curr["close"])
-        atr = float(curr["atr"])
+        atr = float(risk_row["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
@@ -987,6 +995,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
         "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
+        "risk_atr_source_index": int(risk_idx),
+        "setup_index": int(idx),
         "pattern": pattern_name,
         "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
     }
@@ -1273,6 +1283,7 @@ V2_DEFAULTS = {
     "regime_atr_low": 0.75,
     "ema_slope_min_atr": 0.03,
     "min_edge_proxy": 0.10,
+    "use_edge_proxy_gate": False,
     "min_setup_score": 62.0,
     "high_vol_min_score": 68.0,
     "high_vol_min_rr": 1.50,
@@ -1321,13 +1332,19 @@ def _ema_slope_atr(df, ema_col="ema20", lookback=5):
 
 
 def detect_market_regime(df, strategy_config=None):
-    """Return an explicit market regime without using future candles.
+    """Return trend and volatility as separate state dimensions.
 
-    Regimes: TREND_BULL, TREND_BEAR, RANGE, HIGH_VOL, LOW_VOL, MIXED.
-    Confidence is a heuristic, not a calibrated probability.
+    The previous implementation made HIGH_VOL mutually exclusive with trend,
+    which could route a strong high-vol trend into mean reversion. Here trend
+    state is detected first from directional structure, while volatility is
+    reported independently.
     """
     if df is None or len(df) < 65:
-        return {"name": "MIXED", "confidence": 0.0, "atr_ratio": 1.0, "trend_strength": 0.0}
+        return {
+            "name": "MIXED", "confidence": 0.0, "atr_ratio": 1.0,
+            "trend_strength": 0.0, "trend_state": "NEUTRAL",
+            "volatility_state": "NORMAL",
+        }
     cfg = get_v2_config(strategy_config)
     c = df.iloc[-2]
     adx = _safe_float(c.get("adx"), 0)
@@ -1336,25 +1353,61 @@ def detect_market_regime(df, strategy_config=None):
     med_atr = float(hist.median()) if len(hist) else atr
     atr_ratio = atr / max(med_atr, 1e-12)
     slope = _ema_slope_atr(df, "ema20", 5)
-    bull = _safe_float(c.get("close")) > _safe_float(c.get("ema20")) > _safe_float(c.get("ema50")) and _safe_float(c.get("plus_di")) > _safe_float(c.get("minus_di"))
-    bear = _safe_float(c.get("close")) < _safe_float(c.get("ema20")) < _safe_float(c.get("ema50")) and _safe_float(c.get("minus_di")) > _safe_float(c.get("plus_di"))
+    close = _safe_float(c.get("close"))
+    ema20 = _safe_float(c.get("ema20"))
+    ema50 = _safe_float(c.get("ema50"))
+    plus = _safe_float(c.get("plus_di"))
+    minus = _safe_float(c.get("minus_di"))
+    bull = close > ema20 > ema50 and plus > minus and slope > 0
+    bear = close < ema20 < ema50 and minus > plus and slope < 0
     strong_trend = adx >= float(cfg["regime_adx_trend"]) and abs(slope) >= float(cfg["ema_slope_min_atr"])
-    if atr_ratio >= float(cfg["regime_atr_high"]):
-        name = "HIGH_VOL"
-        conf = min(1.0, 0.55 + min(0.4, (atr_ratio - 1.0) * 0.45))
-    elif atr_ratio <= float(cfg["regime_atr_low"]):
-        name = "LOW_VOL"
-        conf = min(1.0, 0.55 + min(0.35, (1.0 - atr_ratio) * 0.7))
-    elif strong_trend and bull:
-        name, conf = "TREND_BULL", min(1.0, 0.60 + min(0.35, (adx - 23.0) / 30.0))
+    if strong_trend and bull:
+        trend_state = "BULL"
     elif strong_trend and bear:
-        name, conf = "TREND_BEAR", min(1.0, 0.60 + min(0.35, (adx - 23.0) / 30.0))
+        trend_state = "BEAR"
     elif adx <= float(cfg["range_max_adx"]):
-        name, conf = "RANGE", min(1.0, 0.55 + max(0.0, (20.0 - adx) / 30.0))
+        trend_state = "RANGE"
     else:
-        name, conf = "MIXED", 0.50
+        trend_state = "NEUTRAL"
+
+    if atr_ratio >= float(cfg["regime_atr_high"]):
+        volatility_state = "HIGH"
+    elif atr_ratio <= float(cfg["regime_atr_low"]):
+        volatility_state = "LOW"
+    else:
+        volatility_state = "NORMAL"
+
+    # Preserve stable names for downstream/UI compatibility while ensuring
+    # strong trends remain trend regimes even when volatility is high/low.
+    if trend_state == "BULL":
+        name = "TREND_BULL"
+        conf = 0.60 + min(0.35, max(0.0, (adx - 23.0) / 30.0))
+    elif trend_state == "BEAR":
+        name = "TREND_BEAR"
+        conf = 0.60 + min(0.35, max(0.0, (adx - 23.0) / 30.0))
+    elif trend_state == "RANGE":
+        name = "RANGE"
+        conf = 0.55 + max(0.0, (20.0 - adx) / 30.0)
+    elif volatility_state == "HIGH":
+        name = "HIGH_VOL"
+        conf = 0.55 + min(0.35, max(0.0, (atr_ratio - 1.0) * 0.45))
+    elif volatility_state == "LOW":
+        name = "LOW_VOL"
+        conf = 0.55 + min(0.30, max(0.0, (1.0 - atr_ratio) * 0.7))
+    else:
+        name = "MIXED"
+        conf = 0.50
     trend_strength = min(1.0, adx / 40.0) * min(1.0, abs(slope) / 0.15 if slope else 0.0)
-    return {"name": name, "confidence": round(conf, 3), "atr_ratio": float(atr_ratio), "trend_strength": float(trend_strength), "ema_slope_atr": float(slope), "adx": float(adx)}
+    return {
+        "name": name,
+        "confidence": round(min(1.0, conf), 3),
+        "atr_ratio": float(atr_ratio),
+        "trend_strength": float(trend_strength),
+        "ema_slope_atr": float(slope),
+        "adx": float(adx),
+        "trend_state": trend_state,
+        "volatility_state": volatility_state,
+    }
 
 
 def _v2_htf_bias(market_data_dict, want_bullish):
@@ -1402,14 +1455,18 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     regime_info = detect_market_regime(df_primary, cfg)
     rname = regime_info["name"]
     rconf = regime_info["confidence"]
+    trend_state = regime_info.get("trend_state", "NEUTRAL")
+    vol_state = regime_info.get("volatility_state", "NORMAL")
     candidates = []
+
+    if rconf < float(cfg.get("regime_confidence_min", 0.55)):
+        return None, None, f"V2: confidence رژیم پایین است | regime={rname} conf={rconf:.2f}"
 
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
             return
-        # Existing build_trade_plan routes 5m/15m dynamic plans to sweep. For V2
-        # we explicitly choose the generic structural risk engine for non-sweep setups.
-        plan_tf = timeframe if family == "liquidity_sweep" else "1hour"
+        # Risk plan must use the signal timeframe. HTF is context, not execution.
+        plan_tf = timeframe
         active_setup_index = None
         if family == "liquidity_sweep":
             m_active = __import__("re").search(r"ACTIVE_SETUP_INDEX=(\d+)", reason or "")
@@ -1428,53 +1485,73 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                 try: target_level = float(mt.group(1))
                 except Exception: target_level = None
         if family == "liquidity_sweep":
-            plan, plan_reason = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price, anchor_level=anchor_level, target_level=target_level)
+            plan, plan_reason = build_sweep_trade_plan(
+                df_primary, sig, cfg, grid_levels=grid_levels,
+                setup_index=active_setup_index, live_price=live_price,
+                anchor_level=anchor_level, target_level=target_level
+            )
         else:
-            plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price)
+            plan, plan_reason = build_trade_plan(
+                df_primary, sig, cfg, family, strategy_timeframe=plan_tf,
+                grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price
+            )
         if not plan:
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
         score = float(plan.get("score", 0)) + float(bonus)
         score += max(-8.0, min(8.0, htf * 8.0))
         score = max(0.0, min(100.0, score))
-        ev, pwin = _v2_edge_proxy(score, float(plan.get("rr", 0)), rname, regime_info["atr_ratio"])
-        min_score = float(cfg["high_vol_min_score"] if rname == "HIGH_VOL" else cfg["min_setup_score"])
-        min_rr = float(cfg["high_vol_min_rr"] if rname == "HIGH_VOL" else cfg.get("min_rr", 1.3))
-        if score < min_score or float(plan.get("rr", 0)) < min_rr or ev < float(cfg["min_edge_proxy"]):
+        rr = float(plan.get("rr", 0))
+        ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
+        # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
+        # but high volatility requires stricter score/RR. Mean reversion is never selected
+        # merely because volatility is high.
+        if vol_state == "HIGH":
+            min_score = float(cfg["high_vol_min_score"])
+            min_rr = float(cfg["high_vol_min_rr"])
+        else:
+            min_score = float(cfg["min_setup_score"])
+            min_rr = float(cfg.get("min_rr", 1.3))
+        if score < min_score or rr < min_rr:
+            return
+        if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
         plan = dict(plan)
         plan.update({
             "score": int(round(score)),
             "regime": rname,
             "regime_confidence": rconf,
+            "trend_state": trend_state,
+            "volatility_state": vol_state,
             "htf_bias": float(htf),
+            "htf_details": htf_details,
             "edge_proxy": round(ev, 4),
             "model_win_proxy": round(pwin, 4),
             "setup_family": family,
         })
-        candidates.append((ev, plan, sig, f"V2 {rname} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+        candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
-    # روی تایم‌فریم ۵ و ۱۵ دقیقه استراتژی واحد (Liquidity Sweep) اجرا می‌شود - بدون رقابت
-    # بین چند خانواده‌ی استراتژی. فیلترهای کیفیت V2 (score/RR/edge proxy) همچنان روی همین
-    # یک استراتژی اعمال می‌شوند. تایم‌فریم‌های بالاتر همچنان انتخابی (چند-استراتژی) هستند.
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
-        # Adaptive continuation uses the existing trend risk engine; adaptive sweeps
-        # use the sweep engine and retain the strict V2 quality gates.
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
         add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
     else:
-        if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
+        # Strategy selection is driven by trend state, while volatility only changes
+        # strictness. This prevents high-vol trends from being treated as mean-reversion.
+        if trend_state in ("BULL", "BEAR", "NEUTRAL"):
             sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
-            add_candidate(sig, reason, "trend", 4 if rname.startswith("TREND") else 0)
+            add_candidate(sig, reason, "trend", 4 if trend_state in ("BULL", "BEAR") else 0)
             sig, reason = strategy_breakout(df_primary, filters, cfg)
-            add_candidate(sig, reason, "breakout", 6 if rname.startswith("TREND") else 2)
-        if rname in ("RANGE", "HIGH_VOL", "MIXED"):
+            add_candidate(sig, reason, "breakout", 6 if trend_state in ("BULL", "BEAR") else 2)
+        if trend_state in ("RANGE", "NEUTRAL"):
             sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
             add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
-        return None, None, f"V2: ستاپ مناسب پیدا نشد | regime={rname} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+        return None, None, (
+            f"V2: ستاپ مناسب پیدا نشد | regime={rname} trend={trend_state} "
+            f"vol={vol_state} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+        )
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, best_plan, best_sig, best_reason = candidates[0]
     return best_sig, best_plan, best_reason

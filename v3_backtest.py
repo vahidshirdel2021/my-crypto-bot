@@ -58,7 +58,7 @@ from strategy import (
 
 PAPER_CONSERVATIVE_OHLC = True
 CCXT_TO_STRATEGY_TF = {'5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour'}
-POSITION_MANAGEMENT_TIMEFRAME_MAP = {'5m':'1m','15m':'5m','1h':'15m','4h':'1h'}
+POSITION_MANAGEMENT_TIMEFRAME_MAP = {'5m':'5m','15m':'15m','1h':'1h','4h':'4h'}
 
 
 @dataclass
@@ -338,12 +338,11 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
                     mg=mgmt_ind[mgmt_ind.ts <= ts]
                     if len(mg) >= 60:
                         weak, ws, _ = evaluate_trend_weakness(mg, 'BUY' if is_long else 'SELL', scfg)
-                        if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) and weak:
+                        min_weak_r = max(1.0, float(scfg.get('weakness_exit_min_r',1.0)))
+                        if current_r >= min_weak_r and weak:
                             exit_px, reason = close, 'WEAKNESS_EXIT'
-                        else:
-                            loss_score = 30.0 if current_r <= -0.70 else 35.0 if current_r <= -0.50 else 40.0 if current_r <= -0.30 else 45.0
-                            if current_r <= -0.50 and ws >= loss_score:
-                                exit_px, reason = close, 'SMART_LOSS_CUT'
+                        elif bool(scfg.get('early_loss_weakness_exit_enabled', False)) and current_r <= -0.50 and ws >= 55.0:
+                            exit_px, reason = close, 'SMART_LOSS_CUT'
             if exit_px is not None:
                 tr = close_position(pos, exit_px, ts, reason, cfg, i-pos.entry_idx, timeframe)
                 balance += tr['pnl_net']

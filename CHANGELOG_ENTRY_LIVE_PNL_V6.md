@@ -26,7 +26,7 @@ REAL position excursion tracking no longer feeds the last 120 historical candles
 ## 4) No changes to the core strategy families
 - 5m/15m remain PDH/PDL Liquidity Sweep based.
 - 1h/4h remain the existing Adaptive Trend/Breakout/Mean-Reversion engine.
-- Position management mapping remains 5m→1m, 15m→5m, 1h→15m, 4h→1h.
+- Indicator-based weakness management now uses the position execution timeframe itself (5m→5m, 15m→15m, 1h→1h, 4h→4h); live-price profit protection remains separate.
 
 
 ## V7 fix
