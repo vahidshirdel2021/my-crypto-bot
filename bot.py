@@ -86,9 +86,7 @@ except Exception:
 ALLOWED_CHAT_IDS_RAW = os.environ.get('ALLOWED_CHAT_IDS', '').strip()
 ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
 
-ALL_SYMBOLS = [
-    'BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI','LUNA','WAVES'
-]
+ALL_SYMBOLS = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ','IOTA','ALGO','MASK','NEO','BTC','COMP','ONE','AR','LUNA','MANA','ETH','SOL','SUSHI','SKL','CHZ','TRB','VET','SLP','ZIL','AAVE','RVN','ENJ','XTZ','AXS','SNX','SAND','RSR','ZRX','RAY']
 PAPER_DEFAULT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','LINK','AVAX','DOT','TRX','LTC','BCH','UNI','AAVE','NEAR','ATOM','ETC','FIL','SUI','APT','ARB','OP','INJ','SEI','TIA','TON','SHIB','PEPE','WIF']
 PAPER_SYMBOLS = [x.strip().upper() for x in os.environ.get('PAPER_SYMBOLS', ','.join(PAPER_DEFAULT_SYMBOLS)).split(',') if x.strip()]
 DEFAULT_ACTIVE_SYMBOLS = ALL_SYMBOLS[:]
@@ -96,30 +94,18 @@ LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه','multi':'مولتی'}
 
-SHARED_WATCHLIST = ['BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI']
-# ۵ نماد SRM / BZRX / ALPHA / TOMO / NU از فایل ورودی عمداً حذف شدند: این‌ها تنها نمادهایی
-# بودند که قبلاً (در ALL_SYMBOLS اصلی) نبودند و به‌شدت محتمل است دلیل خطاهای «داده بازار
-# خالی دریافت شد» باشند (SRM/BZRX دیگر معامله نمی‌شوند، ALPHA/NU ری‌برند شده‌اند و TOMO
-# حجم/پشتیبانی بسیار کمی روی CoinEx/KuCoin دارد).
-# واچ‌لیست خرید و فروش عمداً یکی و مشترک است (طبق درخواست کاربر) - در همه‌ی تایم‌فریم‌ها
-# دقیقاً همین ۱۲۸ نماد هم برای Long و هم برای Short بررسی می‌شوند.
-SHARED_LONG_WATCHLIST = SHARED_WATCHLIST
-WINNING_WATCHLISTS = {
-    '5min': SHARED_LONG_WATCHLIST,
-    '15min': SHARED_LONG_WATCHLIST,
-    '1hour': SHARED_LONG_WATCHLIST,
-    '4hour': SHARED_LONG_WATCHLIST,
-    'multi': SHARED_LONG_WATCHLIST,
-}
+LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ']
+WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour', 'multi')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
-SHARED_SHORT_WATCHLIST = SHARED_WATCHLIST
-WINNING_SHORT_WATCHLISTS = {
-    '5min': SHARED_SHORT_WATCHLIST,
-    '15min': SHARED_SHORT_WATCHLIST,
-    '1hour': SHARED_SHORT_WATCHLIST,
-    '4hour': SHARED_SHORT_WATCHLIST,
-    'multi': SHARED_SHORT_WATCHLIST,
-}
+
+# لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
+# لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
+SHORT_WATCHLIST = ['IOTA','ALGO','MASK','NEO','UNI','STORJ','BTC','DASH','RUNE','COMP','BNB','ONE','GALA','AR','LUNA','MANA','ETH','ETC','SOL','SUSHI','LINK','SKL','CHZ','TRB','EGLD','BTT','VET','NEAR','SLP','ANKR','ADA','ZIL','BCH','AAVE','DYDX','RVN','SHIB','TRX','ATOM','ENJ','WAVES','ZEC','XTZ','AVAX','AXS','SNX','KSM','SAND','RSR','ZRX','RAY','QTUM']
+WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour', 'multi')}
+
+# اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
+SHARED_LONG_WATCHLIST = LONG_WATCHLIST
+SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'

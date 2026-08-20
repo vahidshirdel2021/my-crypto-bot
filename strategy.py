@@ -1182,17 +1182,21 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         })
         candidates.append((ev, plan, sig, f"V2 {rname} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
-    if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
-        sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
-        add_candidate(sig, reason, "trend", 4 if rname.startswith("TREND") else 0)
-        sig, reason = strategy_breakout(df_primary, filters, cfg)
-        add_candidate(sig, reason, "breakout", 6 if rname.startswith("TREND") else 2)
-    if rname in ("RANGE", "HIGH_VOL", "MIXED"):
-        if timeframe in ("5min", "15min"):
-            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg)
-            add_candidate(sig, reason, "liquidity_sweep", float(cfg["sweep_score_bonus"]))
-        sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
-        add_candidate(sig, reason, "mean_reversion", 0)
+    # روی تایم‌فریم ۵ و ۱۵ دقیقه استراتژی واحد (Liquidity Sweep) اجرا می‌شود - بدون رقابت
+    # بین چند خانواده‌ی استراتژی. فیلترهای کیفیت V2 (score/RR/edge proxy) همچنان روی همین
+    # یک استراتژی اعمال می‌شوند. تایم‌فریم‌های بالاتر همچنان انتخابی (چند-استراتژی) هستند.
+    if timeframe in ("5min", "15min"):
+        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg)
+        add_candidate(sig, reason, "liquidity_sweep", float(cfg["sweep_score_bonus"]))
+    else:
+        if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
+            sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
+            add_candidate(sig, reason, "trend", 4 if rname.startswith("TREND") else 0)
+            sig, reason = strategy_breakout(df_primary, filters, cfg)
+            add_candidate(sig, reason, "breakout", 6 if rname.startswith("TREND") else 2)
+        if rname in ("RANGE", "HIGH_VOL", "MIXED"):
+            sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
+            add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
         return None, None, f"V2: ستاپ مناسب پیدا نشد | regime={rname} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
