@@ -2160,13 +2160,14 @@ def _market_snapshot(symbol, tf):
 
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
-# --- رژیم «اجماع فوری» - همان روش گزارش «وضعیت بازار» ولی وصل به تصمیم‌گیری معامله -----
-# برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی خیلی سخت‌گیرانه
-# می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را می‌بیند - یعنی
-# دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند. اگر اکثریت قاطع (پیش‌فرض ۸۰٪)
-# هم‌جهت باشند، به‌عنوان یک روند «شدید» دیگر برای بلاک‌کردن معامله خلاف‌جهت لحاظ می‌شود.
+# --- رژیم «اجماع فوری» - همان روش و همان آستانه‌ی گزارش «وضعیت بازار»، ولی وصل به --------
+# تصمیم‌گیری معامله. برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی
+# خیلی سخت‌گیرانه می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را
+# می‌بیند - یعنی دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند، و با همان قانون
+# اکثریت ساده (>=۵۰٪) که آنجا هم استفاده می‌شود. یعنی هر وقت «وضعیت بازار» صعودی/نزولی
+# اعلام شود، دقیقاً همان لحظه ورود خلاف‌جهت روی همه‌ی نمادها بلاک می‌شود؛ فقط وقتی بازار
+# رنج/نامشخص باشد (نه اکثریت صعودی نه نزولی) هر دو جهت آزاد هستند.
 TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
-TIMEFRAME_REGIME_EXTREME_RATIO = float(os.environ.get('TIMEFRAME_REGIME_EXTREME_RATIO', '0.8'))
 TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
 TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
 
@@ -2184,7 +2185,8 @@ async def _market_snapshot_async(http, symbol, tf):
 
 
 async def refresh_timeframe_regime(http, timeframe):
-    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده)."""
+    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده).
+    دقیقاً همان فرمول market_report(): اکثریت ساده (>=۵۰٪) از همان ۱۰ ارز، نه اجماع افراطی."""
     tf = '5min' if timeframe == 'multi' else timeframe
     now = time.time()
     c = TIMEFRAME_REGIME_CACHE.get(tf)
@@ -2197,9 +2199,9 @@ async def refresh_timeframe_regime(http, timeframe):
         bullish = sum(1 for x in scores if x > 0)
         bearish = sum(1 for x in scores if x < 0)
         total = len(scores)
-        if bullish / total >= TIMEFRAME_REGIME_EXTREME_RATIO:
+        if bullish > bearish and bullish >= total * 0.5:
             extreme = 'BULLISH'
-        elif bearish / total >= TIMEFRAME_REGIME_EXTREME_RATIO:
+        elif bearish > bullish and bearish >= total * 0.5:
             extreme = 'BEARISH'
     TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
     return extreme
