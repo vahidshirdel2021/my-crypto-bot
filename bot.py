@@ -24,6 +24,8 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
+from backtest import run_backtest, fetch_ohlcv_coinex
+
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     strategy_trend_following,
@@ -3068,7 +3070,54 @@ def apply_user_profile(s, profile):
     return label,score,rr,risk
 
 
+
+def manual_signal_scan(chat_id):
+    """اسکن دستی نمادها با همان منطق سیگنال فعلی و فقط ارائه پیشنهاد ورود."""
+    s = get_session(chat_id)
+    tf = s.get('timeframe', '5min')
+    symbols = scan_watchlist_for_timeframe(tf)
+    results = []
+    send_message(chat_id, f"⏳ لطفاً منتظر بمانید...\nدر حال بررسی {len(symbols)} نماد با تایم‌فریم {TF_DISPLAY.get(tf, tf)}")
+    async def _run():
+        async with aiohttp.ClientSession() as http:
+            for sym in symbols:
+                try:
+                    df = await get_klines_async(http, sym, tf, 180)
+                    if df is None or df.empty or len(df) < 80:
+                        continue
+                    ind = calculate_indicators(df)
+                    sig, reason = get_signal_with_reason(ind, s.get('strategy_config', STRATEGY_DEFAULTS))
+                    if sig not in ('BUY','SELL'):
+                        continue
+                    plan = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_timeframe=tf)
+                    if plan:
+                        results.append((sym, sig, plan, reason))
+                except Exception:
+                    continue
+    try:
+        asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop(); loop.run_until_complete(_run()); loop.close()
+    if not results:
+        send_message(chat_id, '❌ در بررسی فعلی، نمادی مطابق شرایط استراتژی آماده ورود پیدا نشد.')
+        return
+    lines = ['🚀 *سیگنال‌های آماده ورود دستی*']
+    for sym, sig, plan, reason in results[:5]:
+        lines.append(
+            f"\n{'🟢 LONG' if sig=='BUY' else '🔴 SHORT'} `{sym}`"
+            f"\nورود: `{plan.get('entry')}`"
+            f"\nحد ضرر: `{plan.get('sl')}`"
+            f"\nحد سود: `{plan.get('tp')}`"
+            f"\nدلیل: {reason}"
+        )
+    send_message(chat_id, '\n'.join(lines))
+
+
 def process_command(cmd,chat_id,message_id=None):
+    if cmd == '/backtest_start':
+        start_backtest_flow(chat_id); return
+    if cmd == '/scan_signal_start':
+        manual_signal_scan(chat_id); return
     # Admin revenue / fee management commands.
     if str(cmd).startswith('/set_fee '):
         admin_set_fee_command(chat_id, cmd)
@@ -3242,6 +3291,11 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
+    if cl in ('/add_long_symbol','/remove_long_symbol','/add_short_symbol','/remove_short_symbol'):
+        s['user_state']=cl.upper(); save_session(chat_id)
+        send_message(chat_id,'📝 نام نماد را ارسال کنید (مثال BTC)')
+        return
+
     if cl in ('/manage_watchlist','/watchlist_list'):
         long_list='، '.join(SHARED_LONG_WATCHLIST)
         short_list='، '.join(SHARED_SHORT_WATCHLIST)
@@ -3315,6 +3369,28 @@ def process_command(cmd,chat_id,message_id=None):
         return
 
 
+def start_backtest_flow(chat_id):
+    s=get_session(chat_id)
+    s['user_state']='WAIT_BACKTEST_SYMBOL'
+    save_session(chat_id)
+    send_message(chat_id,'🧪 تست استراتژی\n\nنماد را وارد کنید (مثال: BTC/USDT:USDT):')
+
+
+def run_user_backtest(chat_id):
+    s=get_session(chat_id)
+    try:
+        send_message(chat_id,'⏳ لطفاً منتظر بمانید...\nدر حال دریافت داده‌های تاریخی از سرور و آماده‌سازی تست.')
+        df=fetch_ohlcv_coinex(s['backtest_symbol'], s['backtest_tf'], s['backtest_start'], s['backtest_end'])
+        send_message(chat_id,'✅ داده‌ها دریافت شد.\nدر حال اجرای تست استراتژی...')
+        result=run_backtest(df, strategy_type=s.get('active_strategy','dynamic'), side='both', strategy_timeframe=s.get('timeframe','1hour'))
+        send_message(chat_id, f'🧪 نتیجه تست\n\nنماد: {s["backtest_symbol"]}\nتعداد معاملات: {len(result.get("trades",[])) if isinstance(result,dict) else "انجام شد"}')
+    except Exception as e:
+        send_message(chat_id,f'❌ خطا در تست: {e}')
+    finally:
+        s['user_state']=None
+        save_session(chat_id)
+
+
 def handle_text(chat_id,text):
     raw=(text or '').strip()
     fixed_buttons={
@@ -3327,13 +3403,47 @@ def handle_text(chat_id,text):
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
-        '🖐 معامله دستی':'/manual_trade', 'معامله دستی':'/manual_trade',
+        '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')
+
+    if current_state in ('/ADD_LONG_SYMBOL','/REMOVE_LONG_SYMBOL','/ADD_SHORT_SYMBOL','/REMOVE_SHORT_SYMBOL'):
+        sym=raw.upper().replace('USDT','')
+        if current_state=='/ADD_LONG_SYMBOL' and sym not in SHARED_LONG_WATCHLIST: SHARED_LONG_WATCHLIST.append(sym)
+        elif current_state=='/REMOVE_LONG_SYMBOL' and sym in SHARED_LONG_WATCHLIST: SHARED_LONG_WATCHLIST.remove(sym)
+        elif current_state=='/ADD_SHORT_SYMBOL' and sym not in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.append(sym)
+        elif current_state=='/REMOVE_SHORT_SYMBOL' and sym in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.remove(sym)
+        s['user_state']=None; save_session(chat_id)
+        send_message(chat_id,'✅ واچ‌لیست اصلاح شد.')
+        return
+
+    if current_state == 'WAIT_BACKTEST_SYMBOL':
+        s['backtest_symbol']=raw.upper()
+        s['user_state']='WAIT_BACKTEST_TF'
+        save_session(chat_id)
+        send_message(chat_id,'⏱ تایم‌فریم را وارد کنید (5m / 15m / 1h / 4h):')
+        return
+    if current_state == 'WAIT_BACKTEST_TF':
+        s['backtest_tf']=raw
+        s['user_state']='WAIT_BACKTEST_START'
+        save_session(chat_id)
+        send_message(chat_id,'📅 تاریخ شروع را وارد کنید (YYYY-MM-DD):')
+        return
+    if current_state == 'WAIT_BACKTEST_START':
+        s['backtest_start']=raw
+        s['user_state']='WAIT_BACKTEST_END'
+        save_session(chat_id)
+        send_message(chat_id,'📅 تاریخ پایان را وارد کنید (YYYY-MM-DD):')
+        return
+    if current_state == 'WAIT_BACKTEST_END':
+        s['backtest_end']=raw
+        save_session(chat_id)
+        run_user_backtest(chat_id)
+        return
 
     if current_state == 'WAIT_ADMIN_SET_FEE':
         s['user_state'] = None
