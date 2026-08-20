@@ -116,9 +116,8 @@ def get_timeframe_keyboard():
     return {"inline_keyboard": [
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "📈 دسته ۲: روندی / چندزمانه (تأیید روند و شکست)", "callback_data": "/dummy"}],
+        [{"text": "📈 دسته ۲: معاملات روندی (تأیید روند و شکست)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۱ ساعته", "callback_data": "/set_tf_1h"}, {"text": "⏱ ۴ ساعته", "callback_data": "/set_tf_4h"}],
-        [{"text": "🌊 چندزمانه (مولتی)", "callback_data": "/set_tf_multi"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 

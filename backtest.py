@@ -130,7 +130,7 @@ def fetch_ohlcv_coinex(symbol, timeframe, start_iso, end_iso, market_type='swap'
 # نگاشت تایم‌فریم سبک ccxt (که برای دانلود داده استفاده می‌شود) به کلید تایم‌فریم استراتژی
 # (که آستانه‌های ADX/امتیاز/R:R را بر اساس آن تنظیم می‌کند - مطابق TIMEFRAME_PARAM_ADJUST در strategy.py)
 CCXT_TO_STRATEGY_TF = {
-    '5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour', '1d': 'multi',
+    '5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour', '1d': '1day',
 }
 
 

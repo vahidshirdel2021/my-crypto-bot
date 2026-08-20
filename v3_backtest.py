@@ -57,7 +57,8 @@ from strategy import (
 )
 
 PAPER_CONSERVATIVE_OHLC = True
-CCXT_TO_STRATEGY_TF = {'5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour', '1d': 'multi'}
+CCXT_TO_STRATEGY_TF = {'5m': '5min', '15m': '15min', '1h': '1hour', '4h': '4hour'}
+POSITION_MANAGEMENT_TIMEFRAME_MAP = {'5m':'1m','15m':'5m','1h':'15m','4h':'1h'}
 
 
 @dataclass
@@ -176,6 +177,10 @@ def load_source(symbol: str, timeframe: str, start: str, end: str, csv: Optional
         return normalize_ohlcv(pd.read_csv(csv), start, end)
     return fetch_ohlcv_coinex(symbol, timeframe, start, end)
 
+def management_timeframe(timeframe: str) -> str:
+    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(timeframe, timeframe)
+
+
 
 # ---------------------------- mechanics ------------------------------------
 
@@ -274,7 +279,7 @@ def build_htf_data(primary: pd.DataFrame, timeframe: str) -> Dict[str,pd.DataFra
 
 def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: str,
                cfg: BacktestConfig, side_filter='both', strategy_config=None,
-               calibrator=None) -> Tuple[List[Dict], pd.DataFrame]:
+               calibrator=None, management_df: Optional[pd.DataFrame]=None) -> Tuple[List[Dict], pd.DataFrame]:
     ind = calculate_indicators(df)
     if len(ind) < cfg.min_bars:
         return [], pd.DataFrame()
@@ -291,6 +296,8 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
     pos: Optional[Position] = None
     cooldown_until = -1
     htf = build_htf_data(df, timeframe)
+    mgmt_tf=management_timeframe(timeframe)
+    mgmt_ind=calculate_indicators(management_df) if management_df is not None and not management_df.empty else ind
     n = len(ind)
     i = cfg.min_bars - 1
 
@@ -328,10 +335,16 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
                         if (ns > pos.sl_current if is_long else ns < pos.sl_current):
                             pos.sl_current, pos.locked_r, pos.trailing_activated = ns, lr, True
                 current_r = ((close-pos.entry)/pos.risk_distance if is_long else (pos.entry-close)/pos.risk_distance)
-                if current_r >= float(scfg.get('weakness_exit_min_r', 0.8)) and len(ind.iloc[:i+2]) >= 60:
-                    weak, ws, _ = evaluate_trend_weakness(ind.iloc[:i+2], 'BUY' if is_long else 'SELL', scfg)
-                    if weak:
-                        exit_px, reason = close, 'WEAKNESS_EXIT'
+                if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) or current_r <= -0.10:
+                    mg=mgmt_ind[mgmt_ind.ts <= ts]
+                    if len(mg) >= 60:
+                        weak, ws, _ = evaluate_trend_weakness(mg, 'BUY' if is_long else 'SELL', scfg)
+                        if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) and weak:
+                            exit_px, reason = close, 'WEAKNESS_EXIT'
+                        else:
+                            loss_score = 30.0 if current_r <= -0.70 else 35.0 if current_r <= -0.50 else 40.0 if current_r <= -0.30 else 45.0
+                            if current_r <= -0.10 and ws >= loss_score:
+                                exit_px, reason = close, 'SMART_LOSS_CUT'
             if exit_px is not None:
                 tr = close_position(pos, exit_px, ts, reason, cfg, i-pos.entry_idx)
                 # Recompute funding with actual timeframe and correct the placeholder.
@@ -525,7 +538,7 @@ def group_metrics(trades: List[Dict], key: str) -> pd.DataFrame:
 # ---------------------------- walk forward ---------------------------------
 
 def walk_forward(df: pd.DataFrame, symbol, timeframe, start, end, cfg, train_days=60, test_days=30,
-                 calibrate_edge=False, side='both', strategy_config=None) -> Tuple[List[Dict], pd.DataFrame]:
+                 calibrate_edge=False, side='both', strategy_config=None, management_df=None) -> Tuple[List[Dict], pd.DataFrame]:
     d=df.copy(); d['dt']=pd.to_datetime(d.ts,unit='ms',utc=True)
     start_dt=pd.Timestamp(start,tz='UTC'); end_dt=pd.Timestamp(end,tz='UTC')
     cursor=start_dt + pd.Timedelta(days=train_days)
@@ -534,16 +547,18 @@ def walk_forward(df: pd.DataFrame, symbol, timeframe, start, end, cfg, train_day
         train_start=cursor-pd.Timedelta(days=train_days); test_end=min(cursor+pd.Timedelta(days=test_days),end_dt)
         train=d[(d.dt>=train_start)&(d.dt<cursor)].drop(columns='dt')
         test=d[(d.dt>=cursor)&(d.dt<test_end)].drop(columns='dt')
+        mtrain = management_df[(pd.to_datetime(management_df.ts,unit='ms',utc=True)>=train_start)&(pd.to_datetime(management_df.ts,unit='ms',utc=True)<cursor)] if management_df is not None else None
+        mtest = management_df[(pd.to_datetime(management_df.ts,unit='ms',utc=True)>=cursor)&(pd.to_datetime(management_df.ts,unit='ms',utc=True)<test_end)] if management_df is not None else None
         if len(train)<cfg.min_bars or len(test)<cfg.min_bars//2:
             cursor=test_end; continue
         calibrator=None
         if calibrate_edge:
             # Training-only calibration: map V2 score to empirical win rate using bins.
-            tr,_=run_single(train,symbol,timeframe,str(train_start.date()),str(cursor.date()),cfg,side,strategy_config)
+            tr,_=run_single(train,symbol,timeframe,str(train_start.date()),str(cursor.date()),cfg,side,strategy_config,management_df=mtrain)
             if tr:
                 td=pd.DataFrame(tr); td['score_bin']=(td.score//5*5).clip(0,100)
                 calibrator=td.groupby('score_bin').realized_r.mean().to_dict()
-        te,eq=run_single(test,symbol,timeframe,str(cursor.date()),str(test_end.date()),cfg,side,strategy_config,calibrator)
+        te,eq=run_single(test,symbol,timeframe,str(cursor.date()),str(test_end.date()),cfg,side,strategy_config,calibrator,management_df=mtest)
         for x in te: x['wf_fold_start']=cursor.isoformat(); x['wf_fold_end']=test_end.isoformat()
         all_trades.extend(te)
         folds.append({'fold':len(folds)+1,'train_start':train_start.isoformat(),'train_end':cursor.isoformat(),
@@ -584,6 +599,7 @@ def main():
     ap=argparse.ArgumentParser(description='V3 Professional Backtester for Strategy V2')
     ap.add_argument('--symbol',default='BTC/USDT:USDT'); ap.add_argument('--timeframe',default='15m',choices=['5m','15m','1h','4h','1d'])
     ap.add_argument('--start',required=True); ap.add_argument('--end',required=True); ap.add_argument('--csv',default=None)
+    ap.add_argument('--management-csv',default=None,help='CSV تایم‌فریم مدیریت؛ برای شبیه‌سازی دقیق مدیریت سریع در حالت CSV')
     ap.add_argument('--side',default='both',choices=['long','short','both']); ap.add_argument('--outdir',default='v3_report')
     ap.add_argument('--initial',type=float,default=10000); ap.add_argument('--risk',type=float,default=.005)
     ap.add_argument('--daily-loss',type=float,default=.03); ap.add_argument('--leverage',type=float,default=5)
@@ -599,14 +615,23 @@ def main():
                        conservative_ohlc=not args.no_conservative_ohlc)
     print(f'Loading {args.symbol} {args.timeframe}: {args.start} -> {args.end}')
     df=load_source(args.symbol,args.timeframe,args.start,args.end,args.csv)
+    mgmt_tf=management_timeframe(args.timeframe)
+    if args.management_csv:
+        management_df=normalize_ohlcv(pd.read_csv(args.management_csv),args.start,args.end)
+    elif args.csv:
+        management_df=None
+        print(f'⚠️ CSV مدیریت سریع ارائه نشده؛ برای {args.timeframe}→{mgmt_tf} خروج ضعف با تایم‌فریم اصلی تقریب زده می‌شود.')
+    else:
+        print(f'Loading management timeframe {mgmt_tf} ...')
+        management_df=fetch_ohlcv_coinex(args.symbol,mgmt_tf,args.start,args.end)
     if args.walk_forward:
-        trades,folds=walk_forward(df,args.symbol,args.timeframe,args.start,args.end,cfg,args.train_days,args.test_days,args.calibrate_edge,args.side)
+        trades,folds=walk_forward(df,args.symbol,args.timeframe,args.start,args.end,cfg,args.train_days,args.test_days,args.calibrate_edge,args.side,management_df=management_df)
         # OOS equity curve is reconstructed from trade PnL.
         if trades:
             tt=pd.DataFrame(trades); tt['exit_dt']=pd.to_datetime(tt.exit_time,unit='ms',utc=True); tt=tt.sort_values('exit_time'); tt['equity']=cfg.initial_balance+tt.pnl_net.cumsum(); tt['peak']=tt.equity.cummax(); tt['drawdown']=tt.equity/tt.peak-1; eq=tt[['exit_time','equity','drawdown']].rename(columns={'exit_time':'ts'}); eq['balance']=eq.equity; eq['open_pnl']=0.0
         else: eq=pd.DataFrame()
     else:
-        trades,eq=run_single(df,args.symbol,args.timeframe,args.start,args.end,cfg,args.side)
+        trades,eq=run_single(df,args.symbol,args.timeframe,args.start,args.end,cfg,args.side,management_df=management_df)
         folds=None
     metrics=compute_metrics(trades,eq,cfg.initial_balance,args.timeframe)
     save_report(args.outdir,trades,eq,metrics,args.symbol,args.timeframe,args.start,args.end,folds)

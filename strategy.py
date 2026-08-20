@@ -198,6 +198,12 @@ STRATEGY_DEFAULTS = {
     "sweep_enable_retest_continuation": True,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
+    # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
+    "active_setup_enabled": True,
+    "active_setup_lookback_candles": 3,
+    "active_setup_max_age_candles": 3,
+    "active_setup_max_distance_atr": 0.80,
+    "active_setup_invalidation_atr": 0.25,
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -233,11 +239,6 @@ TIMEFRAME_STRATEGY_PRESETS = {
         "min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
         "min_trade_score": 54.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.5,
         "min_sl_percent": 0.008, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 3600
-    },
-    "multi": {
-        "min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
-        "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2,
-        "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
     },
 }
 
@@ -334,13 +335,13 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels)
+        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
         if sig == signal and plan:
             return plan, reason
     if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):
-        return build_sweep_trade_plan(df, signal, strategy_config, grid_levels=grid_levels)
+        return build_sweep_trade_plan(df, signal, strategy_config, grid_levels=grid_levels, setup_index=setup_index, live_price=live_price)
     if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     c = df.iloc[-2]
@@ -545,46 +546,128 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
     return None, None
 
 
-def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
+def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
+    """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
+
+    The primary signal still uses only the latest closed candle. If that exact
+    candle was missed by the scanner, a very recent valid sweep/retest can remain
+    actionable for a few candles, but only while price is still close to the
+    original PDH/PDL level. This avoids both missed entries and FOMO/chasing.
+    """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
         return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
     if pdh is None or pdl is None:
         return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
-    curr = d.iloc[-2]
-    try:
-        atr = float(curr.get("atr") or 0)
-    except Exception:
-        atr = 0.0
-    if not np.isfinite(atr) or atr <= 0:
-        return None, "ATR نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
 
-    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+    def detect_at(idx):
+        if idx < 0 or idx >= len(d):
+            return None, None, None
+        curr = d.iloc[idx]
+        atr = _safe_float(curr.get("atr"), 0.0)
+        if not np.isfinite(atr) or atr <= 0:
+            return None, None, None
+        min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
+        o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+        if h >= pdh + min_sweep:
+            reclaimed = (not require_reclaim) or (c < pdh)
+            reversal = (not require_reversal) or (c < o)
+            if reclaimed and reversal:
+                return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی", atr
+        if l <= pdl - min_sweep:
+            reclaimed = (not require_reclaim) or (c > pdl)
+            reversal = (not require_reversal) or (c > o)
+            if reclaimed and reversal:
+                return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی", atr
+        if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
+            sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
+            if sig:
+                return sig, reason, atr
+        return None, None, None
 
-    if h >= pdh + min_sweep:
-        reclaimed = (not require_reclaim) or (c < pdh)
-        reversal = (not require_reversal) or (c < o)
-        if reclaimed and reversal:
-            return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی"
+    latest_idx = len(d) - 2  # آخرین کندل کاملاً بسته‌شده
+    sig, reason, atr = detect_at(latest_idx)
 
-    if l <= pdl - min_sweep:
-        reclaimed = (not require_reclaim) or (c > pdl)
-        reversal = (not require_reversal) or (c > o)
-        if reclaimed and reversal:
-            return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی"
-
-    if bool(cfg.get("sweep_enable_retest_continuation", True)):
-        sig, reason = _detect_retest_continuation(d, len(d) - 2, pdh, pdl, atr, cfg)
-        if sig:
+    # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
+    # روز قبل بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
+    # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
+    try:
+        live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
+    except Exception:
+        live_for_guard = float(d.iloc[latest_idx]["close"])
+    if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
+        level = pdl if sig == "BUY" else pdh
+        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
+        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
+        too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
+        invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
+        if not too_far and not invalidated:
             return sig, reason
+        sig, reason = None, None
+    elif sig:
+        return sig, reason
 
-    return None, "Sweep/Reclaim یا پولبک+ادامه معتبری روی سطح روز قبل شناسایی نشد"
+    if not bool(cfg.get("active_setup_enabled", True)):
+        return None, "ستاپ جدیدی ثبت نشد"
 
+    try:
+        live = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
+    except Exception:
+        live = float(d.iloc[latest_idx]["close"])
+    if not np.isfinite(live) or live <= 0:
+        return None, "قیمت فعلی معتبر نیست"
+
+    max_age = max(1, int(cfg.get("active_setup_max_age_candles", cfg.get("active_setup_lookback_candles", 3))))
+    lookback = max(max_age, int(cfg.get("active_setup_lookback_candles", 3)))
+    min_idx = max(1, latest_idx - lookback)
+    # Newest candidate wins. We intentionally do not search older than the short freshness window.
+    latest_date = d.loc[latest_idx, "_date"] if "_date" in d.columns else None
+    current = d.iloc[latest_idx]
+    co, cc, ch, cl = (float(current["open"]), float(current["close"]),
+                       float(current["high"]), float(current["low"]))
+    for idx in range(latest_idx - 1, min_idx - 1, -1):
+        if latest_date is not None and d.loc[idx, "_date"] != latest_date:
+            continue
+        sig, reason, atr = detect_at(idx)
+        if not sig or atr <= 0:
+            continue
+        level = pdl if sig == "BUY" else pdh
+        tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
+        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
+        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
+
+        # IMPORTANT: an old setup is NOT enough by itself. The latest closed candle
+        # must now perform a fresh pullback/reclaim of the original PDH/PDL level.
+        # This prevents entering merely because live price happens to be near the level.
+        if sig == "BUY":
+            retest = cl <= level + tol
+            reclaimed = cc > level
+            directional = (cc > co) if require_reversal else True
+        else:
+            retest = ch >= level - tol
+            reclaimed = cc < level
+            directional = (cc < co) if require_reversal else True
+        if not (retest and reclaimed and directional):
+            continue
+
+        # The live price is only used as an anti-chasing guard after the closed-candle
+        # revalidation above. We never enter from a live tick alone.
+        if sig == "BUY":
+            if live < level - invalid_dist or live > level + max_dist:
+                continue
+        else:
+            if live > level + invalid_dist or live < level - max_dist:
+                continue
+        age = latest_idx - idx
+        return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
+                     f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
+                     f"ورود با قیمت فعلی، بدون تعقیب قیمت")
+
+    return None, "ستاپ جدیدی ثبت نشد یا ستاپ‌های اخیر بدون Pullback/Reclaim جدید معتبر نیستند"
 
 def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
     """
@@ -634,15 +717,18 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None):
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None or pdh is None or pdl is None:
         return None, "سطوح روز قبل هنوز آماده نیست"
-    curr = d.iloc[-2]
+    idx = (len(d) - 2) if setup_index is None else int(setup_index)
+    if idx < 1 or idx >= len(d):
+        return None, "شاخص ستاپ معتبر نیست"
+    curr = d.iloc[idx]
     try:
-        entry = float(curr["close"])
+        entry = float(live_price) if (setup_index is not None and live_price is not None) else float(curr["close"])
         atr = float(curr["atr"])
     except Exception:
         return None, "ATR یا قیمت ورود نامعتبر است"
@@ -714,7 +800,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None):
     rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
     # این استراتژی خودش یک برگشت روی سطح کلیدی (PDH/PDL) است، پس همیشه «نزدیک سطح ساختاری»
     # و رژیم «رنج/برگشتی» در نظر گرفته می‌شود؛ کندل ریکلیم با الگوهای شناخته‌شده تقویت/تضعیف می‌شود.
-    pattern_score, pattern_name = candle_pattern_score(df, signal, regime="range", near_structure=True, max_points=10.0)
+    pattern_df = d.iloc[:idx + 1].copy() if setup_index is not None else df
+    pattern_score, pattern_name = candle_pattern_score(pattern_df, signal, regime="range", near_structure=True, max_points=10.0)
     score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
 
     min_score = float(cfg.get("min_trade_score", 58.0))
@@ -930,29 +1017,6 @@ def strategy_mean_reversion(df, filters=None, strategy_config=None):
     return None, f"RSI خنثی است ({rsi:.1f})"
 
 
-def strategy_multi_tf(df_primary, market_data_dict, timeframe="5min", filters=None, strategy_config=None):
-    required = ["1d", "4h", "1h", "15m"]
-    missing = [x for x in required if (market_data_dict or {}).get(x) is None or (market_data_dict or {}).get(x).empty]
-    if missing:
-        return None, f"تایم‌فریم‌های لازم موجود نیست: {', '.join(missing)}"
-    c = df_primary.iloc[-2]
-    up = c["close"] > c["ema50"] and c["ema20"] > c["ema50"] and c["plus_di"] > c["minus_di"]
-    down = c["close"] < c["ema50"] and c["ema20"] < c["ema50"] and c["minus_di"] > c["plus_di"]
-    if not (up or down):
-        return None, "روند تایم اصلی مشخص نیست"
-    for tf in required:
-        h = market_data_dict[tf].iloc[-2]
-        h_adx = _safe_float(h.get("adx"))
-        if h_adx < max(15.0, get_strategy_params(strategy_config)["adx"] - 5):
-            return None, f"ADX تایم {tf} ضعیف است ({h_adx:.1f})"
-        if up and not (h["close"] > h["ema50"] and h["ema20"] >= h["ema50"] and h["plus_di"] >= h["minus_di"]):
-            return None, f"عدم هم‌راستایی Long در {tf}"
-        if down and not (h["close"] < h["ema50"] and h["ema20"] <= h["ema50"] and h["minus_di"] >= h["plus_di"]):
-            return None, f"عدم هم‌راستایی Short در {tf}"
-    sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-    return (sig, f"چندزمانه | {reason}") if sig else (None, reason)
-
-
 def _htf_trend_aligned(df, want_bullish):
     if df is None or df.empty or len(df) < 55:
         return None
@@ -987,15 +1051,15 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
     return break_sig, f"[شکست-قوی] {break_reason}"
 
 
-def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None):
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None, live_price=None):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
     if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+        sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     elif st == "dynamic":
-        if timeframe in ("5min", "15min") and timeframe_mode != "multi":
-            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
+        if timeframe in ("5min", "15min"):
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price)
         else:
             sig, reason = strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     elif st == "trend":
@@ -1004,8 +1068,6 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         sig, reason = strategy_breakout(df_primary, filters, strategy_config)
     elif st == "mean_reversion":
         sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
-    elif st == "multi":
-        sig, reason = strategy_multi_tf(df_primary, market_data_dict, timeframe, filters, strategy_config)
     else:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
@@ -1148,7 +1210,7 @@ def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
     return float(ev), float(base_p)
 
 
-def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None):
+def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     cfg = get_v2_config(strategy_config)
     regime_info = detect_market_regime(df_primary, cfg)
     rname = regime_info["name"]
@@ -1161,7 +1223,12 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         # Existing build_trade_plan routes 5m/15m dynamic plans to sweep. For V2
         # we explicitly choose the generic structural risk engine for non-sweep setups.
         plan_tf = timeframe if family == "liquidity_sweep" else "1hour"
-        plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels)
+        active_setup_index = None
+        if family == "liquidity_sweep":
+            m_active = __import__("re").search(r"ACTIVE_SETUP_INDEX=(\d+)", reason or "")
+            if m_active:
+                active_setup_index = int(m_active.group(1))
+        plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price)
         if not plan:
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
@@ -1189,7 +1256,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     # بین چند خانواده‌ی استراتژی. فیلترهای کیفیت V2 (score/RR/edge proxy) همچنان روی همین
     # یک استراتژی اعمال می‌شوند. تایم‌فریم‌های بالاتر همچنان انتخابی (چند-استراتژی) هستند.
     if timeframe in ("5min", "15min"):
-        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg)
+        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
         add_candidate(sig, reason, "liquidity_sweep", float(cfg["sweep_score_bonus"]))
     else:
         if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
@@ -1208,13 +1275,13 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     return best_sig, best_plan, best_reason
 
 
-def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
-    sig, plan, reason = _select_v2_setup(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, live_price=None):
+    sig, plan, reason = _select_v2_setup(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     return sig, reason
 
-def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None):
+def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "V2: داده کافی نیست"
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
-    return get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime)
+        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
+    return get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime, live_price=live_price)
