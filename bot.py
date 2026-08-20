@@ -39,6 +39,7 @@ from ui import (
     get_confirm_emergency_close_keyboard,
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
+    get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -2419,101 +2420,183 @@ def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None
 
 
 def _entry_diag_label(reason):
+    """Turn internal strategy reasons into short, human trading language.
+    The diagnostic log is for decision transparency, not for exposing indicator math.
+    """
     r = str(reason or '').strip()
     if not r:
-        return 'دلیل مشخصی ثبت نشد'
-    replacements = {
-        'روند ضعیف است': 'روند بازار ضعیف است',
-        'شرایط روندی برقرار نیست': 'شرایط ورود روندی کامل نیست',
-        'شکست جدیدی ثبت نشد': 'شکست معتبر ثبت نشده است',
-        'حجم شکست کافی نیست': 'حجم برای تأیید شکست کافی نیست',
-        'قدرت بدنه کافی نیست': 'قدرت کندل برای ورود کافی نیست',
-        'RSI خنثی است': 'RSI در محدوده خنثی است',
-        'قیمت از محدوده میانگین دور است': 'قیمت برای بازگشت به میانگین مناسب نیست',
-        'کندل تأیید معتبر نبود': 'کندل تأیید لازم دیده نشد',
-        'امتیاز کیفیت پایین است': 'امتیاز کیفیت معامله به حد لازم نرسید',
-        'R:R کافی نیست': 'نسبت سود به ضرر مناسب نیست',
-        'داده کافی نیست': 'داده کافی برای تصمیم‌گیری وجود ندارد',
-        'داده کافی برای طراحی معامله وجود ندارد': 'داده کافی برای ساخت معامله وجود ندارد',
-    }
-    for old, new in replacements.items():
-        if old in r:
-            tail = r.split(old, 1)[1].strip()
-            return (new + (' ' + tail if tail else '')).strip()[:180]
-    return r[:180]
+        return 'شرایط ورود هنوز کامل نشده'
 
-
-def _entry_diag_report(chat_id, results, elapsed):
-    s = get_session(chat_id)
-    scanned = len(results)
-    opened = sum(1 for x in results if x.get('status') == 'entry_opened')
-    signals = sum(1 for x in results if x.get('signal'))
-    data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
-    blocked = sum(1 for x in results if x.get('status') in ('blocked','risk_blocked','trade_plan_blocked','execute_blocked'))
-
-    counts = {}
-    for x in results:
-        if x.get('status') == 'entry_opened':
-            continue
-        label = _entry_diag_label(x.get('reason'))
-        if label and label != 'دلیل مشخصی ثبت نشد':
-            counts[label] = counts.get(label, 0) + 1
-    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
-
-    tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
-    lines = [
-        '🔎 *گزارش تشخیصی ورود*',
-        '━━━━━━━━━━━━━━━━━━━━',
-        f'⏱ بازه بدون ورود: `{max(1, int(elapsed/60))} دقیقه`',
-        f'📊 تایم‌فریم: `{tf}` | استراتژی: `{s.get("active_strategy")}`',
-        f'🔍 نمادهای بررسی‌شده: `{scanned}`',
-        f'🎯 سیگنال معتبر: `{signals}`',
-        f'📥 پوزیشن بازشده: `{opened}`',
+    # Keep the explanation at the level a trader actually needs: what is missing,
+    # not which indicator number failed.
+    rules = [
+        (r'داده کافی|داده بازار خالی|سطوح روز قبل هنوز آماده|یک روز کامل قبلی', 'هنوز داده یا سطح معتبر کافی برای تصمیم‌گیری نداریم'),
+        (r'ظرفیت پوزیشن|محدودیت ریسک|ریسک به کارمزد|وضعیت ربات|توقف', 'فعلاً اجازه ورود از سمت مدیریت ریسک/ربات داده نمی‌شود'),
+        (r'cooldown|دوره انتظار', 'ربات بعد از معامله قبلی در زمان انتظار است'),
+        (r'R:R کافی نیست|نسبت سود به ضرر', 'ستاپ خوب به نظر می‌رسد، اما سود احتمالی به ریسک آن نمی‌ارزد'),
+        (r'امتیاز کیفیت پایین', 'ستاپ شکل گرفته، ولی کیفیت کلی هنوز به حد ورود نرسیده'),
+        (r'فاصله .* معتبر نیست|فاصله .* حد ضرر', 'برای این معامله حد ضرر منطقی پیدا نشد'),
+        (r'کندل تأیید|قدرت بدنه|تأیید معتبر|برگشت تأیید نشده', 'قیمت به ناحیه مناسب نزدیک شده، اما تأیید نهایی هنوز نیامده'),
+        (r'حجم .*کافی نیست|حجم .* تأیید', 'حرکت دیده می‌شود، ولی قدرت لازم برای تأیید آن هنوز کافی نیست'),
+        (r'شکست جدیدی ثبت نشد|شکست معتبر ثبت نشده', 'هنوز شکست معناداری برای ورود شکل نگرفته'),
+        (r'شکست تأیید نشد|هم‌جهت نیست|خلاف جهت بازار', 'حرکت دیده شده با جهت کلی بازار هماهنگ نیست؛ ورود رد شد'),
+        (r'روند ضعیف|شرایط روندی برقرار نیست', 'بازار هنوز روند واضحی برای ورود ندارد'),
+        (r'Mean Reversion|محدوده میانگین|RSI خنثی|اشباع .*برگشت', 'بازار هنوز به نقطه مناسب برای برگشت نرسیده'),
+        (r'ستاپ جدیدی ثبت نشد|ستاپ مناسب پیدا نشد|بدون Pullback|V2:', 'فعلاً ستاپ تمیز و قابل معامله‌ای شکل نگرفته'),
+        (r'ACTIVE_SETUP|فرصت بازیابی', 'یک ستاپ قبلی زیر نظر است، اما ورود هنوز تأیید نشده'),
     ]
+    import re as _re
+    for pattern, label in rules:
+        if _re.search(pattern, r, flags=_re.I):
+            return label
+    return 'هنوز شرایط کامل یک ورود کم‌ریسک فراهم نشده'
+
+
+def _entry_diag_stage(item):
+    """Map an internal scan result to a small human stage machine."""
+    status = str(item.get('status') or '')
+    reason = str(item.get('reason') or '')
+    if status == 'entry_opened':
+        return '🟢', 'سیگنال آماده', 'ورود انجام شد'
+    if status in ('data_error', 'insufficient_data'):
+        return '⚠️', 'داده ناقص', 'برای تصمیم‌گیری داده کافی نیست'
+    if status in ('risk_blocked', 'blocked', 'execute_blocked', 'leader_guard_blocked'):
+        if 'دوره انتظار' in reason or 'cooldown' in reason.lower():
+            return '⏳', 'در انتظار', 'بعد از معامله قبلی هنوز زمان انتظار تمام نشده'
+        return '🛑', 'ورود محافظت شد', 'قواعد محافظتی فعلاً اجازه ورود نمی‌دهند'
+    r = reason.lower()
+    if 'trade_plan' in str(item.get('stage','')).lower() or 'حد ضرر منطقی' in reason or 'rr' in r:
+        return '❌', 'رد شد', 'طرح معامله کیفیت لازم را نداشت'
+    if 'pullback' in r or 'پولبک' in reason or 'retest' in r or 'بازآزمایی' in reason:
+        return '🔄', 'منتظر پولبک', 'حرکت انجام شده؛ منتظر برگشت امن به ناحیه ورودیم'
+    if 'active_setup' in r or 'ستاپ قبلی' in reason or 'نزدیک' in reason:
+        return '👀', 'نزدیک ورود', 'ستاپ در حال شکل‌گیری است و یک تأیید دیگر لازم دارد'
+    if 'تأیید' in reason or 'confirmation' in r or 'قدرت' in reason or 'حجم' in reason:
+        return '⏳', 'منتظر تأیید', 'ناحیه مناسب است ولی تأیید نهایی هنوز نیامده'
+    if 'شکست' in reason or 'breakout' in r or 'روند' in reason:
+        return '⏳', 'منتظر حرکت واضح', 'هنوز حرکت معناداری برای ورود تأیید نشده'
+    if 'ستاپ' in reason or 'شرایط ورود' in reason or 'محدوده' in reason:
+        return '💤', 'بدون ستاپ', 'فعلاً ناحیه و ساختار مناسبی برای معامله نداریم'
+    return '💤', 'بدون ستاپ', 'فعلاً ورود تمیزی دیده نشده'
+
+
+def _entry_diag_next_step(results):
+    stages = [_entry_diag_stage(x)[1] for x in results if x.get('status') != 'entry_opened']
+    if 'نزدیک ورود' in stages:
+        return '👀 چند نماد به ورود نزدیک‌اند؛ ربات فقط منتظر تأیید لازم می‌ماند.'
+    if 'منتظر پولبک' in stages:
+        return '🔄 شکست‌هایی دیده شده؛ ربات وسط حرکت وارد نمی‌شود و منتظر پولبک می‌ماند.'
+    if 'منتظر تأیید' in stages:
+        return '⏳ ستاپ‌ها بررسی شده‌اند؛ هنوز تأیید نهایی برای ورود کم‌ریسک کامل نیست.'
+    if 'منتظر حرکت واضح' in stages:
+        return '⏳ بازار هنوز حرکت واضحی نداده؛ ورود اجباری نداریم.'
+    return '🛡️ فعلاً ستاپ تمیزی نیست؛ ربات صبر می‌کند تا فرصت ارزشمندتری شکل بگیرد.'
+
+
+def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transitions=None):
+    s = get_session(chat_id)
+    results = list(results or [])
+    symbol_states = symbol_states or {}
+    transitions = transitions or []
+    scanned = len(symbol_states) or len(results)
+    opened = sum(1 for x in results if x.get('status') == 'entry_opened')
+    data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
+    tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
+    minutes = max(1, int(elapsed / 60))
+
+    lines = [
+        '🧠 *داشبورد زنده فرصت‌ها*',
+        '━━━━━━━━━━━━━━━━━━━━',
+        f'⏱ گزارش دوره‌ای: هر ۱۰ دقیقه | تایم‌فریم: `{tf}`',
+        f'📊 نمادهای زیر نظر: `{scanned}`',
+    ]
+    if opened:
+        lines.append(f'🟢 در این چرخه `{opened}` ورود انجام شد.')
+    else:
+        lines.append('🟡 هنوز ورود جدیدی انجام نشده؛ ربات منتظر ستاپ تمیز است.')
     if data_issues:
-        lines.append(f'⚠️ مشکل داده: `{data_issues}`')
-    if blocked:
-        lines.append(f'🛑 موارد متوقف‌شده قبل از ورود: `{blocked}`')
+        lines.append(f'⚠️ `{data_issues}` نماد مشکل داده داشته‌اند.')
 
-    if top:
-        lines.append('\n*دلایل اصلی عدم ورود:*')
-        for label, n in top:
-            lines.append(f'• `{n}×` {label}')
+    # Stable ordering: same order as the latest scan, then anything else.
+    ordered = list(symbol_states.values())
+    for item in ordered:
+        sym = item.get('symbol','?')
+        icon, stage, desc = _entry_diag_stage(item)
+        prev = item.get('previous_stage')
+        change = ''
+        if prev and prev != stage:
+            change = f' | تغییر: {prev} → {stage}'
+        lines.append(f'\n{icon} *{sym}* — {stage}{change}\n   {desc}')
 
+    if transitions:
+        lines.append('\n*تغییرات مهم از گزارش قبل:*')
+        for t in transitions[-5:]:
+            lines.append(f'• `{t}`')
+
+    lines.append('\n' + _entry_diag_next_step(list(symbol_states.values()) or results))
     return '\n'.join(lines)
 
 
 def _entry_diag_batch_update(chat_id, results):
     now = time.time()
     state = ENTRY_DIAG_STATE.setdefault(chat_id, {
-        'no_entry_since': None,
+        'no_entry_since': now,
         'last_report_at': 0.0,
         'last_entry_at': 0.0,
         'window_results': [],
+        'symbol_states': {},
+        'transitions': [],
     })
-    opened = any(x.get('status') == 'entry_opened' for x in results)
-    if opened:
-        state['last_entry_at'] = now
-        state['no_entry_since'] = None
-        state['last_report_at'] = 0.0
-        state['window_results'] = []
-        return
     if not results:
         return
-    state.setdefault('window_results', []).extend(results)
-    state['window_results'] = state['window_results'][-240:]
-    if state['no_entry_since'] is None:
-        state['no_entry_since'] = now
-    elapsed = now - float(state['no_entry_since'])
-    last_report = float(state.get('last_report_at', 0.0) or 0.0)
     if not get_session(chat_id).get('entry_diag_enabled', True):
         return
-    if elapsed >= NO_ENTRY_REPORT_SECONDS and (not last_report or now-last_report >= NO_ENTRY_REPORT_SECONDS):
+
+    state.setdefault('symbol_states', {})
+    state.setdefault('transitions', [])
+    state.setdefault('window_results', [])
+    state['window_results'].extend(results)
+    state['window_results'] = state['window_results'][-300:]
+
+    # Keep the latest state for every symbol, and remember only meaningful stage changes.
+    for item in results:
+        sym = item.get('symbol')
+        if not sym:
+            continue
+        old = state['symbol_states'].get(sym)
+        old_stage = old.get('stage') if old else None
+        icon, stage, desc = _entry_diag_stage(item)
+        updated = dict(item)
+        updated['stage'] = stage
+        updated['stage_icon'] = icon
+        updated['stage_desc'] = desc
+        updated['previous_stage'] = old_stage
+        updated['last_update_at'] = now
+        state['symbol_states'][sym] = updated
+        if old_stage and old_stage != stage:
+            state['transitions'].append(f'{sym}: {old_stage} → {stage}')
+    state['transitions'] = state['transitions'][-20:]
+
+    # Always report periodically, even if a trade happened. This makes the log a real
+    # live dashboard instead of only a "why no entry" alarm.
+    if not state.get('no_entry_since'):
+        state['no_entry_since'] = now
+    last_report = float(state.get('last_report_at', 0.0) or 0.0)
+    if (not last_report) or now - last_report >= NO_ENTRY_REPORT_SECONDS:
         try:
-            report_results = list(state.get('window_results') or results)
-            send_message(chat_id, _entry_diag_report(chat_id, report_results, elapsed), parse_mode='Markdown')
+            elapsed = now - float(state.get('no_entry_since') or now)
+            report = _entry_diag_report(
+                chat_id,
+                list(state['window_results']),
+                elapsed,
+                symbol_states=state['symbol_states'],
+                transitions=state['transitions'],
+            )
+            send_message(chat_id, report, parse_mode='Markdown')
             state['last_report_at'] = now
             state['window_results'] = []
+            state['transitions'] = []
+            state['no_entry_since'] = now
         except Exception as exc:
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
@@ -2718,7 +2801,7 @@ def menu(chat_id,message_id=None):
     maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
     text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True)),message_id)
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
@@ -2915,12 +2998,28 @@ def process_command(cmd,chat_id,message_id=None):
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
         period={'/admin_fee_report':'all','/admin_fee_day':'day','/admin_fee_week':'week','/admin_fee_month':'month'}[cmd]
-        send_message(chat_id, admin_fee_report(period), parse_mode='Markdown')
+        edit_page(chat_id, admin_fee_report(period), get_admin_fee_menu_keyboard(), message_id)
         return
-    if cmd == '/users':
+    if cmd == '/admin_fee_menu':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
-        send_message(chat_id, admin_users_report(), parse_mode='Markdown')
+        edit_page(chat_id, admin_fee_report('all'), get_admin_fee_menu_keyboard(), message_id)
+        return
+    if cmd == '/admin_panel':
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        edit_page(chat_id, '👑 *پنل مدیریت*\n\nاز منوی زیر بخش موردنظر را انتخاب کن:', get_admin_panel_keyboard(), message_id)
+        return
+    if cmd in ('/admin_users_list','/users'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        edit_page(chat_id, admin_users_report(), get_admin_panel_keyboard(), message_id)
+        return
+    if cmd == '/admin_set_fee_prompt':
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        s=get_session(chat_id); s['user_state']='WAIT_ADMIN_SET_FEE'; save_session(chat_id)
+        send_message(chat_id, '⚙️ *تنظیم نرخ کارمزد کاربر*\n\nشناسه چت کاربر و درصد کارمزد را با فاصله ارسال کنید.\nمثال: `123456789 10`')
         return
     if str(cmd).startswith('/user '):
         if not is_admin(chat_id):
@@ -2931,8 +3030,9 @@ def process_command(cmd,chat_id,message_id=None):
         except Exception:
             send_message(chat_id,'فرمت: `/user USER_CHAT_ID`', parse_mode='Markdown')
         return
-    if cmd in ('/my_fees','/my_fee_report'):
-        send_message(chat_id, fee_report(chat_id,'all'), parse_mode='Markdown')
+    if cmd in ('/fee_menu','/my_fees','/my_fee_report','/fee_today','/fee_week','/fee_month','/fee_all'):
+        period={'/fee_today':'day','/fee_week':'week','/fee_month':'month'}.get(cmd,'all')
+        edit_page(chat_id, fee_report(chat_id,period), get_fee_menu_keyboard(), message_id)
         return
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
         send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
@@ -3155,6 +3255,22 @@ def handle_text(chat_id,text):
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')
+
+    if current_state == 'WAIT_ADMIN_SET_FEE':
+        s['user_state'] = None
+        save_session(chat_id)
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return
+        parts = raw.split()
+        if len(parts) != 2:
+            send_message(chat_id, 'فرمت نامعتبر است. مثال: `123456789 10`', get_admin_fee_menu_keyboard()); return
+        try:
+            target_id = int(parts[0]); rate = float(parts[1])
+            set_user_fee_rate(target_id, rate)
+            send_message(chat_id, f'✅ نرخ کارمزد کاربر `{target_id}` روی `{rate:.2f}%` تنظیم شد.', get_admin_fee_menu_keyboard())
+        except Exception:
+            send_message(chat_id, '⚠️ مقادیر وارد شده نامعتبر است.', get_admin_fee_menu_keyboard())
+        return
 
     if current_state.startswith('WAIT_EDIT_SL_'):
         sym = current_state.replace('WAIT_EDIT_SL_', '')

@@ -503,6 +503,158 @@ def _compute_prev_day_levels(df):
     return d, float(pdh), float(pdl)
 
 
+
+def _adaptive_intraday_levels(d, before_idx, cfg):
+    """Build conservative, non-future intraday liquidity anchors.
+
+    Priority is deliberately lower than PDH/PDL.  We only expose levels that were
+    already formed before the signal candle and have enough observations to avoid
+    turning every tiny fluctuation into a tradable level.
+    """
+    if d is None or before_idx < 10 or "_dt" not in d.columns or "_date" not in d.columns:
+        return {}
+    work = d.iloc[:before_idx].copy()  # strictly before the signal candle
+    if work.empty:
+        return {}
+    today = d.loc[before_idx, "_date"]
+    day = work[work["_date"] == today].copy()
+    if len(day) < 5:
+        return {}
+
+    min_candles = max(3, int(cfg.get("adaptive_min_level_candles", 6)))
+    levels = {}
+
+    # UTC session buckets are intentional and configurable.  They are stable for
+    # crypto and do not introduce exchange-local DST ambiguity.
+    sessions = {
+        "ASIA": (0, 8),
+        "LONDON": (8, 13),
+        "NEW_YORK": (13, 21),
+    }
+    for name, (h0, h1) in sessions.items():
+        part = day[(day["_dt"].dt.hour >= h0) & (day["_dt"].dt.hour < h1)]
+        if len(part) >= min_candles:
+            levels[f"{name}_HIGH"] = {"price": float(part["high"].max()), "kind": f"{name}_HIGH", "count": len(part)}
+            levels[f"{name}_LOW"] = {"price": float(part["low"].min()), "kind": f"{name}_LOW", "count": len(part)}
+
+    # Opening range: first N minutes of the UTC day. It becomes static once formed.
+    or_minutes = max(15, int(cfg.get("adaptive_opening_range_minutes", 30)))
+    day_start = pd.Timestamp(today, tz="UTC")
+    opening = day[(day["_dt"] >= day_start) & (day["_dt"] < day_start + pd.Timedelta(minutes=or_minutes))]
+    if len(opening) >= max(3, min_candles // 2) and len(work) >= len(opening) + 2:
+        levels["OPENING_RANGE_HIGH"] = {"price": float(opening["high"].max()), "kind": "OPENING_RANGE_HIGH", "count": len(opening)}
+        levels["OPENING_RANGE_LOW"] = {"price": float(opening["low"].min()), "kind": "OPENING_RANGE_LOW", "count": len(opening)}
+
+    # Confirmed intraday swings. The last two candles are excluded; a swing must
+    # have candles on both sides, so the level is not based on the current move.
+    swing_left = max(2, int(cfg.get("adaptive_swing_left", 2)))
+    swing_right = max(2, int(cfg.get("adaptive_swing_right", 2)))
+    if len(day) >= swing_left + swing_right + 3:
+        highs = day["high"].to_numpy(dtype=float)
+        lows = day["low"].to_numpy(dtype=float)
+        best_h = None; best_l = None
+        for i in range(swing_left, len(day) - swing_right):
+            if i >= len(day) - 2:
+                continue
+            if highs[i] >= np.max(highs[i-swing_left:i]) and highs[i] > np.max(highs[i+1:i+1+swing_right]):
+                best_h = float(highs[i])
+            if lows[i] <= np.min(lows[i-swing_left:i]) and lows[i] < np.min(lows[i+1:i+1+swing_right]):
+                best_l = float(lows[i])
+        if best_h is not None:
+            levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
+        if best_l is not None:
+            levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
+    return levels
+
+
+def _adaptive_anchor_candidates(d, idx, atr, cfg):
+    """Return only anchors close enough to be actionable, ranked by hierarchy."""
+    if atr <= 0:
+        return []
+    levels = _adaptive_intraday_levels(d, idx, cfg)
+    if not levels:
+        return []
+    c = float(d.iloc[idx]["close"])
+    max_dist = atr * float(cfg.get("adaptive_max_anchor_distance_atr", 1.60))
+    min_dist = atr * float(cfg.get("adaptive_min_anchor_distance_atr", 0.20))
+    priority = {"LONDON": 3, "NEW_YORK": 3, "ASIA": 2, "OPENING_RANGE": 2, "SWING": 1}
+    out = []
+    for name, item in levels.items():
+        p = float(item["price"])
+        dist = abs(c - p)
+        if not np.isfinite(p) or p <= 0 or dist > max_dist:
+            continue
+        # A level immediately under/over price is not useful until it has room to be swept.
+        if dist < min_dist:
+            continue
+        base = next((v for k, v in priority.items() if name.startswith(k)), 1)
+        out.append((base, -dist, name, p))
+    out.sort(reverse=True)
+    return [(name, price) for _, _, name, price in out]
+
+
+def _adaptive_target_level(d, idx, signal, anchor, atr, cfg):
+    """Choose a nearby opposing liquidity target; fall back to the opposite daily level."""
+    levels = _adaptive_intraday_levels(d, idx, cfg)
+    c = float(d.iloc[idx]["close"])
+    min_move = atr * float(cfg.get("adaptive_min_target_distance_atr", 1.20))
+    candidates = []
+    for name, item in levels.items():
+        p = float(item["price"])
+        if signal == "SELL" and p < c - min_move:
+            candidates.append((c - p, p, name))
+        elif signal == "BUY" and p > c + min_move:
+            candidates.append((p - c, p, name))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda x: x[0])
+    _, p, name = candidates[0]
+    return p, name
+
+def _detect_adaptive_liquidity(d, idx, cfg):
+    """Detect one high-quality intraday sweep or trend retest on a non-daily anchor."""
+    if idx < 2:
+        return None, None, None
+    curr = d.iloc[idx]
+    prev = d.iloc[idx - 1]
+    atr = _safe_float(curr.get("atr"), 0.0)
+    if atr <= 0:
+        return None, None, None
+    o, c, h, l = map(float, (curr["open"], curr["close"], curr["high"], curr["low"]))
+    po, pc, ph, pl = map(float, (prev["open"], prev["close"], prev["high"], prev["low"]))
+    vr = _safe_float(curr.get("volume_ratio"), 0.0)
+    body = _safe_float(curr.get("body_ratio"), 0.0)
+    adx = _safe_float(curr.get("adx"), 0.0)
+    candidates = _adaptive_anchor_candidates(d, idx, atr, cfg)
+    sweep_min = atr * float(cfg.get("adaptive_sweep_min_distance_atr", 0.15))
+    tol = atr * float(cfg.get("adaptive_retest_tolerance_atr", 0.22))
+    min_vol = float(cfg.get("adaptive_min_volume_ratio", 1.12))
+    min_body = float(cfg.get("adaptive_min_body_ratio", 0.50))
+    trend_adx = float(cfg.get("adaptive_trend_adx", 23.0))
+
+    for name, level in candidates:
+        # Reversal/sweep: price pierces the anchor and closes back through it.
+        if h >= level + sweep_min and c < level and c < o and body >= min_body and vr >= min_vol:
+            target, target_name = _adaptive_target_level(d, idx, "SELL", level, atr, cfg)
+            target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
+            return "SELL", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+                             f"intraday liquidity sweep + reclaim نزولی | حجم={vr:.2f}x | body={body:.2f}"), atr
+        if l <= level - sweep_min and c > level and c > o and body >= min_body and vr >= min_vol:
+            target, target_name = _adaptive_target_level(d, idx, "BUY", level, atr, cfg)
+            target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
+            return "BUY", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+                            f"intraday liquidity sweep + reclaim صعودی | حجم={vr:.2f}x | body={body:.2f}"), atr
+
+        # Trend continuation: two-step confirmation. The previous candle must already
+        # have accepted beyond the anchor; current candle must retest and hold it.
+        if adx >= trend_adx and pc > level and c > level and l <= level + tol and c > o and body >= min_body and vr >= min_vol:
+            return "BUY", (f"ADAPTIVE_CONTINUATION|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}|"
+                            f"breakout acceptance + retest موفق | ADX={adx:.1f} | حجم={vr:.2f}x"), atr
+        if adx >= trend_adx and pc < level and c < level and h >= level - tol and c < o and body >= min_body and vr >= min_vol:
+            return "SELL", (f"ADAPTIVE_CONTINUATION|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}|"
+                             f"breakdown acceptance + retest موفق | ADX={adx:.1f} | حجم={vr:.2f}x"), atr
+    return None, None, None
+
 def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
     start = max(0, before_idx - lookback)
     window = d.iloc[start:before_idx]
@@ -611,6 +763,22 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     elif sig:
         return sig, reason
 
+    # If the daily liquidity is no longer realistically reachable, rotate the reference
+    # instead of widening the old setup. This is the key anti-dead-bot mechanism.
+    try:
+        guard_atr = float(atr) if atr is not None and np.isfinite(atr) and atr > 0 else _safe_float(d.iloc[latest_idx].get("atr"), 0.0)
+        daily_activation_atr = float(cfg.get("adaptive_activation_distance_atr", 1.00))
+        daily_nearest_dist = min(abs(live_for_guard - pdh), abs(live_for_guard - pdl))
+        daily_far = daily_nearest_dist >= guard_atr * daily_activation_atr if guard_atr > 0 else False
+    except Exception:
+        guard_atr = 0.0
+        daily_far = False
+
+    if daily_far:
+        adaptive_sig, adaptive_reason, adaptive_atr = _detect_adaptive_liquidity(d, latest_idx, cfg)
+        if adaptive_sig:
+            return adaptive_sig, adaptive_reason
+
     if not bool(cfg.get("active_setup_enabled", True)):
         return None, "ستاپ جدیدی ثبت نشد"
 
@@ -717,7 +885,7 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None):
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -758,11 +926,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         reclaim_depth = (sweep_extreme - entry) / risk_dist
         soft_tp = entry - (risk_dist * target_rr)
         tp = soft_tp
-        # هدف اصلی: کف روز قبل (PDL) - اگر با فاصله حداقل RR قابل قبول باشد
-        if extend_to_structure and pdl < entry and (entry - pdl) / risk_dist >= min_rr:
-            tp = pdl
-        elif pdl < entry and (entry - pdl) / risk_dist >= min_rr:
-            tp = max(tp, pdl)
+        target_ref = float(target_level) if target_level is not None else pdl
+        if extend_to_structure and target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
+            tp = target_ref
+        elif target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
+            tp = max(tp, target_ref)
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
     else:
         sweep_extreme = float(curr["low"])
@@ -776,11 +944,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         reclaim_depth = (entry - sweep_extreme) / risk_dist
         soft_tp = entry + (risk_dist * target_rr)
         tp = soft_tp
-        # هدف اصلی: سقف روز قبل (PDH) - اگر با فاصله حداقل RR قابل قبول باشد
-        if extend_to_structure and pdh > entry and (pdh - entry) / risk_dist >= min_rr:
-            tp = pdh
-        elif pdh > entry and (pdh - entry) / risk_dist >= min_rr:
-            tp = min(tp, pdh)
+        target_ref = float(target_level) if target_level is not None else pdh
+        if extend_to_structure and target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
+            tp = target_ref
+        elif target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
+            tp = min(tp, target_ref)
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
 
     # فیلتر کارمزد به ریسک دلاری
@@ -813,7 +981,9 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
         "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
-        "structural_target": bool(tp == pdl or tp == pdh),
+        "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
+        "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
+        "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
         "pattern": pattern_name,
         "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
     }
@@ -1112,6 +1282,20 @@ V2_DEFAULTS = {
     "sweep_score_bonus": 8.0,
     "regime_confidence_min": 0.55,
     "max_atr_ratio_for_entry": 2.20,
+    # Adaptive intraday liquidity: deliberately conservative to prevent signal spam.
+    "adaptive_activation_distance_atr": 1.00,
+    "adaptive_min_level_candles": 6,
+    "adaptive_opening_range_minutes": 30,
+    "adaptive_swing_left": 2,
+    "adaptive_swing_right": 2,
+    "adaptive_max_anchor_distance_atr": 1.60,
+    "adaptive_min_anchor_distance_atr": 0.20,
+    "adaptive_sweep_min_distance_atr": 0.15,
+    "adaptive_retest_tolerance_atr": 0.22,
+    "adaptive_min_volume_ratio": 1.12,
+    "adaptive_min_body_ratio": 0.50,
+    "adaptive_min_target_distance_atr": 1.20,
+    "adaptive_trend_adx": 23.0,
 }
 
 
@@ -1228,7 +1412,22 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             m_active = __import__("re").search(r"ACTIVE_SETUP_INDEX=(\d+)", reason or "")
             if m_active:
                 active_setup_index = int(m_active.group(1))
-        plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price)
+        anchor_level = None
+        target_level = None
+        if family == "liquidity_sweep" and "ADAPTIVE_SWEEP" in (reason or ""):
+            import re as _re
+            ma = _re.search(r"\bANCHOR=([0-9.eE+-]+)", reason or "")
+            mt = _re.search(r"\bTARGET=([0-9.eE+-]+)", reason or "")
+            if ma:
+                try: anchor_level = float(ma.group(1))
+                except Exception: anchor_level = None
+            if mt:
+                try: target_level = float(mt.group(1))
+                except Exception: target_level = None
+        if family == "liquidity_sweep":
+            plan, plan_reason = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price, anchor_level=anchor_level, target_level=target_level)
+        else:
+            plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price)
         if not plan:
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
@@ -1257,7 +1456,10 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     # یک استراتژی اعمال می‌شوند. تایم‌فریم‌های بالاتر همچنان انتخابی (چند-استراتژی) هستند.
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
-        add_candidate(sig, reason, "liquidity_sweep", float(cfg["sweep_score_bonus"]))
+        # Adaptive continuation uses the existing trend risk engine; adaptive sweeps
+        # use the sweep engine and retain the strict V2 quality gates.
+        family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
+        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
     else:
         if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
             sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)

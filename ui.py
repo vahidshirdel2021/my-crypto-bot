@@ -122,8 +122,8 @@ def get_timeframe_keyboard():
     ]}
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True):
-    return {"inline_keyboard": [
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
+    rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
@@ -132,9 +132,39 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
          {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
+        [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
         [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+    ]
+    if is_admin_user:
+        rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
+    return {"inline_keyboard": rows}
+
+
+def get_fee_menu_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "📅 امروز", "callback_data": "/fee_today"}, {"text": "📆 ۷ روز", "callback_data": "/fee_week"}],
+        [{"text": "🗓 ۳۰ روز", "callback_data": "/fee_month"}, {"text": "📊 کل سابقه", "callback_data": "/fee_all"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
+
+
+def get_admin_panel_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "💰 گزارش کارمزد پلتفرم", "callback_data": "/admin_fee_menu"}],
+        [{"text": "👥 لیست کاربران", "callback_data": "/admin_users_list"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
+
+
+def get_admin_fee_menu_keyboard():
+    return {"inline_keyboard": [
+        [{"text": "📅 امروز", "callback_data": "/admin_fee_day"}, {"text": "📆 ۷ روز", "callback_data": "/admin_fee_week"}],
+        [{"text": "🗓 ۳۰ روز", "callback_data": "/admin_fee_month"}, {"text": "📊 کل سابقه", "callback_data": "/admin_fee_report"}],
+        [{"text": "⚙️ تنظیم نرخ کارمزد کاربر", "callback_data": "/admin_set_fee_prompt"}],
+        [{"text": "👑 بازگشت به پنل مدیریت", "callback_data": "/admin_panel"}],
+        [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
 
