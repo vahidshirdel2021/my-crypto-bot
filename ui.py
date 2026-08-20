@@ -128,6 +128,8 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True):
         [{"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
+        [{"text": "💰 گزارش کارمزد من", "callback_data": "/my_fees"},
+         {"text": "👑 گزارش درآمد ادمین", "callback_data": "/admin_fee_report"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
