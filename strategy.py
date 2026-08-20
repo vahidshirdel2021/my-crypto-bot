@@ -2,31 +2,24 @@ import pandas as pd
 import numpy as np
 
 
-def compute_log_grid_levels(df, base_steps=20):
-    """
-    بازنویسی دقیق منطق اسکریپت Pine «شبکه هندسی یکدست و پرتر»:
-    - chart_low / chart_high = کف و سقف مطلق کل بازه‌ی داده‌ی ورودی (df)
-    - ratio = پله‌ی نسبت هندسی طوری که از chart_low با base_steps پله به chart_high برسیم
-    - خروجی شامل نیم‌پله‌ها هم هست (مثل اسکریپت اصلی: step_index = i*0.5)
-    نکته مهم: این سطوح حمایت/مقاومت واقعی (بر اساس رفتار قیمت) نیستند، صرفاً یک شبکه‌ی
-    لگاریتمی مساوی‌فاصله بین کف و سقف بازه‌ی داده هستند - دقیقاً مثل اسکریپت اصلی.
-    خروجی: لیستی از دیکشنری {'step': step_index, 'price': level_price} به ترتیب صعودی.
+def compute_log_grid_levels(df, base_steps=20, lookback=None):
+    """Build a correctly spaced log grid without anchoring it to stale extremes.
+
+    ``base_steps`` is the number of full log steps; half-steps are inserted,
+    so the final grid has ``base_steps * 2`` equal log intervals.  When
+    ``lookback`` is supplied only the latest completed history is used.  This
+    keeps the grid adaptive while avoiding a permanently stale all-time anchor.
     """
     if df is None or df.empty or len(df) < 2:
         return []
-    chart_low = float(df['low'].min())
-    chart_high = float(df['high'].max())
-    if chart_low <= 0 or chart_high <= chart_low:
+    d = df.tail(int(lookback)) if lookback and int(lookback) > 1 else df
+    chart_low = float(pd.to_numeric(d['low'], errors='coerce').min())
+    chart_high = float(pd.to_numeric(d['high'], errors='coerce').max())
+    if not np.isfinite(chart_low) or not np.isfinite(chart_high) or chart_low <= 0 or chart_high <= chart_low:
         return []
-    ratio = (chart_high / chart_low) ** (1.0 / base_steps)
-    total_sub_steps = base_steps * 2
-    levels = []
-    for i in range(total_sub_steps + 1):
-        step_index = i * 0.5
-        level_price = chart_low * (ratio ** step_index)
-        levels.append({'step': step_index, 'price': level_price})
-    return levels
-
+    n_intervals = max(1, int(base_steps) * 2)
+    ratio = (chart_high / chart_low) ** (1.0 / n_intervals)
+    return [{'step': i / 2.0, 'price': chart_low * (ratio ** i)} for i in range(n_intervals + 1)]
 
 def nearest_grid_level(price, levels):
     """نزدیک‌ترین سطح شبکه به یک قیمت مشخص را برمی‌گرداند: (level_dict, فاصله به‌درصد)."""
@@ -186,6 +179,7 @@ STRATEGY_DEFAULTS = {
     "min_trade_score": 65.0,
     "min_rr": 1.35,
     "max_sl_atr": 3.00,
+    "grid_lookback_candles": 500,
     "min_target_r": 1.35,
     "max_target_r": 1.8,
     "min_volume_ratio": 1.05,
@@ -413,8 +407,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         sl = swing_sl if (swing_sl is not None and swing_sl < entry) else atr_sl
         if (entry - sl) / entry < min_sl_pct:
             sl = entry * (1.0 - min_sl_pct)
+        if swing_sl is not None and swing_sl < entry and entry - sl > atr * max_sl_atr:
+            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         if entry - sl > atr * max_sl_atr:
-            sl = entry - atr * max_sl_atr
+            return None, "فاصله حد ضرر بیش از سقف مجاز است"
         risk_dist = entry - sl
         resistance = _safe_float(c.get("channel_high"), 0)
         if resistance <= entry + risk_dist * min_r:
@@ -429,8 +425,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         sl = swing_sl if (swing_sl is not None and swing_sl > entry) else atr_sl
         if (sl - entry) / entry < min_sl_pct:
             sl = entry * (1.0 + min_sl_pct)
+        if swing_sl is not None and swing_sl > entry and sl - entry > atr * max_sl_atr:
+            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         if sl - entry > atr * max_sl_atr:
-            sl = entry + atr * max_sl_atr
+            return None, "فاصله حد ضرر بیش از سقف مجاز است"
         risk_dist = sl - entry
         support = _safe_float(c.get("channel_low"), 0)
         if support >= entry - risk_dist * min_r:
@@ -909,6 +907,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
+    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
     body_ratio = _safe_float(curr.get("body_ratio"), 0)
     vr = _safe_float(curr.get("volume_ratio"), 1)
 
@@ -923,6 +922,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         risk_dist = sl - entry
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
+        if risk_dist > atr * max_sl_atr:
+            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (sweep_extreme - entry) / risk_dist
         soft_tp = entry - (risk_dist * target_rr)
         tp = soft_tp
@@ -941,6 +942,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         risk_dist = entry - sl
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
+        if risk_dist > atr * max_sl_atr:
+            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (entry - sweep_extreme) / risk_dist
         soft_tp = entry + (risk_dist * target_rr)
         tp = soft_tp

@@ -1,3 +1,4 @@
+import hashlib
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
 from threading import Thread, RLock
@@ -1493,7 +1494,15 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
     if m_level:
         level_key = f"{symbol}:{m_level.group(1)}:{m_level.group(2)}"
-    audit_event(chat_id, trade_id, 'signal_and_plan', {'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp, 'reason': reason, 'timeframe': s.get('timeframe'), 'strategy': s.get('active_strategy'), 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
+    # A setup is consumable only once. Use the latest closed signal identity so
+    # repeated scan loops cannot create duplicate audit signals or re-enter the
+    # exact same liquidity event.
+    setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
+    setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
+    if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
+        return False
+    if setup_id in set(s.get('consumed_setups') or []):
+        return False
     if (require_active and not s['is_bot_active']) or s['daily_stopped'] or not risk_guard(chat_id):
         return False
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
@@ -1511,6 +1520,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
         return False
+    audit_event(chat_id, trade_id, 'signal_and_plan', {
+        'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
+        'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
+        'strategy': s.get('active_strategy'), 'quality_score': quality_score,
+        'quality_label': quality_label, 'planned_rr': planned_rr
+    })
 
     price=latest_price(symbol) or float(signal_price)
     # Conservative paper execution: adverse entry slippage only.
@@ -1536,7 +1551,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
-    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1640,6 +1655,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
+    consumed = s.setdefault('consumed_setups', [])
+    if setup_id not in consumed:
+        consumed.append(setup_id)
+        # Keep memory bounded while preserving enough recent setup identities.
+        if len(consumed) > 2000:
+            del consumed[:-2000]
         save_session(chat_id)
 
     if trade.get('is_real'):
@@ -2117,14 +2138,11 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
             return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
 
-        # Loss-cut becomes progressively more sensitive as the trade approaches SL.
-        if current_r <= -0.70: loss_score=30.0
-        elif current_r <= -0.50: loss_score=35.0
-        elif current_r <= -0.30: loss_score=40.0
-        elif current_r <= -0.10: loss_score=45.0
-        else: loss_score=999.0
+        # Do not cut normal liquidity-sweep pullbacks. Early loss-cut is only
+        # considered once the trade has materially deteriorated (<= -0.50R).
+        loss_score = 35.0 if current_r <= -0.50 else 999.0
 
-        need_weakness = current_r>=min_profit_r or current_r<=-0.10
+        need_weakness = current_r>=min_profit_r or current_r<=-0.50
         if not need_weakness:
             return False,[]
         if wdf is None:
@@ -2140,7 +2158,7 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         # the stricter threshold to avoid exiting normal pullbacks.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if current_r<=-0.10 and wscore>=loss_score:
+        if current_r<=-0.50 and wscore>=loss_score:
             return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         return False,[]
     except Exception as exc:
@@ -2493,49 +2511,91 @@ def _entry_diag_next_step(results):
     return '🛡️ فعلاً ستاپ تمیزی نیست؛ ربات صبر می‌کند تا فرصت ارزشمندتری شکل بگیرد.'
 
 
+def _entry_diag_direction(item):
+    """Return the relevant LONG/SHORT context for a diagnostic row."""
+    sig = str(item.get('signal') or '').upper()
+    if sig == 'BUY':
+        return '🟢 LONG'
+    if sig == 'SELL':
+        return '🔴 SHORT'
+    sym = str(item.get('symbol') or '').upper()
+    in_long = sym in SHARED_LONG_WATCHLIST
+    in_short = sym in SHARED_SHORT_WATCHLIST
+    if in_long and in_short:
+        return '🟡 LONG/SHORT'
+    if in_long:
+        return '🟢 LONG'
+    if in_short:
+        return '🔴 SHORT'
+    return '⚪️'
+
+
 def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transitions=None):
+    """Compact opportunity dashboard: show only active/non-idle opportunities."""
     s = get_session(chat_id)
     results = list(results or [])
     symbol_states = symbol_states or {}
     transitions = transitions or []
-    scanned = len(symbol_states) or len(results)
     opened = sum(1 for x in results if x.get('status') == 'entry_opened')
     data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
     tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
-    minutes = max(1, int(elapsed / 60))
+
+    all_items = list(symbol_states.values()) or results
+    active_items = []
+    for item in all_items:
+        icon, stage, desc = _entry_diag_stage(item)
+        # Keep the report focused on actionable/watch states. Pure idle/no-setup
+        # symbols are intentionally omitted from Telegram.
+        if stage in ('بدون ستاپ', 'داده ناقص'):
+            continue
+        active_items.append((item, icon, stage, desc))
+
+    long_active = sum(1 for item, *_ in active_items if 'LONG' in _entry_diag_direction(item))
+    short_active = sum(1 for item, *_ in active_items if 'SHORT' in _entry_diag_direction(item))
+    confirm_wait = sum(1 for _, _, stage, _ in active_items if stage in ('منتظر تأیید', 'نزدیک ورود', 'منتظر حرکت واضح', 'در انتظار'))
+    pullback_wait = sum(1 for _, _, stage, _ in active_items if stage == 'منتظر پولبک')
 
     lines = [
         '🧠 *داشبورد زنده فرصت‌ها*',
         '━━━━━━━━━━━━━━━━━━━━',
         f'⏱ گزارش دوره‌ای: هر ۱۰ دقیقه | تایم‌فریم: `{tf}`',
-        f'📊 نمادهای زیر نظر: `{scanned}`',
+        f'🟢 LONG زیر نظر: `{len(SHARED_LONG_WATCHLIST)}` نماد',
+        f'🔴 SHORT زیر نظر: `{len(SHARED_SHORT_WATCHLIST)}` نماد',
+        f'🔎 مجموع مسیرهای بررسی: `{len(SHARED_LONG_WATCHLIST) + len(SHARED_SHORT_WATCHLIST)}`',
     ]
     if opened:
         lines.append(f'🟢 در این چرخه `{opened}` ورود انجام شد.')
+    elif active_items:
+        lines.append(f'📌 فرصت‌های فعال: `{len(active_items)}`')
     else:
-        lines.append('🟡 هنوز ورود جدیدی انجام نشده؛ ربات منتظر ستاپ تمیز است.')
+        lines.append('💤 فعلاً فرصت فعال و قابل پیگیری وجود ندارد؛ موارد بدون ستاپ نمایش داده نمی‌شوند.')
     if data_issues:
-        lines.append(f'⚠️ `{data_issues}` نماد مشکل داده داشته‌اند.')
+        lines.append(f'⚠️ `{data_issues}` مورد مشکل داده داشت و در فهرست فرصت‌های فعال نمایش داده نشده است.')
 
-    # Stable ordering: same order as the latest scan, then anything else.
-    ordered = list(symbol_states.values())
-    for item in ordered:
+    for item, icon, stage, desc in active_items:
         sym = item.get('symbol','?')
-        icon, stage, desc = _entry_diag_stage(item)
+        direction = _entry_diag_direction(item)
         prev = item.get('previous_stage')
         change = ''
         if prev and prev != stage:
             change = f' | تغییر: {prev} → {stage}'
-        lines.append(f'\n{icon} *{sym}* — {stage}{change}\n   {desc}')
+        lines.append(f'\n{icon} *{sym}* — {direction} — {stage}{change}\n   {desc}')
 
-    if transitions:
+    if active_items:
+        lines.append('\n━━━━━━━━━━━━━━━━━━━━')
+        lines.append(f'📊 *خلاصه فرصت‌ها:* `{len(active_items)}` فعال | 🟢 LONG: `{long_active}` | 🔴 SHORT: `{short_active}`')
+        lines.append(f'⏳ منتظر تأیید: `{confirm_wait}` | 🔄 منتظر پولبک: `{pullback_wait}`')
+
+    # Only show transitions that are still relevant to the compact active dashboard.
+    relevant_transitions = [t for t in transitions if not any(x in t for x in ('→ بدون ستاپ', '→ داده ناقص'))]
+    if relevant_transitions:
         lines.append('\n*تغییرات مهم از گزارش قبل:*')
-        for t in transitions[-5:]:
+        for t in relevant_transitions[-5:]:
             lines.append(f'• `{t}`')
 
-    lines.append('\n' + _entry_diag_next_step(list(symbol_states.values()) or results))
+    if active_items:
+        lines.append('\n' + _entry_diag_next_step([x[0] for x in active_items]))
     return '\n'.join(lines)
-
 
 def _entry_diag_batch_update(chat_id, results):
     now = time.time()
@@ -2669,7 +2729,17 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
-    full_reason=f"{reason} | {plan_reason}"[:500]
+    # The V2 planner may return the same setup reason already emitted by the
+    # signal engine. Do not concatenate duplicate evidence/EdgeProxy values.
+    signal_reason = (reason or '').strip()
+    planner_reason = (plan_reason or '').strip()
+    if not planner_reason or planner_reason == signal_reason or planner_reason in signal_reason:
+        full_reason = signal_reason
+    elif signal_reason and signal_reason in planner_reason:
+        full_reason = planner_reason
+    else:
+        full_reason = f"{signal_reason} | {planner_reason}"
+    full_reason = full_reason[:500]
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)

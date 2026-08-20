@@ -49,3 +49,14 @@ Required columns:
 - drawdown.png
 
 This is a research tool, not a guarantee of future returns.
+
+
+## Correctness fixes in final reviewed build
+- Correct half-step logarithmic grid spacing.
+- Rolling grid support for backtests to avoid stale all-history anchoring.
+- Structural stops wider than the configured ATR ceiling are rejected instead of being moved inside market structure.
+- Timeframe-aware funding is calculated once at close; no placeholder/double-adjustment path.
+- Position sizing now explicitly respects both target risk and a 50% margin cap.
+- Smart loss cuts require a meaningful adverse move (default -0.5R) instead of triggering from a trivial -0.1R move.
+- Single-symbol backtester defaults to one open position, matching the actual engine.
+- Removed duplicate equity-row append.

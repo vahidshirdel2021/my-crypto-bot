@@ -66,7 +66,7 @@ class BacktestConfig:
     initial_balance: float = 10_000.0
     risk_per_trade: float = 0.005
     max_daily_loss: float = 0.03
-    max_open_positions: int = 3
+    max_open_positions: int = 1  # single-symbol engine: more than one is not simulated
     leverage: float = 5.0
     taker_fee_pct: float = 0.05
     slippage_bps: float = 2.0
@@ -228,12 +228,11 @@ def position_size(balance: float, entry: float, sl: float, risk_pct: float, leve
     return qty, notional, margin
 
 
-def close_position(pos: Position, exit_price: float, exit_time: int, reason: str, cfg: BacktestConfig, bars_held: int) -> Dict:
+def close_position(pos: Position, exit_price: float, exit_time: int, reason: str, cfg: BacktestConfig, bars_held: int, timeframe: str) -> Dict:
     px = apply_slippage(exit_price, pos.side, False, cfg.slippage_bps)
     gross = mark_to_market_pnl(pos, px)
     fee_exit = abs(pos.qty * px) * cfg.taker_fee_pct / 100.0
-    fund = funding_cost(abs(pos.qty * px), bars_held, '5m', cfg.funding_rate_8h) if cfg.funding_enabled else 0.0
-    # timeframe-specific funding is corrected by caller after the record is built.
+    fund = funding_cost(abs(pos.qty * pos.entry), bars_held, timeframe, cfg.funding_rate_8h) if cfg.funding_enabled else 0.0
     total_fee = pos.fee_entry + fee_exit
     net = gross - total_fee - fund
     risk_usdt = pos.risk_distance * pos.qty
@@ -335,7 +334,7 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
                         if (ns > pos.sl_current if is_long else ns < pos.sl_current):
                             pos.sl_current, pos.locked_r, pos.trailing_activated = ns, lr, True
                 current_r = ((close-pos.entry)/pos.risk_distance if is_long else (pos.entry-close)/pos.risk_distance)
-                if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) or current_r <= -0.10:
+                if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) or current_r <= -0.50:
                     mg=mgmt_ind[mgmt_ind.ts <= ts]
                     if len(mg) >= 60:
                         weak, ws, _ = evaluate_trend_weakness(mg, 'BUY' if is_long else 'SELL', scfg)
@@ -343,17 +342,10 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
                             exit_px, reason = close, 'WEAKNESS_EXIT'
                         else:
                             loss_score = 30.0 if current_r <= -0.70 else 35.0 if current_r <= -0.50 else 40.0 if current_r <= -0.30 else 45.0
-                            if current_r <= -0.10 and ws >= loss_score:
+                            if current_r <= -0.50 and ws >= loss_score:
                                 exit_px, reason = close, 'SMART_LOSS_CUT'
             if exit_px is not None:
-                tr = close_position(pos, exit_px, ts, reason, cfg, i-pos.entry_idx)
-                # Recompute funding with actual timeframe and correct the placeholder.
-                if cfg.funding_enabled:
-                    old = tr['funding']
-                    tr['funding'] = funding_cost(abs(pos.qty * pos.entry), i-pos.entry_idx, timeframe, cfg.funding_rate_8h)
-                    tr['pnl_net'] += old - tr['funding']
-                    risk_usdt = pos.risk_distance * pos.qty
-                    tr['realized_r'] = tr['pnl_net'] / risk_usdt if risk_usdt else 0.0
+                tr = close_position(pos, exit_px, ts, reason, cfg, i-pos.entry_idx, timeframe)
                 balance += tr['pnl_net']
                 daily_realized += tr['pnl_net']
                 peak = max(peak, balance)
@@ -381,7 +373,8 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
         # IMPORTANT: build HTF features only from data available at this decision time.
         # Reusing full-history HTF frames here would leak future candles into the signal.
         htf = build_htf_data(window, timeframe)
-        grid = compute_log_grid_levels(window) if timeframe in ('5m','15m') else None
+        grid_lookback = int(scfg.get('grid_lookback_candles', 500))
+        grid = compute_log_grid_levels(window, lookback=grid_lookback) if timeframe in ('5m','15m') else None
         sig, plan, reason = _select_v2_setup(window, htf, strategy_tf, filters, scfg, grid_levels=grid)
         if sig not in ('BUY','SELL') or plan is None:
             equity_rows.append({'ts':ts,'balance':balance,'drawdown':balance/peak-1,'open_pnl':0.0,'equity':balance})
@@ -401,13 +394,17 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
         side = 'LONG' if sig == 'BUY' else 'SHORT'
         entry = apply_slippage(raw_entry, side, True, cfg.slippage_bps)
         dist = abs(entry-sl)
-        qty, notional, margin = position_size(balance, entry, sl, cfg.risk_per_trade, cfg.leverage)
+        target_risk_usdt = balance * cfg.risk_per_trade
+        qty_by_risk, _, _ = position_size(balance, entry, sl, cfg.risk_per_trade, cfg.leverage)
+        max_margin = balance * 0.5
+        qty_by_margin = (max_margin * cfg.leverage) / entry
+        qty = min(qty_by_risk, qty_by_margin)
+        notional = qty * entry
+        margin = notional / max(cfg.leverage, 1e-9)
         if qty <= 0 or notional <= 0:
             i += 1
             continue
-        # Avoid impossible leverage/margin after sizing.
-        margin = min(margin, balance * 0.5)
-        qty = margin * cfg.leverage / entry
+        actual_risk_usdt = dist * qty
         fee_entry = abs(qty*entry) * cfg.taker_fee_pct/100.0
         pos = Position(symbol, side, ts, i, entry, sl, sl, tp, dist, qty, qty*entry, margin,
                        fee_entry, float(plan.get('score',0)), float(plan.get('rr',0)),
@@ -420,13 +417,7 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
 
     if pos is not None:
         last = ind.iloc[-1]
-        tr = close_position(pos, float(last.close), int(last.ts), 'END_OF_DATA', cfg, n-1-pos.entry_idx)
-        if cfg.funding_enabled:
-            old = tr['funding']
-            tr['funding'] = funding_cost(abs(pos.qty*pos.entry), n-1-pos.entry_idx, timeframe, cfg.funding_rate_8h)
-            tr['pnl_net'] += old-tr['funding']
-            risk_usdt = pos.risk_distance*pos.qty
-            tr['realized_r'] = tr['pnl_net']/risk_usdt if risk_usdt else 0.0
+        tr = close_position(pos, float(last.close), int(last.ts), 'END_OF_DATA', cfg, n-1-pos.entry_idx, timeframe)
         trades.append(tr)
         balance += tr['pnl_net']
         equity_rows.append({'ts':int(last.ts),'balance':balance,'drawdown':balance/peak-1,'open_pnl':0.0,'equity':balance})
