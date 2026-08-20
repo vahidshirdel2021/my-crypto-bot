@@ -282,7 +282,20 @@ def upsert_telegram_user(user, chat_id=None):
         finally: conn.close()
 
 
+def mark_stale_users(days=30):
+    cutoff = int(time.time()) - int(days * 86400)
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('PRAGMA busy_timeout=15000')
+            conn.execute('UPDATE users SET is_active=0 WHERE last_seen < ?', (cutoff,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
 def admin_users_report(limit=100):
+    mark_stale_users(30)
     with DB_LOCK:
         conn=db_connect()
         try:
@@ -298,7 +311,8 @@ def admin_users_report(limit=100):
         name = ' '.join(x for x in (first, last) if x) or 'بدون نام'
         uname = f'@{username}' if username else 'بدون username'
         status = '🟢' if is_active else '⚪️'
-        lines.append(f'{status} `{i}` {name} — `{uname}`\n   ID: `{cid}` | کارمزد: `{fee_total:.2f}` USDT ({fee_trades})')
+        last_txt = time.strftime('%Y-%m-%d %H:%M', time.localtime(last_seen))
+        lines.append(f'{status} `{i}` {name} — `{uname}`\n   ID: `{cid}` | آخرین فعالیت: `{last_txt}` | کارمزد: `{fee_total:.2f}` USDT ({fee_trades})')
     return '\n'.join(lines)
 
 
@@ -309,11 +323,17 @@ def admin_user_detail(chat_id, target_id):
             row=conn.execute('SELECT chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active FROM users WHERE chat_id=?',(int(target_id),)).fetchone()
             fee=conn.execute('SELECT COALESCE(SUM(platform_fee_usdt),0),COUNT(*) FROM fee_ledger WHERE chat_id=?',(int(target_id),)).fetchone()
         finally: conn.close()
-    if not row: return f'❌ کاربری با ID `{target_id}` پیدا نشد.'
+    if not row: return f'❌ کاربری با ID `{target_id}` در رجیستری پیدا نشد.'
     cid, uid, username, first, last, first_seen, last_seen, is_active = row
     fee_total, fee_count = fee or (0, 0)
     name = ' '.join(x for x in (first, last) if x) or 'بدون نام'
-    return f'👤 *پروفایل کاربر*\nنام: `{name}`\nChat ID: `{cid}`\nکارمزد ثبت‌شده: `{fee_total:.2f} USDT` در `{fee_count}` معامله'
+    uname = f'@{username}' if username else 'بدون username'
+    return (f'👤 *پروفایل کاربر*\n\nنام: `{name}`\nUsername: `{uname}`\nChat ID: `{cid}`\nTelegram ID: `{uid}`\n'
+            f'اولین فعالیت: `{time.strftime("%Y-%m-%d %H:%M", time.localtime(first_seen))}`\n'
+            f'آخرین فعالیت: `{time.strftime("%Y-%m-%d %H:%M", time.localtime(last_seen))}`\n'
+            f'وضعیت: `{"فعال" if is_active else "غیرفعال"}`\n'
+            f'نرخ کارمزد فعلی: `{get_user_fee_rate(target_id):.2f}%`\n'
+            f'کارمزد ثبت‌شده: `{fee_total:.2f} USDT` در `{fee_count}` معامله')
 
 
 def save_session(chat_id):
@@ -324,6 +344,7 @@ def save_session(chat_id):
     with DB_LOCK:
         conn = db_connect()
         try:
+            conn.execute('PRAGMA busy_timeout=15000')
             conn.execute('INSERT INTO sessions(chat_id,data,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at', (chat_id, payload, int(time.time())))
             conn.commit()
         finally: conn.close()
@@ -332,41 +353,70 @@ def save_session(chat_id):
 def audit_event(chat_id, trade_id, stage, data=None):
     try:
         s = get_session(chat_id)
-        event = {'trade_id': str(trade_id), 'stage': str(stage), 'ts': time.time(), 'data': data or {}}
+        event = {
+            'trade_id': str(trade_id),
+            'stage': str(stage),
+            'ts': time.time(),
+            'data': data or {},
+        }
         s.setdefault('trade_audit', []).append(event)
         s['trade_audit'] = s['trade_audit'][-2000:]
         save_session(chat_id)
         return event
-    except Exception: return None
+    except Exception:
+        logger.exception('trade audit event failed chat=%s trade=%s stage=%s', chat_id, trade_id, stage)
+        return None
 
 
 def new_trade_id(chat_id, symbol):
-    return hashlib.sha1(f"{chat_id}:{symbol}:{time.time_ns()}".encode()).hexdigest()[:12].upper()
+    raw = f"{chat_id}:{symbol}:{time.time_ns()}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12].upper()
 
 
 def audit_trade_record(p):
     return {
         'trade_id': p.get('trade_id'), 'symbol': p.get('symbol'), 'side': p.get('side'),
-        'timeframe': p.get('timeframe'), 'strategy': p.get('strategy'), 'opened_at': p.get('opened_at'),
+        'timeframe': p.get('timeframe'), 'strategy': p.get('strategy'),
+        'opened_at': p.get('opened_at'), 'closed_at': p.get('close_timestamp'),
         'entry_price': p.get('entry_price'), 'close_price': p.get('close_price'),
         'sl': p.get('sl'), 'tp': p.get('tp'), 'amount': p.get('amount'),
-        'margin': p.get('margin'), 'leverage': p.get('leverage'), 'pnl_usdt': p.get('pnl_usdt'),
-        'fee_usdt': p.get('fee_usdt'), 'platform_fee_usdt': p.get('platform_fee_usdt'),
+        'margin': p.get('margin'), 'leverage': p.get('leverage'),
+        'planned_rr': p.get('planned_rr'), 'quality_score': p.get('quality_score'),
+        'quality_label': p.get('quality_label'), 'risk_usdt': p.get('risk_usdt'),
+        'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
+        'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
+        'entry_reason': p.get('entry_reason'),
+        'fee_usdt': p.get('fee_usdt'), 'platform_fee_usdt': p.get('platform_fee_usdt'), 'platform_fee_rate_pct': p.get('platform_fee_rate_pct'), 'pnl_before_platform_fee_usdt': p.get('pnl_before_platform_fee_usdt'), 'pnl_gross_usdt': p.get('pnl_gross_usdt'),
+        'duration_seconds': p.get('duration_seconds'),
+        'realized_r': p.get('realized_r'),
+        'mfe_usdt': p.get('mfe_usdt', 0.0), 'mae_usdt': p.get('mae_usdt', 0.0),
+        'mfe_r': p.get('mfe_r', 0.0), 'mae_r': p.get('mae_r', 0.0),
+        'last_price': p.get('last_price'),
+        'peak_favorable_price': p.get('peak_favorable_price'),
+        'peak_adverse_price': p.get('peak_adverse_price'),
+        'trailing_activated': p.get('trailing_activated', False),
+        'trailing_locked_r': p.get('trailing_locked_r', 0.0),
     }
 
 
 def get_entry_lock(chat_id):
-    with ENTRY_LOCKS_GUARD: return ENTRY_LOCKS.setdefault(int(chat_id), RLock())
+    with ENTRY_LOCKS_GUARD:
+        return ENTRY_LOCKS.setdefault(int(chat_id), RLock())
 
 
 def load_telegram_offset():
     global TELEGRAM_OFFSET
     with DB_LOCK:
         conn = db_connect()
-        try: row = conn.execute('SELECT value FROM bot_meta WHERE key=?', ('telegram_offset',)).fetchone()
-        finally: conn.close()
-    try: TELEGRAM_OFFSET = max(0, int(row[0])) if row else 0
-    except Exception: TELEGRAM_OFFSET = 0
+        try:
+            row = conn.execute('SELECT value FROM bot_meta WHERE key=?', ('telegram_offset',)).fetchone()
+        finally:
+            conn.close()
+    try:
+        TELEGRAM_OFFSET = max(0, int(row[0])) if row else 0
+    except Exception:
+        TELEGRAM_OFFSET = 0
+    logger.info('Telegram offset loaded: %s', TELEGRAM_OFFSET)
 
 
 def save_telegram_offset(offset):
@@ -375,45 +425,87 @@ def save_telegram_offset(offset):
     with DB_LOCK:
         conn = db_connect()
         try:
+            conn.execute('PRAGMA busy_timeout=15000')
             conn.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at', ('telegram_offset', str(TELEGRAM_OFFSET), int(time.time())))
             conn.commit()
-        finally: conn.close()
+        finally:
+            conn.close()
 
 
 def default_session():
     return {
-        'is_bot_active': False, 'scan_generation': 0, 'trading_mode': 'PAPER',
-        'paper_balance': 1000.0, 'daily_start_equity': 1000.0,
-        'daily_start_date': time.strftime('%Y-%m-%d', time.gmtime()), 'daily_stopped': False,
-        'trade_amount_usdt': 50.0, 'leverage': 5, 'max_open_positions': 3,
-        'timeframe': '5min', 'active_strategy': 'dynamic', 'paper_positions': [],
-        'closed_positions': [], 'trade_audit': [],
+        'is_bot_active': False,
+        'scan_generation': 0,
+        'last_stop_reason': None,
+        'trading_mode': 'PAPER',
+        'paper_balance': 1000.0,
+        'daily_start_equity': 1000.0,
+        'daily_start_date': time.strftime('%Y-%m-%d', time.gmtime()),
+        'daily_stopped': False,
+        'trade_amount_usdt': 50.0,
+        'leverage': 5,
+        'max_open_positions': 3,
+        'timeframe': '5min',
+        'active_strategy': 'dynamic',
+        'paper_positions': [],
+        'closed_positions': [],
+        'trade_audit': [],
         'scan_stats': {'scans': 0, 'symbols': 0, 'signals': 0, 'entries': 0, 'blocked': 0, 'data_errors': 0, 'reason_counts': {}},
-        'cooldowns': {}, 'traded_levels': {}, 'user_state': None,
+        'cooldowns': {},
+        'traded_levels': {},
+        'user_state': None,
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
-        'filters': FILTER_DEFAULTS.copy(), 'strategy_config': get_timeframe_preset('5min'),
-        'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT, 'risk_per_trade_pct': RISK_PER_TRADE_PCT,
-        'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT, 'entry_diag_enabled': True,
-        'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT, 'platform_fee_total_usdt': 0.0,
-        'platform_fee_trade_count': 0, 'positions_message_id': None, 'positions_message_last_edit': 0.0,
+        'filters': FILTER_DEFAULTS.copy(),
+        'strategy_config': get_timeframe_preset('5min'),
+        'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
+        'risk_per_trade_pct': RISK_PER_TRADE_PCT,
+        'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT,
+        'real_reconciliation_required': False,
+        'last_risk_check': 0,
+        'last_reconcile': 0,
+        'telegram_offset': None,
+        'created_at': int(time.time()),
+        'bottom_menu_open': True,
+        'entry_diag_enabled': True,
+        'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT,
+        'platform_fee_total_usdt': 0.0,
+        'platform_fee_trade_count': 0,
+        'positions_message_id': None,
+        'positions_message_last_edit': 0.0,
     }
 
 
 def normalize_session(data):
     s = default_session(); s.update(data or {})
     s['filters'] = {**FILTER_DEFAULTS, **(data.get('filters') or {})}
+    s['user_experience'] = data.get('user_experience') if data.get('user_experience') in ('simple','advanced') else 'simple'
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
     s['trade_audit'] = list(data.get('trade_audit') or [])[-2000:]
+    ss = data.get('scan_stats') or {}
+    s['scan_stats'] = {**default_session()['scan_stats'], **ss}
+    s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['traded_levels'] = dict(data.get('traded_levels') or {})
-    s['active_symbols'] = PAPER_SYMBOLS[:] if PAPER_ONLY else (list(data.get('active_symbols') or []) or DEFAULT_ACTIVE_SYMBOLS[:])
+    stored_symbols = list(data.get('active_symbols') or [])
+    if PAPER_ONLY:
+        s['active_symbols'] = PAPER_SYMBOLS[:]
+    elif not stored_symbols or set(stored_symbols) == set(LEGACY_DEFAULT_ACTIVE_SYMBOLS):
+        s['active_symbols'] = DEFAULT_ACTIVE_SYMBOLS[:]
+    else:
+        s['active_symbols'] = stored_symbols
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
-    if s.get('timeframe') not in SUPPORTED_TRADING_TIMEFRAMES: s['timeframe'] = '5min'
+    if s.get('timeframe') not in SUPPORTED_TRADING_TIMEFRAMES:
+        s['timeframe'] = '5min'
     s['strategy_config'] = get_timeframe_preset(s['timeframe'])
+    s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
+    s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
+    s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
     s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
     s['platform_fee_rate_pct'] = min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
+    s['platform_fee_total_usdt'] = max(0.0, float(s.get('platform_fee_total_usdt', 0.0)))
+    s['platform_fee_trade_count'] = max(0, int(s.get('platform_fee_trade_count', 0) or 0))
     return s
 
 
@@ -425,7 +517,7 @@ def load_sessions():
     with STATE_LOCK:
         for chat_id, raw in rows:
             try: USER_SESSIONS[int(chat_id)] = normalize_session(json.loads(raw))
-            except Exception: pass
+            except Exception: logger.exception('Failed loading session %s', chat_id)
 
 
 def get_session(chat_id):
@@ -453,14 +545,17 @@ def get_exchange(chat_id):
     if not creds: return None
     fingerprint = hashlib.sha256((creds[0] + '|' + creds[1]).encode('utf-8')).hexdigest()
     cached = EXCHANGE_CACHE.get(chat_id)
-    if cached and cached.get('fingerprint') == fingerprint: return cached.get('exchange')
+    if cached and cached.get('fingerprint') == fingerprint:
+        return cached.get('exchange')
     try:
         ex = ccxt.coinex({'apiKey':creds[0],'secret':creds[1],'enableRateLimit':True,'options':{'defaultType':'swap','defaultMarginMode':MARGIN_MODE}})
         ex.load_markets()
         EXCHANGE_CACHE[chat_id] = {'fingerprint': fingerprint, 'exchange': ex}
+        logger.info('CoinEx connected/refreshed for chat_id=%s', chat_id)
         return ex
-    except Exception:
+    except Exception as exc:
         EXCHANGE_CACHE.pop(chat_id, None)
+        logger.exception('CoinEx init failed for %s: %s', chat_id, exc)
         return None
 
 
@@ -472,17 +567,25 @@ def tg(method, payload=None, timeout=10):
     if not TELEGRAM_TOKEN: return None
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
-        if r.status_code != 200: return None
+        if r.status_code != 200: logger.warning('Telegram %s: %s', method, r.text[:300]); return None
         return r.json()
-    except Exception: return None
+    except Exception as exc:
+        logger.warning('Telegram request failed: %s', exc); return None
 
 
-TELEGRAM_COMMANDS = [{'command':'menu','description':'منوی اصلی'}]
+TELEGRAM_COMMANDS = [
+    {'command':'menu','description':'منوی اصلی'},
+]
 
 def configure_telegram_native_menu():
-    if not TELEGRAM_TOKEN: return
-    tg('setMyCommands', {'commands': TELEGRAM_COMMANDS}, 10)
-    tg('setChatMenuButton', {'menu_button': {'type':'commands'}}, 10)
+    if not TELEGRAM_TOKEN:
+        return
+    r=tg('setMyCommands', {'commands': TELEGRAM_COMMANDS}, 10)
+    if not r or not r.get('ok'):
+        logger.warning('setMyCommands failed')
+    r=tg('setChatMenuButton', {'menu_button': {'type':'commands'}}, 10)
+    if not r or not r.get('ok'):
+        logger.warning('setChatMenuButton failed')
 
 
 def answer_callback(cid):
@@ -498,6 +601,9 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
         if parse_mode: body['parse_mode'] = parse_mode
         res = tg('editMessageText', body, 10)
         if res and res.get('ok'): return True
+        desc = ((res or {}).get('description') or '').lower()
+        if 'message is not modified' in desc:
+            return True
     body = {'chat_id':chat_id,'text':text,'reply_markup':markup}
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
@@ -511,7 +617,11 @@ def edit_page(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'
 def sync_bottom_keyboard(chat_id, status_message=None):
     s = get_session(chat_id)
     active = bool(s.get('is_bot_active'))
-    text = status_message or ("🟢 اسکن فعال است." if active else "🔴 اسکن متوقف است.")
+    text = status_message or (
+        "🟢 اسکن فعال است.\n🔒 تنظیمات حساس تا توقف اسکن قفل هستند."
+        if active else
+        "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند."
+    )
     return send_message(chat_id, text, get_bottom_menu_keyboard(active), parse_mode=None)
 
 
@@ -523,7 +633,7 @@ def send_photo(chat_id, img, caption='', markup=None):
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
         return r.status_code == 200
-    except Exception: return False
+    except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
 
 def fmt(v):
@@ -532,7 +642,9 @@ def fmt(v):
         if abs(x)<.0001: return f'{x:.8f}'
         if abs(x)<1: return f'{x:.6f}'
         return f'{x:.4f}'
-    except Exception: return str(v)
+    except Exception as exc:
+        logger.debug('fmt fallback value=%r: %s', v, exc)
+        return str(v)
 
 
 def market_name(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}USDT"
@@ -565,7 +677,17 @@ def get_klines(symbol, tf='5min', limit=200):
                 if len(df)>=60:
                     with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
                     return df
-    except Exception: pass
+    except Exception as exc: logger.debug('CoinEx kline %s: %s', symbol, exc)
+    try:
+        r=requests.get(f'{KUCOIN_PUBLIC}/market/candles', params={'symbol':f'{symbol}-USDT','type':period}, timeout=7)
+        if r.ok and r.json().get('code')=='200000':
+            data=r.json().get('data') or []
+            df=pd.DataFrame(data, columns=['timestamp','open','close','high','low','volume','turnover']).iloc[::-1].reset_index(drop=True)
+            for c in ['timestamp','open','close','high','low','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
+            if len(df)>=60:
+                with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
+                return df
+    except Exception as exc: logger.debug('KuCoin kline %s: %s', symbol, exc)
     return pd.DataFrame()
 
 
@@ -576,21 +698,25 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
         if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
     await ASYNC_SEMAPHORE.acquire()
     try:
-        async with http.get(f'{COINEX_PUBLIC}/futures/kline', params={'market':market_name(symbol),'period':period,'limit':min(limit,1000)}) as r:
-            if r.status == 200:
-                p=await r.json()
-                if p.get('code')==0:
-                    df=normalize_klines(p.get('data'))
-                    for c_col in ['timestamp','open','close','high','low','volume']: df[c_col]=pd.to_numeric(df[c_col],errors='coerce')
+        for base, params in [(f'{COINEX_PUBLIC}/futures/kline',{'market':market_name(symbol),'period':period,'limit':min(limit,1000)}),(f'{KUCOIN_PUBLIC}/market/candles',{'symbol':f'{symbol}-USDT','type':period})]:
+            try:
+                async with http.get(base, params=params) as r:
+                    if r.status != 200: continue
+                    p=await r.json()
+                    good = p.get('code')==0 if 'coinex.com' in base else p.get('code')=='200000'
+                    if not good: continue
+                    df=normalize_klines(p.get('data')) if 'coinex.com' in base else pd.DataFrame(p.get('data') or [], columns=['timestamp','open','close','high','low','volume','turnover']).iloc[::-1].reset_index(drop=True)
+                    for c in ['timestamp','open','close','high','low','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
                     if len(df)>=60:
                         with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
                         return df
-    except Exception: pass
+            except Exception as exc: logger.debug('async market data %s: %s',symbol,exc)
     finally: ASYNC_SEMAPHORE.release()
     return pd.DataFrame()
 
 
 def latest_price(symbol):
+    """Public CoinEx price for PAPER/non-exchange-specific operations."""
     key=symbol.upper(); now=time.time()
     with DATA_LOCK:
         c=PRICE_CACHE.get(key)
@@ -604,18 +730,26 @@ def latest_price(symbol):
             if price>0:
                 with DATA_LOCK: PRICE_CACHE[key]={'ts':now,'price':price}
                 return price
-    except Exception: pass
+    except Exception as exc: logger.debug('price %s',symbol,exc)
     return None
 
 
 def exchange_latest_price(chat_id, symbol):
+    """REAL price must come from the same CoinEx account/exchange used by the position."""
+    key=f'{chat_id}:{symbol.upper()}'; now=time.time()
+    with DATA_LOCK:
+        c=REAL_PRICE_CACHE.get(key)
+        if c and now-c['ts']<3: return c['price']
     ex=get_exchange(chat_id)
     if not ex: return None
     try:
         ticker=ex.fetch_ticker(ccxt_symbol(symbol))
-        price=float(ticker.get('last') or ticker.get('mark') or 0)
-        if price>0: return price
-    except Exception: pass
+        price=float(ticker.get('last') or ticker.get('mark') or ticker.get('close') or 0)
+        if price>0:
+            with DATA_LOCK: REAL_PRICE_CACHE[key]={'ts':now,'price':price}
+            return price
+    except Exception as exc:
+        logger.debug('exchange price chat=%s symbol=%s: %s',chat_id,symbol,exc)
     return None
 
 
@@ -626,8 +760,13 @@ def exchange_balance(chat_id):
         b=ex.fetch_balance({'type':'swap'})
         total=(b.get('total') or {}).get('USDT')
         if total is None: raise ExchangeStateError('USDT balance missing')
-        return float(total)
+        value=float(total)
+        if not math.isfinite(value) or value < 0: raise ExchangeStateError('invalid USDT balance')
+        return value
+    except ExchangeStateError:
+        raise
     except Exception as exc:
+        logger.warning('balance %s: %s',chat_id,exc)
         raise ExchangeStateError(f'balance fetch failed: {exc}') from exc
 
 
@@ -638,6 +777,7 @@ def get_open_positions(chat_id):
         rows=ex.fetch_positions()
         return [p for p in rows if abs(float(p.get('contracts') or p.get('amount') or 0))>0]
     except Exception as exc:
+        logger.warning('positions %s: %s',chat_id,exc)
         raise ExchangeStateError(f'position fetch failed: {exc}') from exc
 
 
@@ -655,6 +795,98 @@ def find_position(chat_id, symbol):
     return None
 
 
+def call_implicit_any(ex, candidates, params):
+    for name in candidates:
+        fn=getattr(ex,name,None)
+        if callable(fn): return fn(params)
+    raise AttributeError('CoinEx implicit SL/TP method unavailable in this CCXT version')
+
+
+def _extract_numbers(obj, names):
+    found=[]
+    if isinstance(obj, dict):
+        for k,v in obj.items():
+            key=str(k).lower().replace('-','_')
+            if key in names:
+                try: found.append(float(v))
+                except Exception: pass
+            found.extend(_extract_numbers(v,names))
+    elif isinstance(obj, list):
+        for v in obj: found.extend(_extract_numbers(v,names))
+    return found
+
+
+def _price_matches(a,b):
+    try:
+        a=float(a); b=float(b); scale=max(abs(a),abs(b),1.0)
+        return abs(a-b) <= max(1e-8,scale*2e-5)
+    except Exception:
+        return False
+
+
+def _live_position_raw(chat_id, symbol):
+    ex=get_exchange(chat_id)
+    try:
+        rows=ex.fetch_positions([ccxt_symbol(symbol)]) if callable(getattr(ex,'fetch_positions',None)) else ex.fetch_positions()
+    except Exception:
+        rows=ex.fetch_positions()
+    for p in rows:
+        n=normalize_real_position(p)
+        if n['symbol']==symbol.upper(): return p
+    return None
+
+
+def _halt_real_trading(chat_id, reason):
+    s=get_session(chat_id)
+    s['is_bot_active']=False
+    s['real_reconciliation_required']=True
+    s['trading_halted_reason']=str(reason)[:500]
+    s['scan_generation']=int(s.get('scan_generation',0))+1
+    save_session(chat_id)
+    send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت CoinEx، معامله جدید مجاز نیست.")
+
+
+def set_protection(chat_id, symbol, sl, tp):
+    ex=get_exchange(chat_id)
+    if not ex: return False,'exchange unavailable'
+    m=market_name(symbol); errors=[]; responses=[]
+    params={'market':m,'market_type':'FUTURES','stop_loss_type':PROTECTION_TRIGGER,'stop_loss_price':str(sl)}
+    try: responses.append(call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],params))
+    except Exception as e: errors.append(f'SL:{e}')
+    params={'market':m,'market_type':'FUTURES','take_profit_type':PROTECTION_TRIGGER,'take_profit_price':str(tp)}
+    try: responses.append(call_implicit_any(ex,['v2PrivatePostFuturesSetPositionTakeProfit','v2_private_post_futures_set_position_take_profit'],params))
+    except Exception as e: errors.append(f'TP:{e}')
+    if errors: return False,' | '.join(errors)
+    try:
+        raw=_live_position_raw(chat_id,symbol)
+        if not raw: return False,'position disappeared after protection setup'
+        sls=_extract_numbers(responses,{'stop_loss_price','stoploss_price','stop_loss','stoplossprice'})
+        tps=_extract_numbers(responses,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
+        sls += _extract_numbers(raw,{'stop_loss_price','stoploss_price','stop_loss','stoplossprice'})
+        tps += _extract_numbers(raw,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
+        if sls and not any(_price_matches(x,sl) for x in sls): return False,f'SL verification mismatch: expected {sl}'
+        if tps and not any(_price_matches(x,tp) for x in tps): return False,f'TP verification mismatch: expected {tp}'
+        return True,'OK'
+    except Exception as exc:
+        return False,f'protection verification failed: {exc}'
+
+
+def move_stop_loss(chat_id, symbol, sl):
+    ex=get_exchange(chat_id)
+    if not ex: return False,'exchange unavailable'
+    try:
+        call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],{'market':market_name(symbol),'market_type':'FUTURES','stop_loss_type':PROTECTION_TRIGGER,'stop_loss_price':str(sl)})
+        return True,'OK'
+    except Exception as e: return False,str(e)
+
+
+def position_history_for(chat_id, symbol, since_ms):
+    ex=get_exchange(chat_id)
+    if not ex: return []
+    try: return ex.fetch_position_history(ccxt_symbol(symbol), since_ms, 20)
+    except Exception as exc: logger.debug('position history %s: %s',symbol,exc); return []
+
+
 def side_long(side): return 'BUY' in str(side).upper() or 'LONG' in str(side).upper()
 def reserved_margin(s): return sum(float(p.get('margin',0)) for p in s['paper_positions'])
 
@@ -664,97 +896,944 @@ def round_trip_fee_usdt(margin, leverage):
         notional = abs(float(margin)) * abs(float(leverage))
         if not math.isfinite(notional): return 0.0
         return notional * (TAKER_FEE_PCT / 100.0) * 2
-    except Exception: return 0.0
+    except Exception:
+        return 0.0
+
+
+def trailing_locked_r(entry, risk_distance, current_price, is_long):
+    """
+    Profit-protection ladder for an already profitable position.
+
+    1.0R -> break-even
+    1.5R -> lock +0.5R
+    2.0R -> lock +1.0R
+    2.5R -> lock +1.5R
+    ...
+
+    This intentionally does not alter entry/TP logic; it only protects an
+    existing position after it has moved in the intended direction.
+    """
+    try:
+        entry=float(entry); risk_distance=float(risk_distance); current_price=float(current_price)
+    except Exception:
+        return None
+    if risk_distance<=0 or not math.isfinite(risk_distance): return None
+    r=(current_price-entry)/risk_distance if is_long else (entry-current_price)/risk_distance
+    if r<1.0: return None
+    step=math.floor(r*2)/2.0
+    return max(0.0, step-1.0)
 
 
 def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
-    return False
+    """Apply the position-management trailing ladder without changing entries."""
+    try:
+        entry=float(p['entry_price'])
+        risk_distance=float(p.get('risk_distance') or 0.0)
+        if risk_distance <= 0:
+            risk_distance=abs(entry-float(p.get('sl', entry)))
+        if risk_distance <= 0:
+            return False
+        is_long=side_long(p['side'])
+        probe=float(favorable_price if favorable_price is not None else current_price)
+        lr=trailing_locked_r(entry,risk_distance,probe,is_long)
+        if lr is None:
+            return False
+        new_sl=entry+(lr*risk_distance if is_long else -lr*risk_distance)
+        old_sl=float(p['sl'])
+        is_better=(new_sl>old_sl) if is_long else (new_sl<old_sl)
+        locked=float(p.get('trailing_locked_r') or 0.0)
+        # First activation is allowed at exactly 1R: 0R is a valid lock level.
+        first_activation=not bool(p.get('trailing_activated'))
+        if not is_better or not (lr>locked or (first_activation and lr>=locked)):
+            return False
+        if p.get('is_real'):
+            ok,err=move_stop_loss(chat_id,p['symbol'],normalize_price(chat_id,p['symbol'],new_sl))
+            if not ok:
+                logger.warning('profit-protection SL move failed symbol=%s: %s',p.get('symbol'),err)
+                return False
+        p['sl']=new_sl
+        p['trailing_activated']=True
+        p['trailing_locked_r']=lr
+        if first_activation or lr>locked:
+            send_message(chat_id, f"🛡️ مدیریت سود فعال شد: `{p['symbol']}`\n• قفل سود: `{lr:.1f}R`\n• حد ضرر جدید: `{fmt(new_sl)}`")
+        return True
+    except Exception as exc:
+        logger.debug('profit protection failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
+        return False
 
 
 def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
-    pass
+    """
+    استاپ‌لاس را بر اساس آخرین سوینگ معاملاتی تأییدشده بازبینی می‌کند (هر بار که پوزیشن
+    چک می‌شود، یعنی هر SCAN_INTERVAL_SECONDS). اگر سوینگ جدیدی شکل گرفته باشد و جابه‌جایی
+    استاپ به آن، وضعیت را بهتر کند (هرگز بازتر نمی‌شود)، استاپ جابه‌جا شده و پیام اطلاع‌رسانی
+    ارسال می‌شود.
+    """
+    try:
+        tf = p.get('timeframe', '5min')
+        if sdf is None:
+            sdf = get_klines(p['symbol'], tf, 100)
+        if sdf.empty:
+            return
+        sdf = calculate_indicators(sdf)
+        if sdf.empty or 'atr' not in sdf.columns:
+            return
+        is_long = side_long(p['side'])
+        cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
+        lookback_n = int(cfg.get('swing_lookback', 12))
+        confirm_n = int(cfg.get('swing_confirm_candles', 2))
+        buffer_atr = float(cfg.get('swing_buffer_atr', 0.40))
+        new_sl, swing_level = compute_swing_stop(sdf, is_long, lookback_n, buffer_atr, confirm_n)
+        if new_sl is None or swing_level is None:
+            return
+        cur_sl = float(p['sl'])
+        if is_long:
+            behind_price = new_sl < price
+            improved = new_sl > cur_sl
+        else:
+            behind_price = new_sl > price
+            improved = new_sl < cur_sl
+        if not (behind_price and improved):
+            return
+        prev_level = p.get('swing_sl_level')
+        if prev_level is not None and math.isclose(swing_level, prev_level, rel_tol=1e-9, abs_tol=1e-9):
+            return
+        if p.get('is_real'):
+            ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], new_sl))
+            if not ok:
+                logger.warning('swing SL move failed symbol=%s: %s', p['symbol'], err)
+                return
+        old_sl = cur_sl
+        p['sl'] = new_sl
+        p['swing_sl_level'] = swing_level
+        p['trailing_activated'] = True
+        send_message(chat_id, f"🔄 استاپ‌لاس *{p['symbol']}* به‌دلیل تشکیل سوینگ جدید تغییر کرد\n• قبلی: `{fmt(old_sl)}`\n• جدید: `{fmt(new_sl)}`")
+    except Exception as exc:
+        logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
 
 def _maybe_close_before_day_end(chat_id, p, price):
+    """
+    برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
+    چه با ضرر. اگر تا پایان روز (بر اساس DAILY_CLOSE_TZ) کمتر از یک چرخه اسکن باقی مانده
+    باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
+    """
     tf = p.get('timeframe', '5min')
-    if tf not in NO_OVERNIGHT_TIMEFRAMES: return False
-    if _seconds_to_local_day_end() > SCAN_INTERVAL_SECONDS: return False
-    close_position(chat_id, p, price, 'پایان روز - بستن اجباری')
+    if tf not in NO_OVERNIGHT_TIMEFRAMES:
+        return False
+    if _seconds_to_local_day_end() > SCAN_INTERVAL_SECONDS:
+        return False
+    close_position(chat_id, p, price, 'پایان روز - بستن اجباری (معاملات ۵ و ۱۵ دقیقه هرگز به روز بعد منتقل نمی‌شوند)')
     return True
 
 
 def reset_daily_if_needed(chat_id, equity):
     s=get_session(chat_id); today=time.strftime('%Y-%m-%d',time.gmtime())
     if s.get('daily_start_date')!=today:
-        s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; save_session(chat_id)
+        s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; s['traded_levels']={}; save_session(chat_id)
+
+
+def current_paper_equity(s):
+    eq=float(s['paper_balance'])
+    for p in s['paper_positions']:
+        price=latest_price(p['symbol'])
+        if not price: continue
+        entry=float(p['entry_price']); frac=((price-entry)/entry) if side_long(p['side']) else ((entry-price)/entry)
+        eq += float(p.get('margin',0))*frac*float(p.get('leverage',1))
+    return eq
 
 
 def risk_guard(chat_id):
     s=get_session(chat_id); now=time.time()
     if now-s.get('last_risk_check',0)<15: return not s['daily_stopped']
     s['last_risk_check']=now
-    try: equity=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
-    except Exception: return False
+    try:
+        equity=exchange_balance(chat_id) if s['trading_mode']=='REAL' else current_paper_equity(s)
+    except ExchangeStateError as exc:
+        if s['trading_mode']=='REAL':
+            _halt_real_trading(chat_id,f'اطلاعات حساب CoinEx قابل اعتماد نیست: {exc}')
+        return False
     reset_daily_if_needed(chat_id,equity)
     start=float(s['daily_start_equity'])
     if start<=0: return True
     limit=start*(1-float(s['daily_loss_limit_pct'])/100)
     if equity<=limit:
-        s['daily_stopped']=True; save_session(chat_id)
+        stop_scan(chat_id, 'daily-risk')
+        s=get_session(chat_id)
+        s['daily_stopped']=True
+        save_session(chat_id)
+        sync_bottom_keyboard(chat_id, "🛑 اسکن به‌دلیل حد ضرر روزانه متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند.")
+        send_message(chat_id,f"🛑 *حد ضرر روزانه فعال شد.*\n\nشروع روز: `${start:.2f}`\nسرمایه: `${equity:.2f}`\nحد: `{s['daily_loss_limit_pct']:.2f}%`\n\nورود جدید متوقف شد؛ پوزیشن‌های باز دست‌نخورده باقی می‌مانند.")
         return False
     return True
 
 
+def market_meta(chat_id,symbol):
+    ex=get_exchange(chat_id)
+    if not ex: return None
+    try: return ex.market(ccxt_symbol(symbol))
+    except Exception as exc:
+        logger.debug('market_meta fallback symbol=%s: %s', symbol, exc)
+        return None
+
+
 def normalize_amount(chat_id,symbol,amount):
     ex=get_exchange(chat_id)
-    if not ex: return float(amount)
+    if not ex: return 0.0
     try: return float(ex.amount_to_precision(ccxt_symbol(symbol),amount))
-    except Exception: return float(amount)
+    except Exception as exc:
+        logger.debug('normalize_amount fallback symbol=%s amount=%s: %s', symbol, amount, exc)
+        return float(amount)
 
 
 def normalize_price(chat_id,symbol,price):
     ex=get_exchange(chat_id)
     if not ex: return float(price)
     try: return float(ex.price_to_precision(ccxt_symbol(symbol),price))
-    except Exception: return float(price)
+    except Exception as exc:
+        logger.debug('normalize_price fallback symbol=%s price=%s: %s', symbol, price, exc)
+        return float(price)
 
 
 def safe_size(chat_id,s,entry,sl):
     try:
         balance=exchange_balance(chat_id) if s['trading_mode']=='REAL' else float(s['paper_balance'])
-    except Exception: return 0, 'error'
+    except ExchangeStateError as exc:
+        return 0,f'account state unavailable: {exc}'
     stop_dist=abs(entry-sl)/max(abs(entry),1e-12)
-    if stop_dist<=0: return 0, 'invalid stop'
+    if stop_dist<=0 or not math.isfinite(stop_dist): return 0,'invalid stop distance'
     risk_budget=balance*float(s['risk_per_trade_pct'])/100
     leverage=max(1,int(s['leverage']))
     requested_margin=float(s['trade_amount_usdt'])
     cap=balance*float(s['max_margin_usage_pct'])/100
     available=max(0,cap-reserved_margin(s))
-    margin=min(requested_margin,available,(risk_budget/stop_dist)/leverage)
-    if margin<=0: return 0, 'cap blocked'
-    return margin, (margin*leverage)/entry
+    risk_notional=risk_budget/stop_dist
+    risk_margin=risk_notional/leverage
+    margin=min(requested_margin,available,risk_margin)
+    if margin<=0: return 0,'risk/margin cap blocks entry'
+    amount=(margin*leverage)/entry
+    if s['trading_mode']=='REAL':
+        amount=normalize_amount(chat_id,s.get('_symbol_tmp',''),amount)
+    return margin,amount
 
 
 def expected_trade_metrics(trade):
     try:
-        entry=float(trade.get('entry_price') or 0); tp=float(trade.get('tp') or 0); sl=float(trade.get('sl') or 0); amount=abs(float(trade.get('amount') or 0))
-        if entry<=0 or tp<=0 or sl<=0 or amount<=0: return {'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
-        risk, reward = abs((sl-entry)*amount), abs((tp-entry)*amount)
-        return {'risk':risk,'reward':reward,'rr':(reward/risk) if risk>0 else 0.0,'valid':True}
-    except Exception: return {'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
+        entry=float(trade.get('entry_price') or 0)
+        tp=float(trade.get('tp') or 0)
+        sl=float(trade.get('sl') or 0)
+        amount=abs(float(trade.get('amount') or 0))
+        if entry <= 0 or tp <= 0 or sl <= 0 or amount <= 0:
+            return {'tp_pnl':0.0,'sl_pnl':0.0,'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
+        if side_long(trade.get('side','BUY')):
+            tp_pnl=(tp-entry)*amount
+            sl_pnl=(sl-entry)*amount
+            valid=(tp > entry and sl < entry)
+        else:
+            tp_pnl=(entry-tp)*amount
+            sl_pnl=(entry-sl)*amount
+            valid=(tp < entry and sl > entry)
+        risk=abs(sl_pnl)
+        reward=abs(tp_pnl)
+        rr=(reward/risk) if risk > 0 else 0.0
+        return {'tp_pnl':tp_pnl,'sl_pnl':sl_pnl,'risk':risk,'reward':reward,'rr':rr,
+                'valid':bool(valid and risk > 0 and reward > 0)}
+    except Exception:
+        return {'tp_pnl':0.0,'sl_pnl':0.0,'risk':0.0,'reward':0.0,'rr':0.0,'valid':False}
+
+
+TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1day': 'D'}
+
+
+def tradingview_chart_url(symbol, timeframe='5min'):
+    sym = symbol.upper().replace('USDT', '').replace('/', '')
+    interval = TV_INTERVAL_MAP.get(timeframe, '15')
+    tv_symbol = urlparse.quote(f'COINEX:{sym}USDT.P', safe='')
+    return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
+
+
+def trade_action_keyboard(symbol, chart_url=None, timeframe='5min'):
+    rows = []
+    if chart_url:
+        rows.append([{'text':'🌐 چارت تعاملی (MiniApp)','web_app':{'url':chart_url}}])
+    rows.append([
+        {'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, timeframe)}
+    ])
+    rows.append([
+        {'text':'🛑 تغییر حد ضرر (SL)','callback_data':f'/edit_sl_{symbol}'},
+        {'text':'🎯 تغییر حد سود (TP)','callback_data':f'/edit_tp_{symbol}'}
+    ])
+    rows.append([
+        {'text':'🔴 بستن معامله','callback_data':f'/close_prompt_{symbol}'},
+        {'text':'🔄 بروزرسانی','callback_data':f'/manage_{symbol}'}
+    ])
+    rows.append([{'text':'🏠 منوی اصلی','callback_data':'/menu'}])
+    return {'inline_keyboard': rows}
+
+
+def close_confirm_keyboard(symbol):
+    return {'inline_keyboard': [
+        [{'text':'✅ بله، ببند','callback_data':f'/confirm_close_{symbol}'}, {'text':'❌ انصراف','callback_data':'/cancel'}]
+    ]}
+
+
+def format_trade_status(p, price=None):
+    entry=float(p.get('entry_price') or 0)
+    sl=float(p.get('sl') or 0)
+    tp=float(p.get('tp') or 0)
+    if price is None:
+        price=latest_price(p['symbol']) or entry
+    price=float(price)
+    amount=abs(float(p.get('amount') or 0))
+    long_side=side_long(p.get('side','BUY'))
+    pnl=(price-entry)*amount if long_side else (entry-price)*amount
+    metrics=expected_trade_metrics(p)
+    mode='REAL' if p.get('is_real') else 'PAPER'
+
+    tp_dist_pct=abs(tp-entry)/entry*100 if entry else 0
+    sl_dist_pct=abs(sl-entry)/entry*100 if entry else 0
+    fee_est=round_trip_fee_usdt(p.get('margin'), p.get('leverage'))
+    net_reward=max(0.0, metrics['reward']-fee_est)
+    net_risk=metrics['risk']+fee_est
+    net_rr=(net_reward/net_risk) if net_risk>0 else 0.0
+    tf_str = TF_DISPLAY.get(p.get('timeframe'), p.get('timeframe', '5min'))
+
+    lines=[
+        f'📊 *مدیریت معامله* — `{p["symbol"]}`',
+        '',
+        f'📌 وضعیت: `{"🟢 LONG" if long_side else "🔴 SHORT"}` | `{mode}` | تایم‌فریم: `{tf_str}`',
+        f'💰 ورود: `{fmt(entry)}`',
+        f'📍 قیمت فعلی: `{fmt(price)}`',
+        f'🎯 حد سود: `{fmt(tp)}`',
+        f'🛑 حد ضرر: `{fmt(sl)}`',
+        f'📦 حجم: `{amount:.6f}`',
+        '',
+        f'💵 سود/زیان فعلی: `{pnl:+.2f} USDT`',
+        f'🟢 پاداش ناخالص در صورت TP: `+{metrics["reward"]:.2f} USDT`',
+        f'🔴 ریسک ناخالص در صورت SL: `-{metrics["risk"]:.2f} USDT`',
+        f'⚖️ R:R ناخالص: `{metrics["rr"]:.2f}R`',
+        f'💸 کارمزد تخمینی رفت‌وبرگشت: `{fee_est:.2f} USDT`',
+        f'🟢 *پاداش خالص در صورت TP:* `+{net_reward:.2f} USDT`',
+        f'🔴 *ریسک خالص در صورت SL:* `-{net_risk:.2f} USDT`',
+        f'⚖️ *R:R خالص:* `{net_rr:.2f}R`',
+        '',
+        f'📏 فاصله تا TP: `{tp_dist_pct:.2f}%`',
+        f'📏 فاصله تا SL: `{sl_dist_pct:.2f}%`',
+    ]
+    if not metrics['valid']:
+        lines += ['', '⚠️ *هشدار:* ورود، TP، SL و جهت معامله با هم سازگار نیستند.']
+    lines += ['', 'ℹ️ برای تغییر حد سود و ضرر از دکمه‌های زیر استفاده کنید.']
+    return '\n'.join(lines)
+
+
+def chart(chat_id, symbol, df, trade):
+    try:
+        if df.empty or len(df) < 5:
+            return
+
+        tf = trade.get('timeframe', '5min')
+        tf_label = TF_DISPLAY.get(tf, tf)
+        pdh = pdl = None
+
+        if tf in ('5min', '15min'):
+            try:
+                dated_df, pdh, pdl = _compute_prev_day_levels(df)
+            except Exception:
+                dated_df = None
+            if dated_df is not None and '_date' in dated_df.columns:
+                today_date = dated_df['_date'].iloc[-1]
+                today_df = dated_df[dated_df['_date'] == today_date]
+                d = today_df.copy().reset_index(drop=True) if len(today_df) >= 10 else df.tail(60).copy().reset_index(drop=True)
+            else:
+                d = df.tail(60).copy().reset_index(drop=True)
+        else:
+            d = df.tail(50).copy().reset_index(drop=True)
+
+        fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+
+        body_width = 0.62
+        for i, row in d.iterrows():
+            o = float(row['open']); h = float(row['high'])
+            l = float(row['low']); c = float(row['close'])
+            up = c >= o
+            candle_color = '#22c55e' if up else '#ef4444'
+            ax.vlines(i, l, h, color=candle_color, linewidth=1.1, alpha=0.95, zorder=2)
+            bottom = min(o, c)
+            height = max(abs(c - o), max((h - l) * 0.003, 1e-12))
+            rect = plt.Rectangle((i - body_width / 2, bottom), body_width, height,
+                                 facecolor=candle_color, edgecolor=candle_color,
+                                 linewidth=0.7, alpha=0.92, zorder=3)
+            ax.add_patch(rect)
+
+        entry = float(trade['entry_price'])
+        tp = float(trade['tp'])
+        sl = float(trade['sl'])
+        is_long = side_long(trade.get('side', 'BUY'))
+
+        levels = [
+            (entry, '#60a5fa', 'ENTRY', '-', 1.8),
+            (tp, '#22c55e', 'TP', '--', 2.0),
+            (sl, '#ef4444', 'SL', '--', 2.0),
+        ]
+        if pdh is not None:
+            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
+        if pdl is not None:
+            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
+
+        x_right = len(d) + 1.8
+        for value, color, label, style, width in levels:
+            ax.axhline(value, color=color, linestyle=style, linewidth=width, alpha=0.95, zorder=1)
+            ax.text(x_right, value, f' {label}  {fmt(value)} ',
+                    va='center', ha='left', fontsize=9.5, fontweight='bold',
+                    color='white',
+                    bbox=dict(boxstyle='round,pad=0.28', facecolor=color, edgecolor='none', alpha=0.95),
+                    clip_on=False, zorder=5)
+
+        entry_idx = int((d['close'] - entry).abs().idxmin())
+        entry_y = float(d.loc[entry_idx, 'low'] if is_long else d.loc[entry_idx, 'high'])
+        ax.scatter([entry_idx], [entry_y], s=42, color='#60a5fa', edgecolors='white', linewidths=0.8, zorder=6)
+
+        mode = 'REAL' if trade.get('is_real') else 'PAPER'
+        direction = 'LONG' if is_long else 'SHORT'
+        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}', loc='left',
+                     color='white', fontsize=15, fontweight='bold', pad=14)
+
+        summary = f"TF: {tf_label} | Entry: {fmt(entry)} | TP: {fmt(tp)} | SL: {fmt(sl)}"
+        ax.text(0.01, 0.015, summary, transform=ax.transAxes, color='#cbd5e1',
+                fontsize=9.5, va='bottom', ha='left',
+                bbox=dict(boxstyle='round,pad=0.35', facecolor='#1e293b', edgecolor='#334155', alpha=0.95))
+
+        ax.set_xlim(-1, len(d) + 5.5)
+        ymin = float(d['low'].min()); ymax = float(d['high'].max())
+        pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
+        extra_vals = [v for v in (pdh, pdl) if v is not None]
+        ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
+        ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
+        ax.grid(False, axis='x')
+        ax.tick_params(axis='both', colors='#94a3b8', labelsize=8.5)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_xticks([])
+        ax.set_ylabel('Price', color='#94a3b8', fontsize=9)
+
+        plt.subplots_adjust(left=0.06, right=0.82, top=0.90, bottom=0.10)
+        b = io.BytesIO()
+        plt.savefig(b, format='png', dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        b.seek(0)
+
+        metrics = expected_trade_metrics(trade)
+        send_photo(
+            chat_id, b.getvalue(),
+            f"📊 *پوزیشن معامله [{mode}]*\n"
+            f"• نماد: `{symbol}` ({trade['side']})\n"
+            f"• تایم‌فریم: `{tf_label}`\n"
+            f"• ورود: `{fmt(entry)}`\n"
+            f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
+            f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
+            f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`",
+            trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf)
+        )
+    except Exception:
+        logger.exception('chart error')
+
+
+def update_trade_excursions(pos, high, low):
+    try:
+        entry = float(pos.get('entry_price') or 0)
+        margin = float(pos.get('margin') or 0)
+        leverage = float(pos.get('leverage') or 1)
+        risk = float(pos.get('risk_usdt') or 0)
+        if entry <= 0 or margin <= 0 or leverage <= 0:
+            return
+        if side_long(pos.get('side')):
+            favorable = max(0.0, float(high) - entry)
+            adverse = max(0.0, entry - float(low))
+            fav_price = float(high)
+            adv_price = float(low)
+        else:
+            favorable = max(0.0, entry - float(low))
+            adverse = max(0.0, float(high) - entry)
+            fav_price = float(low)
+            adv_price = float(high)
+        scale = margin * leverage / entry
+        mfe_usdt = favorable * scale
+        mae_usdt = adverse * scale
+        if mfe_usdt > float(pos.get('mfe_usdt') or 0.0):
+            pos['mfe_usdt'] = mfe_usdt
+            pos['peak_favorable_price'] = fav_price
+        if mae_usdt > float(pos.get('mae_usdt') or 0.0):
+            pos['mae_usdt'] = mae_usdt
+            pos['peak_adverse_price'] = adv_price
+        pos['mfe_r'] = (float(pos.get('mfe_usdt') or 0.0) / risk) if risk > 0 else 0.0
+        pos['mae_r'] = (float(pos.get('mae_usdt') or 0.0) / risk) if risk > 0 else 0.0
+        pos['last_price'] = float((float(high) + float(low)) / 2.0)
+    except Exception as exc:
+        logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
+
+
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
+    s=get_session(chat_id)
+    trade_id = new_trade_id(chat_id, symbol)
+    quality_score = None; quality_label = None; planned_rr = None
+    m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
+    if m_score:
+        quality_score=int(m_score.group(1)); quality_label=m_score.group(2)
+    m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
+    if m_rr:
+        planned_rr=float(m_rr.group(1))
+    level_key = None
+    m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
+    if m_level:
+        level_key = f"{symbol}:{m_level.group(1)}:{m_level.group(2)}"
+    audit_event(chat_id, trade_id, 'signal_and_plan', {'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp, 'reason': reason, 'timeframe': s.get('timeframe'), 'strategy': s.get('active_strategy'), 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
+    if (require_active and not s['is_bot_active']) or s['daily_stopped'] or not risk_guard(chat_id):
+        return False
+    now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
+    if now<cd:
+        return False
+    s['cooldowns'].pop(symbol,None)
+    if level_key and level_key in s.get('traded_levels', {}):
+        return False
+    is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
+    if not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
+        return False
+    if not is_dynamic_strategy and s['filters'].get('no_buy_filter') and 'BUY' in side:
+        return False
+    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+        return False
+    if any(p['symbol']==symbol for p in s['paper_positions']):
+        return False
+
+    price=latest_price(symbol) or float(signal_price)
+    # Conservative paper execution: adverse entry slippage only.
+    if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+        slip = PAPER_SLIPPAGE_BPS / 10000.0
+        price = price * (1.0 + slip) if side_long(side) else price * (1.0 - slip)
+    gap_sl=abs(float(signal_price)-float(sl))
+    gap_tp=abs(float(tp)-float(signal_price))
+    if side_long(side):
+        sl=price-gap_sl
+        tp=float(tp) if (structural_tp and float(tp)>price) else price+gap_tp
+    else:
+        sl=price+gap_sl
+        tp=float(tp) if (structural_tp and float(tp)<price) else price-gap_tp
+    s['_symbol_tmp']=symbol
+    margin, amount_or_reason=safe_size(chat_id,s,price,sl)
+    s.pop('_symbol_tmp',None)
+    if margin<=0:
+        return False
+    leverage=int(s['leverage'])
+    risk_dist=abs(float(price)-float(sl))
+    risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
+    fee_estimate=round_trip_fee_usdt(margin,leverage)
+    if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+        return False
+    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+
+    if s['trading_mode']=='REAL':
+        ex=get_exchange(chat_id)
+        if not ex:
+            send_message(chat_id,'❌ حساب CoinEx این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
+        sym=ccxt_symbol(symbol)
+        try:
+            market=ex.market(sym)
+            lev_info=market.get('info') or {}
+            max_lev=float(lev_info.get('max_leverage') or market.get('maxLeverage') or leverage)
+            if leverage>max_lev: leverage=int(max_lev); trade['leverage']=leverage
+            ex.set_margin_mode(MARGIN_MODE,sym,{'leverage':leverage})
+        except Exception:
+            try:
+                ex.set_leverage(leverage,sym,{'marginMode':MARGIN_MODE})
+            except Exception as exc:
+                send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`'); return False
+        amount=(margin*leverage)/price
+        amount=normalize_amount(chat_id,symbol,amount)
+        min_amt=float(((market.get('limits') or {}).get('amount') or {}).get('min') or 0)
+        if amount<=0 or (min_amt and amount<min_amt):
+            send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
+        try:
+            norm_price = normalize_price(chat_id, symbol, price)
+            if ENTRY_ORDER_TYPE == 'limit':
+                order = ex.create_order(sym, 'limit', 'buy' if side_long(side) else 'sell', amount, norm_price)
+            else:
+                order = ex.create_order(sym, 'market', 'buy' if side_long(side) else 'sell', amount)
+
+            order_id = order.get('id')
+            confirmed = None
+            for _ in range(ORDER_CONFIRM_RETRIES):
+                try:
+                    confirmed = ex.fetch_order(order_id, sym) if order_id else order
+                except Exception:
+                    confirmed = order
+                filled = float((confirmed or {}).get('filled') or 0)
+                status = str((confirmed or {}).get('status') or '').lower()
+                if filled > 0 and (status in ('closed', 'filled') or not status): break
+                time.sleep(ORDER_CONFIRM_DELAY)
+
+            if confirmed is None: confirmed = order
+            filled = float(confirmed.get('filled') or 0)
+
+            if filled <= 0:
+                if order_id:
+                    try:
+                        ex.cancel_order(order_id, sym)
+                    except Exception:
+                        pass
+                live = find_position(chat_id, symbol)
+                if live and float(live.get('amount') or 0) > 0:
+                    filled = float(live['amount'])
+                    exec_price = float(live.get('entry_price') or norm_price)
+                else:
+                    send_message(chat_id, f'⏱ سفارش Limit نماد `{symbol}` در قیمت `{fmt(norm_price)}` پر نشد و لغو شد.')
+                    return False
+            else:
+                exec_price = float(confirmed.get('average') or confirmed.get('price') or norm_price)
+
+            trade['entry_price'] = exec_price
+            trade['amount'] = filled
+            trade['margin'] = exec_price * filled / max(leverage, 1)
+            trade['is_real'] = True
+            trade['order_id'] = order_id
+
+            if side_long(side):
+                trade['sl'] = exec_price - gap_sl
+                trade['tp'] = exec_price + gap_tp
+            else:
+                trade['sl'] = exec_price + gap_sl
+                trade['tp'] = exec_price - gap_tp
+
+            trade['sl'] = normalize_price(chat_id, symbol, trade['sl'])
+            trade['tp'] = normalize_price(chat_id, symbol, trade['tp'])
+            trade['risk_usdt'] = abs(float(trade['entry_price']) - float(trade['sl'])) / max(float(trade['entry_price']), 1e-12) * float(trade['margin']) * float(trade['leverage'])
+
+            audit_event(chat_id, trade_id, 'order_filled', {'entry_price': trade['entry_price'], 'amount': trade['amount'], 'order_id': order_id})
+            ok, err = set_protection(chat_id, symbol, trade['sl'], trade['tp'])
+            audit_event(chat_id, trade_id, 'protection_set', {'ok': ok, 'detail': err, 'sl': trade.get('sl'), 'tp': trade.get('tp')})
+            if not ok:
+                _halt_real_trading(chat_id, f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
+                try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
+                except Exception as close_exc: send_message(chat_id, f'🚨 *حفاظت شکست و بستن خودکار هم شکست.* `{symbol}`\nSL/TP: `{err}`\nخطای بستن: `{close_exc}`')
+                else: send_message(chat_id, f'⚠️ معامله `{symbol}` به‌دلیل عدم ثبت SL/TP فوراً بسته شد.')
+                return False
+
+            current = get_session(chat_id)
+            if (require_active and not current['is_bot_active']) or int(current.get('scan_generation', 0)) != generation:
+                try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
+                except Exception as close_exc:
+                    _halt_real_trading(chat_id, f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
+                return False
+        except Exception as exc:
+            _halt_real_trading(chat_id, f'وضعیت سفارش REAL {symbol} قابل تأیید نیست: {exc}')
+            send_message(chat_id, f'❌ سفارش REAL `{symbol}` به‌طور قطعی تأیید نشد؛ ربات متوقف شد.', parse_mode=None)
+            return False
+    else:
+        if float(s['paper_balance']) - reserved_margin(s) < margin:
+            return False
+        trade['amount'] = (margin * leverage) / price
+        audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
+        s['paper_positions'].append(trade)
+        save_session(chat_id)
+
+    if trade.get('is_real'):
+        s['paper_positions'].append(trade)
+        save_session(chat_id)
+    if level_key:
+        s['traded_levels'][level_key] = time.strftime('%Y-%m-%d', time.gmtime())
+        save_session(chat_id)
+
+    audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
+    chart_tf = s['timeframe']
+    df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min') else 200)
+    if not df.empty:
+        chart(chat_id, symbol, calculate_indicators(df), trade)
+    return True
+
+
+def scan_watchlist_for_timeframe(timeframe, regime=None):
+    if regime == 'BEARISH':
+        return list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))
+    if regime == 'BULLISH':
+        return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
+    long_list = WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min'])
+    short_list = WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min'])
+    return list(dict.fromkeys(list(long_list) + list(short_list)))
+
+
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90}
+MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
+# آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
+# انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
+# فعال می‌شود و باعث بلاک‌شدن معاملات خلاف‌جهت (fade/sweep) می‌شود.
+MARKET_REGIME_EXTREME_ADX = float(os.environ.get('MARKET_REGIME_EXTREME_ADX', '30'))
+MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
+
+
+async def refresh_market_regime(http):
+    now = time.time()
+    if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
+        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail'], MARKET_REGIME_CACHE['extreme']
+    tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
+    states = {}
+    for leader in LEADER_SYMBOLS:
+        try:
+            d = await get_klines_async(http, leader, tf, 120)
+            if d is None or d.empty or len(d) < 60:
+                detail = f'داده کافی برای {leader} در دسترس نیست'
+                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+                return 'NEUTRAL', detail, None
+            x = calculate_indicators(d).iloc[-2]
+            adx = float(x.get('adx') or 0)
+            bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            bearish = bool(x['close'] < x['ema20'] < x['ema50'] and x['minus_di'] > x['plus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
+        except Exception as exc:
+            detail = f'خطا در دریافت داده {leader}: {exc}'
+            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+            return 'NEUTRAL', detail, None
+    detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
+    unique_dirs = {v[0] for v in states.values()}
+    if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
+        regime = 'BULLISH'
+    elif 'BEARISH' in unique_dirs and 'BULLISH' not in unique_dirs:
+        regime = 'BEARISH'
+    else:
+        regime = 'NEUTRAL'
+    # حالت «شدید»: همه‌ی لیدرها هم‌جهت و با ADX بالای آستانه‌ی سخت‌گیرانه - فقط همین حالت
+    # باعث بلاک شدن معاملات خلاف‌جهت می‌شود، نه regime عادی بالا (که صرفاً برای واچ‌لیست است)
+    extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme)
+    return regime, detail, extreme
+
+
+# --- شبکه سطوح لگاریتمی (بر اساس اسکریپت Pine کاربر) --------------------------------
+# ساختار کلان و کم‌تغییر است (بر پایه‌ی کف/سقف تاریخچه‌ی روزانه)، پس مثل رژیم بازار کش
+# می‌شود و فقط هر چند ساعت یک‌بار به‌روزرسانی می‌شود، نه در هر اسکن.
+LOG_GRID_BASE_STEPS = int(os.environ.get('LOG_GRID_BASE_STEPS', '20'))
+LOG_GRID_LOOKBACK_DAYS = int(os.environ.get('LOG_GRID_LOOKBACK_DAYS', '500'))
+LOG_GRID_TTL = float(os.environ.get('LOG_GRID_TTL_SECONDS', '21600'))  # هر ۶ ساعت
+LOG_GRID_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+async def get_log_grid_levels(http, symbol):
+    """
+    سطوح شبکه‌ی لگاریتمی یک نماد را برمی‌گرداند (کش‌شده). بر پایه‌ی داده‌ی روزانه
+    (تا LOG_GRID_LOOKBACK_DAYS کندل، برای تخمین نزدیک به کف/سقف کل تاریخچه‌ی نماد -
+    دقیقاً مثل chart_low/chart_high در اسکریپت اصلی که کل چارت را می‌بیند).
+    """
+    now = time.time()
+    c = LOG_GRID_CACHE.get(symbol)
+    if c and now - c['ts'] < LOG_GRID_TTL:
+        return c['levels']
+    d = await get_klines_async(http, symbol, '1day', LOG_GRID_LOOKBACK_DAYS)
+    levels = compute_log_grid_levels(d, LOG_GRID_BASE_STEPS) if d is not None and not d.empty else []
+    LOG_GRID_CACHE[symbol] = {'ts': now, 'levels': levels}
+    return levels
+
+
+async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
+    if symbol.upper() in LEADER_SYMBOLS:
+        return True, 'لیدر بازار است'
+    try:
+        if primary_df is None or primary_df.empty:
+            return False, 'داده کافی برای سنجش همبستگی موجود نیست'
+        leader_frames = {}
+        for leader in LEADER_SYMBOLS:
+            d = await get_klines_async(http, leader, timeframe if timeframe in TIMEFRAME_MAP else '5min', 100)
+            if d is None or d.empty or len(d) < 65:
+                return False, f'داده کافی برای {leader} جهت محافظت بازار دریافت نشد'
+            leader_frames[leader] = calculate_indicators(d)
+
+        alt = primary_df.copy()
+        if len(alt) < 65:
+            return False, 'داده کافی برای محاسبه همبستگی ارز هدف موجود نیست'
+        alt_ret = pd.to_numeric(alt['close'], errors='coerce').pct_change().dropna().tail(60)
+
+        leader_states = []
+        correlations = []
+        for leader, frame in leader_frames.items():
+            c = frame.iloc[-2]
+            ret = pd.to_numeric(frame['close'], errors='coerce').pct_change().dropna().tail(60)
+            corr = float(alt_ret.corr(ret)) if len(alt_ret) >= 20 and len(ret) >= 20 else 0.0
+            if not math.isfinite(corr):
+                corr = 0.0
+            correlations.append((leader, corr))
+            change_1 = (float(c.close) / float(frame.iloc[-3].close) - 1.0) * 100 if float(frame.iloc[-3].close) else 0.0
+            change_3 = (float(c.close) / float(frame.iloc[-5].close) - 1.0) * 100 if float(frame.iloc[-5].close) else 0.0
+            bearish = bool(float(c.close) < float(c.ema20) < float(c.ema50) and float(c.adx) >= 20 and change_3 <= -0.8)
+            bullish = bool(float(c.close) > float(c.ema20) > float(c.ema50) and float(c.adx) >= 20 and change_3 >= 0.8)
+            crash = bool(change_1 <= -1.0 or change_3 <= -2.0)
+            pump = bool(change_1 >= 1.0 or change_3 >= 2.0)
+            leader_states.append((leader, bearish, crash, change_1, change_3, bullish, pump))
+
+        both_bearish = all(x[1] for x in leader_states)
+        both_bullish = all(x[5] for x in leader_states)
+        any_crash = any(x[2] for x in leader_states)
+        any_pump = any(x[6] for x in leader_states)
+        max_corr = max(abs(x[1]) for x in correlations) if correlations else 0.0
+        avg_positive_corr = sum(max(0.0, x[1]) for x in correlations) / len(correlations) if correlations else 0.0
+
+        is_long = side_long(side)
+        detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+        if is_long:
+            if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
+            if any_crash and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+        else:
+            if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
+            if any_pump and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+
+        return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
+    except Exception as exc:
+        return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
+
+
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False):
+    s=get_session(chat_id)
+    generation=int(s.get('scan_generation',0))
+    if not s['is_bot_active'] or s['daily_stopped']:
+        return False
+    lock=get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
+            return False
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp)
+
+
+def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
+    s=get_session(chat_id)
+    if s['daily_stopped']:
+        return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
+    live_price=latest_price(symbol)
+    if not live_price:
+        return False, f'قیمت لحظه‌ای `{symbol}` دریافت نشد.'
+    price=float(entry_price) if entry_price else live_price
+    generation=int(s.get('scan_generation',0))
+    lock=get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if s['daily_stopped']:
+            return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
+        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,'معامله دستی کاربر',generation,require_active=False)
+    if ok:
+        return True, ''
+    return False, 'ورود دستی رد شد (ممکن است ظرفیت پوزیشن پر باشد، نماد از قبل باز باشد، یا حجم/ریسک معتبر نباشد).'
+
+
+def realized_history_value(chat_id,symbol,opened_at):
+    rows=position_history_for(chat_id,symbol,max(0,int((opened_at-120)*1000)))
+    if not rows: return None
+    best=None; best_ts=0
+    for r in rows:
+        rp=r.get('realizedPnl') or r.get('info',{}).get('realized_pnl') if isinstance(r,dict) else None
+        try: rp=float(rp)
+        except: continue
+        ts=float(r.get('timestamp') or r.get('datetime') and time.mktime(time.strptime(r['datetime'],'%Y-%m-%dT%H:%M:%S.%fZ'))*1000 or 0)
+        if ts>=best_ts: best_ts=ts; best=rp
+    return best
+
+
+def is_admin(chat_id):
+    return int(chat_id) in ADMIN_CHAT_IDS
+
+
+def get_user_fee_rate(chat_id):
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT fee_rate_pct FROM user_fee_settings WHERE chat_id=?', (int(chat_id),)).fetchone()
+            finally:
+                conn.close()
+        if row is not None:
+            return min(100.0, max(0.0, float(row[0])))
+    except Exception:
+        logger.exception('get user fee rate failed chat=%s', chat_id)
+    s = get_session(chat_id)
+    return min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
+
+
+def set_user_fee_rate(chat_id, rate_pct):
+    rate = min(100.0, max(0.0, float(rate_pct)))
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('PRAGMA busy_timeout=15000')
+            conn.execute('INSERT INTO user_fee_settings(chat_id,fee_rate_pct,updated_at) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET fee_rate_pct=excluded.fee_rate_pct, updated_at=excluded.updated_at', (int(chat_id), rate, int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+    s = get_session(chat_id)
+    s['platform_fee_rate_pct'] = rate
+    save_session(chat_id)
+    return rate
+
+
+def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
+    '''Idempotent platform fee settlement for PAPER and REAL.
+    Fee is charged only on realized positive profit and is recorded once per trade_id.
+    REAL mode records the payable fee in the ledger; actual wallet transfer is intentionally
+    separate and requires an explicitly configured exchange settlement mechanism.
+    '''
+    try:
+        trade_id = str(pos.get('trade_id') or '')
+        profit = float(net_profit_before_platform_fee or 0.0)
+        if not trade_id or profit <= PLATFORM_FEE_MIN_PROFIT_USDT:
+            return 0.0
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                conn.execute('PRAGMA busy_timeout=15000')
+                existing = conn.execute('SELECT platform_fee_usdt FROM fee_ledger WHERE trade_id=?', (trade_id,)).fetchone()
+                if existing is not None:
+                    return float(existing[0] or 0.0)
+                rate = get_user_fee_rate(chat_id)
+                fee = round(profit * rate / 100.0, 8)
+                mode = 'REAL' if pos.get('is_real') else 'PAPER'
+                gross = float(pos.get('pnl_gross_usdt') or profit)
+                trading_cost = max(0.0, gross - profit)
+                user_net = profit - fee
+                conn.execute('''INSERT INTO fee_ledger(trade_id,chat_id,mode,gross_pnl_usdt,trading_cost_usdt,net_profit_before_platform_fee_usdt,fee_rate_pct,platform_fee_usdt,user_net_profit_usdt,status,created_at,settled_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (trade_id,int(chat_id),mode,gross,trading_cost,profit,rate,fee,user_net,'SETTLED',time.time(),time.time()))
+                conn.commit()
+            finally:
+                conn.close()
+        s = get_session(chat_id)
+        s['platform_fee_rate_pct'] = rate
+        s['platform_fee_total_usdt'] = float(s.get('platform_fee_total_usdt', 0.0)) + fee
+        s['platform_fee_trade_count'] = int(s.get('platform_fee_trade_count', 0)) + 1
+        pos['platform_fee_usdt'] = fee
+        pos['platform_fee_rate_pct'] = rate
+        pos['platform_fee_status'] = 'SETTLED'
+        save_session(chat_id)
+        return fee
+    except sqlite3.IntegrityError:
+        return 0.0
+    except Exception:
+        logger.exception('platform fee settlement failed chat=%s trade=%s', chat_id, pos.get('trade_id'))
+        return 0.0
 
 
 def fee_report(chat_id, period='all'):
-    now=time.time(); since=0
+    now=time.time()
+    since=0
     if period=='day': since=now-86400
     elif period=='week': since=now-7*86400
     elif period=='month': since=now-30*86400
     with DB_LOCK:
         conn=db_connect()
-        try: row=conn.execute('SELECT COALESCE(SUM(platform_fee_usdt),0), COUNT(*), COALESCE(SUM(net_profit_before_platform_fee_usdt),0) FROM fee_ledger WHERE chat_id=? AND created_at>=?',(int(chat_id),since)).fetchone()
+        try:
+            row=conn.execute('SELECT COALESCE(SUM(platform_fee_usdt),0), COUNT(*), COALESCE(SUM(net_profit_before_platform_fee_usdt),0) FROM fee_ledger WHERE chat_id=? AND created_at>=?',(int(chat_id),since)).fetchone()
         finally: conn.close()
     fee,count,profit=row or (0,0,0)
-    return f'💰 *کارمزد پلتفرم*\n\n• بازه: `{period}`\n• معاملات سودده: `{count}`\n• سود قبل از کارمزد: `{profit:.2f} USDT`\n• کارمزد شما: `{fee:.2f} USDT`\n• نرخ فعلی: `{get_user_fee_rate(chat_id):.2f}%`'
+    return f'💰 *کارمزد پلتفرم*\n\n• بازه: `{period}`\n• معاملات سودده: `{count}`\n• سود قبل از کارمزد پلتفرم: `{profit:.2f} USDT`\n• کارمزد شما: `{fee:.2f} USDT`\n• نرخ فعلی: `{get_user_fee_rate(chat_id):.2f}%`'
 
 
 def admin_fee_report(period='all'):
@@ -769,8 +1848,8 @@ def admin_fee_report(period='all'):
             rows=conn.execute('SELECT chat_id, COALESCE(SUM(platform_fee_usdt),0), COUNT(*) FROM fee_ledger WHERE created_at>=? GROUP BY chat_id ORDER BY SUM(platform_fee_usdt) DESC LIMIT 20',(since,)).fetchall()
         finally: conn.close()
     fee,count,users=total or (0,0,0)
-    lines=[f'👑 *گزارش درآمد پلتفرم — {period}*','',f'• درآمد کارمزد: `{fee:.2f} USDT`',f'• معاملات: `{count}`',f'• کاربران: `{users}`','','*برترین‌ها:*']
-    lines += [f'• `{uid}` → `{amt:.2f} USDT` ({cnt})' for uid,amt,cnt in rows] or ['• ثبت نشده']
+    lines=[f'👑 *گزارش درآمد پلتفرم — {period}*','',f'• درآمد کارمزد: `{fee:.2f} USDT`',f'• معاملات کارمزدخورده: `{count}`',f'• کاربران فعال: `{users}`','', '*برترین کاربران:*']
+    lines += [f'• `{uid}` → `{amt:.2f} USDT` ({cnt} معامله)' for uid,amt,cnt in rows] or ['• هنوز داده‌ای ثبت نشده است.']
     return '\n'.join(lines)
 
 
@@ -779,7 +1858,7 @@ def admin_set_fee_command(chat_id, text):
         send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
     parts=(text or '').split()
     if len(parts) != 3:
-        send_message(chat_id,'فرمت: `/set_fee USER_CHAT_ID RATE_PERCENT`',parse_mode='Markdown'); return
+        send_message(chat_id,'فرمت: `/set_fee USER_CHAT_ID RATE_PERCENT`\nمثال: `/set_fee 123456789 10`',parse_mode='Markdown'); return
     try:
         uid=int(parts[1]); rate=float(parts[2])
         set_user_fee_rate(uid, rate)
@@ -788,46 +1867,476 @@ def admin_set_fee_command(chat_id, text):
         send_message(chat_id,f'❌ خطا: `{exc}`',parse_mode='Markdown')
 
 
-def close_position(chat_id, pos, price=None, reason='manual'):
-    s = get_session(chat_id)
+def close_position(chat_id,pos,price=None,reason='manual'):
+    s=get_session(chat_id)
     if pos not in s['paper_positions']: return False
-    fee = round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
-    if price is None: price = latest_price(pos['symbol']) or pos['entry_price']
-    entry = float(pos['entry_price'])
-    frac = ((price - entry) / entry) if side_long(pos['side']) else ((entry - price) / entry)
-    pnl = (float(pos['margin']) * frac * float(pos['leverage'])) - fee
-    s['paper_balance'] += pnl
-    pos['close_price'] = price
+    fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
+    fee_note=''
+    if pos.get('is_real'):
+        ex=get_exchange(chat_id)
+        if not ex: send_message(chat_id,'❌ اتصال CoinEx در دسترس نیست.'); return False
+        try:
+            sym=ccxt_symbol(pos['symbol']); amount=float(pos.get('amount') or 0)
+            live=find_position(chat_id,pos['symbol']); amount=float(live['amount']) if live else amount
+            if amount<=0: return False
+            order=ex.close_position(sym,None,{'type':'market','amount':amount})
+            price=float(order.get('average') or order.get('price') or latest_price(pos['symbol']) or pos['entry_price'])
+            await_until=time.time()+12
+            while time.time()<await_until:
+                try:
+                    if not find_position(chat_id,pos['symbol']): break
+                except ExchangeStateError:
+                    time.sleep(.5); continue
+                time.sleep(.5)
+            realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
+            if realized is None:
+                entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+                pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+                realized=pnl_gross-fee
+                pos['pnl_is_estimate']=True
+                pos['pnl_gross_usdt']=pnl_gross
+                fee_note=' (کسر شده در برآورد)'
+            else:
+                pos['pnl_is_estimate']=False
+                fee_note=' (لحاظ شده در صرافی)'
+            pnl=realized; pos['close_price']=price
+        except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
+    else:
+        if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
+        # Conservative paper exit slippage.
+        if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+            slip = PAPER_SLIPPAGE_BPS / 10000.0
+            price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
+        entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+        pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+        hours=max(0.0, time.time()-float(pos.get('opened_at',time.time()))) / 3600.0
+        funding_intervals=hours/8.0
+        funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
+        pnl=pnl_gross-fee-funding_cost
+        s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+        pos['pnl_gross_usdt']=pnl_gross
+        pos['funding_usdt']=funding_cost
+        fee_note=f' (کارمزد + فاندینگ کسر شد: {funding_cost:.2f} USDT)'
+    # Exchange/trading costs are already represented by `pnl`; platform fee is a separate layer.
     platform_fee = settle_platform_fee(chat_id, pos, float(pnl)) if float(pnl) > PLATFORM_FEE_MIN_PROFIT_USDT else 0.0
     if platform_fee > 0:
-        pnl -= platform_fee
-        s['paper_balance'] -= platform_fee
+        pos['pnl_before_platform_fee_usdt'] = float(pnl)
+        pnl = float(pnl) - platform_fee
+        if not pos.get('is_real'):
+            s['paper_balance'] -= platform_fee
     pos['platform_fee_usdt'] = platform_fee
-    pos['pnl_usdt'] = float(pnl)
-    s['closed_positions'].append(pos.copy())
-    s['paper_positions'].remove(pos)
-    save_session(chat_id)
-    send_message(chat_id, f"📌 *پوزیشن بسته شد*\n• `{pos['symbol']}`\n• PnL: `{pnl:+.2f} USDT`\n• علت: `{reason}`")
+    pos['fee_usdt']=fee
+    if not pos.get('risk_usdt'):
+        try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
+        except Exception: pos['risk_usdt']=0.0
+    pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
+    pos['duration_seconds']=max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])))
+    pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
+    update_trade_excursions(pos, float(price), float(price))
+    audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
+    cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
+    s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
+    est=' تقریبی' if pos.get('pnl_is_estimate') else ''
+    fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
+    platform_line = f'\n• سهم پلتفرم: `{platform_fee:.2f} USDT` ({get_user_fee_rate(chat_id):.2f}%)' if platform_fee > 0 else ''
+    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
     return True
 
 
-def update_positions(chat_id):
+def reconcile_real(chat_id):
+    s=get_session(chat_id)
+    if s['trading_mode']!='REAL': return True
+    try:
+        rows=get_open_positions(chat_id)
+    except ExchangeStateError as exc:
+        _halt_real_trading(chat_id,f'تطبیق پوزیشن‌های REAL ممکن نیست: {exc}')
+        return False
+    live={normalize_real_position(p)['symbol']:normalize_real_position(p) for p in rows}
+    known={p['symbol']:p for p in s['paper_positions'] if p.get('is_real')}
+    unknown=[x for k,x in live.items() if k not in known]
+    if unknown:
+        _halt_real_trading(chat_id,'پوزیشن REAL ناشناخته پیدا شد: '+', '.join(x['symbol'] for x in unknown[:15]))
+        return False
+    for sym,p in list(known.items()):
+        if sym in live: p.update(live[sym])
+        else:
+            hist=position_history_for(chat_id,sym,max(0,int((p.get('opened_at',time.time()-3600)-120)*1000)))
+            rp=None
+            for h in hist:
+                try: rp=float(h.get('realizedPnl') or h.get('info',{}).get('realized_pnl'))
+                except: continue
+                if rp is not None: break
+            if rp is None:
+                p['pnl_usdt']=0.0
+                p['pnl_is_estimate']=True
+            else:
+                p['pnl_usdt']=rp
+                p['pnl_is_estimate']=False
+            p['close_timestamp']=time.time()
+            p['close_reason']='external TP/SL or exchange close'
+            p['duration_seconds']=max(0, p['close_timestamp']-float(p.get('opened_at',p['close_timestamp'])))
+            p['realized_r']=(float(p.get('pnl_usdt') or 0.0)/float(p.get('risk_usdt') or 0.0)) if float(p.get('risk_usdt') or 0.0)>0 else None
+            if float(p.get('pnl_usdt') or 0.0) > PLATFORM_FEE_MIN_PROFIT_USDT:
+                pf = settle_platform_fee(chat_id, p, float(p.get('pnl_usdt') or 0.0))
+                p['pnl_before_platform_fee_usdt'] = float(p.get('pnl_usdt') or 0.0)
+                p['platform_fee_usdt'] = pf
+                p['pnl_usdt'] = float(p.get('pnl_usdt') or 0.0) - pf
+            cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
+            s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+cooldown_len
+            audit_event(chat_id, p.get('trade_id') or new_trade_id(chat_id, sym), 'position_closed', {'close_price': p.get('close_price'), 'pnl_usdt': p.get('pnl_usdt'), 'reason': p.get('close_reason'), 'duration_seconds': p.get('duration_seconds'), 'realized_r': p.get('realized_r'), 'mfe_usdt': p.get('mfe_usdt',0.0), 'mae_usdt': p.get('mae_usdt',0.0), 'external': True})
+            send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
+    s['last_reconcile']=time.time(); save_session(chat_id); return True
+
+
+def _position_management_timeframe(p):
+    """
+    تایم‌فریم سریع مدیریت پوزیشن را بر اساس تایم‌فریم اصلی معامله تعیین می‌کند.
+    این تابع عمداً از TIMEFRAME_MAP ورود جداست تا منطق ورود هیچ تغییری نکند.
+    """
+    primary = str(p.get('timeframe') or '5min')
+    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, '1min')
+
+
+def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
+    """Fast multi-timeframe position protection; entries remain untouched."""
+    try:
+        cfg=s.get('strategy_config') or STRATEGY_DEFAULTS
+        min_profit_r=float(cfg.get('weakness_exit_min_r',0.8))
+        primary_tf=str(p.get('timeframe') or '5min')
+        management_tf=_position_management_timeframe(p)
+        p['management_timeframe']=management_tf
+        peak_r=float(p.get('mfe_r') or 0.0)
+
+        # Profit protection independent of indicators. It reacts to live price/MFE,
+        # so a fast reversal does not need to wait for a slow candle close.
+        if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
+            return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
+
+        # Loss-cut becomes progressively more sensitive as the trade approaches SL.
+        if current_r <= -0.70: loss_score=30.0
+        elif current_r <= -0.50: loss_score=35.0
+        elif current_r <= -0.30: loss_score=40.0
+        elif current_r <= -0.10: loss_score=45.0
+        else: loss_score=999.0
+
+        need_weakness = current_r>=min_profit_r or current_r<=-0.10
+        if not need_weakness:
+            return False,[]
+        if wdf is None:
+            wdf=get_klines(p['symbol'],management_tf,150)
+        if wdf is None or wdf.empty or len(wdf)<60:
+            return False,[]
+        wdf=calculate_indicators(wdf)
+        if wdf.empty or len(wdf)<60:
+            return False,[]
+        is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
+
+        # A mild but confirmed weakness can cut a deep loss; profitable trades keep
+        # the stricter threshold to avoid exiting normal pullbacks.
+        if current_r>=min_profit_r and is_weak:
+            return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+        if current_r<=-0.10 and wscore>=loss_score:
+            return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+        return False,[]
+    except Exception as exc:
+        logger.debug('weakness exit check failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
+        return False,[]
+
+
+def _build_open_positions_view(chat_id, prices=None):
+    """Build the live open-position card. Prices are fetched fresh (with normal caches)."""
     s = get_session(chat_id)
+    positions = list(s.get('paper_positions') or [])
+    if not positions:
+        return 'پوزیشن بازی وجود ندارد.', get_positions_keyboard([])
+    prices = prices or {}
+    lines = [f'🔄 *پوزیشن‌ها ({len(positions)})*', '━━━━━━━━━━━━━━━━━━━━']
+    for p in positions:
+        try:
+            symbol = p['symbol']
+            live = prices.get(symbol)
+            if live is None:
+                live = exchange_latest_price(chat_id, symbol) if p.get('is_real') else latest_price(symbol)
+            live = float(live or p.get('last_price') or p.get('entry_price') or 0)
+            entry = float(p.get('entry_price') or live or 0)
+            amount = abs(float(p.get('amount') or 0))
+            pnl = (live-entry)*amount if side_long(p['side']) else (entry-live)*amount
+            pct = ((live-entry)/entry*100.0) if side_long(p['side']) and entry>0 else ((entry-live)/entry*100.0 if entry>0 else 0.0)
+            risk = float(p.get('risk_usdt') or 0.0)
+            r = (pnl/risk) if risk>0 else 0.0
+            side_label = '🟢 LONG' if side_long(p['side']) else '🔴 SHORT'
+            lines += [
+                f'\n{side_label} `{symbol}`',
+                f'↳ ورود: `{fmt(entry)}` | فعلی: `{fmt(live)}`',
+                f'↳ 📈 سود/زیان لحظه‌ای: `{pnl:+.2f} USDT`',
+                f'↳ 📊 بازده: `{pct:+.2f}%` | R: `{r:+.2f}`',
+                f'↳ 🎯 TP: `{fmt(p["tp"])}` | 🛑 SL: `{fmt(p["sl"])}`',
+            ]
+        except Exception as exc:
+            logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
+    return '\n'.join(lines), get_positions_keyboard(positions)
+
+
+def _send_or_edit_positions_view(chat_id, message_id=None, force_send=False):
+    """Send/edit the positions card and remember its Telegram message id for live refresh."""
+    s = get_session(chat_id)
+    text, markup = _build_open_positions_view(chat_id)
+    target_id = message_id or s.get('positions_message_id')
+    if target_id and not force_send:
+        res = tg('editMessageText', {
+            'chat_id': chat_id,
+            'message_id': int(target_id),
+            'text': text,
+            'reply_markup': markup,
+            'parse_mode': 'Markdown'
+        }, 10)
+        if res and res.get('ok'):
+            s['positions_message_id'] = int(target_id)
+            s['positions_message_last_edit'] = time.time()
+            save_session(chat_id)
+            return int(target_id)
+        desc = ((res or {}).get('description') or '').lower()
+        if 'message is not modified' in desc:
+            s['positions_message_id'] = int(target_id)
+            s['positions_message_last_edit'] = time.time()
+            save_session(chat_id)
+            return int(target_id)
+        # Stale/deleted message: fall through and create a fresh card.
+    if not s.get('paper_positions'):
+        # Keep the last message if possible; otherwise a short notification is enough.
+        if target_id:
+            res = tg('editMessageText', {
+                'chat_id': chat_id, 'message_id': int(target_id),
+                'text': text, 'reply_markup': markup, 'parse_mode': 'Markdown'
+            }, 10)
+            if res and res.get('ok'):
+                s['positions_message_id'] = int(target_id)
+                s['positions_message_last_edit'] = time.time()
+                save_session(chat_id)
+                return int(target_id)
+    res = tg('sendMessage', {
+        'chat_id': chat_id, 'text': text,
+        'reply_markup': markup, 'parse_mode': 'Markdown'
+    }, 10)
+    if res and res.get('ok'):
+        mid = ((res.get('result') or {}).get('message_id'))
+        if mid:
+            s['positions_message_id'] = int(mid)
+            s['positions_message_last_edit'] = time.time()
+            save_session(chat_id)
+            return int(mid)
+    return None
+
+
+def refresh_live_position_messages():
+    """Refresh visible position cards every ~10s without running the heavy management engine."""
+    now = time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        if not s.get('paper_positions') or not s.get('positions_message_id'):
+            continue
+        if now - float(s.get('positions_message_last_edit') or 0.0) < 10.0:
+            continue
+        prices = {}
+        for p in list(s.get('paper_positions') or []):
+            try:
+                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                if price:
+                    prices[p['symbol']] = float(price)
+                    p['last_price'] = float(price)
+            except Exception:
+                pass
+        text, markup = _build_open_positions_view(chat_id, prices)
+        res = tg('editMessageText', {
+            'chat_id': chat_id,
+            'message_id': int(s['positions_message_id']),
+            'text': text,
+            'reply_markup': markup,
+            'parse_mode': 'Markdown'
+        }, 10)
+        if res and res.get('ok'):
+            s['positions_message_last_edit'] = now
+            save_session(chat_id)
+        else:
+            desc = ((res or {}).get('description') or '').lower()
+            if 'message is not modified' in desc:
+                s['positions_message_last_edit'] = now
+
+
+def update_positions(chat_id):
+    s=get_session(chat_id)
     if not s['paper_positions']: return
+    if s['trading_mode']=='REAL':
+        if not reconcile_real(chat_id): return
     for p in s['paper_positions'][:]:
-        price = latest_price(p['symbol'])
-        if not price: continue
-        if _maybe_close_before_day_end(chat_id, p, price): continue
+        if s['trading_mode']=='REAL' and not p.get('is_real'): continue
+        if s['trading_mode']=='REAL':
+            price=exchange_latest_price(chat_id,p['symbol'])
+            if not price: continue
+        else:
+            price=None
+        primary_tf=p.get('timeframe','5min')
+        management_tf=_position_management_timeframe(p)
+        # One market-data fetch per required timeframe per cycle; downstream management
+        # functions reuse these frames instead of issuing duplicate requests.
+        primary_df=get_klines(p['symbol'],primary_tf,120)
+        management_df=primary_df if management_tf==primary_tf else get_klines(p['symbol'],management_tf,150)
+        if s['trading_mode']!='REAL':
+            if primary_df.empty: continue
+            c=primary_df.iloc[-1]
+            high,low,close=float(c['high']),float(c['low']),float(c['close'])
+            live_market = latest_price(p['symbol'])
+            price = float(live_market) if live_market else close
+            # PAPER excursion remains candle-based for deterministic backtests, while
+            # current PnL/management decisions use the freshest available market price.
+            update_trade_excursions(p,high,low)
+            p['last_unrealized_pnl'] = ((price-float(p['entry_price']))*abs(float(p.get('amount') or 0))
+                                        if side_long(p['side']) else
+                                        (float(p['entry_price'])-price)*abs(float(p.get('amount') or 0)))
+            p['last_price']=float(price)
+        else:
+            # REAL: excursion/MFE/MAE starts at the actual position lifetime.
+            # Never feed historical candles from before the position opened.
+            update_trade_excursions(p, float(price), float(price))
+            p['last_unrealized_pnl']=float(p.get('margin',0))*(((price-float(p['entry_price']))/float(p['entry_price'])) if side_long(p['side']) else ((float(p['entry_price'])-price)/float(p['entry_price'])))*float(p['leverage'])
+            p['last_price']=float(price)
+        if _maybe_close_before_day_end(chat_id,p,price):
+            continue
+
+        entry=float(p['entry_price'])
+        risk_distance=float(p.get('risk_distance') or 0.0)
+        if risk_distance<=0: risk_distance=abs(entry-float(p.get('sl',entry)))
+        current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance) if risk_distance>0 else 0.0
+
+        # Hard SL/TP is always checked before any discretionary stop movement.
+        exit_price=None; reason=None
+        if s['trading_mode']=='PAPER' and not primary_df.empty:
+            if side_long(p['side']):
+                hit_tp=high>=float(p['tp']); hit_sl=low<=float(p['sl'])
+            else:
+                hit_tp=low<=float(p['tp']); hit_sl=high>=float(p['sl'])
+            if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
+                exit_price=float(p['sl']); reason='SL (same candle)'
+            elif hit_tp: exit_price=float(p['tp']); reason='TP'
+            elif hit_sl: exit_price=float(p['sl']); reason='SL'
+
+        if reason is None and s['filters'].get('trailing_stop',True) and risk_distance>0:
+            favorable_price=(high if side_long(p['side']) else low) if s['trading_mode']=='PAPER' else (p.get('peak_favorable_price') or price)
+            _apply_profit_protection(chat_id,s,p,favorable_price,price)
+            # Re-read current R after a possible stop update.
+            current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance)
+
+        if reason is None:
+            # Structural swing stop intentionally remains on the primary trading timeframe.
+            if not primary_df.empty:
+                _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
+
+        if reason is None:
+            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
+            if should_exit:
+                exit_price=price; reason='مدیریت هوشمند (ضعف روند / کاهش ریسک)'; p['weakness_exit_reasons']=wreasons
+
+        if reason:
+            close_position(chat_id,p,exit_price,reason)
     save_session(chat_id)
 
 
+def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
+    out = {
+        'adx_ok': False, 'volume_breakout_ok': False, 'body_ok': False,
+        'trend_buy_ok': False, 'trend_sell_ok': False,
+        'breakout_buy_ok': False, 'breakout_sell_ok': False,
+        'candle_volume_ok': False, 'candle_buy_ok': False, 'candle_sell_ok': False,
+        'final_buy_ok': False, 'final_sell_ok': False,
+    }
+    try:
+        if df is None or df.empty or len(df) < 60:
+            return out
+        curr, prev = df.iloc[-2], df.iloc[-3]
+        cfg = strategy_config if isinstance(strategy_config, dict) else STRATEGY_DEFAULTS
+        f = filters if isinstance(filters, dict) else FILTER_DEFAULTS
+        adx = float(curr.get('adx', 0) or 0)
+        vr = float(curr.get('volume_ratio', 0) or 0)
+        body_ratio = float(curr.get('body_ratio', 0) or 0)
+        channel_high = curr.get('channel_high')
+        channel_low = curr.get('channel_low')
+        if pd.isna(channel_high) or pd.isna(channel_low):
+            return out
+        min_adx = float(cfg.get('min_adx', 20.0))
+        min_vr = float(cfg.get('min_volume_ratio', 1.05))
+        min_body = float(cfg.get('min_body_ratio', 0.45))
+        out['adx_ok'] = adx >= max(15.0, min_adx - 5.0)
+        out['volume_breakout_ok'] = (not f.get('volume_filter', True)) or vr >= min_vr
+        out['body_ok'] = body_ratio >= min_body
+        out['trend_buy_ok'] = bool(curr['close'] > curr['ema20'] > curr['ema50'] and curr['plus_di'] > curr['minus_di'])
+        out['trend_sell_ok'] = bool(curr['close'] < curr['ema20'] < curr['ema50'] and curr['minus_di'] > curr['plus_di'])
+        out['breakout_buy_ok'] = bool(curr['close'] > channel_high and prev['close'] <= prev.get('channel_high', float('inf')) and out['trend_buy_ok'] and adx >= min_adx)
+        out['breakout_sell_ok'] = bool(curr['close'] < channel_low and prev['close'] >= prev.get('channel_low', -float('inf')) and out['trend_sell_ok'] and adx >= min_adx)
+
+        if not f.get('volume_filter', True):
+            out['candle_volume_ok'] = True
+        else:
+            out['candle_volume_ok'] = vr >= 1.0
+
+        if not f.get('candlestick_filter', True):
+            out['candle_buy_ok'] = True
+            out['candle_sell_ok'] = True
+        else:
+            body = abs(float(curr['close']) - float(curr['open']))
+            rng = max(float(curr['high']) - float(curr['low']), 1e-12)
+            upper = float(curr['high']) - max(float(curr['close']), float(curr['open']))
+            lower = min(float(curr['close']), float(curr['open'])) - float(curr['low'])
+            bullish_pin = lower >= 2 * max(body, 1e-12) and upper <= max(body * 1.2, 1e-12) and curr['close'] > curr['open']
+            bearish_pin = upper >= 2 * max(body, 1e-12) and lower <= max(body * 1.2, 1e-12) and curr['close'] < curr['open']
+            prev_body = abs(float(prev['close']) - float(prev['open']))
+            bull_engulf = prev['close'] < prev['open'] and curr['close'] > curr['open'] and curr['close'] >= prev['open'] and curr['open'] <= prev['close'] and body > prev_body
+            bear_engulf = prev['close'] > prev['open'] and curr['close'] < curr['open'] and curr['close'] <= prev['open'] and curr['open'] >= prev['close'] and body > prev_body
+            strong_bull = curr['close'] > curr['open'] and body / rng >= 0.60
+            strong_bear = curr['close'] < curr['open'] and body / rng >= 0.60
+            out['candle_buy_ok'] = bool(bullish_pin or strong_bull)
+            out['candle_sell_ok'] = bool(bearish_pin or strong_bear)
+        out['final_buy_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_buy_ok'] and out['candle_volume_ok'] and (out['candle_buy_ok'] or not f.get('candlestick_filter', True)))
+        out['final_sell_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_sell_ok'] and out['candle_volume_ok'] and (out['candle_sell_ok'] or not f.get('candlestick_filter', True)))
+    except Exception:
+        pass
+    return out
+
+
 def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None, diagnostics=None):
-    return {'chat_id': chat_id, 'symbol': symbol, 'status': status, 'reason': str(reason or '').strip(), 'stage': stage, 'signal': signal, 'ts': time.time()}
+    return {
+        'chat_id': chat_id,
+        'symbol': symbol,
+        'status': status,
+        'reason': str(reason or '').strip(),
+        'stage': stage,
+        'signal': signal,
+        'diagnostics': diagnostics or {},
+        'ts': time.time(),
+    }
 
 
 def _entry_diag_label(reason):
     r = str(reason or '').strip()
-    return r[:180] or 'دلیل مشخصی ثبت نشد'
+    if not r:
+        return 'دلیل مشخصی ثبت نشد'
+    replacements = {
+        'روند ضعیف است': 'روند بازار ضعیف است',
+        'شرایط روندی برقرار نیست': 'شرایط ورود روندی کامل نیست',
+        'شکست جدیدی ثبت نشد': 'شکست معتبر ثبت نشده است',
+        'حجم شکست کافی نیست': 'حجم برای تأیید شکست کافی نیست',
+        'قدرت بدنه کافی نیست': 'قدرت کندل برای ورود کافی نیست',
+        'RSI خنثی است': 'RSI در محدوده خنثی است',
+        'قیمت از محدوده میانگین دور است': 'قیمت برای بازگشت به میانگین مناسب نیست',
+        'کندل تأیید معتبر نبود': 'کندل تأیید لازم دیده نشد',
+        'امتیاز کیفیت پایین است': 'امتیاز کیفیت معامله به حد لازم نرسید',
+        'R:R کافی نیست': 'نسبت سود به ضرر مناسب نیست',
+        'داده کافی نیست': 'داده کافی برای تصمیم‌گیری وجود ندارد',
+        'داده کافی برای طراحی معامله وجود ندارد': 'داده کافی برای ساخت معامله وجود ندارد',
+    }
+    for old, new in replacements.items():
+        if old in r:
+            tail = r.split(old, 1)[1].strip()
+            return (new + (' ' + tail if tail else '')).strip()[:180]
+    return r[:180]
 
 
 def _entry_diag_report(chat_id, results, elapsed):
@@ -835,93 +2344,311 @@ def _entry_diag_report(chat_id, results, elapsed):
     scanned = len(results)
     opened = sum(1 for x in results if x.get('status') == 'entry_opened')
     signals = sum(1 for x in results if x.get('signal'))
-    lines = ['🔎 *گزارش تشخیصی ورود*', '━━━━━━━━━━━━━━━━━━━━', f'⏱ بازه: `{max(1, int(elapsed/60))} دقیقه`', f'🔍 بررسی‌شده: `{scanned}`', f'🎯 سیگنال: `{signals}`', f'📥 بازشده: `{opened}`']
+    data_issues = sum(1 for x in results if x.get('status') in ('data_error','insufficient_data'))
+    blocked = sum(1 for x in results if x.get('status') in ('blocked','risk_blocked','trade_plan_blocked','execute_blocked'))
+
+    counts = {}
+    for x in results:
+        if x.get('status') == 'entry_opened':
+            continue
+        label = _entry_diag_label(x.get('reason'))
+        if label and label != 'دلیل مشخصی ثبت نشد':
+            counts[label] = counts.get(label, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+
+    tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
+    lines = [
+        '🔎 *گزارش تشخیصی ورود*',
+        '━━━━━━━━━━━━━━━━━━━━',
+        f'⏱ بازه بدون ورود: `{max(1, int(elapsed/60))} دقیقه`',
+        f'📊 تایم‌فریم: `{tf}` | استراتژی: `{s.get("active_strategy")}`',
+        f'🔍 نمادهای بررسی‌شده: `{scanned}`',
+        f'🎯 سیگنال معتبر: `{signals}`',
+        f'📥 پوزیشن بازشده: `{opened}`',
+    ]
+    if data_issues:
+        lines.append(f'⚠️ مشکل داده: `{data_issues}`')
+    if blocked:
+        lines.append(f'🛑 موارد متوقف‌شده قبل از ورود: `{blocked}`')
+
+    if top:
+        lines.append('\n*دلایل اصلی عدم ورود:*')
+        for label, n in top:
+            lines.append(f'• `{n}×` {label}')
+
     return '\n'.join(lines)
 
 
 def _entry_diag_batch_update(chat_id, results):
     now = time.time()
-    state = ENTRY_DIAG_STATE.setdefault(chat_id, {'no_entry_since': None, 'last_report_at': 0.0, 'window_results': []})
+    state = ENTRY_DIAG_STATE.setdefault(chat_id, {
+        'no_entry_since': None,
+        'last_report_at': 0.0,
+        'last_entry_at': 0.0,
+        'window_results': [],
+    })
     opened = any(x.get('status') == 'entry_opened' for x in results)
     if opened:
-        state['no_entry_since'] = None; state['window_results'] = []; return
-    if not results: return
+        state['last_entry_at'] = now
+        state['no_entry_since'] = None
+        state['last_report_at'] = 0.0
+        state['window_results'] = []
+        return
+    if not results:
+        return
     state.setdefault('window_results', []).extend(results)
     state['window_results'] = state['window_results'][-240:]
-    if state['no_entry_since'] is None: state['no_entry_since'] = now
+    if state['no_entry_since'] is None:
+        state['no_entry_since'] = now
     elapsed = now - float(state['no_entry_since'])
     last_report = float(state.get('last_report_at', 0.0) or 0.0)
-    if not get_session(chat_id).get('entry_diag_enabled', True): return
-    if elapsed >= NO_ENTRY_REPORT_SECONDS and (not last_report or now - last_report >= NO_ENTRY_REPORT_SECONDS):
+    if not get_session(chat_id).get('entry_diag_enabled', True):
+        return
+    if elapsed >= NO_ENTRY_REPORT_SECONDS and (not last_report or now-last_report >= NO_ENTRY_REPORT_SECONDS):
         try:
-            send_message(chat_id, _entry_diag_report(chat_id, list(state['window_results']), elapsed), parse_mode='Markdown')
+            report_results = list(state.get('window_results') or results)
+            send_message(chat_id, _entry_diag_report(chat_id, report_results, elapsed), parse_mode='Markdown')
             state['last_report_at'] = now
             state['window_results'] = []
-        except Exception: pass
+        except Exception as exc:
+            logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
-async def scan_symbol(http, chat_id, symbol, regime=None):
-    s = get_session(chat_id)
-    if not s['is_bot_active'] or s['daily_stopped']: return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است', 'precheck')
-    d = await get_klines_async(http, symbol, s['timeframe'], 120)
-    if d.empty: return _entry_diag_result(chat_id, symbol, 'data_error', 'داده خالی', 'data')
-    primary = calculate_indicators(d)
-    sig, reason = get_signal_with_reason(primary, {}, 'single', s['timeframe'], s['active_strategy'], s['filters'], s['strategy_config'], regime)
-    if not sig: return _entry_diag_result(chat_id, symbol, 'no_signal', reason, 'signal')
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], s['active_strategy'], strategy_timeframe=s['timeframe'])
-    if not plan: return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason, 'trade_plan', sig)
-    ok = execute_trade(chat_id, symbol, 'BUY (Long)' if sig=='BUY' else 'SELL (Short)', plan['entry'], plan['sl'], plan['tp'], f"{reason} | {plan_reason}")
-    if ok: return _entry_diag_result(chat_id, symbol, 'entry_opened', 'موفق', 'entry', sig)
-    return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'خطای اجرا', 'execute', sig)
+async def scan_symbol(http,chat_id,symbol,regime=None):
+    s=get_session(chat_id)
+    if not s['is_bot_active'] or s['daily_stopped']:
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
+    scan_generation=int(s.get('scan_generation',0))
+    if time.time() < float(s['cooldowns'].get(symbol,0)):
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
+    tf=s['timeframe']; strat=s['active_strategy']; md={}
+    try:
+        klimit = 650 if tf in ('5min', '15min') else 160
+        d=await get_klines_async(http,symbol,tf,klimit)
+    except Exception as exc:
+        return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده: {exc}', 'data')
+    if d.empty:
+        return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
+    primary=calculate_indicators(d); primary_tf=tf; mode='single'
+    # برای استراتژی dynamic روی 1h/4h، تایم‌فریم بالاتر را هم می‌گیریم تا
+    # تأیید هم‌جهتی HTF در strategy_dynamic واقعاً اجرا شود.
+    if strat == 'dynamic' and tf in ('1hour', '4hour'):
+        htf_key, htf_tf = ('4h', '4hour') if tf == '1hour' else ('1d', '1day')
+        try:
+            hd=await get_klines_async(http,symbol,htf_tf,160)
+            if not hd.empty: md[htf_key]=calculate_indicators(hd)
+        except Exception as exc:
+            logger.warning('ENTRY_DIAG chat=%s symbol=%s htf=%s data_error=%s', chat_id, symbol, htf_tf, exc)
+    s=get_session(chat_id)
+    if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != scan_generation:
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات هنگام اسکن تغییر کرد', 'state')
+    if not risk_guard(chat_id):
+        return _entry_diag_result(chat_id, symbol, 'risk_blocked', 'محدودیت ریسک اجازه ورود نمی‌دهد', 'risk')
+    s=get_session(chat_id)
+    if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
+
+    is_scalp_strategy = (strat == 'dynamic' and primary_tf in ('5min', '15min'))
+    # برای 5m/15m، استراتژی هنوز بر اساس کندل بسته‌شده و PDH/PDL تصمیم می‌گیرد؛
+    # فقط برای بازیابی یک ستاپ خیلی تازه، قیمت زنده جهت جلوگیری از تعقیب قیمت استفاده می‌شود.
+    live_entry_price = None
+    if is_scalp_strategy:
+        try:
+            live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
+        except Exception:
+            live_entry_price = None
+    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
+    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
+    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
+    if not sig:
+        return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
+    # V2 dynamic must use the same adaptive candidate-selection engine for BOTH
+    # signal and plan. The seller build previously forced 5m/15m into the legacy
+    # liquidity-sweep planner here, which could make signal and SL/TP come from
+    # different strategy families.
+    plan_strategy_type = 'dynamic' if (strat == 'dynamic' and s.get('strategy_config', {}).get('v2_enabled', True)) else ('liquidity_sweep' if is_scalp_strategy else strat)
+    active_setup_index = None
+    if is_scalp_strategy:
+        m_active = re.search(r'ACTIVE_SETUP_INDEX=(\d+)', reason or '')
+        if m_active:
+            active_setup_index = int(m_active.group(1))
+    plan, plan_reason = build_trade_plan(
+        primary, sig, s['strategy_config'], plan_strategy_type,
+        strategy_timeframe=primary_tf, grid_levels=grid_levels,
+        setup_index=active_setup_index, live_price=live_entry_price
+    )
+    if not plan:
+        return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
+    entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
+    full_reason=f"{reason} | {plan_reason}"[:500]
+    guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
+    if not guard_ok:
+        return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)))
+    if ok:
+        return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
+    return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
 
 
 def performance_period_report(chat_id, period='all'):
-    s = get_session(chat_id)
-    closed = list(s.get('closed_positions') or [])
-    n = len(closed); pnls = [float(p.get('pnl_usdt', 0) or 0) for p in closed]
-    net = sum(pnls)
-    return f'📊 *گزارش عملکرد*\n\nمعاملات بسته‌شده: `{n}`\nسود/زیان خالص: `{net:+.2f} USDT`'
+    s=get_session(chat_id)
+    closed=list(s.get('closed_positions') or [])
+    now=time.time()
+    seconds={'day':86400,'week':7*86400,'month':30*86400}.get(period)
+    if seconds: closed=[p for p in closed if now-float(p.get('close_timestamp',p.get('opened_at',0)) or 0)<=seconds]
+    label={'day':'امروز','week':'۷ روز اخیر','month':'۳۰ روز اخیر','all':'کل سابقه'}.get(period,'کل سابقه')
+    n=len(closed); pnls=[float(p.get('pnl_usdt',0) or 0) for p in closed]
+    wins=[x for x in pnls if x>0]; losses=[x for x in pnls if x<0]
+    net=sum(pnls); gp=sum(wins); gl=abs(sum(losses)); pf=gp/gl if gl else (float('inf') if gp else 0)
+    rvals=[]
+    for p in closed:
+        try:
+            risk=float(p.get('risk_usdt') or 0); pnl=float(p.get('pnl_usdt') or 0)
+            if risk>0: rvals.append(pnl/risk)
+        except Exception: pass
+
+    longs=[p for p in closed if side_long(p.get('side'))]
+    shorts=[p for p in closed if not side_long(p.get('side'))]
+    long_wins=sum(1 for p in longs if float(p.get('pnl_usdt',0) or 0)>0)
+    short_wins=sum(1 for p in shorts if float(p.get('pnl_usdt',0) or 0)>0)
+    long_net=sum(float(p.get('pnl_usdt',0) or 0) for p in longs)
+    short_net=sum(float(p.get('pnl_usdt',0) or 0) for p in shorts)
+
+    lines=['📊 *گزارش عملکرد '+label+'*','━━━━━━━━━━━━━━━━━━━━',f'معاملات بسته‌شده: `{n}`',f'موفق: `{len(wins)}` | ناموفق: `{len(losses)}`',f'نرخ موفقیت: `{(len(wins)/n*100 if n else 0):.1f}%`',f'سود/زیان خالص: `{net:+.2f} USDT`',f'Profit Factor: `{("∞" if pf==float("inf") else f"{pf:.2f}")}`']
+    lines.append('━━━━━━━━━━━━━━━━━━━━')
+    lines.append(f"🟢 خرید (Long): `{len(longs)}` معامله | موفق: `{long_wins}` | ناموفق: `{len(longs)-long_wins}` | نرخ موفقیت: `{(long_wins/len(longs)*100 if longs else 0):.1f}%` | سود/زیان: `{long_net:+.2f} USDT`")
+    lines.append(f"🔴 فروش (Short): `{len(shorts)}` معامله | موفق: `{short_wins}` | ناموفق: `{len(shorts)-short_wins}` | نرخ موفقیت: `{(short_wins/len(shorts)*100 if shorts else 0):.1f}%` | سود/زیان: `{short_net:+.2f} USDT`")
+    if rvals:
+        lines.append('━━━━━━━━━━━━━━━━━━━━')
+        lines.append(f'📐 R واقعی میانگین: `{sum(rvals)/len(rvals):+.2f}R`')
+    return '\n'.join(lines)
 
 
 def trade_audit_report(chat_id):
-    return '🔎 ممیزی معامله ثبت نشد.'
+    s=get_session(chat_id); positions=list(s.get('paper_positions') or []); closed=list(s.get('closed_positions') or [])
+    allp=closed+positions
+    if not allp: return '🔎 *ممیزی معامله*\n\nهنوز معامله‌ای برای بررسی ثبت نشده است.'
+    p=max(allp,key=lambda x: float(x.get('opened_at',0) or 0)); tid=p.get('trade_id','—')
+    lines=['🔎 *ممیزی صفر تا صد آخرین پوزیشن*','━━━━━━━━━━━━━━━━━━━━',f'🆔 شناسه: `{tid}`',f'🪙 نماد: `{p.get("symbol")}` | {"LONG" if side_long(p.get("side")) else "SHORT"}',f'⏱ تایم‌فریم: `{TF_DISPLAY.get(p.get("timeframe"),p.get("timeframe"))}`',f'🎯 Entry: `{fmt(p.get("entry_price",0))}` | SL: `{fmt(p.get("sl",0))}` | TP: `{fmt(p.get("tp",0))}`',f'📦 وضعیت: `{"بسته‌شده" if p in closed else "باز"}`']
+    if p in closed:
+        lines += [f'🚪 خروج: `{fmt(p.get("close_price",0))}`',f'💰 PnL: `{float(p.get("pnl_usdt",0) or 0):+.2f} USDT`',f'📝 علت خروج: `{p.get("close_reason","—")}`']
+    return '\n'.join(lines)
 
 
-def export_trade_data(chat_id): return True
+def export_trade_data(chat_id):
+    if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
+    s=get_session(chat_id)
+    payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[])}
+    raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
+    try:
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        return True
+    except Exception as exc: logger.warning('export trade data failed: %s',exc); return False
 
 
 def reset_stats(chat_id):
-    s = get_session(chat_id); s['closed_positions'] = []; save_session(chat_id)
-    return True, '✅ آمار ریست شد.'
+    s=get_session(chat_id)
+    if s.get('paper_positions'):
+        return False, '❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'
+    s['closed_positions'] = []
+    s['trade_audit'] = []
+    s['scan_stats'] = {'scans':0,'symbols':0,'signals':0,'entries':0,'blocked':0,'data_errors':0,'reason_counts':{}}
+    s['daily_stopped'] = False
+    equity = exchange_balance(chat_id) if s.get('trading_mode') == 'REAL' else float(s.get('paper_balance', 1000.0))
+    s['daily_start_equity'] = float(equity)
+    s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime())
+    save_session(chat_id)
+    return True, f"✅ *آمار تست ریست شد*\n\nمبنای ریسک جدید: `{equity:.2f} USDT`"
 
 
-def analyze(chat_id, symbol):
-    return f"🔍 تحلیل {symbol}", {'inline_keyboard': [[{'text':'🏠 منوی اصلی', 'callback_data':'/menu'}]]}
+def analyze(chat_id,symbol):
+    s=get_session(chat_id)
+    tf=s['timeframe']
+    d=get_klines(symbol,tf,160)
+    if d.empty:
+        return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.', None
+    d=calculate_indicators(d); c=d.iloc[-2]
+    a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config'])
+    b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
+    m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
+
+    close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
+    adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
+
+    if close>ema20>ema50 and plus_di>minus_di and adx>=MARKET_REGIME_MIN_ADX:
+        trend_text='📈 صعودی'
+    elif close<ema20<ema50 and minus_di>plus_di and adx>=MARKET_REGIME_MIN_ADX:
+        trend_text='📉 نزولی'
+    else:
+        trend_text='➡️ رنج (بدون روند مشخص)'
+
+    good_entry=bool(a or b or m)
+    if good_entry:
+        strategy_text='✅ موقعیت مناسب برای ورود بر اساس استراتژی'
+    else:
+        reason=r1 or r2 or r3 or 'شرایط استراتژی هنوز کامل نشده است'
+        strategy_text=f'⚠️ موقعیت مناسب ورود نیست\n_({reason})_'
+
+    live_price=latest_price(symbol)
+    price_to_show=live_price if live_price is not None else close
+
+    text = (
+        f"🔍 *تحلیل {symbol}*\n\n"
+        f"💰 قیمت لحظه‌ای: `{fmt(price_to_show)}`\n"
+        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
+        f"📊 روند: {trend_text}\n"
+        f"🎯 وضعیت نسبت به استراتژی: {strategy_text}"
+    )
+    keyboard = {'inline_keyboard': [
+        [{'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, tf)}],
+        [{'text':'🏠 منوی اصلی','callback_data':'/menu'}],
+    ]}
+    return text, keyboard
 
 
-def menu(chat_id, message_id=None):
-    s = get_session(chat_id)
-    text = f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💰 موجودی: `{s['paper_balance']:.2f} USDT`"
-    send_message(chat_id, text, get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True)), message_id)
+def menu(chat_id,message_id=None):
+    s=get_session(chat_id)
+    bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
+    maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
+    diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True)),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
-    s = get_session(chat_id)
+    s=get_session(chat_id)
     with STATE_LOCK:
-        s['scan_generation'] = int(s.get('scan_generation', 0)) + 1
-        s['is_bot_active'] = False
+        s['scan_generation']=int(s.get('scan_generation',0))+1
+        s['is_bot_active']=False
+        s['last_stop_reason']=reason
     save_session(chat_id)
+    with get_entry_lock(chat_id):
+        pass
     return s
 
 
-def start_scan(chat_id, message_id=None):
-    s = get_session(chat_id)
+def start_scan(chat_id,message_id=None):
+    s=get_session(chat_id)
+    if s['daily_stopped']:
+        equity=exchange_balance(chat_id) if s['trading_mode']=='REAL' else current_paper_equity(s)
+        s['daily_stopped']=False
+        s['daily_start_equity']=equity
+    if s['trading_mode']=='REAL':
+        if not get_exchange(chat_id):
+            send_message(chat_id,'❌ حساب CoinEx برای این کاربر تنظیم نشده است.')
+            return
+        if not reconcile_real(chat_id):
+            return
+        s['real_reconciliation_required']=False
     with get_entry_lock(chat_id):
-        s['scan_generation'] = int(s.get('scan_generation', 0)) + 1
-        s['is_bot_active'] = True
+        s['scan_generation']=int(s.get('scan_generation',0))+1
+        s['is_bot_active']=True
+        s['last_stop_reason']=None
         save_session(chat_id)
-    menu(chat_id, message_id)
-    sync_bottom_keyboard(chat_id, "🟢 اسکن فعال شد.")
+    menu(chat_id,message_id)
+    sync_bottom_keyboard(chat_id, "🟢 اسکن فعال شد.\n🔒 تنظیمات حساس تا توقف اسکن قفل هستند.")
 
 
 def reload_and_restart_scan(chat_id, message_id=None):
@@ -930,9 +2657,9 @@ def reload_and_restart_scan(chat_id, message_id=None):
         s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
         save_session(chat_id)
         start_scan(chat_id, message_id)
-        send_message(chat_id, "🔄 تنظیمات استراتژی بازسازی شد.")
+        send_message(chat_id, "🔄 *تنظیمات استراتژی بر اساس تایم‌فریم فعلی بازسازی شد و اسکن فعال گردید.*")
     except Exception as exc:
-        send_message(chat_id, f"❌ خطا: `{exc}`")
+        send_message(chat_id, f"❌ خطا در بازسازی تنظیمات استراتژی: `{exc}`")
 
 
 def market_report(chat_id):
@@ -940,111 +2667,192 @@ def market_report(chat_id):
 
 
 def runtime_audit(chat_id):
-    s = get_session(chat_id)
-    return f'🧪 اسکن: `{"فعال" if s.get("is_bot_active") else "متوقف"}`'
+    s=get_session(chat_id)
+    return (
+        '🧪 *ممیزی وضعیت ربات*\n\n'
+        f'🤖 اسکن: `{"فعال" if s.get("is_bot_active") else "متوقف"}`\n'
+        f'💼 حساب: `{"REAL" if s.get("trading_mode")=="REAL" else "PAPER"}`\n'
+        f'📦 پوزیشن‌های باز: `{len(s.get("paper_positions",[]))}`\n'
+        '✅ بدون مغایرت ساختاری'
+    )
 
 
-def process_command(cmd, chat_id, message_id=None):
+def process_command(cmd,chat_id,message_id=None):
     if str(cmd).startswith('/set_fee '):
-        admin_set_fee_command(chat_id, cmd); return
+        admin_set_fee_command(chat_id, cmd)
+        return
     if cmd in ('/admin_fee_report','/admin_fee_day','/admin_fee_week','/admin_fee_month'):
-        if not is_admin(chat_id): send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
-        period = {'/admin_fee_report':'all','/admin_fee_day':'day','/admin_fee_week':'week','/admin_fee_month':'month'}[cmd]
-        send_message(chat_id, admin_fee_report(period), parse_mode='Markdown'); return
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        period={'/admin_fee_report':'all','/admin_fee_day':'day','/admin_fee_week':'week','/admin_fee_month':'month'}[cmd]
+        send_message(chat_id, admin_fee_report(period), parse_mode='Markdown')
+        return
     if cmd == '/users':
-        if not is_admin(chat_id): send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
-        send_message(chat_id, admin_users_report(), parse_mode='Markdown'); return
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        send_message(chat_id, admin_users_report(), parse_mode='Markdown')
+        return
+    if str(cmd).startswith('/user '):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        try:
+            target_id=int(str(cmd).split()[1])
+            send_message(chat_id, admin_user_detail(chat_id, target_id), parse_mode='Markdown')
+        except Exception:
+            send_message(chat_id,'فرمت: `/user USER_CHAT_ID`', parse_mode='Markdown')
+        return
     if cmd in ('/my_fees','/my_fee_report'):
-        send_message(chat_id, fee_report(chat_id,'all'), parse_mode='Markdown'); return
+        send_message(chat_id, fee_report(chat_id,'all'), parse_mode='Markdown')
+        return
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
         send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
+    if cmd in ('/audit','audit','🧪 ممیزی ربات'):
+        send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active'])); return
     
-    s = get_session(chat_id); c = (cmd or '').strip(); cl = c.lower()
-    if cl == '/start':
-        if s.get('is_bot_active'): stop_scan(chat_id)
-        send_message(chat_id, '🤖 ربات معامله‌گر', get_start_keyboard()); return
-    if cl in ('/menu','☰ منو','🏠 منوی اصلی'): menu(chat_id, message_id); return
-    if cl == '/cancel': menu(chat_id, message_id); return
+    s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
+
+    if cl=='/start':
+        if s.get('is_bot_active'): stop_scan(chat_id, 'start-reset')
+        s['user_state']=None; save_session(chat_id)
+        send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
+        return
+    if cl in ('/menu','☰ منو','🏠 منوی اصلی'): s['user_state']=None; menu(chat_id,message_id); return
+    if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id, message_id); return
     if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
-        stop_scan(chat_id); menu(chat_id, message_id); return
-    if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن'): start_scan(chat_id, message_id); return
+        stop_scan(chat_id, 'manual'); menu(chat_id,message_id)
+        sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند."); return
+    if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن'): start_scan(chat_id,message_id); return
     if cl == '/reload_and_start': reload_and_restart_scan(chat_id, message_id); return
-    if cl == '/market_report': send_message(chat_id, market_report(chat_id)); return
-    if cl == '/entry_diag':
+    if cl=='/market_report':
+        send_message(chat_id, market_report(chat_id)); return
+    if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
         edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}", get_entry_diag_keyboard(enabled), message_id); return
     if cl == '/toggle_entry_diag':
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
         edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled']), message_id); return
-    if cl == '/open_positions' or 'پوزیشن‌های باز' in c:
-        _send_or_edit_positions_view(chat_id, message_id=message_id); return
+    if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
+        _send_or_edit_positions_view(chat_id, message_id=message_id)
+        return
     if cl.startswith('/confirm_close_') and cl not in ('/confirm_close_all','/confirm_close_longs','/confirm_close_shorts'):
-        sym = cl.replace('/confirm_close_', '').upper()
+        sym=cl.replace('/confirm_close_','').upper()
         for p in s['paper_positions'][:]:
-            if p['symbol'] == sym: close_position(chat_id, p, reason='manual'); return
-    if cl == '/confirm_close_all':
-        stop_scan(chat_id)
-        for p in s['paper_positions'][:]: close_position(chat_id, p, reason='close_all')
+            if p['symbol']==sym:
+                close_position(chat_id,p,reason='manual'); return
+        send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl=='/close_all_prompt': send_message(chat_id,'⚠️ *تأیید بستن همه پوزیشن‌ها*',get_confirm_close_all_keyboard()); return
+    if cl=='/confirm_close_all':
+        stop_scan(chat_id, 'close-all')
+        for p in s['paper_positions'][:]: close_position(chat_id,p,reason='close_all')
         menu(chat_id); return
 
 
-def handle_text(chat_id, text):
-    raw = (text or '').strip()
-    fixed_buttons = {
+def handle_text(chat_id,text):
+    raw=(text or '').strip()
+    fixed_buttons={
         '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu',
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
+        '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
+        '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
         '📊 وضعیت بازار':'/market_report', 'وضعیت بازار':'/market_report',
-        '🆘 بستن اضطراری همه':'/close_all_prompt', 'بستن اضطراری همه':'/close_all_prompt',
+        '⚙️ تنظیمات معامله':'/check_wizard', 'تنظیمات معامله':'/check_wizard',
+        '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
+        '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
+        '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
+        '🖐 معامله دستی':'/manual_trade', 'معامله دستی':'/manual_trade',
     }
-    if raw in fixed_buttons: process_command(fixed_buttons[raw], chat_id); return
+    if raw in fixed_buttons:
+        process_command(fixed_buttons[raw],chat_id); return
     process_command(text, chat_id)
 
 
 def telegram_listener():
     global TELEGRAM_OFFSET
+    backlog_checked=False
     while True:
-        if not TELEGRAM_TOKEN: time.sleep(5); continue
+        if not TELEGRAM_TOKEN:
+            time.sleep(5); continue
         try:
-            params = {'timeout': 25}
-            if TELEGRAM_OFFSET > 0: params['offset'] = TELEGRAM_OFFSET
-            r = requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates', params=params, timeout=30)
-            if not r.ok: time.sleep(2); continue
-            for u in r.json().get('result', []):
-                upd = int(u.get('update_id', 0))
-                save_telegram_offset(upd + 1)
+            params={'timeout':25}
+            if TELEGRAM_OFFSET>0:
+                params['offset']=TELEGRAM_OFFSET
+            elif TELEGRAM_SKIP_BACKLOG and not backlog_checked:
+                params.update({'limit':100,'timeout':0})
+                r=requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates',params=params,timeout=10)
+                if r.ok:
+                    updates=r.json().get('result',[])
+                    if updates:
+                        save_telegram_offset(int(updates[-1].get('update_id',0))+1)
+                backlog_checked=True
+                time.sleep(1)
+                continue
+            r=requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates',params=params,timeout=30)
+            if not r.ok:
+                time.sleep(2); continue
+            updates=r.json().get('result',[])
+            for u in updates:
+                upd=int(u.get('update_id',0))
+                save_telegram_offset(upd+1)
                 try:
-                    callback = u.get('callback_query') or {}
-                    msg = callback.get('message') or u.get('message') or {}
-                    chat = (msg.get('chat') or {}).get('id')
-                    telegram_user = callback.get('from') or (u.get('message') or {}).get('from') or {}
+                    callback=u.get('callback_query') or {}
+                    msg=callback.get('message') or u.get('message') or {}
+                    chat=(msg.get('chat') or {}).get('id')
+                    telegram_user=callback.get('from') or (u.get('message') or {}).get('from') or {}
                     if not chat: continue
                     upsert_telegram_user(telegram_user, chat)
                     if callback.get('id'): answer_callback(callback['id'])
                     if not is_allowed(chat): continue
-                    data = callback.get('data') or (u.get('message') or {}).get('text')
-                    if callback: process_command(data, chat, msg.get('message_id'))
-                    elif data: handle_text(chat, data)
-                except Exception: pass
-        except Exception: time.sleep(2)
+                    data=callback.get('data') or (u.get('message') or {}).get('text')
+                    if callback: process_command(data,chat,msg.get('message_id'))
+                    elif data: handle_text(chat,data)
+                except Exception:
+                    logger.exception('Telegram update %s processing failed',upd)
+        except Exception as exc:
+            logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
 
 async def scan_loop():
     global ASYNC_SEMAPHORE
-    ASYNC_SEMAPHORE = asyncio.Semaphore(MAX_ASYNC_REQUESTS)
+    ASYNC_SEMAPHORE=asyncio.Semaphore(MAX_ASYNC_REQUESTS)
     while True:
         try:
-            for cid, s in list(USER_SESSIONS.items()): update_positions(cid)
-            timeout = aiohttp.ClientTimeout(total=10)
-            conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
-            async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-                tasks = []
-                for cid, s in list(USER_SESSIONS.items()):
+            for cid,s in list(USER_SESSIONS.items()):
+                if s['trading_mode']=='REAL' and s['is_bot_active']:
+                    reconcile_real(cid)
+                update_positions(cid)
+            timeout=aiohttp.ClientTimeout(total=10)
+            conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
+            async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
+                tasks=[]
+                need_regime = any(
+                    s.get('is_bot_active') and not s.get('daily_stopped')
+                    for s in USER_SESSIONS.values()
+                )
+                if need_regime:
+                    await refresh_market_regime(http)
+                loose_regime = MARKET_REGIME_CACHE['regime']
+                macro_extreme = MARKET_REGIME_CACHE['extreme']
+                active_timeframes = {
+                    s.get('timeframe', '5min')
+                    for s in USER_SESSIONS.values()
+                    if s.get('is_bot_active') and not s.get('daily_stopped')
+                }
+                micro_extreme_by_tf = {}
+                for tf in active_timeframes:
+                    micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
+                for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe', '5min'))
+                    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+                        _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
+                        continue
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
+                    user_tf = s.get('timeframe', '5min')
+                    combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme_by_tf.get(user_tf))
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http, cid, sym))
+                        tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
@@ -1053,14 +2861,40 @@ async def scan_loop():
                             by_chat.setdefault(item['chat_id'], []).append(item)
                     for cid, results in by_chat.items():
                         _entry_diag_batch_update(cid, results)
-        except Exception: pass
+        except Exception as exc: logger.exception('scan loop: %s',exc)
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 
 @app.get('/')
-def home(): return f"OK - Sessions: {len(USER_SESSIONS)}", 200
+def home(): return f"OK - Sessions: {len(USER_SESSIONS)} | Active: {sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active'))}",200
 @app.get('/health')
-def health(): return 'OK', 200
+def health(): return 'OK',200
+@app.get('/status')
+def status():
+    key=os.environ.get('STATUS_KEY','').strip()
+    if key and request.headers.get('X-Status-Key')!=key: return {'status':'unauthorized'},401
+    return {'status':'ok','sessions':len(USER_SESSIONS),'active_bots':sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active')),'multi_user_real':bool(COINEX_ACCOUNTS)},200
+
+
+def _notify_boot_status():
+    try:
+        targets = set(ALLOWED_CHAT_IDS) | set(USER_SESSIONS.keys())
+        if not targets: return
+        for cid in targets:
+            s = USER_SESSIONS.get(cid)
+            open_n = len(s.get('paper_positions') or []) if s else 0
+            closed_n = len(s.get('closed_positions') or []) if s else 0
+            msg = f"🔄 *ربات بالا آمد.*\nپوزیشن‌های باز شما: `{open_n}` | تاریخچه بسته‌شده: `{closed_n}`"
+            try: send_message(cid, msg)
+            except Exception: pass
+    except Exception: pass
+
+
+def _live_positions_loop():
+    while True:
+        try: refresh_live_position_messages()
+        except Exception: pass
+        time.sleep(10)
 
 
 def main():
@@ -1068,11 +2902,17 @@ def main():
     migrate_legacy_sqlite_to_postgres()
     load_telegram_offset()
     load_sessions()
+    logger.info('Loaded %s sessions', len(USER_SESSIONS))
+    _notify_boot_status()
     configure_telegram_native_menu()
     Thread(target=telegram_listener, daemon=True, name='telegram').start()
     Thread(target=lambda: (time.sleep(3), asyncio.run(scan_loop())), daemon=True, name='scanner').start()
+    Thread(target=lambda: (time.sleep(5), _live_positions_loop()), daemon=True, name='live-pnl').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
+
+if __name__ == 'main':
+    main()
 
 if __name__ == '__main__':
     main()
