@@ -54,9 +54,12 @@ DATA_CACHE_SECONDS = max(5, int(os.environ.get('DATA_CACHE_SECONDS', '20')))
 MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
+# تایم‌فریم‌هایی که هرگز نباید معامله‌شان به روز بعد منتقل شود (چه با سود چه با ضرر)
 NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
 DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 
+# تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
+# این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
     '5min': '1min',
     '15min': '5min',
@@ -68,18 +71,20 @@ POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
 
 
 def _seconds_to_local_day_end():
+    """ثانیه‌های باقی‌مانده تا پایان روز جاری بر اساس منطقه‌زمانی DAILY_CLOSE_TZ."""
     tz = None
     if ZoneInfo is not None:
-        try: tz = ZoneInfo(DAILY_CLOSE_TZ)
-        except Exception: tz = None
+        try:
+            tz = ZoneInfo(DAILY_CLOSE_TZ)
+        except Exception:
+            tz = None
     now = datetime.now(tz) if tz else datetime.utcnow()
     day_end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (day_end - now).total_seconds()
-
-
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
 TAKER_FEE_PCT = max(0.0, float(os.environ.get('TAKER_FEE_PCT', '0.05')))
 MIN_RISK_TO_FEE_RATIO = max(0.0, float(os.environ.get('MIN_RISK_TO_FEE_RATIO', '3.0')))
+# Platform fee: applied consistently to PAPER and REAL trades after a trade is realized.
 PLATFORM_FEE_RATE_PCT = min(100.0, max(0.0, float(os.environ.get('PLATFORM_FEE_RATE_PCT', '10.0'))))
 PLATFORM_FEE_MIN_PROFIT_USDT = max(0.0, float(os.environ.get('PLATFORM_FEE_MIN_PROFIT_USDT', '0.01')))
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
@@ -118,9 +123,12 @@ LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LI
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
 
+# لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
+# لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
 SHORT_WATCHLIST = ['IOTA','ALGO','MASK','NEO','UNI','STORJ','BTC','DASH','RUNE','COMP','BNB','ONE','GALA','AR','LUNA','MANA','ETH','ETC','SOL','SUSHI','LINK','SKL','CHZ','TRB','EGLD','BTT','VET','NEAR','SLP','ANKR','ADA','ZIL','BCH','AAVE','DYDX','RVN','SHIB','TRX','ATOM','ENJ','WAVES','ZEC','XTZ','AVAX','AXS','SNX','KSM','SAND','RSR','ZRX','RAY','QTUM']
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
+# اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
 SHARED_LONG_WATCHLIST = LONG_WATCHLIST
 SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
@@ -202,25 +210,48 @@ def init_db():
             conn.execute('PRAGMA busy_timeout=15000')
             fee_id_type = 'BIGSERIAL PRIMARY KEY' if DB_BACKEND == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
             real_type = 'DOUBLE PRECISION' if DB_BACKEND == 'postgres' else 'REAL'
-            conn.execute('CREATE TABLE IF NOT EXISTS sessions(chat_id BIGINT PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS sessions(chat_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)')
             conn.execute('CREATE TABLE IF NOT EXISTS bot_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)')
             conn.execute('''CREATE TABLE IF NOT EXISTS fee_ledger(
-                id %s, trade_id TEXT NOT NULL UNIQUE, chat_id BIGINT NOT NULL, mode TEXT NOT NULL,
-                gross_pnl_usdt %s NOT NULL DEFAULT 0, trading_cost_usdt %s NOT NULL DEFAULT 0,
-                net_profit_before_platform_fee_usdt %s NOT NULL DEFAULT 0, fee_rate_pct %s NOT NULL DEFAULT 0,
-                platform_fee_usdt %s NOT NULL DEFAULT 0, user_net_profit_usdt %s NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'SETTLED', created_at %s NOT NULL, settled_at %s
+                id %s,
+                trade_id TEXT NOT NULL UNIQUE,
+                chat_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                gross_pnl_usdt %s NOT NULL DEFAULT 0,
+                trading_cost_usdt %s NOT NULL DEFAULT 0,
+                net_profit_before_platform_fee_usdt %s NOT NULL DEFAULT 0,
+                fee_rate_pct %s NOT NULL DEFAULT 0,
+                platform_fee_usdt %s NOT NULL DEFAULT 0,
+                user_net_profit_usdt %s NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'SETTLED',
+                created_at %s NOT NULL,
+                settled_at %s
             )''' % ((fee_id_type,) + (real_type,)*8))
             conn.execute('''CREATE TABLE IF NOT EXISTS user_fee_settings(
-                chat_id BIGINT PRIMARY KEY, fee_rate_pct %s NOT NULL, updated_at INTEGER NOT NULL
+                chat_id INTEGER PRIMARY KEY,
+                fee_rate_pct %s NOT NULL,
+                updated_at INTEGER NOT NULL
             )''' % real_type)
             conn.execute('''CREATE TABLE IF NOT EXISTS users(
-                chat_id BIGINT PRIMARY KEY, telegram_user_id BIGINT, username TEXT, first_name TEXT,
-                last_name TEXT, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, is_active INTEGER NOT NULL DEFAULT 1
+                chat_id INTEGER PRIMARY KEY,
+                telegram_user_id INTEGER,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                first_seen INTEGER NOT NULL,
+                last_seen INTEGER NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
             )''')
             conn.commit()
         finally:
             conn.close()
+    if DB_BACKEND == 'postgres':
+        logger.info('Database backend: PostgreSQL (remote/Neon compatible)')
+    else:
+        if not os.environ.get('BOT_DB_PATH', '').strip():
+            logger.warning('هشدار ماندگاری داده: BOT_DB_PATH تنظیم نشده؛ دیتابیس روی مسیر پیش‌فرض محلی (%s) ذخیره می‌شود.', DB_PATH)
+        if not db_existed_before:
+            logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
 
 
 def _sqlite_table_exists(conn, table_name):
@@ -232,40 +263,95 @@ def _sqlite_table_exists(conn, table_name):
 
 
 def migrate_legacy_sqlite_to_postgres():
-    if DB_BACKEND != 'postgres': return
+    """One-time, idempotent migration of legacy SQLite state into PostgreSQL/Neon."""
+    if DB_BACKEND != 'postgres':
+        return
     legacy_path = os.environ.get('LEGACY_SQLITE_PATH', DB_PATH).strip() or DB_PATH
-    if not os.path.exists(legacy_path): return
+    if not os.path.exists(legacy_path):
+        logger.info('No legacy SQLite database found at %s; nothing to migrate.', legacy_path)
+        return
     with DB_LOCK:
         pg = db_connect()
         try:
             marker = pg.execute("SELECT value FROM bot_meta WHERE key=?", ('sqlite_migration_v1',)).fetchone()
-            if marker and str(marker[0]).lower() in ('done','completed'): return
+            if marker and str(marker[0]).lower() in ('done','completed'):
+                logger.info('SQLite→PostgreSQL migration already completed.')
+                return
             src = sqlite3.connect(legacy_path, timeout=15)
             try:
                 src.row_factory = sqlite3.Row
                 if not _sqlite_table_exists(src, 'sessions'):
                     pg.execute("INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", ('sqlite_migration_v1','done',int(time.time())))
                     pg.commit()
+                    logger.info('Legacy SQLite has no sessions table; migration marked complete.')
                     return
+                counts = {'sessions':0,'fees':0,'fee_settings':0,'users':0,'meta':0}
                 for r in src.execute('SELECT chat_id,data,updated_at FROM sessions').fetchall():
                     existing = pg.execute('SELECT updated_at FROM sessions WHERE chat_id=?', (int(r['chat_id']),)).fetchone()
                     if not existing or int(r['updated_at'] or 0) > int(existing[0] or 0):
-                        if existing: pg.execute('UPDATE sessions SET data=?,updated_at=? WHERE chat_id=?', (r['data'], int(r['updated_at']), int(r['chat_id'])))
-                        else: pg.execute('INSERT INTO sessions(chat_id,data,updated_at) VALUES(?,?,?)', (int(r['chat_id']), r['data'], int(r['updated_at'])))
+                        if existing:
+                            pg.execute('UPDATE sessions SET data=?,updated_at=? WHERE chat_id=?', (r['data'], int(r['updated_at']), int(r['chat_id'])))
+                        else:
+                            pg.execute('INSERT INTO sessions(chat_id,data,updated_at) VALUES(?,?,?)', (int(r['chat_id']), r['data'], int(r['updated_at'])))
+                        counts['sessions'] += 1
+                if _sqlite_table_exists(src, 'fee_ledger'):
+                    cols = ['id','trade_id','chat_id','mode','gross_pnl_usdt','trading_cost_usdt','net_profit_before_platform_fee_usdt','fee_rate_pct','platform_fee_usdt','user_net_profit_usdt','status','created_at','settled_at']
+                    for r in src.execute('SELECT '+','.join(cols)+' FROM fee_ledger').fetchall():
+                        vals=[r[c] for c in cols]
+                        try:
+                            pg.execute("""INSERT INTO fee_ledger(id,trade_id,chat_id,mode,gross_pnl_usdt,trading_cost_usdt,net_profit_before_platform_fee_usdt,fee_rate_pct,platform_fee_usdt,user_net_profit_usdt,status,created_at,settled_at)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trade_id) DO NOTHING""", vals)
+                            counts['fees'] += 1
+                        except Exception:
+                            logger.exception('fee migration failed trade_id=%s', r['trade_id'])
+                if _sqlite_table_exists(src, 'user_fee_settings'):
+                    for r in src.execute('SELECT chat_id,fee_rate_pct,updated_at FROM user_fee_settings').fetchall():
+                        pg.execute("""INSERT INTO user_fee_settings(chat_id,fee_rate_pct,updated_at) VALUES(?,?,?)
+                            ON CONFLICT(chat_id) DO UPDATE SET fee_rate_pct=excluded.fee_rate_pct,updated_at=excluded.updated_at
+                            WHERE excluded.updated_at > user_fee_settings.updated_at""", (int(r['chat_id']), float(r['fee_rate_pct']), int(r['updated_at'])))
+                        counts['fee_settings'] += 1
+                if _sqlite_table_exists(src, 'users'):
+                    for r in src.execute('SELECT chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active FROM users').fetchall():
+                        pg.execute("""INSERT INTO users(chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active)
+                            VALUES(?,?,?,?,?,?,?,?)
+                            ON CONFLICT(chat_id) DO UPDATE SET
+                                telegram_user_id=COALESCE(EXCLUDED.telegram_user_id,users.telegram_user_id),
+                                username=COALESCE(EXCLUDED.username,users.username),
+                                first_name=COALESCE(EXCLUDED.first_name,users.first_name),
+                                last_name=COALESCE(EXCLUDED.last_name,users.last_name),
+                                first_seen=LEAST(users.first_seen,EXCLUDED.first_seen),
+                                last_seen=GREATEST(users.last_seen,EXCLUDED.last_seen),
+                                is_active=EXCLUDED.is_active""", (int(r['chat_id']), r['telegram_user_id'], r['username'], r['first_name'], r['last_name'], int(r['first_seen']), int(r['last_seen']), int(r['is_active'])))
+                        counts['users'] += 1
+                if _sqlite_table_exists(src, 'bot_meta'):
+                    for r in src.execute('SELECT key,value,updated_at FROM bot_meta').fetchall():
+                        existing=pg.execute('SELECT updated_at FROM bot_meta WHERE key=?',(r['key'],)).fetchone()
+                        if not existing:
+                            pg.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?)',(r['key'],r['value'],int(r['updated_at'])))
+                            counts['meta'] += 1
+                # Advance BIGSERIAL after importing explicit SQLite IDs.
+                pg.execute("SELECT setval(pg_get_serial_sequence('fee_ledger','id'), COALESCE((SELECT MAX(id) FROM fee_ledger),1), true)")
+                pg.execute("INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", ('sqlite_migration_v1','done',int(time.time())))
                 pg.commit()
+                logger.info('SQLite→PostgreSQL migration completed: %s', counts)
             except Exception:
                 pg.rollback()
+                logger.exception('SQLite→PostgreSQL migration failed; transaction rolled back.')
                 raise
-            finally: src.close()
-        finally: pg.close()
-
+            finally:
+                src.close()
+        finally:
+            pg.close()
 
 def upsert_telegram_user(user, chat_id=None):
-    if not user: return
+    """ثبت/به‌روزرسانی پروفایل غیرحساس تلگرام برای نمایش به ادمین."""
+    if not user:
+        return
     try:
         uid = int(user.get('id') or chat_id)
         cid = int(chat_id if chat_id is not None else uid)
-    except Exception: return
+    except Exception:
+        return
     username = str(user.get('username') or '').strip() or None
     first_name = str(user.get('first_name') or '').strip() or None
     last_name = str(user.get('last_name') or '').strip() or None
@@ -273,14 +359,20 @@ def upsert_telegram_user(user, chat_id=None):
     with DB_LOCK:
         conn = db_connect()
         try:
+            conn.execute('PRAGMA busy_timeout=15000')
             conn.execute('''INSERT INTO users(chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active)
-                VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(chat_id) DO UPDATE SET
-                telegram_user_id=excluded.telegram_user_id, username=COALESCE(excluded.username, users.username),
-                first_name=COALESCE(excluded.first_name, users.first_name), last_name=COALESCE(excluded.last_name, users.last_name),
-                last_seen=excluded.last_seen, is_active=1''', (cid, uid, username, first_name, last_name, now, now))
+                VALUES(?,?,?,?,?,?,?,1)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    telegram_user_id=excluded.telegram_user_id,
+                    username=COALESCE(excluded.username, users.username),
+                    first_name=COALESCE(excluded.first_name, users.first_name),
+                    last_name=COALESCE(excluded.last_name, users.last_name),
+                    last_seen=excluded.last_seen,
+                    is_active=1''',
+                (cid, uid, username, first_name, last_name, now, now))
             conn.commit()
-        finally: conn.close()
-
+        finally:
+            conn.close()
 
 def mark_stale_users(days=30):
     cutoff = int(time.time()) - int(days * 86400)
@@ -293,8 +385,9 @@ def mark_stale_users(days=30):
         finally:
             conn.close()
 
-
 def admin_users_report(limit=100):
+    if not USER_SESSIONS and DB_BACKEND == 'sqlite' and not os.path.exists(DB_PATH):
+        return '👥 *کاربران ربات*\n\nهنوز کاربری ثبت نشده است.'
     mark_stale_users(30)
     with DB_LOCK:
         conn=db_connect()
@@ -303,18 +396,19 @@ def admin_users_report(limit=100):
                     (SELECT COUNT(*) FROM fee_ledger f WHERE f.chat_id=u.chat_id) AS fee_trades,
                     (SELECT COALESCE(SUM(f.platform_fee_usdt),0) FROM fee_ledger f WHERE f.chat_id=u.chat_id) AS fee_total
                 FROM users u ORDER BY u.last_seen DESC LIMIT ?''',(int(limit),)).fetchall()
-        finally: conn.close()
-    if not rows: return '👥 *کاربران ربات*\n\nهنوز کاربری ثبت نشده است.'
-    active = sum(1 for r in rows if r[6])
-    lines = [f'👥 *کاربران ربات*', '', f'• تعداد نمایش‌داده‌شده: `{len(rows)}`', f'• فعال در ۳۰ روز اخیر: `{active}`', '', '*فهرست:*']
-    for i, (cid, username, first, last, first_seen, last_seen, is_active, fee_trades, fee_total) in enumerate(rows, 1):
-        name = ' '.join(x for x in (first, last) if x) or 'بدون نام'
-        uname = f'@{username}' if username else 'بدون username'
-        status = '🟢' if is_active else '⚪️'
-        last_txt = time.strftime('%Y-%m-%d %H:%M', time.localtime(last_seen))
+        finally:
+            conn.close()
+    if not rows:
+        return '👥 *کاربران ربات*\n\nهنوز کاربری ثبت نشده است.'
+    active=sum(1 for r in rows if r[6])
+    lines=[f'👥 *کاربران ربات*', '', f'• تعداد نمایش‌داده‌شده: `{len(rows)}`', f'• فعال در ۳۰ روز اخیر: `{active}`', '', '*فهرست:*']
+    for i,(cid,username,first,last,first_seen,last_seen,is_active,fee_trades,fee_total) in enumerate(rows,1):
+        name=' '.join(x for x in (first,last) if x) or 'بدون نام'
+        uname=f'@{username}' if username else 'بدون username'
+        status='🟢' if is_active else '⚪️'
+        last_txt=time.strftime('%Y-%m-%d %H:%M', time.localtime(last_seen))
         lines.append(f'{status} `{i}` {name} — `{uname}`\n   ID: `{cid}` | آخرین فعالیت: `{last_txt}` | کارمزد: `{fee_total:.2f}` USDT ({fee_trades})')
     return '\n'.join(lines)
-
 
 def admin_user_detail(chat_id, target_id):
     with DB_LOCK:
@@ -322,12 +416,14 @@ def admin_user_detail(chat_id, target_id):
         try:
             row=conn.execute('SELECT chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active FROM users WHERE chat_id=?',(int(target_id),)).fetchone()
             fee=conn.execute('SELECT COALESCE(SUM(platform_fee_usdt),0),COUNT(*) FROM fee_ledger WHERE chat_id=?',(int(target_id),)).fetchone()
-        finally: conn.close()
-    if not row: return f'❌ کاربری با ID `{target_id}` در رجیستری پیدا نشد.'
-    cid, uid, username, first, last, first_seen, last_seen, is_active = row
-    fee_total, fee_count = fee or (0, 0)
-    name = ' '.join(x for x in (first, last) if x) or 'بدون نام'
-    uname = f'@{username}' if username else 'بدون username'
+        finally:
+            conn.close()
+    if not row:
+        return f'❌ کاربری با ID `{target_id}` در رجیستری پیدا نشد.'
+    cid,uid,username,first,last,first_seen,last_seen,is_active=row
+    fee_total,fee_count=fee or (0,0)
+    name=' '.join(x for x in (first,last) if x) or 'بدون نام'
+    uname=f'@{username}' if username else 'بدون username'
     return (f'👤 *پروفایل کاربر*\n\nنام: `{name}`\nUsername: `{uname}`\nChat ID: `{cid}`\nTelegram ID: `{uid}`\n'
             f'اولین فعالیت: `{time.strftime("%Y-%m-%d %H:%M", time.localtime(first_seen))}`\n'
             f'آخرین فعالیت: `{time.strftime("%Y-%m-%d %H:%M", time.localtime(last_seen))}`\n'
@@ -489,6 +585,7 @@ def normalize_session(data):
     s['traded_levels'] = dict(data.get('traded_levels') or {})
     stored_symbols = list(data.get('active_symbols') or [])
     if PAPER_ONLY:
+        # Paper validation should use a stable, liquid universe by default.
         s['active_symbols'] = PAPER_SYMBOLS[:]
     elif not stored_symbols or set(stored_symbols) == set(LEGACY_DEFAULT_ACTIVE_SYMBOLS):
         s['active_symbols'] = DEFAULT_ACTIVE_SYMBOLS[:]
@@ -1146,6 +1243,13 @@ TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1
 
 
 def tradingview_chart_url(symbol, timeframe='5min'):
+    """
+    لینک چارت TradingView برای نماد/تایم‌فریم فعال می‌سازد (نماد پرپچوال روی CoinEx،
+    همان صرافی‌ای که ربات معامله می‌کند: COINEX:{SYMBOL}USDT.P).
+    این یک لینک معمولی tradingview.com است؛ تلگرام و سیستم‌عامل موبایل به‌صورت خودکار
+    اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
+    وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
+    """
     sym = symbol.upper().replace('USDT', '').replace('/', '')
     interval = TV_INTERVAL_MAP.get(timeframe, '15')
     tv_symbol = urlparse.quote(f'COINEX:{sym}USDT.P', safe='')
@@ -2652,6 +2756,17 @@ def start_scan(chat_id,message_id=None):
 
 
 def reload_and_restart_scan(chat_id, message_id=None):
+    """
+    توجه: این تابع فقط تنظیمات استراتژی (strategy_config) را بر اساس تایم‌فریم
+    فعلی همین اکانت بازسازی و اسکن را دوباره فعال می‌کند. عمداً importlib.reload
+    حذف شد — در بات چندکاربره‌ای که چند اکانت روی یک پردازه اجرا می‌شوند، بازخوانی
+    زنده‌ی ماژول strategy نه اثر واقعی داشت (چون bot.py توابع را یک‌بار در ابتدای
+    اجرا import کرده و دیگر آپدیت نمی‌شدند) و نه بی‌خطر بود (می‌توانست هم‌زمان با
+    اجرای اسکن سایر اکانت‌ها تداخل ایجاد کند). timeframe و تنظیمات این اکانت دست
+    نخورده باقی می‌ماند؛ اگر بعد از این دکمه بازهم تنظیمات به‌طور کامل به حالت
+    پیش‌فرض برگشت، علتش خارج از این تابع است — احتمالاً ری‌استارت کل پردازه/کانتینر
+    میزبان و نبودِ دیسک دائمی برای BOT_DB_PATH (به هشدار init_db مراجعه کنید).
+    """
     try:
         s = get_session(chat_id)
         s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
@@ -2662,8 +2777,104 @@ def reload_and_restart_scan(chat_id, message_id=None):
         send_message(chat_id, f"❌ خطا در بازسازی تنظیمات استراتژی: `{exc}`")
 
 
+def _market_snapshot(symbol, tf):
+    try:
+        d = get_klines(symbol, tf, 160)
+        if d.empty or len(d) < 60: return None
+        d = calculate_indicators(d); c = d.iloc[-2]
+        close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50); adx = float(c.adx); rsi = float(c.rsi); atr = float(c.atr)
+        vol_ratio = float(c.volume / d['volume'].rolling(20).mean().iloc[-2]) if float(d['volume'].rolling(20).mean().iloc[-2]) > 0 else 0.0
+        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+        return {'symbol': symbol, 'close': close, 'adx': adx, 'rsi': rsi, 'atr_pct': atr / close * 100 if close else 0.0, 'volume_ratio': vol_ratio, 'score': score}
+    except Exception:
+        return None
+
+
+MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
+# --- رژیم «اجماع فوری» - همان روش و همان آستانه‌ی گزارش «وضعیت بازار»، ولی وصل به --------
+# تصمیم‌گیری معامله. برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی
+# خیلی سخت‌گیرانه می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را
+# می‌بیند - یعنی دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند، و با همان قانون
+# اکثریت ساده (>=۵۰٪) که آنجا هم استفاده می‌شود. یعنی هر وقت «وضعیت بازار» صعودی/نزولی
+# اعلام شود، دقیقاً همان لحظه ورود خلاف‌جهت روی همه‌ی نمادها بلاک می‌شود؛ فقط وقتی بازار
+# رنج/نامشخص باشد (نه اکثریت صعودی نه نزولی) هر دو جهت آزاد هستند.
+TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
+TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
+TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+async def _market_snapshot_async(http, symbol, tf):
+    try:
+        d = await get_klines_async(http, symbol, tf, 160)
+        if d is None or d.empty or len(d) < 60: return None
+        d = calculate_indicators(d); c = d.iloc[-2]
+        close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50)
+        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+        return score
+    except Exception:
+        return None
+
+
+async def refresh_timeframe_regime(http, timeframe):
+    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده).
+    دقیقاً همان فرمول market_report(): اکثریت ساده (>=۵۰٪) از همان ۱۰ ارز، نه اجماع افراطی."""
+    tf = timeframe
+    now = time.time()
+    c = TIMEFRAME_REGIME_CACHE.get(tf)
+    if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
+        return c['extreme']
+    scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
+    scores = [x for x in scores if x is not None]
+    extreme = None
+    if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
+        bullish = sum(1 for x in scores if x > 0)
+        bearish = sum(1 for x in scores if x < 0)
+        total = len(scores)
+        if bullish > bearish and bullish >= total * 0.5:
+            extreme = 'BULLISH'
+        elif bearish > bullish and bearish >= total * 0.5:
+            extreme = 'BEARISH'
+    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
+    return extreme
+
+
+def combine_extreme_regime(macro, micro):
+    """اگر با هم تناقض داشتند (نادر) به‌جای بلاک‌کردن اشتباه، خنثی در نظر گرفته می‌شود."""
+    if macro and micro and macro != micro:
+        return None
+    return macro or micro
+
+
 def market_report(chat_id):
-    return "🌐 *داشبورد بازار*\nوضعیت عادی است."
+    s = get_session(chat_id)
+    tf = s['timeframe']
+    symbols = MARKET_REPORT_SYMBOLS
+    results = []
+    with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as ex:
+        futures = [ex.submit(_market_snapshot, sym, tf) for sym in symbols]
+        for f in as_completed(futures):
+            item = f.result()
+            if item: results.append(item)
+    if not results:
+        return '❌ داده کافی برای ساخت داشبورد بازار دریافت نشد.'
+    total = len(results)
+    bullish = sum(1 for x in results if x['score'] > 0)
+    bearish = sum(1 for x in results if x['score'] < 0)
+    ranged = total - bullish - bearish
+
+    if bullish > bearish and bullish >= total * 0.5:
+        overall = '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.'
+    elif bearish > bullish and bearish >= total * 0.5:
+        overall = '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.'
+    else:
+        overall = '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.'
+
+    return (
+        '🌐 *داشبورد بازار*\n'
+        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`\n\n"
+        f"{overall}\n"
+        f"📊 از بین {total} ارز بررسی‌شده: {bullish} صعودی، {bearish} نزولی، {ranged} رنج"
+    )
 
 
 def runtime_audit(chat_id):
@@ -2677,7 +2888,26 @@ def runtime_audit(chat_id):
     )
 
 
+def learning_text(topic):
+    texts={
+        'adx':"📈 *ADX چیست؟*\n\nADX برای سنجش *قدرت روند* است، نه جهت آن.",
+        'atr':"🌪 *ATR چیست؟*\n\nATR میزان *نوسان معمول قیمت* را اندازه می‌گیرد.",
+        'rsi':"📊 *RSI چیست؟*\n\nRSI وضعیت اشباع خرید یا فروش را مشخص می‌کند.",
+        'rr':"⚖️ *R:R چیست؟*\n\nنسبت پاداش به ریسک احتمالی معامله.",
+        'why':"🧠 *چرا این شاخص‌ها؟*\n\nبرای ارزیابی چندبعدی بازار پیش از ورود."
+    }
+    return texts.get(topic,texts['why'])
+
+
+def apply_user_profile(s, profile):
+    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(65.0,1.30,0.50,20.0,'متعادل'),'opportunity':(60.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
+    score,rr,risk,adx,label=presets[profile]
+    s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
+    return label,score,rr,risk
+
+
 def process_command(cmd,chat_id,message_id=None):
+    # Admin revenue / fee management commands.
     if str(cmd).startswith('/set_fee '):
         admin_set_fee_command(chat_id, cmd)
         return
@@ -2708,8 +2938,56 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
     if cmd in ('/audit','audit','🧪 ممیزی ربات'):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active'])); return
-    
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
+
+    if cl in ('/learn_menu','learn','🎓 آموزش مفاهیم'):
+        edit_page(chat_id,'🎓 *آموزش ساده مفاهیم ربات*',get_learn_menu_keyboard(),message_id); return
+    if cl in ('/learn_adx','/learn_atr','/learn_rsi','/learn_rr','/learn_why'):
+        edit_page(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard(),message_id); return
+    if cl=='/profile_advanced':
+        s['user_experience']='advanced'; save_session(chat_id); edit_page(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*',get_params_menu_keyboard(s),message_id); return
+    if cl=='/profile_simple':
+        s['user_experience']='simple'; save_session(chat_id); edit_page(chat_id,'🟢 *حالت ساده فعال شد.*',get_params_menu_keyboard(s),message_id); return
+    if cl in ('/profile_conservative','/profile_balanced','/profile_opportunity'):
+        profile={'/profile_conservative':'conservative','/profile_balanced':'balanced','/profile_opportunity':'opportunity'}[cl]
+        label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
+        edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*',get_params_menu_keyboard(s),message_id); return
+
+    if cl.startswith('/view_chart_'):
+        sym = cl.replace('/view_chart_', '').upper()
+        pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
+        if not pos:
+            send_message(chat_id, f'❌ پوزیشن باز برای `{sym}` یافت نشد.')
+            return
+        tf = pos.get('timeframe', '5min')
+        df = get_klines(sym, tf, 200)
+        if df.empty:
+            send_message(chat_id, f'❌ دریافت داده کندل برای `{sym}` ناموفق بود.')
+            return
+        chart(chat_id, sym, calculate_indicators(df), pos)
+        return
+
+    if cl.startswith('/edit_sl_'):
+        sym = cl.replace('/edit_sl_', '').upper()
+        pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
+        if not pos:
+            send_message(chat_id, f'❌ پوزیشن `{sym}` یافت نشد.')
+            return
+        s['user_state'] = f'WAIT_EDIT_SL_{sym}'
+        save_session(chat_id)
+        send_message(chat_id, f"🛑 *تغییر حد ضرر (SL)* برای `{sym}`\n\nورود: `{fmt(pos['entry_price'])}`\nحد ضرر فعلی: `{fmt(pos['sl'])}`\n\nلطفاً مقدار عددی جدید SL را ارسال کنید:")
+        return
+
+    if cl.startswith('/edit_tp_'):
+        sym = cl.replace('/edit_tp_', '').upper()
+        pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
+        if not pos:
+            send_message(chat_id, f'❌ پوزیشن `{sym}` یافت نشد.')
+            return
+        s['user_state'] = f'WAIT_EDIT_TP_{sym}'
+        save_session(chat_id)
+        send_message(chat_id, f"🎯 *تغییر حد سود (TP)* برای `{sym}`\n\nورود: `{fmt(pos['entry_price'])}`\nحد سود فعلی: `{fmt(pos['tp'])}`\n\nلطفاً مقدار عددی جدید TP را ارسال کنید:")
+        return
 
     if cl=='/start':
         if s.get('is_bot_active'): stop_scan(chat_id, 'start-reset')
@@ -2724,8 +3002,31 @@ def process_command(cmd,chat_id,message_id=None):
         sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند."); return
     if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن'): start_scan(chat_id,message_id); return
     if cl == '/reload_and_start': reload_and_restart_scan(chat_id, message_id); return
+    if cl=='/mode_paper':
+        if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
+        s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
+    if cl=='/mode_real':
+        if PAPER_ONLY:
+            send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.')
+            return
+        if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
+        if not get_exchange(chat_id): send_message(chat_id,'❌ حساب CoinEx این کاربر در `COINEX_ACCOUNTS_JSON` تنظیم نشده است.'); return
+        bal=exchange_balance(chat_id)
+        s['trading_mode']='REAL'; s['is_bot_active']=False; s['daily_start_equity']=bal; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,f'🔴 موجودی REAL: `{bal:.2f} USDT`\n\n⚙️ مارجین هر معامله:',get_margin_keyboard(),message_id); return
+    if cl.startswith('/set_bal_'):
+        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
+    if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
+    if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl.startswith('/set_max_'):
+        s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
+        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
+    if cl.startswith('/set_tf_'):
+        tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
+        if cl in tf_map:
+            s['timeframe']=tf_map[cl]; s['strategy_config']=get_timeframe_preset(s['timeframe']); save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
         send_message(chat_id, market_report(chat_id)); return
+    if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
         edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}", get_entry_diag_keyboard(enabled), message_id); return
@@ -2733,9 +3034,56 @@ def process_command(cmd,chat_id,message_id=None):
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
         edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled']), message_id); return
+    if cl == '/entry_diag_log':
+        window = list((ENTRY_DIAG_STATE.get(chat_id) or {}).get('window_results') or [])
+        if not window:
+            edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        data_errs = [x for x in window if x.get('status') in ('data_error', 'insufficient_data')]
+        lines = ['📋 *آخرین موارد خطای داده (نماد مشخص)*', '━━━━━━━━━━━━━━━━━━━━']
+        if data_errs:
+            seen_syms = {}
+            for x in reversed(data_errs):
+                seen_syms.setdefault(x.get('symbol', '?'), x.get('reason', ''))
+            for sym, reason in list(seen_syms.items())[:20]:
+                lines.append(f'• `{sym}` — {reason}')
+        else:
+            lines.append('موردی یافت نشد.')
+        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+    if cl in ('/manual_trade','🖐 معامله دستی'):
+        s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
+        send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
+    if cl in ('/manual_side_buy','/manual_side_sell'):
+        tmp=s.get('_manual_tmp') or {}
+        if not tmp.get('symbol'):
+            send_message(chat_id,'⚠️ ابتدا نماد را ارسال کنید.'); s['user_state']='WAIT_MANUAL_SYMBOL'; save_session(chat_id); return
+        tmp['side']='BUY' if cl=='/manual_side_buy' else 'SELL'
+        s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
+        live=latest_price(tmp['symbol'])
+        send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
     if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
+    if cl in ('/manage_watchlist','/watchlist_list'):
+        long_list='، '.join(SHARED_LONG_WATCHLIST)
+        short_list='، '.join(SHARED_SHORT_WATCHLIST)
+        edit_page(
+            chat_id,
+            f"📋 *واچ‌لیست فعال*\n\n"
+            f"🟢 *Long* ({len(SHARED_LONG_WATCHLIST)} نماد):\n`{long_list}`\n\n"
+            f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`",
+            get_watchlist_manage_keyboard(),message_id); return
+    if cl.startswith('/manage_'):
+        sym=cl.replace('/manage_','').upper()
+        for p in s['paper_positions']:
+            if p['symbol']==sym:
+                send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym, p.get('timeframe','5min')), p.get('timeframe','5min'))); return
+        send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl.startswith('/close_prompt_'):
+        sym=cl.replace('/close_prompt_','').upper()
+        for p in s['paper_positions']:
+            if p['symbol']==sym:
+                send_message(chat_id,format_trade_status(p)+'\n\n⚠️ آیا از بستن با قیمت بازار اطمینان دارید؟',close_confirm_keyboard(sym)); return
+        send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
     if cl.startswith('/confirm_close_') and cl not in ('/confirm_close_all','/confirm_close_longs','/confirm_close_shorts'):
         sym=cl.replace('/confirm_close_','').upper()
         for p in s['paper_positions'][:]:
@@ -2747,6 +3095,45 @@ def process_command(cmd,chat_id,message_id=None):
         stop_scan(chat_id, 'close-all')
         for p in s['paper_positions'][:]: close_position(chat_id,p,reason='close_all')
         menu(chat_id); return
+    if cl=='/emergency_close_all':
+        n = len(s['paper_positions'])
+        if n==0: send_message(chat_id,'❌ پوزیشن بازی وجود ندارد.'); return
+        send_message(chat_id,f'🆘 *تأیید بستن اضطراری*\n\n{n} پوزیشن فوراً با قیمت بازار بسته می‌شود و اسکن متوقف می‌شود.',get_confirm_emergency_close_keyboard()); return
+    if cl=='/confirm_emergency_close_all':
+        # بدون تأخیر: اسکن را متوقف می‌کند تا معامله جدیدی باز نشود و همه پوزیشن‌ها را می‌بندد
+        stop_scan(chat_id, 'emergency-close-all')
+        n = len(s['paper_positions'])
+        for p in s['paper_positions'][:]: close_position(chat_id,p,reason='emergency_close_all')
+        send_message(chat_id, f'🆘 *بستن اضطراری انجام شد*\n\n{n} پوزیشن بسته شد و اسکن متوقف شد.')
+        return
+    if cl=='/close_longs_prompt':
+        n=sum(1 for p in s['paper_positions'] if side_long(p['side']))
+        if n==0: send_message(chat_id,'❌ پوزیشن خریدی وجود ندارد.'); return
+        send_message(chat_id,f'⚠️ تأیید بستن {n} پوزیشن خرید:',get_confirm_close_longs_keyboard()); return
+    if cl=='/confirm_close_longs':
+        for p in s['paper_positions'][:]:
+            if side_long(p['side']): close_position(chat_id,p,reason='manual_longs')
+        return
+    if cl=='/close_shorts_prompt':
+        n=sum(1 for p in s['paper_positions'] if not side_long(p['side']))
+        if n==0: send_message(chat_id,'❌ پوزیشن فروشی وجود ندارد.'); return
+        send_message(chat_id,f'⚠️ تأیید بستن {n} پوزیشن فروش:',get_confirm_close_shorts_keyboard()); return
+    if cl=='/confirm_close_shorts':
+        for p in s['paper_positions'][:]:
+            if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
+        return
+    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
+        if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
+        elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
+        elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
+        elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
+        elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
+        elif cl=='/export_trade_data': export_trade_data(chat_id)
+        elif cl=='/reset_stats_prompt':
+            send_message(chat_id,'⚠️ آیا از ریست آمار عملکرد اطمینان دارید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
+        elif cl=='/reset_stats_confirm':
+            ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
+        return
 
 
 def handle_text(chat_id,text):
@@ -2765,7 +3152,106 @@ def handle_text(chat_id,text):
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
-    process_command(text, chat_id)
+
+    s=get_session(chat_id); val=raw.upper()
+    current_state = str(s.get('user_state') or '')
+
+    if current_state.startswith('WAIT_EDIT_SL_'):
+        sym = current_state.replace('WAIT_EDIT_SL_', '')
+        s['user_state'] = None
+        save_session(chat_id)
+        try:
+            new_sl = float(raw.replace(',', '').strip())
+        except ValueError:
+            send_message(chat_id, '⚠️ مقدار وارد شده نامعتبر است.')
+            return
+        pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
+        if not pos:
+            send_message(chat_id, f'❌ پوزیشن `{sym}` پیدا نشد.')
+            return
+        is_long = side_long(pos['side'])
+        entry = float(pos['entry_price'])
+        if (is_long and new_sl >= entry) or (not is_long and new_sl <= entry):
+            send_message(chat_id, f"⚠️ حد ضرر باید {'کمتر' if is_long else 'بیشتر'} از قیمت ورود ({fmt(entry)}) باشد.")
+            return
+        if pos.get('is_real'):
+            ok, err = move_stop_loss(chat_id, sym, normalize_price(chat_id, sym, new_sl))
+            if not ok:
+                send_message(chat_id, f'❌ تغییر حد ضرر در صرافی ناموفق بود: {err}')
+                return
+        pos['sl'] = new_sl
+        save_session(chat_id)
+        send_message(chat_id, f"✅ حد ضرر پوزیشن `{sym}` به `{fmt(new_sl)}` تغییر یافت.", trade_action_keyboard(sym, timeframe=pos.get('timeframe','5min')))
+        return
+
+    if current_state.startswith('WAIT_EDIT_TP_'):
+        sym = current_state.replace('WAIT_EDIT_TP_', '')
+        s['user_state'] = None
+        save_session(chat_id)
+        try:
+            new_tp = float(raw.replace(',', '').strip())
+        except ValueError:
+            send_message(chat_id, '⚠️ مقدار وارد شده نامعتبر است.')
+            return
+        pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
+        if not pos:
+            send_message(chat_id, f'❌ پوزیشن `{sym}` پیدا نشد.')
+            return
+        is_long = side_long(pos['side'])
+        entry = float(pos['entry_price'])
+        if (is_long and new_tp <= entry) or (not is_long and new_tp >= entry):
+            send_message(chat_id, f"⚠️ حد سود باید {'بیشتر' if is_long else 'کمتر'} از قیمت ورود ({fmt(entry)}) باشد.")
+            return
+        if pos.get('is_real'):
+            ok, err = set_protection(chat_id, sym, pos['sl'], normalize_price(chat_id, sym, new_tp))
+            if not ok:
+                send_message(chat_id, f'❌ تغییر حد سود در صرافی ناموفق بود: {err}')
+                return
+        pos['tp'] = new_tp
+        save_session(chat_id)
+        send_message(chat_id, f"✅ حد سود پوزیشن `{sym}` به `{fmt(new_tp)}` تغییر یافت.", trade_action_keyboard(sym, timeframe=pos.get('timeframe','5min')))
+        return
+
+    if current_state == 'WAIT_MANUAL_SYMBOL':
+        sym=re.sub(r'[^A-Z0-9]','',val)
+        if not (2<=len(sym)<=12) or latest_price(sym) is None:
+            send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
+        s['_manual_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
+        send_message(chat_id,f'🖐 جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
+    if current_state == 'WAIT_MANUAL_ENTRY':
+        tmp=s.get('_manual_tmp') or {}
+        symbol=tmp.get('symbol')
+        live=latest_price(symbol)
+        if raw.strip() in ('بازار','بازاری','market','Market'):
+            entry=live
+        else:
+            try: entry=float(raw.replace(',','').strip())
+            except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        tmp['entry']=entry; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
+        send_message(chat_id,f'✅ قیمت ورود: `{fmt(entry)}`\nقیمت حد ضرر (SL) را ارسال کنید:'); return
+    if current_state == 'WAIT_MANUAL_SL':
+        tmp=s.get('_manual_tmp') or {}
+        try: sl=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        tmp['sl']=sl; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_TP'; save_session(chat_id)
+        send_message(chat_id,'قیمت حد سود (TP) را ارسال کنید:'); return
+    if current_state == 'WAIT_MANUAL_TP':
+        tmp=s.get('_manual_tmp') or {}
+        try: tp=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        symbol=tmp.get('symbol'); side=tmp.get('side'); sl=tmp.get('sl'); entry=tmp.get('entry')
+        s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id)
+        is_long = side=='BUY'
+        if not ((is_long and sl<entry<tp) or ((not is_long) and tp<entry<sl)):
+            send_message(chat_id,'⚠️ نسبت SL و TP با جهت معامله همخوانی ندارد.'); return
+        ok,err=execute_manual_trade(chat_id,symbol,'BUY (Long)' if is_long else 'SELL (Short)',sl,tp,entry_price=entry)
+        if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
+        else: send_message(chat_id,f'❌ باز نشد: {err}')
+        return
+    if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()):
+        atext, akeyboard = analyze(chat_id,val)
+        send_message(chat_id,atext,akeyboard)
+    else: process_command(text,chat_id)
 
 
 def telegram_listener():
@@ -2834,6 +3320,9 @@ async def scan_loop():
                     await refresh_market_regime(http)
                 loose_regime = MARKET_REGIME_CACHE['regime']
                 macro_extreme = MARKET_REGIME_CACHE['extreme']
+                # رژیم اجماع فوری (همان روش «وضعیت بازار») را برای هر تایم‌فریمی که واقعاً
+                # در حال استفاده است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم
+                # متفاوتی داشته باشد و این سیگنال برخلاف رژیم ماکرو، به تایم‌فریم وابسته است.
                 active_timeframes = {
                     s.get('timeframe', '5min')
                     for s in USER_SESSIONS.values()
@@ -2876,24 +3365,197 @@ def status():
     return {'status':'ok','sessions':len(USER_SESSIONS),'active_bots':sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active')),'multi_user_real':bool(COINEX_ACCOUNTS)},200
 
 
+def _validate_telegram_webapp_initdata(init_data: str, max_age_seconds: int = 3600):
+    if not init_data or not TELEGRAM_TOKEN:
+        return None
+    try:
+        pairs = urlparse.parse_qsl(init_data, keep_blank_values=True)
+        data = dict(pairs)
+        received_hash = data.pop('hash', None)
+        if not received_hash:
+            return None
+        check_string = '\n'.join(f'{k}={v}' for k, v in sorted(data.items()))
+        secret_key = hmac.new(b'WebAppData', TELEGRAM_TOKEN.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(computed_hash, received_hash):
+            return None
+        auth_date = int(data.get('auth_date', '0') or '0')
+        if auth_date and (time.time() - auth_date) > max_age_seconds:
+            return None
+        user_raw = data.get('user')
+        if not user_raw:
+            return None
+        return json.loads(user_raw)
+    except Exception:
+        return None
+
+
+def _miniapp_find_position(chat_id, symbol):
+    s = USER_SESSIONS.get(int(chat_id))
+    if not s: return None
+    for p in s.get('paper_positions', []):
+        if p.get('symbol', '').upper() == symbol.upper(): return p
+    return None
+
+
+_MINIAPP_CHART_HTML = """<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<title>چارت پوزیشن</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;padding:0;background:#0e0e12;color:#eaeaea;font-family:-apple-system,Tahoma,sans-serif;height:100%;}
+  #info{padding:10px 12px;font-size:13px;line-height:1.9;border-bottom:1px solid #23232b;}
+  #chart{width:100%;height:calc(100% - 96px);position:relative;touch-action:none;}
+  .row{display:flex;justify-content:space-between;}
+  .buy{color:#26a69a;} .sell{color:#ef5350;}
+  #err{padding:14px;color:#ef5350;font-size:13px;}
+</style>
+</head>
+<body>
+<div id="info">در حال بارگذاری...</div>
+<div id="chart"></div>
+<div id="err"></div>
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const params = new URLSearchParams(window.location.search);
+const symbol = params.get('symbol') || '';
+const tf = params.get('tf') || '5min';
+const initData = tg ? tg.initData : '';
+
+async function load() {
+  try {
+    const res = await fetch('/miniapp/api/data', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({initData, symbol, tf})
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      document.getElementById('err').textContent = data.error || 'خطا در دریافت داده';
+      document.getElementById('info').textContent = '';
+      return;
+    }
+    let p = data.position;
+    const sideLabel = p ? (p.side.includes('BUY') ? 'خرید (Long)' : 'فروش (Short)') : '—';
+    const sideClass = p && p.side.includes('BUY') ? 'buy' : 'sell';
+    document.getElementById('info').innerHTML = `
+      <div class="row"><span>نماد</span><b>${data.symbol} (${tf})</b></div>
+      ${p ? `
+      <div class="row"><span>جهت</span><b class="${sideClass}">${sideLabel}</b></div>
+      <div class="row"><span>ورود</span><b>${p.entry_price}</b></div>
+      <div class="row"><span>حد ضرر (SL)</span><b class="sell">${p.sl}</b></div>
+      <div class="row"><span>حد سود (TP)</span><b class="buy">${p.tp}</b></div>
+      ` : '<div class="row"><span>پوزیشن باز فعالی برای این نماد نیست</span></div>'}
+    `;
+    const chartEl = document.getElementById('chart');
+    const chart = LightweightCharts.createChart(chartEl, {
+      width: chartEl.clientWidth, height: chartEl.clientHeight,
+      layout: {background:{color:'#0e0e12'}, textColor:'#c8c8d0'},
+      grid: {vertLines:{color:'#1c1c24'}, horzLines:{color:'#1c1c24'}},
+      timeScale: {timeVisible:true, secondsVisible:false},
+      rightPriceScale: {borderColor:'#2a2a33'},
+    });
+    const series = chart.addCandlestickSeries({
+      upColor:'#26a69a', downColor:'#ef5350', borderVisible:false,
+      wickUpColor:'#26a69a', wickDownColor:'#ef5350',
+    });
+    series.setData(data.candles);
+    if (p) {
+      series.createPriceLine({price: p.entry_price, color:'#f0c419', lineWidth:1, lineStyle:2, title:'ورود'});
+      series.createPriceLine({price: p.sl, color:'#ef5350', lineWidth:2, lineStyle:0, title:'SL'});
+      series.createPriceLine({price: p.tp, color:'#26a69a', lineWidth:2, lineStyle:0, title:'TP'});
+    }
+    chart.timeScale().fitContent();
+    window.addEventListener('resize', () => chart.applyOptions({width: chartEl.clientWidth, height: chartEl.clientHeight}));
+  } catch (e) {
+    document.getElementById('err').textContent = 'خطای شبکه: ' + e;
+  }
+}
+load();
+</script>
+</body>
+</html>"""
+
+
+@app.get('/miniapp/chart')
+def miniapp_chart_page():
+    return _MINIAPP_CHART_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+
+@app.post('/miniapp/api/data')
+def miniapp_api_data():
+    body = request.get_json(silent=True) or {}
+    init_data = body.get('initData', '')
+    symbol = str(body.get('symbol', '')).strip().upper()
+    tf = str(body.get('tf', '5min')).strip()
+    if not symbol: return {'error': 'نماد مشخص نشده'}, 400
+    user = _validate_telegram_webapp_initdata(init_data)
+    if not user or not user.get('id'): return {'error': 'احراز هویت تلگرام نامعتبر است'}, 401
+    chat_id = user['id']
+    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS: return {'error': 'دسترسی مجاز نیست'}, 403
+    df = get_klines(symbol, tf, 200)
+    if df.empty: return {'error': 'داده کندل در دسترس نیست'}, 404
+    candles = [
+        {'time': int(row['timestamp']) // 1000 if row['timestamp'] > 1e12 else int(row['timestamp']),
+         'open': float(row['open']), 'high': float(row['high']), 'low': float(row['low']), 'close': float(row['close'])}
+        for _, row in df.iterrows()
+    ]
+    pos = _miniapp_find_position(chat_id, symbol)
+    position = None
+    if pos:
+        position = {
+            'side': pos['side'],
+            'entry_price': round(float(pos['entry_price']), 8),
+            'sl': round(float(pos['sl']), 8),
+            'tp': round(float(pos['tp']), 8),
+            'is_real': bool(pos.get('is_real', False)),
+        }
+    return {'symbol': symbol, 'candles': candles, 'position': position}, 200
+
+
+def miniapp_chart_url(symbol, timeframe='5min'):
+    if not MINIAPP_BASE_URL:
+        return None
+    return f'{MINIAPP_BASE_URL}/miniapp/chart?symbol={symbol}&tf={timeframe}'
+
+
 def _notify_boot_status():
+    """بعد از هر بالا آمدن پروسه، به کاربران شناخته‌شده اطلاع می‌دهد چند سشن و پوزیشن باز بارگذاری
+    شد. هدف این است که اگر دیتابیس به هر دلیل (مثلاً دیسک غیردائمی) خالی بارگذاری شود، کاربر همان
+    لحظه متوجه شود، نه اینکه بعداً و تصادفی بفهمد پوزیشن‌ها و آمارش پاک شده‌اند."""
     try:
         targets = set(ALLOWED_CHAT_IDS) | set(USER_SESSIONS.keys())
-        if not targets: return
+        if not targets:
+            return
+        total_open = sum(len(s.get('paper_positions') or []) for s in USER_SESSIONS.values())
+        total_closed = sum(len(s.get('closed_positions') or []) for s in USER_SESSIONS.values())
         for cid in targets:
             s = USER_SESSIONS.get(cid)
             open_n = len(s.get('paper_positions') or []) if s else 0
             closed_n = len(s.get('closed_positions') or []) if s else 0
             msg = f"🔄 *ربات بالا آمد.*\nپوزیشن‌های باز شما: `{open_n}` | تاریخچه بسته‌شده: `{closed_n}`"
-            try: send_message(cid, msg)
-            except Exception: pass
-    except Exception: pass
+            if s is None or (open_n == 0 and closed_n == 0):
+                msg += "\n\n⚠️ اگر انتظار داشتید اینجا داده‌ای باشد، ممکن است دیتابیس ری‌ست شده باشد (مشکل ماندگاری دیسک هاست)."
+            try:
+                send_message(cid, msg)
+            except Exception:
+                pass
+        logger.info('Boot status: sessions=%s total_open_positions=%s total_closed_positions=%s', len(USER_SESSIONS), total_open, total_closed)
+    except Exception:
+        logger.exception('boot status notification failed')
 
 
 def _live_positions_loop():
     while True:
-        try: refresh_live_position_messages()
-        except Exception: pass
+        try:
+            refresh_live_position_messages()
+        except Exception:
+            logger.exception('live position refresh failed')
         time.sleep(10)
 
 
@@ -2910,9 +3572,6 @@ def main():
     Thread(target=lambda: (time.sleep(5), _live_positions_loop()), daemon=True, name='live-pnl').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
-
-if __name__ == 'main':
-    main()
 
 if __name__ == '__main__':
     main()
