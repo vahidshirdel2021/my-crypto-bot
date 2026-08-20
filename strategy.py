@@ -1,6 +1,41 @@
 import pandas as pd
 import numpy as np
 
+
+def compute_log_grid_levels(df, base_steps=20):
+    """
+    بازنویسی دقیق منطق اسکریپت Pine «شبکه هندسی یکدست و پرتر»:
+    - chart_low / chart_high = کف و سقف مطلق کل بازه‌ی داده‌ی ورودی (df)
+    - ratio = پله‌ی نسبت هندسی طوری که از chart_low با base_steps پله به chart_high برسیم
+    - خروجی شامل نیم‌پله‌ها هم هست (مثل اسکریپت اصلی: step_index = i*0.5)
+    نکته مهم: این سطوح حمایت/مقاومت واقعی (بر اساس رفتار قیمت) نیستند، صرفاً یک شبکه‌ی
+    لگاریتمی مساوی‌فاصله بین کف و سقف بازه‌ی داده هستند - دقیقاً مثل اسکریپت اصلی.
+    خروجی: لیستی از دیکشنری {'step': step_index, 'price': level_price} به ترتیب صعودی.
+    """
+    if df is None or df.empty or len(df) < 2:
+        return []
+    chart_low = float(df['low'].min())
+    chart_high = float(df['high'].max())
+    if chart_low <= 0 or chart_high <= chart_low:
+        return []
+    ratio = (chart_high / chart_low) ** (1.0 / base_steps)
+    total_sub_steps = base_steps * 2
+    levels = []
+    for i in range(total_sub_steps + 1):
+        step_index = i * 0.5
+        level_price = chart_low * (ratio ** step_index)
+        levels.append({'step': step_index, 'price': level_price})
+    return levels
+
+
+def nearest_grid_level(price, levels):
+    """نزدیک‌ترین سطح شبکه به یک قیمت مشخص را برمی‌گرداند: (level_dict, فاصله به‌درصد)."""
+    if not levels or price is None or price <= 0:
+        return None, None
+    best = min(levels, key=lambda lv: abs(lv['price'] - price))
+    dist_pct = abs(best['price'] - price) / price * 100.0
+    return best, dist_pct
+
 FILTER_DEFAULTS = {
     "volume_filter": True,
     "trailing_stop": True,
@@ -299,9 +334,13 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min"):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None):
+    if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels)
+        if sig == signal and plan:
+            return plan, reason
     if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):
-        return build_sweep_trade_plan(df, signal, strategy_config)
+        return build_sweep_trade_plan(df, signal, strategy_config, grid_levels=grid_levels)
     if df is None or len(df) < 30 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     c = df.iloc[-2]
@@ -547,7 +586,55 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None):
     return None, "Sweep/Reclaim یا پولبک+ادامه معتبری روی سطح روز قبل شناسایی نشد"
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None):
+def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
+    """
+    اگر یک سطح شبکه‌ی لگاریتمی خیلی نزدیک به نقطه‌ی sweep باشد (حداکثر ۱.۵ ATR جلوتر)،
+    استاپ را کمی جلوتر از آن سطح می‌گذاریم، نه فقط بر اساس بافر ثابت ATR - چون طبق
+    بررسی کاربر قیمت تاریخی به این سطوح واکنش نشان داده و ممکن است قبل از برگشت واقعی
+    یک ویک (wick) کوتاه به آن سطح بخورد؛ استاپ صرفاً ATR-محور ممکن است زودتر از موعد بخورد.
+    """
+    if not levels:
+        return naive_sl
+    if direction == -1:  # SELL: استاپ بالای sweep_extreme
+        cands = [lv['price'] for lv in levels if sweep_extreme < lv['price'] <= sweep_extreme + atr * 1.5]
+        if cands:
+            return max(naive_sl, min(cands) + atr * 0.15)
+    else:  # BUY: استاپ پایین sweep_extreme
+        cands = [lv['price'] for lv in levels if sweep_extreme - atr * 1.5 <= lv['price'] < sweep_extreme]
+        if cands:
+            return min(naive_sl, max(cands) - atr * 0.15)
+    return naive_sl
+
+
+def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_target):
+    """
+    اگر بین قیمت ورود و هدف فعلی یک سطح شبکه‌ی لگاریتمی معتبر (با رعایت حداقل R:R) وجود
+    داشته باشد، هدف را به نزدیک‌ترین آن سطح محدود می‌کند - چون طبق بررسی تاریخی کاربر،
+    قیمت معمولاً پیش از عبور از این سطوح واکنش نشان می‌دهد و رسیدن به هدف دورتر بعید است.
+    """
+    if not levels:
+        return current_target
+    candidates = []
+    for lv in levels:
+        p = lv['price']
+        dist = (entry - p) if direction == -1 else (p - entry)
+        if dist <= 0:
+            continue
+        if dist / risk_dist < min_rr:
+            continue
+        candidates.append((dist, p))
+    if not candidates:
+        return current_target
+    candidates.sort()
+    _, nearest_price = candidates[0]
+    if direction == -1 and nearest_price > current_target:
+        return nearest_price
+    if direction == 1 and nearest_price < current_target:
+        return nearest_price
+    return current_target
+
+
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -576,6 +663,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
         sl = sweep_extreme + (atr * buffer_atr)
+        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, -1)
         if (sl - entry) / entry < min_sl_pct:
             sl = entry * (1.0 + min_sl_pct)
         risk_dist = sl - entry
@@ -589,9 +677,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
             tp = pdl
         elif pdl < entry and (entry - pdl) / risk_dist >= min_rr:
             tp = max(tp, pdl)
+        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
     else:
         sweep_extreme = float(curr["low"])
         sl = sweep_extreme - (atr * buffer_atr)
+        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, 1)
         if (entry - sl) / entry < min_sl_pct:
             sl = entry * (1.0 - min_sl_pct)
         risk_dist = entry - sl
@@ -605,6 +695,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None):
             tp = pdh
         elif pdh > entry and (pdh - entry) / risk_dist >= min_rr:
             tp = min(tp, pdh)
+        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
 
     # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
@@ -900,6 +991,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
+    if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     if st == "dynamic":
         if timeframe in ("5min", "15min") and timeframe_mode != "multi":
             sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
@@ -917,14 +1010,204 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
     # --- محافظ روند به‌شدت یک‌طرفه ---
-    # regime این‌جا فقط وقتی 'BULLISH' یا 'BEARISH' است که هر دو لیدر بازار (مثلاً BTC/ETH)
-    # هم‌جهت و با ADX بسیار بالا باشند (نگاه کنید به MARKET_REGIME_EXTREME_ADX در bot.py).
-    # این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت خنثی یا روند معمولی هیچ تاثیری
-    # ندارد و کاملاً شفاف است؛ فقط دقیقاً همان سناریویی را می‌گیرد که معامله *خلاف* یک روند
-    # به‌شدت قدرتمند باز می‌شود (مثل فروش/fade وسط یک رالی شدید صعودی).
+    # regime این‌جا یا از رژیم ماکرو (BTC/ETH روی 4 ساعته با ADX بالا) می‌آید یا از اجماع
+    # فوری همان تایم‌فریم معاملاتی (وقتی اکثریت قاطع ۱۰ ارز برتر هم‌جهت باشند - دقیقاً
+    # همان چیزی که در «وضعیت بازار» دیده می‌شود)؛ در هر دو حالت یعنی یک روند واقعاً
+    # یک‌طرفه در جریان است. این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت خنثی یا
+    # روند معمولی هیچ تاثیری ندارد؛ فقط دقیقاً سناریویی را می‌گیرد که معامله *خلاف* یک روند
+    # قدرتمند باز می‌شود (مثل فروش/fade وسط یک رالی شدید صعودی).
     if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH"):
         if regime == "BULLISH" and sig == "SELL":
-            return None, f"بازار به‌شدت صعودی است (لیدرها هم‌جهت + ADX بالا) - سیگنال فروش خلاف روند نادیده گرفته شد | {reason}"
+            return None, f"بازار به‌شدت صعودی است - سیگنال فروش خلاف روند نادیده گرفته شد | {reason}"
         if regime == "BEARISH" and sig == "BUY":
-            return None, f"بازار به‌شدت نزولی است (لیدرها هم‌جهت + ADX بالا) - سیگنال خرید خلاف روند نادیده گرفته شد | {reason}"
+            return None, f"بازار به‌شدت نزولی است - سیگنال خرید خلاف روند نادیده گرفته شد | {reason}"
     return sig, reason
+
+# ========================= STRATEGY V2 =========================
+# Adaptive regime + setup selection + execution-quality filters.
+# This layer intentionally keeps the public APIs above backward compatible.
+
+V2_DEFAULTS = {
+    "v2_enabled": True,
+    "regime_adx_trend": 23.0,
+    "regime_adx_strong": 30.0,
+    "regime_atr_high": 1.35,
+    "regime_atr_low": 0.75,
+    "ema_slope_min_atr": 0.03,
+    "min_edge_proxy": 0.10,
+    "min_setup_score": 62.0,
+    "high_vol_min_score": 68.0,
+    "high_vol_min_rr": 1.50,
+    "range_max_adx": 20.0,
+    "range_rsi_buy": 34.0,
+    "range_rsi_sell": 66.0,
+    "trend_pullback_atr": 0.35,
+    "breakout_volume": 1.15,
+    "breakout_body": 0.55,
+    "sweep_score_bonus": 8.0,
+    "regime_confidence_min": 0.55,
+    "max_atr_ratio_for_entry": 2.20,
+}
+
+
+def get_v2_config(strategy_config=None):
+    cfg = {**STRATEGY_DEFAULTS, **V2_DEFAULTS}
+    if isinstance(strategy_config, dict):
+        cfg.update(strategy_config)
+    return cfg
+
+
+def _ema_slope_atr(df, ema_col="ema20", lookback=5):
+    if df is None or len(df) < lookback + 3 or ema_col not in df.columns or "atr" not in df.columns:
+        return 0.0
+    c = df.iloc[-2]
+    prev = df.iloc[-2 - lookback]
+    atr = _safe_float(c.get("atr"), 0.0)
+    if atr <= 0:
+        return 0.0
+    return (_safe_float(c.get(ema_col)) - _safe_float(prev.get(ema_col))) / atr
+
+
+def detect_market_regime(df, strategy_config=None):
+    """Return an explicit market regime without using future candles.
+
+    Regimes: TREND_BULL, TREND_BEAR, RANGE, HIGH_VOL, LOW_VOL, MIXED.
+    Confidence is a heuristic, not a calibrated probability.
+    """
+    if df is None or len(df) < 65:
+        return {"name": "MIXED", "confidence": 0.0, "atr_ratio": 1.0, "trend_strength": 0.0}
+    cfg = get_v2_config(strategy_config)
+    c = df.iloc[-2]
+    adx = _safe_float(c.get("adx"), 0)
+    atr = _safe_float(c.get("atr"), 0)
+    hist = pd.to_numeric(df["atr"].iloc[-62:-2], errors="coerce").dropna()
+    med_atr = float(hist.median()) if len(hist) else atr
+    atr_ratio = atr / max(med_atr, 1e-12)
+    slope = _ema_slope_atr(df, "ema20", 5)
+    bull = _safe_float(c.get("close")) > _safe_float(c.get("ema20")) > _safe_float(c.get("ema50")) and _safe_float(c.get("plus_di")) > _safe_float(c.get("minus_di"))
+    bear = _safe_float(c.get("close")) < _safe_float(c.get("ema20")) < _safe_float(c.get("ema50")) and _safe_float(c.get("minus_di")) > _safe_float(c.get("plus_di"))
+    strong_trend = adx >= float(cfg["regime_adx_trend"]) and abs(slope) >= float(cfg["ema_slope_min_atr"])
+    if atr_ratio >= float(cfg["regime_atr_high"]):
+        name = "HIGH_VOL"
+        conf = min(1.0, 0.55 + min(0.4, (atr_ratio - 1.0) * 0.45))
+    elif atr_ratio <= float(cfg["regime_atr_low"]):
+        name = "LOW_VOL"
+        conf = min(1.0, 0.55 + min(0.35, (1.0 - atr_ratio) * 0.7))
+    elif strong_trend and bull:
+        name, conf = "TREND_BULL", min(1.0, 0.60 + min(0.35, (adx - 23.0) / 30.0))
+    elif strong_trend and bear:
+        name, conf = "TREND_BEAR", min(1.0, 0.60 + min(0.35, (adx - 23.0) / 30.0))
+    elif adx <= float(cfg["range_max_adx"]):
+        name, conf = "RANGE", min(1.0, 0.55 + max(0.0, (20.0 - adx) / 30.0))
+    else:
+        name, conf = "MIXED", 0.50
+    trend_strength = min(1.0, adx / 40.0) * min(1.0, abs(slope) / 0.15 if slope else 0.0)
+    return {"name": name, "confidence": round(conf, 3), "atr_ratio": float(atr_ratio), "trend_strength": float(trend_strength), "ema_slope_atr": float(slope), "adx": float(adx)}
+
+
+def _v2_htf_bias(market_data_dict, want_bullish):
+    if not isinstance(market_data_dict, dict):
+        return 0.0, []
+    weights = {"1d": 0.40, "4h": 0.30, "1h": 0.20, "15m": 0.10}
+    total = 0.0
+    used = 0.0
+    details = []
+    for key, weight in weights.items():
+        d = market_data_dict.get(key)
+        if d is None or d.empty or len(d) < 55:
+            continue
+        c = d.iloc[-2]
+        adx = _safe_float(c.get("adx"), 0)
+        if want_bullish:
+            aligned = _safe_float(c.get("close")) > _safe_float(c.get("ema20")) > _safe_float(c.get("ema50")) and _safe_float(c.get("plus_di")) >= _safe_float(c.get("minus_di"))
+        else:
+            aligned = _safe_float(c.get("close")) < _safe_float(c.get("ema20")) < _safe_float(c.get("ema50")) and _safe_float(c.get("minus_di")) >= _safe_float(c.get("plus_di"))
+        strength = min(1.0, adx / 30.0)
+        total += weight * (strength if aligned else -strength)
+        used += weight
+        details.append(f"{key}:{'+' if aligned else '-'}{strength:.2f}")
+    return (total / used if used else 0.0), details
+
+
+def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
+    """Conservative expectancy proxy. It is NOT a backtest-derived probability."""
+    base_p = 0.40 + max(0.0, min(0.18, (float(score) - 55.0) / 250.0))
+    if regime_name in ("TREND_BULL", "TREND_BEAR"):
+        base_p += 0.025
+    elif regime_name == "RANGE":
+        base_p += 0.015
+    elif regime_name == "HIGH_VOL":
+        base_p -= 0.035
+    if atr_ratio > 1.8:
+        base_p -= 0.03
+    base_p = max(0.30, min(0.65, base_p))
+    ev = base_p * float(rr) - (1.0 - base_p)
+    return float(ev), float(base_p)
+
+
+def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None):
+    cfg = get_v2_config(strategy_config)
+    regime_info = detect_market_regime(df_primary, cfg)
+    rname = regime_info["name"]
+    rconf = regime_info["confidence"]
+    candidates = []
+
+    def add_candidate(sig, reason, family, bonus=0):
+        if sig not in ("BUY", "SELL"):
+            return
+        # Existing build_trade_plan routes 5m/15m dynamic plans to sweep. For V2
+        # we explicitly choose the generic structural risk engine for non-sweep setups.
+        plan_tf = timeframe if family == "liquidity_sweep" else "1hour"
+        plan, plan_reason = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=plan_tf, grid_levels=grid_levels)
+        if not plan:
+            return
+        htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
+        score = float(plan.get("score", 0)) + float(bonus)
+        score += max(-8.0, min(8.0, htf * 8.0))
+        score = max(0.0, min(100.0, score))
+        ev, pwin = _v2_edge_proxy(score, float(plan.get("rr", 0)), rname, regime_info["atr_ratio"])
+        min_score = float(cfg["high_vol_min_score"] if rname == "HIGH_VOL" else cfg["min_setup_score"])
+        min_rr = float(cfg["high_vol_min_rr"] if rname == "HIGH_VOL" else cfg.get("min_rr", 1.3))
+        if score < min_score or float(plan.get("rr", 0)) < min_rr or ev < float(cfg["min_edge_proxy"]):
+            return
+        plan = dict(plan)
+        plan.update({
+            "score": int(round(score)),
+            "regime": rname,
+            "regime_confidence": rconf,
+            "htf_bias": float(htf),
+            "edge_proxy": round(ev, 4),
+            "model_win_proxy": round(pwin, 4),
+            "setup_family": family,
+        })
+        candidates.append((ev, plan, sig, f"V2 {rname} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+
+    if rname in ("TREND_BULL", "TREND_BEAR", "MIXED"):
+        sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
+        add_candidate(sig, reason, "trend", 4 if rname.startswith("TREND") else 0)
+        sig, reason = strategy_breakout(df_primary, filters, cfg)
+        add_candidate(sig, reason, "breakout", 6 if rname.startswith("TREND") else 2)
+    if rname in ("RANGE", "HIGH_VOL", "MIXED"):
+        if timeframe in ("5min", "15min"):
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg)
+            add_candidate(sig, reason, "liquidity_sweep", float(cfg["sweep_score_bonus"]))
+        sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
+        add_candidate(sig, reason, "mean_reversion", 0)
+
+    if not candidates:
+        return None, None, f"V2: ستاپ مناسب پیدا نشد | regime={rname} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, best_plan, best_sig, best_reason = candidates[0]
+    return best_sig, best_plan, best_reason
+
+
+def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
+    sig, plan, reason = _select_v2_setup(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+    return sig, reason
+
+def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None):
+    if df_primary is None or df_primary.empty or len(df_primary) < 60:
+        return None, "V2: داده کافی نیست"
+    if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+    return get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime)

@@ -21,6 +21,7 @@ from strategy import (
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
+    compute_log_grid_levels, nearest_grid_level,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -71,6 +72,9 @@ ENTRY_ORDER_TYPE = os.environ.get('ENTRY_ORDER_TYPE', 'limit').lower()
 ORDER_CONFIRM_RETRIES = max(1, int(os.environ.get('ORDER_CONFIRM_RETRIES', '6')))
 ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0')))
 PAPER_CONSERVATIVE_OHLC = os.environ.get('PAPER_CONSERVATIVE_OHLC', 'true').lower() not in ('0', 'false', 'no')
+PAPER_ONLY = os.environ.get('PAPER_ONLY', 'true').lower() not in ('0', 'false', 'no')
+PAPER_SLIPPAGE_BPS = max(0.0, float(os.environ.get('PAPER_SLIPPAGE_BPS', '2.0')))
+PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
@@ -85,6 +89,8 @@ ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x
 ALL_SYMBOLS = [
     'BTC','ETH','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','HNT','ENJ','ICX','CRV','NEAR','CTK','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','GTC','CELO','YFII','CTSI','LUNA','WAVES'
 ]
+PAPER_DEFAULT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','LINK','AVAX','DOT','TRX','LTC','BCH','UNI','AAVE','NEAR','ATOM','ETC','FIL','SUI','APT','ARB','OP','INJ','SEI','TIA','TON','SHIB','PEPE','WIF']
+PAPER_SYMBOLS = [x.strip().upper() for x in os.environ.get('PAPER_SYMBOLS', ','.join(PAPER_DEFAULT_SYMBOLS)).split(',') if x.strip()]
 DEFAULT_ACTIVE_SYMBOLS = ALL_SYMBOLS[:]
 LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC','LINK','DOT','AVAX','ATOM','NEAR','TRX','ETC','FIL','UNI','AAVE','MATIC','XTZ']
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
@@ -290,7 +296,7 @@ def default_session():
         'cooldowns': {},
         'traded_levels': {},
         'user_state': None,
-        'active_symbols': DEFAULT_ACTIVE_SYMBOLS[:],
+        'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': get_timeframe_preset('5min'),
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
@@ -319,7 +325,10 @@ def normalize_session(data):
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['traded_levels'] = dict(data.get('traded_levels') or {})
     stored_symbols = list(data.get('active_symbols') or [])
-    if not stored_symbols or set(stored_symbols) == set(LEGACY_DEFAULT_ACTIVE_SYMBOLS):
+    if PAPER_ONLY:
+        # Paper validation should use a stable, liquid universe by default.
+        s['active_symbols'] = PAPER_SYMBOLS[:]
+    elif not stored_symbols or set(stored_symbols) == set(LEGACY_DEFAULT_ACTIVE_SYMBOLS):
         s['active_symbols'] = DEFAULT_ACTIVE_SYMBOLS[:]
     else:
         s['active_symbols'] = stored_symbols
@@ -1172,6 +1181,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
 
     price=latest_price(symbol) or float(signal_price)
+    # Conservative paper execution: adverse entry slippage only.
+    if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+        slip = PAPER_SLIPPAGE_BPS / 10000.0
+        price = price * (1.0 + slip) if side_long(side) else price * (1.0 - slip)
     gap_sl=abs(float(signal_price)-float(sl))
     gap_tp=abs(float(tp)-float(signal_price))
     if side_long(side):
@@ -1191,7 +1204,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
-    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1370,6 +1383,31 @@ async def refresh_market_regime(http):
     return regime, detail, extreme
 
 
+# --- شبکه سطوح لگاریتمی (بر اساس اسکریپت Pine کاربر) --------------------------------
+# ساختار کلان و کم‌تغییر است (بر پایه‌ی کف/سقف تاریخچه‌ی روزانه)، پس مثل رژیم بازار کش
+# می‌شود و فقط هر چند ساعت یک‌بار به‌روزرسانی می‌شود، نه در هر اسکن.
+LOG_GRID_BASE_STEPS = int(os.environ.get('LOG_GRID_BASE_STEPS', '20'))
+LOG_GRID_LOOKBACK_DAYS = int(os.environ.get('LOG_GRID_LOOKBACK_DAYS', '500'))
+LOG_GRID_TTL = float(os.environ.get('LOG_GRID_TTL_SECONDS', '21600'))  # هر ۶ ساعت
+LOG_GRID_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+async def get_log_grid_levels(http, symbol):
+    """
+    سطوح شبکه‌ی لگاریتمی یک نماد را برمی‌گرداند (کش‌شده). بر پایه‌ی داده‌ی روزانه
+    (تا LOG_GRID_LOOKBACK_DAYS کندل، برای تخمین نزدیک به کف/سقف کل تاریخچه‌ی نماد -
+    دقیقاً مثل chart_low/chart_high در اسکریپت اصلی که کل چارت را می‌بیند).
+    """
+    now = time.time()
+    c = LOG_GRID_CACHE.get(symbol)
+    if c and now - c['ts'] < LOG_GRID_TTL:
+        return c['levels']
+    d = await get_klines_async(http, symbol, '1day', LOG_GRID_LOOKBACK_DAYS)
+    levels = compute_log_grid_levels(d, LOG_GRID_BASE_STEPS) if d is not None and not d.empty else []
+    LOG_GRID_CACHE[symbol] = {'ts': now, 'levels': levels}
+    return levels
+
+
 async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
     if symbol.upper() in LEADER_SYMBOLS:
         return True, 'لیدر بازار است'
@@ -1512,12 +1550,20 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
     else:
         if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
+        # Conservative paper exit slippage.
+        if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+            slip = PAPER_SLIPPAGE_BPS / 10000.0
+            price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
         entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
         pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
-        pnl=pnl_gross-fee
+        hours=max(0.0, time.time()-float(pos.get('opened_at',time.time()))) / 3600.0
+        funding_intervals=hours/8.0
+        funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
+        pnl=pnl_gross-fee-funding_cost
         s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
         pos['pnl_gross_usdt']=pnl_gross
-        fee_note=' (کسر شده)'
+        pos['funding_usdt']=funding_cost
+        fee_note=f' (کارمزد + فاندینگ کسر شد: {funding_cost:.2f} USDT)'
     pos['fee_usdt']=fee
     if not pos.get('risk_usdt'):
         try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
@@ -1913,7 +1959,13 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], 'liquidity_sweep' if is_scalp_strategy else strat, strategy_timeframe=primary_tf)
+    grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
+    # V2 dynamic must use the same adaptive candidate-selection engine for BOTH
+    # signal and plan. The seller build previously forced 5m/15m into the legacy
+    # liquidity-sweep planner here, which could make signal and SL/TP come from
+    # different strategy families.
+    plan_strategy_type = 'dynamic' if (strat == 'dynamic' and s.get('strategy_config', {}).get('v2_enabled', True)) else ('liquidity_sweep' if is_scalp_strategy else strat)
+    plan, plan_reason = build_trade_plan(primary, sig, s['strategy_config'], plan_strategy_type, strategy_timeframe=primary_tf, grid_levels=grid_levels)
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
@@ -2121,10 +2173,63 @@ def _market_snapshot(symbol, tf):
         return None
 
 
+MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
+# --- رژیم «اجماع فوری» - همان روش گزارش «وضعیت بازار» ولی وصل به تصمیم‌گیری معامله -----
+# برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی خیلی سخت‌گیرانه
+# می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را می‌بیند - یعنی
+# دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند. اگر اکثریت قاطع (پیش‌فرض ۸۰٪)
+# هم‌جهت باشند، به‌عنوان یک روند «شدید» دیگر برای بلاک‌کردن معامله خلاف‌جهت لحاظ می‌شود.
+TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
+TIMEFRAME_REGIME_EXTREME_RATIO = float(os.environ.get('TIMEFRAME_REGIME_EXTREME_RATIO', '0.8'))
+TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
+TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+async def _market_snapshot_async(http, symbol, tf):
+    try:
+        d = await get_klines_async(http, symbol, tf, 160)
+        if d is None or d.empty or len(d) < 60: return None
+        d = calculate_indicators(d); c = d.iloc[-2]
+        close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50)
+        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+        return score
+    except Exception:
+        return None
+
+
+async def refresh_timeframe_regime(http, timeframe):
+    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده)."""
+    tf = '5min' if timeframe == 'multi' else timeframe
+    now = time.time()
+    c = TIMEFRAME_REGIME_CACHE.get(tf)
+    if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
+        return c['extreme']
+    scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
+    scores = [x for x in scores if x is not None]
+    extreme = None
+    if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
+        bullish = sum(1 for x in scores if x > 0)
+        bearish = sum(1 for x in scores if x < 0)
+        total = len(scores)
+        if bullish / total >= TIMEFRAME_REGIME_EXTREME_RATIO:
+            extreme = 'BULLISH'
+        elif bearish / total >= TIMEFRAME_REGIME_EXTREME_RATIO:
+            extreme = 'BEARISH'
+    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
+    return extreme
+
+
+def combine_extreme_regime(macro, micro):
+    """اگر با هم تناقض داشتند (نادر) به‌جای بلاک‌کردن اشتباه، خنثی در نظر گرفته می‌شود."""
+    if macro and micro and macro != micro:
+        return None
+    return macro or micro
+
+
 def market_report(chat_id):
     s = get_session(chat_id)
     tf = '5min' if s['timeframe'] == 'multi' else s['timeframe']
-    symbols = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
+    symbols = MARKET_REPORT_SYMBOLS
     results = []
     with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as ex:
         futures = [ex.submit(_market_snapshot, sym, tf) for sym in symbols]
@@ -2255,6 +2360,9 @@ def process_command(cmd,chat_id,message_id=None):
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
         s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
     if cl=='/mode_real':
+        if PAPER_ONLY:
+            send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.')
+            return
         if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
         if not get_exchange(chat_id): send_message(chat_id,'❌ حساب CoinEx این کاربر در `COINEX_ACCOUNTS_JSON` تنظیم نشده است.'); return
         bal=exchange_balance(chat_id)
@@ -2565,7 +2673,18 @@ async def scan_loop():
                 if need_regime:
                     await refresh_market_regime(http)
                 loose_regime = MARKET_REGIME_CACHE['regime']
-                extreme_regime = MARKET_REGIME_CACHE['extreme']
+                macro_extreme = MARKET_REGIME_CACHE['extreme']
+                # رژیم اجماع فوری (همان روش «وضعیت بازار») را برای هر تایم‌فریمی که واقعاً
+                # در حال استفاده است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم
+                # متفاوتی داشته باشد و این سیگنال برخلاف رژیم ماکرو، به تایم‌فریم وابسته است.
+                active_timeframes = {
+                    ('5min' if s.get('timeframe') == 'multi' else s.get('timeframe', '5min'))
+                    for s in USER_SESSIONS.values()
+                    if s.get('is_bot_active') and not s.get('daily_stopped')
+                }
+                micro_extreme_by_tf = {}
+                for tf in active_timeframes:
+                    micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
@@ -2573,8 +2692,10 @@ async def scan_loop():
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
                     watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
+                    user_tf = '5min' if s.get('timeframe') == 'multi' else s.get('timeframe', '5min')
+                    combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme_by_tf.get(user_tf))
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,extreme_regime))
+                        tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
