@@ -992,8 +992,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return None, "داده کافی نیست"
     st = strategy_type
     if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
-    if st == "dynamic":
+        sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
+    elif st == "dynamic":
         if timeframe in ("5min", "15min") and timeframe_mode != "multi":
             sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config)
         else:
@@ -1010,6 +1010,9 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
     # --- محافظ خلاف‌جهت بازار ---
+    # این فیلتر روی خروجی *همه‌ی* مسیرهای بالا (شامل dynamic V2 که مسیر پیش‌فرض ربات است)
+    # به‌طور یکسان اعمال می‌شود - قبلاً مسیر V2 زودتر از این نقطه return می‌کرد و این فیلتر
+    # را دور می‌زد؛ این نقص برطرف شد.
     # regime این‌جا یا از رژیم ماکرو (BTC/ETH روی 4 ساعته با ADX بالا) می‌آید یا از اجماع
     # فوری همان تایم‌فریم معاملاتی با همان اکثریت ساده (>=۵۰٪) که در «وضعیت بازار» دیده
     # می‌شود؛ یعنی هر وقت خودِ کاربر «وضعیت بازار» را صعودی/نزولی ببیند، همان لحظه این
