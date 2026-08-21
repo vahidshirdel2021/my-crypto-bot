@@ -65,10 +65,12 @@ DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 # تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
 # این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
-    '5min': '5min',
-    '15min': '15min',
-    '1hour': '1hour',
-    '4hour': '4hour',
+    # مدیریت پوزیشن با تایم‌فریم پایین‌تر انجام می‌شود تا ضعف روند زودتر دیده شود.
+    # این بخش فقط برای مدیریت معامله است و روی منطق ورود تأثیری ندارد.
+    '5min': '1min',
+    '15min': '5min',
+    '1hour': '15min',
+    '4hour': '1hour',
 }
 POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
 POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
