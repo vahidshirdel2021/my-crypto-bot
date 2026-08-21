@@ -202,9 +202,10 @@ STRATEGY_DEFAULTS = {
     # and sufficient distance from the previous-day range.
     "active_setup_require_daily_breakout": True,
     "active_setup_breakout_distance_atr": 1.00,
-    "active_setup_breakout_confirm_candles": 2,
-    "active_setup_require_post_breakout_swing": True,
-    "active_setup_swing_lookback_candles": 12,
+    "active_setup_breakout_confirm_candles": 1,
+    "active_structure_confirmation": True,
+    "active_structure_lookback": 8,
+    "active_structure_confirm_candles": 2,
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -724,42 +725,47 @@ def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
     start = max(0, before_idx - 20)
     window = d.iloc[start:before_idx]
 
-    closes = window["close"].tail(confirms)
-    if len(closes) < confirms:
-        return False
-
     if signal == "BUY":
         # Must have closed above PDH and moved away from it.
-        breakout_ok = bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+
     else:
         # Must have closed below PDL and moved away from it.
-        breakout_ok = bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
 
-    if not breakout_ok:
+
+
+
+def _confirm_active_structure(d, idx, signal, cfg):
+    """Require a confirmed micro swing after PDH/PDL reclaim before active entry.
+    Prevents immediate breakout continuation entries without market structure.
+    """
+    lookback = int(cfg.get("active_structure_lookback", 8))
+    confirm = int(cfg.get("active_structure_confirm_candles", 2))
+    if idx < confirm + 2:
         return False
-
-    # Do not enter on the breakout candle alone. A post-breakout structure must form
-    # first so the stop can be placed behind a real swing.
-    if bool(cfg.get("active_setup_require_post_breakout_swing", True)):
-        swing_window = d.iloc[max(0, before_idx - int(cfg.get("active_setup_swing_lookback_candles", 12))):before_idx]
-        if signal == "BUY":
-            # Require a meaningful reaction low after breakout.
-            post = swing_window[swing_window["close"] > pdh]
-            if len(post) < 3:
-                return False
-            swing_low = float(post["low"].min())
-            if swing_low >= float(closes.iloc[-1]):
-                return False
-        else:
-            post = swing_window[swing_window["close"] < pdl]
-            if len(post) < 3:
-                return False
-            swing_high = float(post["high"].max())
-            if swing_high <= float(closes.iloc[-1]):
-                return False
-
-    return True
-
+    end = idx
+    start = max(0, end - lookback)
+    w = d.iloc[start:end+1]
+    if len(w) < confirm + 2:
+        return False
+    recent = w.iloc[:-confirm] if confirm > 0 else w
+    last = w.iloc[-1]
+    if signal == "BUY":
+        swing_low = float(recent["low"].min())
+        recent_high = float(recent["high"].max())
+        # higher-low style confirmation: price must leave a defended low
+        return float(last["close"]) > recent_high and swing_low < float(last["close"])
+    else:
+        swing_high = float(recent["high"].max())
+        recent_low = float(recent["low"].min())
+        return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
     """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
@@ -903,6 +909,10 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         else:
             if live > level + invalid_dist or live < level - max_dist:
                 continue
+        if bool(cfg.get("active_structure_confirmation", True)):
+            if not _confirm_active_structure(d, latest_idx, sig, cfg):
+                continue
+
         age = latest_idx - idx
         return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
                      f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
@@ -1283,6 +1293,58 @@ def _htf_trend_aligned(df, want_bullish):
         return None
 
 
+def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
+    """HTF liquidity reversal model for 1H/4H.
+    Uses higher-timeframe liquidity events instead of intraday breakout chasing.
+    Entry requires sweep/reclaim + structure confirmation.
+    """
+    if df_primary is None or len(df_primary) < 80:
+        return None, "HTF: داده کافی نیست"
+
+    d = df_primary.copy()
+    try:
+        atr = float(d.iloc[-2].get("atr", 0) or 0)
+    except Exception:
+        atr = 0
+    if atr <= 0:
+        return None, "HTF: ATR نامعتبر"
+
+    high = float(d.iloc[-2]["high"])
+    low = float(d.iloc[-2]["low"])
+    close = float(d.iloc[-2]["close"])
+
+    # HTF liquidity anchors. Prefer supplied higher timeframe levels;
+    # fallback to local structure if unavailable.
+    anchors = market_data_dict or {}
+    prev_week_high = anchors.get("prev_week_high")
+    prev_week_low = anchors.get("prev_week_low")
+    prev_month_high = anchors.get("prev_month_high")
+    prev_month_low = anchors.get("prev_month_low")
+    prev_day_high = anchors.get("prev_day_high")
+    prev_day_low = anchors.get("prev_day_low")
+
+    if timeframe in ("4h", "4hour"):
+        resistance = prev_month_high or prev_week_high
+        support = prev_month_low or prev_week_low
+    else:
+        resistance = prev_week_high or prev_day_high
+        support = prev_week_low or prev_day_low
+
+    # Fallback keeps old datasets compatible.
+    highs = float(resistance) if resistance is not None else d["high"].rolling(20).max().iloc[-3]
+    lows = float(support) if support is not None else d["low"].rolling(20).min().iloc[-3]
+
+    # Long: liquidity grab below support + reclaim + bullish structure candle
+    if low < lows and close > lows and close > float(d.iloc[-3]["close"]):
+        return "BUY", "HTF Liquidity Sweep + Reclaim + ساختار صعودی تأیید شد"
+
+    # Short: liquidity grab above resistance + reclaim + bearish structure candle
+    if high > highs and close < highs and close < float(d.iloc[-3]["close"]):
+        return "SELL", "HTF Liquidity Sweep + Reclaim + ساختار نزولی تأیید شد"
+
+    return None, "HTF: ستاپ نقدینگی تشکیل نشده"
+
+
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if break_sig not in ("BUY", "SELL"):
@@ -1309,7 +1371,9 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
-    if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+    if st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour"):
+        sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
+    elif st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     elif st == "dynamic":
         if timeframe in ("5min", "15min"):
