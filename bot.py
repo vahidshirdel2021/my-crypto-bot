@@ -545,6 +545,9 @@ def default_session():
         'trade_amount_usdt': 50.0,
         'leverage': 5,
         'max_open_positions': 3,
+        'max_same_direction_positions': 2,
+        'same_direction_entry_cooldown_seconds': 120,
+        'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
         'paper_positions': [],
@@ -587,6 +590,9 @@ def normalize_session(data):
     s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['traded_levels'] = dict(data.get('traded_levels') or {})
+    s['last_direction_entry_ts'] = dict(data.get('last_direction_entry_ts') or {})
+    s['max_same_direction_positions'] = int(s.get('max_same_direction_positions', default_session()['max_same_direction_positions']) or 0)
+    s['same_direction_entry_cooldown_seconds'] = float(s.get('same_direction_entry_cooldown_seconds', default_session()['same_direction_entry_cooldown_seconds']) or 0)
     stored_symbols = list(data.get('active_symbols') or [])
     if PAPER_ONLY:
         # Paper validation should use a stable, liquid universe by default.
@@ -1522,6 +1528,22 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
         return False
+    # Correlated-exposure guard: cap how many positions can be open in the SAME
+    # direction at once (e.g. all Long on different alts), and throttle back-to-back
+    # same-direction entries opened seconds apart in one scan burst. This prevents a
+    # single market-wide move from hitting many correlated positions simultaneously,
+    # which independent per-trade risk sizing does not account for.
+    dir_key = 'BUY' if side_long(side) else 'SELL'
+    max_same_dir = int(s.get('max_same_direction_positions', 0) or 0)
+    if max_same_dir > 0:
+        same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
+        if same_dir_open >= max_same_dir:
+            return False
+    same_dir_cooldown = float(s.get('same_direction_entry_cooldown_seconds', 0) or 0)
+    if same_dir_cooldown > 0:
+        last_dir_ts = float((s.get('last_direction_entry_ts') or {}).get(dir_key, 0))
+        if time.time() - last_dir_ts < same_dir_cooldown:
+            return False
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -1657,6 +1679,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
+    last_dir_ts_map = s.setdefault('last_direction_entry_ts', {})
+    last_dir_ts_map[dir_key] = time.time()
     consumed = s.setdefault('consumed_setups', [])
     if setup_id not in consumed:
         consumed.append(setup_id)
@@ -2880,8 +2904,11 @@ def menu(chat_id,message_id=None):
     s=get_session(chat_id)
     bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
     maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
+    max_same=s.get('max_same_direction_positions',0)
+    max_same_disp = max_same if max_same>0 else '∞'
+    dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
 
 
@@ -3247,6 +3274,12 @@ def process_command(cmd,chat_id,message_id=None):
         v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl.startswith('/set_max_same_'):
+        s['max_same_direction_positions']=max(0,int(cl.replace('/set_max_same_',''))); save_session(chat_id)
+        send_message(chat_id, f"✅ حداکثر پوزیشن هم‌جهت هم‌زمان: `{s['max_same_direction_positions'] or '∞'}`"); menu(chat_id); return
+    if cl.startswith('/set_dir_cooldown_'):
+        s['same_direction_entry_cooldown_seconds']=max(0.0,float(cl.replace('/set_dir_cooldown_',''))); save_session(chat_id)
+        send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
