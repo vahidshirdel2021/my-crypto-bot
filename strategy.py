@@ -202,7 +202,9 @@ STRATEGY_DEFAULTS = {
     # and sufficient distance from the previous-day range.
     "active_setup_require_daily_breakout": True,
     "active_setup_breakout_distance_atr": 1.00,
-    "active_setup_breakout_confirm_candles": 1,
+    "active_setup_breakout_confirm_candles": 2,
+    "active_setup_require_post_breakout_swing": True,
+    "active_setup_swing_lookback_candles": 12,
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -722,19 +724,41 @@ def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
     start = max(0, before_idx - 20)
     window = d.iloc[start:before_idx]
 
+    closes = window["close"].tail(confirms)
+    if len(closes) < confirms:
+        return False
+
     if signal == "BUY":
         # Must have closed above PDH and moved away from it.
-        closes = window["close"].tail(confirms)
-        if len(closes) < confirms:
-            return False
-        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
-
+        breakout_ok = bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
     else:
         # Must have closed below PDL and moved away from it.
-        closes = window["close"].tail(confirms)
-        if len(closes) < confirms:
-            return False
-        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+        breakout_ok = bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+
+    if not breakout_ok:
+        return False
+
+    # Do not enter on the breakout candle alone. A post-breakout structure must form
+    # first so the stop can be placed behind a real swing.
+    if bool(cfg.get("active_setup_require_post_breakout_swing", True)):
+        swing_window = d.iloc[max(0, before_idx - int(cfg.get("active_setup_swing_lookback_candles", 12))):before_idx]
+        if signal == "BUY":
+            # Require a meaningful reaction low after breakout.
+            post = swing_window[swing_window["close"] > pdh]
+            if len(post) < 3:
+                return False
+            swing_low = float(post["low"].min())
+            if swing_low >= float(closes.iloc[-1]):
+                return False
+        else:
+            post = swing_window[swing_window["close"] < pdl]
+            if len(post) < 3:
+                return False
+            swing_high = float(post["high"].max())
+            if swing_high <= float(closes.iloc[-1]):
+                return False
+
+    return True
 
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
