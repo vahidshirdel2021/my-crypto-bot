@@ -198,6 +198,11 @@ STRATEGY_DEFAULTS = {
     "active_setup_max_age_candles": 3,
     "active_setup_max_distance_atr": 0.80,
     "active_setup_invalidation_atr": 0.25,
+    # Active setup only becomes valid after a confirmed PDH/PDL breakout
+    # and sufficient distance from the previous-day range.
+    "active_setup_require_daily_breakout": True,
+    "active_setup_breakout_distance_atr": 1.00,
+    "active_setup_breakout_confirm_candles": 1,
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -700,6 +705,38 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
     return None, None
 
 
+
+def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
+    """Active setup guard:
+    Only allow recovery entries after a real PDH/PDL breakout with enough distance.
+    Prevents buying below PDH or selling above PDL from random intraday anchors.
+    """
+    if not bool(cfg.get("active_setup_require_daily_breakout", True)):
+        return True
+    if atr <= 0:
+        return False
+
+    distance = atr * float(cfg.get("active_setup_breakout_distance_atr", 1.0))
+    confirms = max(1, int(cfg.get("active_setup_breakout_confirm_candles", 1)))
+
+    start = max(0, before_idx - 20)
+    window = d.iloc[start:before_idx]
+
+    if signal == "BUY":
+        # Must have closed above PDH and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+
+    else:
+        # Must have closed below PDL and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+
+
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
     """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
 
@@ -779,7 +816,15 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     if daily_far:
         adaptive_sig, adaptive_reason, adaptive_atr = _detect_adaptive_liquidity(d, latest_idx, cfg)
         if adaptive_sig:
-            return adaptive_sig, adaptive_reason
+            # Do not allow adaptive continuation entries inside the previous-day range
+            # unless a confirmed PDH/PDL breakout already happened. This prevents
+            # buying below PDH or selling above PDL from intraday anchors.
+            if _has_confirmed_daily_breakout(
+                d, latest_idx, pdh, pdl, adaptive_sig,
+                adaptive_atr if adaptive_atr else guard_atr,
+                cfg
+            ):
+                return adaptive_sig, adaptive_reason
 
     if not bool(cfg.get("active_setup_enabled", True)):
         return None, "ستاپ جدیدی ثبت نشد"
@@ -804,6 +849,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             continue
         sig, reason, atr = detect_at(idx)
         if not sig or atr <= 0:
+            continue
+        if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
             continue
         level = pdl if sig == "BUY" else pdh
         tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
