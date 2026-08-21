@@ -3325,7 +3325,7 @@ def process_command(cmd,chat_id,message_id=None):
         s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
         live=latest_price(tmp['symbol'])
         send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
-    if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
+    if cl in ('/open_positions','/positions','positions') or any(x in c.replace('‌','') for x in ('پوزیشن‌ها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
     if cl in ('/add_long_symbol','/remove_long_symbol','/add_short_symbol','/remove_short_symbol'):

@@ -767,7 +767,7 @@ def _confirm_active_structure(d, idx, signal, cfg):
         recent_low = float(recent["low"].min())
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
-def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
+def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
     """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
 
     The primary signal still uses only the latest closed candle. If that exact
@@ -784,6 +784,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
+    # 5m is more noisy: require structure confirmation. Keep 15m faster.
+    require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
 
     def detect_at(idx):
         if idx < 0 or idx >= len(d):
@@ -909,7 +911,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         else:
             if live > level + invalid_dist or live < level - max_dist:
                 continue
-        if bool(cfg.get("active_structure_confirmation", True)):
+        if bool(cfg.get("active_structure_confirmation", True)) or require_micro_structure:
             if not _confirm_active_structure(d, latest_idx, sig, cfg):
                 continue
 
@@ -1377,7 +1379,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     elif st == "dynamic":
         if timeframe in ("5min", "15min"):
-            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price)
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price, timeframe=timeframe)
         else:
             sig, reason = strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     elif st == "trend":
@@ -1667,7 +1669,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
     if timeframe in ("5min", "15min"):
-        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
+        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
         add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
     else:
