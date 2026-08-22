@@ -218,9 +218,11 @@ STRATEGY_DEFAULTS = {
     "weakness_exit_min_r": 1.0,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
     "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
     "weakness_profit_lock_min_r": 1.0,
-    "early_loss_weakness_exit_enabled": False,
+    # مدیریت پوزیشن سمت ضرر هم مثل سمت سود روی تایم‌فریم سریع‌تر انجام می‌شود
+    # (نگاه کنید به POSITION_MANAGEMENT_TIMEFRAME_MAP در bot.py) و از همان
+    # آستانه‌ی زودهنگام (POSITION_MANAGEMENT_MIN_LOSS_R) استفاده می‌کند.
+    "early_loss_weakness_exit_enabled": True,
     "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
-    "early_loss_weakness_exit_enabled": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -341,9 +343,14 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
+        # Must reuse the SAME HTF context the signal pass used. Passing None here
+        # silently drops HTF bias, causing this second candidate-selection run to
+        # score/gate differently from the first (see get_signal_with_reason_v2),
+        # which produced duplicated/inconsistent reason strings and could let a
+        # plan through that the original V2 score/RR gates would have rejected.
+        sig, plan, reason = _select_v2_setup(df, market_data_dict, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
         if sig == signal and plan:
             return plan, reason
     if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):

@@ -2143,14 +2143,15 @@ def reconcile_real(chat_id):
 
 
 def _position_management_timeframe(p):
-    """Use the position's execution timeframe for weakness confirmation.
+    """Faster timeframe used to confirm trend weakness for position management.
 
-    Profit-protection/trailing may react to live price, but indicator-based weakness
-    must not be evaluated on a noisier, lower timeframe than the setup that created
-    the trade. This keeps entries and discretionary exits on the same market context.
+    Applies the SAME faster-timeframe technique symmetrically to both directions:
+    protecting an open profit (pullback from peak) and catching an early move
+    toward the stop. Entry/signal logic is untouched — this only affects how
+    quickly an already-open position reacts to a developing reversal.
     """
     primary = str(p.get('timeframe') or '5min')
-    return primary
+    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, primary)
 
 
 def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
@@ -2171,8 +2172,8 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
             return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
 
         early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',False))
-        loss_score = 55.0 if early_loss_enabled and current_r <= -0.50 else 999.0
-        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=-0.50)
+        loss_score = POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE if early_loss_enabled and current_r <= POSITION_MANAGEMENT_MIN_LOSS_R else 999.0
+        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=POSITION_MANAGEMENT_MIN_LOSS_R)
         if not need_weakness:
             return False,[]
         if wdf is None:
@@ -2184,11 +2185,13 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
             return False,[]
         is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
 
-        # Profitable trades can use confirmed weakness; the optional early-loss path
-        # is explicitly disabled by default because the hard SL already defines risk.
+        # Profitable trades can use confirmed weakness; the early-loss path uses a
+        # faster management timeframe (see _position_management_timeframe) and a
+        # looser score threshold, since catching a real reversal early — before the
+        # full SL distance is given back — matters more than being conservative here.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if early_loss_enabled and current_r<=-0.50 and wscore>=loss_score:
+        if early_loss_enabled and current_r<=POSITION_MANAGEMENT_MIN_LOSS_R and wscore>=loss_score:
             return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         return False,[]
     except Exception as exc:
@@ -2255,18 +2258,8 @@ def _send_or_edit_positions_view(chat_id, message_id=None, force_send=False):
             save_session(chat_id)
             return int(target_id)
         # Stale/deleted message: fall through and create a fresh card.
-    if not s.get('paper_positions'):
-        # Keep the last message if possible; otherwise a short notification is enough.
-        if target_id:
-            res = tg('editMessageText', {
-                'chat_id': chat_id, 'message_id': int(target_id),
-                'text': text, 'reply_markup': markup, 'parse_mode': 'Markdown'
-            }, 10)
-            if res and res.get('ok'):
-                s['positions_message_id'] = int(target_id)
-                s['positions_message_last_edit'] = time.time()
-                save_session(chat_id)
-                return int(target_id)
+        # (No positions and the edit above already failed on this same target_id —
+        # retrying the identical edit here would just fail again; go straight to sendMessage.)
     res = tg('sendMessage', {
         'chat_id': chat_id, 'text': text,
         'reply_markup': markup, 'parse_mode': 'Markdown'
@@ -2761,7 +2754,8 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     plan, plan_reason = build_trade_plan(
         primary, sig, s['strategy_config'], plan_strategy_type,
         strategy_timeframe=primary_tf, grid_levels=grid_levels,
-        setup_index=active_setup_index, live_price=live_entry_price
+        setup_index=active_setup_index, live_price=live_entry_price,
+        market_data_dict=md
     )
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -3115,10 +3109,14 @@ def manual_signal_scan(chat_id, symbol=None):
                     if df is None or df.empty or len(df) < 80:
                         continue
                     ind = calculate_indicators(df)
-                    sig, reason = get_signal_with_reason(ind, s.get('strategy_config', STRATEGY_DEFAULTS))
+                    strategy_type = s.get('active_strategy', 'dynamic')
+                    sig, reason = get_signal_with_reason(
+                        ind, None, 'single', tf, strategy_type,
+                        s.get('filters'), s.get('strategy_config', STRATEGY_DEFAULTS)
+                    )
                     if sig not in ('BUY','SELL'):
                         continue
-                    plan = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_timeframe=tf)
+                    plan, _plan_reason = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_type, strategy_timeframe=tf)
                     if plan:
                         results.append((sym, sig, plan, reason))
                 except Exception:
@@ -3325,7 +3323,11 @@ def process_command(cmd,chat_id,message_id=None):
         s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
         live=latest_price(tmp['symbol'])
         send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
-    if cl in ('/open_positions','/positions','positions') or any(x in c.replace('‌','') for x in ('پوزیشن‌ها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
+    # NOTE: keywords on the right must ALSO have ZWNJ stripped, otherwise a keyword like
+    # 'پوزیشن‌ها' (which still contains the ZWNJ char) can never match against `c` with
+    # ZWNJ removed — that comparison was always False, silently disabling this fallback.
+    _c_norm = c.replace('\u200c', '')
+    if cl in ('/open_positions','/positions','positions') or any(x.replace('\u200c','') in _c_norm for x in ('پوزیشن‌ها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
     if cl in ('/add_long_symbol','/remove_long_symbol','/add_short_symbol','/remove_short_symbol'):
