@@ -774,6 +774,39 @@ def _confirm_active_structure(d, idx, signal, cfg):
         recent_low = float(recent["low"].min())
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
+def _active_setup_distance_check(live_price, level, atr, max_distance_atr, invalidation_atr, is_buy):
+    """Pure decision for the active-setup FOMO/invalidation guard: given how
+    far live price has moved from the original PDH/PDL sweep level, is a
+    pending active setup now too far to chase, or already invalidated by
+    moving the wrong way past the level? Extracted from
+    strategy_liquidity_sweep_5m for independent testing of this exact
+    anti-FOMO/anti-dead-bot boundary math.
+
+    Returns (too_far, invalidated).
+    """
+    max_dist = float(atr) * max(0.20, float(max_distance_atr))
+    invalid_dist = float(atr) * max(0.05, float(invalidation_atr))
+    if is_buy:
+        too_far = live_price > level + max_dist
+        invalidated = live_price < level - invalid_dist
+    else:
+        too_far = live_price < level - max_dist
+        invalidated = live_price > level + invalid_dist
+    return too_far, invalidated
+
+
+def _is_daily_level_unreachable(live_price, pdh, pdl, atr, activation_distance_atr):
+    """Pure decision: has price drifted so far from BOTH PDH and PDL that
+    chasing the original daily liquidity setup no longer makes sense, and the
+    strategy should instead rotate to an adaptive intraday level? This is the
+    'anti-dead-bot' mechanism described in strategy_liquidity_sweep_5m.
+    """
+    if not atr or atr <= 0:
+        return False
+    nearest_dist = min(abs(live_price - pdh), abs(live_price - pdl))
+    return nearest_dist >= float(atr) * float(activation_distance_atr)
+
+
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
     """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
 
@@ -831,10 +864,12 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         live_for_guard = float(d.iloc[latest_idx]["close"])
     if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
         level = pdl if sig == "BUY" else pdh
-        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
-        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
-        too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
-        invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
+        too_far, invalidated = _active_setup_distance_check(
+            live_for_guard, level, atr,
+            cfg.get("active_setup_max_distance_atr", 0.80),
+            cfg.get("active_setup_invalidation_atr", 0.25),
+            sig == "BUY",
+        )
         if not too_far and not invalidated:
             return sig, reason
         sig, reason = None, None
@@ -846,8 +881,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     try:
         guard_atr = float(atr) if atr is not None and np.isfinite(atr) and atr > 0 else _safe_float(d.iloc[latest_idx].get("atr"), 0.0)
         daily_activation_atr = float(cfg.get("adaptive_activation_distance_atr", 1.00))
-        daily_nearest_dist = min(abs(live_for_guard - pdh), abs(live_for_guard - pdl))
-        daily_far = daily_nearest_dist >= guard_atr * daily_activation_atr if guard_atr > 0 else False
+        daily_far = _is_daily_level_unreachable(live_for_guard, pdh, pdl, guard_atr, daily_activation_atr)
     except Exception:
         guard_atr = 0.0
         daily_far = False
@@ -1594,6 +1628,36 @@ def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
     return float(ev), float(base_p)
 
 
+def _v2_score_thresholds(vol_state, cfg):
+    """Pure: pick the (min_score, min_rr) gate thresholds for a candidate
+    setup based on volatility regime. High volatility demands a stricter bar
+    (a strong trend may stay directional, but noise-driven setups need extra
+    confirmation) — extracted from _select_v2_setup's add_candidate closure.
+    """
+    if vol_state == "HIGH":
+        return float(cfg["high_vol_min_score"]), float(cfg["high_vol_min_rr"])
+    return float(cfg["min_setup_score"]), float(cfg.get("min_rr", 1.3))
+
+
+def _v2_passes_setup_gates(score, rr, vol_state, cfg, ev):
+    """Pure: does this candidate setup clear the score/RR/edge-proxy gates?"""
+    min_score, min_rr = _v2_score_thresholds(vol_state, cfg)
+    if score < min_score or rr < min_rr:
+        return False
+    if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
+        return False
+    return True
+
+
+def _v2_rank_key(score, rr):
+    """Pure: sort key used to pick the best among competing candidate setups
+    generated in the same scan cycle (e.g. a trend continuation vs a breakout
+    signal firing simultaneously). RR is floored at 0.01 so a zero/negative RR
+    plan never ranks as a false tie with a genuinely-zero-score plan.
+    """
+    return score * max(rr, 0.01)
+
+
 def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     cfg = get_v2_config(strategy_config)
     regime_info = detect_market_regime(df_primary, cfg)
@@ -1650,15 +1714,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
         # but high volatility requires stricter score/RR. Mean reversion is never selected
         # merely because volatility is high.
-        if vol_state == "HIGH":
-            min_score = float(cfg["high_vol_min_score"])
-            min_rr = float(cfg["high_vol_min_rr"])
-        else:
-            min_score = float(cfg["min_setup_score"])
-            min_rr = float(cfg.get("min_rr", 1.3))
-        if score < min_score or rr < min_rr:
-            return
-        if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
+        if not _v2_passes_setup_gates(score, rr, vol_state, cfg, ev):
             return
         plan = dict(plan)
         plan.update({
@@ -1673,7 +1729,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             "model_win_proxy": round(pwin, 4),
             "setup_family": family,
         })
-        candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+        candidates.append((_v2_rank_key(score, rr), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)

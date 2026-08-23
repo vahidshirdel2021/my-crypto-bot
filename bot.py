@@ -76,6 +76,8 @@ POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
 POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
 
 
+
+
 def _seconds_to_local_day_end():
     """ثانیه‌های باقی‌مانده تا پایان روز جاری بر اساس منطقه‌زمانی DAILY_CLOSE_TZ."""
     tz = None
@@ -85,13 +87,28 @@ def _seconds_to_local_day_end():
         except Exception:
             tz = None
     now = datetime.now(tz) if tz else datetime.utcnow()
-    day_end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return (day_end - now).total_seconds()
+    return _seconds_until_next_midnight(now)
+
+
+
+
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
-TAKER_FEE_PCT = max(0.0, float(os.environ.get('TAKER_FEE_PCT', '0.05')))
+from trading_math import TAKER_FEE_PCT
+from trading_math import (
+    _seconds_until_next_midnight, _clamp_pct, fmt, market_name, ccxt_symbol,
+    _extract_numbers, _price_matches, _verify_protection_prices,
+    side_long, _same_direction_guard_allows, round_trip_fee_usdt,
+    trailing_locked_r, _compute_trailing_update, _should_update_swing_stop,
+    _should_close_before_day_end, _directional_price_fraction, _gross_pnl_usdt,
+    _paper_funding_cost_usdt, _risk_usdt_from_stop, _realized_r,
+    _daily_loss_limit_breached, _parse_signal_reason, _compute_setup_id,
+    _risk_usdt_for_entry, _passes_min_risk_to_fee_ratio, _is_order_filled,
+    _capped_leverage, _meets_min_amount, _leader_correlation_decision,
+    _platform_fee_amount, _live_position_metrics,
+)
 MIN_RISK_TO_FEE_RATIO = max(0.0, float(os.environ.get('MIN_RISK_TO_FEE_RATIO', '3.0')))
 # Platform fee: applied consistently to PAPER and REAL trades after a trade is realized.
-PLATFORM_FEE_RATE_PCT = min(100.0, max(0.0, float(os.environ.get('PLATFORM_FEE_RATE_PCT', '10.0'))))
+PLATFORM_FEE_RATE_PCT = _clamp_pct(os.environ.get('PLATFORM_FEE_RATE_PCT', '10.0'))
 PLATFORM_FEE_MIN_PROFIT_USDT = max(0.0, float(os.environ.get('PLATFORM_FEE_MIN_PROFIT_USDT', '0.01')))
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in ADMIN_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
@@ -612,7 +629,7 @@ def normalize_session(data):
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
     s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
-    s['platform_fee_rate_pct'] = min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
+    s['platform_fee_rate_pct'] = _clamp_pct(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))
     s['platform_fee_total_usdt'] = max(0.0, float(s.get('platform_fee_total_usdt', 0.0)))
     s['platform_fee_trade_count'] = max(0, int(s.get('platform_fee_trade_count', 0) or 0))
     return s
@@ -745,19 +762,8 @@ def send_photo(chat_id, img, caption='', markup=None):
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
 
-def fmt(v):
-    try:
-        x=float(v)
-        if abs(x)<.0001: return f'{x:.8f}'
-        if abs(x)<1: return f'{x:.6f}'
-        return f'{x:.4f}'
-    except Exception as exc:
-        logger.debug('fmt fallback value=%r: %s', v, exc)
-        return str(v)
 
 
-def market_name(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}USDT"
-def ccxt_symbol(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}/USDT:USDT"
 
 
 def normalize_klines(data):
@@ -911,26 +917,10 @@ def call_implicit_any(ex, candidates, params):
     raise AttributeError('CoinEx implicit SL/TP method unavailable in this CCXT version')
 
 
-def _extract_numbers(obj, names):
-    found=[]
-    if isinstance(obj, dict):
-        for k,v in obj.items():
-            key=str(k).lower().replace('-','_')
-            if key in names:
-                try: found.append(float(v))
-                except Exception: pass
-            found.extend(_extract_numbers(v,names))
-    elif isinstance(obj, list):
-        for v in obj: found.extend(_extract_numbers(v,names))
-    return found
 
 
-def _price_matches(a,b):
-    try:
-        a=float(a); b=float(b); scale=max(abs(a),abs(b),1.0)
-        return abs(a-b) <= max(1e-8,scale*2e-5)
-    except Exception:
-        return False
+
+
 
 
 def _live_position_raw(chat_id, symbol):
@@ -973,9 +963,7 @@ def set_protection(chat_id, symbol, sl, tp):
         tps=_extract_numbers(responses,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
         sls += _extract_numbers(raw,{'stop_loss_price','stoploss_price','stop_loss','stoplossprice'})
         tps += _extract_numbers(raw,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
-        if sls and not any(_price_matches(x,sl) for x in sls): return False,f'SL verification mismatch: expected {sl}'
-        if tps and not any(_price_matches(x,tp) for x in tps): return False,f'TP verification mismatch: expected {tp}'
-        return True,'OK'
+        return _verify_protection_prices(sls, tps, sl, tp)
     except Exception as exc:
         return False,f'protection verification failed: {exc}'
 
@@ -996,41 +984,15 @@ def position_history_for(chat_id, symbol, since_ms):
     except Exception as exc: logger.debug('position history %s: %s',symbol,exc); return []
 
 
-def side_long(side): return 'BUY' in str(side).upper() or 'LONG' in str(side).upper()
+
+
 def reserved_margin(s): return sum(float(p.get('margin',0)) for p in s['paper_positions'])
 
 
-def round_trip_fee_usdt(margin, leverage):
-    try:
-        notional = abs(float(margin)) * abs(float(leverage))
-        if not math.isfinite(notional): return 0.0
-        return notional * (TAKER_FEE_PCT / 100.0) * 2
-    except Exception:
-        return 0.0
 
 
-def trailing_locked_r(entry, risk_distance, current_price, is_long):
-    """
-    Profit-protection ladder for an already profitable position.
 
-    1.0R -> break-even
-    1.5R -> lock +0.5R
-    2.0R -> lock +1.0R
-    2.5R -> lock +1.5R
-    ...
 
-    This intentionally does not alter entry/TP logic; it only protects an
-    existing position after it has moved in the intended direction.
-    """
-    try:
-        entry=float(entry); risk_distance=float(risk_distance); current_price=float(current_price)
-    except Exception:
-        return None
-    if risk_distance<=0 or not math.isfinite(risk_distance): return None
-    r=(current_price-entry)/risk_distance if is_long else (entry-current_price)/risk_distance
-    if r<1.0: return None
-    step=math.floor(r*2)/2.0
-    return max(0.0, step-1.0)
 
 
 def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
@@ -1044,17 +1006,14 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
             return False
         is_long=side_long(p['side'])
         probe=float(favorable_price if favorable_price is not None else current_price)
-        lr=trailing_locked_r(entry,risk_distance,probe,is_long)
-        if lr is None:
+        update = _compute_trailing_update(
+            entry, risk_distance, float(p['sl']), is_long,
+            p.get('trailing_locked_r'), p.get('trailing_activated'), probe,
+        )
+        if update is None:
             return False
-        new_sl=entry+(lr*risk_distance if is_long else -lr*risk_distance)
-        old_sl=float(p['sl'])
-        is_better=(new_sl>old_sl) if is_long else (new_sl<old_sl)
-        locked=float(p.get('trailing_locked_r') or 0.0)
-        # First activation is allowed at exactly 1R: 0R is a valid lock level.
-        first_activation=not bool(p.get('trailing_activated'))
-        if not is_better or not (lr>locked or (first_activation and lr>=locked)):
-            return False
+        new_sl = update['new_sl']; lr = update['locked_r']; first_activation = update['first_activation']
+        locked = float(p.get('trailing_locked_r') or 0.0)
         if p.get('is_real'):
             ok,err=move_stop_loss(chat_id,p['symbol'],normalize_price(chat_id,p['symbol'],new_sl))
             if not ok:
@@ -1069,6 +1028,8 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
     except Exception as exc:
         logger.debug('profit protection failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
         return False
+
+
 
 
 def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
@@ -1096,16 +1057,8 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         if new_sl is None or swing_level is None:
             return
         cur_sl = float(p['sl'])
-        if is_long:
-            behind_price = new_sl < price
-            improved = new_sl > cur_sl
-        else:
-            behind_price = new_sl > price
-            improved = new_sl < cur_sl
-        if not (behind_price and improved):
-            return
         prev_level = p.get('swing_sl_level')
-        if prev_level is not None and math.isclose(swing_level, prev_level, rel_tol=1e-9, abs_tol=1e-9):
+        if not _should_update_swing_stop(new_sl, swing_level, price, cur_sl, is_long, prev_level):
             return
         if p.get('is_real'):
             ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], new_sl))
@@ -1121,6 +1074,8 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
 
+
+
 def _maybe_close_before_day_end(chat_id, p, price):
     """
     برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
@@ -1128,9 +1083,7 @@ def _maybe_close_before_day_end(chat_id, p, price):
     باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
     """
     tf = p.get('timeframe', '5min')
-    if tf not in NO_OVERNIGHT_TIMEFRAMES:
-        return False
-    if _seconds_to_local_day_end() > SCAN_INTERVAL_SECONDS:
+    if not _should_close_before_day_end(tf, _seconds_to_local_day_end(), SCAN_INTERVAL_SECONDS, NO_OVERNIGHT_TIMEFRAMES):
         return False
     close_position(chat_id, p, price, 'پایان روز - بستن اجباری (معاملات ۵ و ۱۵ دقیقه هرگز به روز بعد منتقل نمی‌شوند)')
     return True
@@ -1142,14 +1095,26 @@ def reset_daily_if_needed(chat_id, equity):
         s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; s['traded_levels']={}; save_session(chat_id)
 
 
+
+
+
+
+
+
+
+
+
+
 def current_paper_equity(s):
     eq=float(s['paper_balance'])
     for p in s['paper_positions']:
         price=latest_price(p['symbol'])
         if not price: continue
-        entry=float(p['entry_price']); frac=((price-entry)/entry) if side_long(p['side']) else ((entry-price)/entry)
-        eq += float(p.get('margin',0))*frac*float(p.get('leverage',1))
+        frac = _directional_price_fraction(p['side'], p['entry_price'], price)
+        eq += _gross_pnl_usdt(p.get('margin',0), p.get('leverage',1), frac)
     return eq
+
+
 
 
 def risk_guard(chat_id):
@@ -1165,8 +1130,8 @@ def risk_guard(chat_id):
     reset_daily_if_needed(chat_id,equity)
     start=float(s['daily_start_equity'])
     if start<=0: return True
-    limit=start*(1-float(s['daily_loss_limit_pct'])/100)
-    if equity<=limit:
+    breached, limit = _daily_loss_limit_breached(equity, start, s['daily_loss_limit_pct'])
+    if breached:
         stop_scan(chat_id, 'daily-risk')
         s=get_session(chat_id)
         s['daily_stopped']=True
@@ -1490,25 +1455,30 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
-    quality_score = None; quality_label = None; planned_rr = None
-    m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
-    if m_score:
-        quality_score=int(m_score.group(1)); quality_label=m_score.group(2)
-    m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
-    if m_rr:
-        planned_rr=float(m_rr.group(1))
-    level_key = None
-    m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
-    if m_level:
-        level_key = f"{symbol}:{m_level.group(1)}:{m_level.group(2)}"
+    parsed = _parse_signal_reason(reason)
+    quality_score = parsed['quality_score']; quality_label = parsed['quality_label']; planned_rr = parsed['planned_rr']
+    level_key = f"{symbol}:{parsed['level_suffix']}" if parsed['level_suffix'] else None
     # A setup is consumable only once. Use the latest closed signal identity so
     # repeated scan loops cannot create duplicate audit signals or re-enter the
     # exact same liquidity event.
-    setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
-    setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
+    setup_id = _compute_setup_id(symbol, side, s.get('timeframe'), signal_price, sl, tp, reason)
     if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
         return False
     if setup_id in set(s.get('consumed_setups') or []):
@@ -1536,16 +1506,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # single market-wide move from hitting many correlated positions simultaneously,
     # which independent per-trade risk sizing does not account for.
     dir_key = 'BUY' if side_long(side) else 'SELL'
-    max_same_dir = int(s.get('max_same_direction_positions', 0) or 0)
-    if max_same_dir > 0:
-        same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
-        if same_dir_open >= max_same_dir:
-            return False
-    same_dir_cooldown = float(s.get('same_direction_entry_cooldown_seconds', 0) or 0)
-    if same_dir_cooldown > 0:
-        last_dir_ts = float((s.get('last_direction_entry_ts') or {}).get(dir_key, 0))
-        if time.time() - last_dir_ts < same_dir_cooldown:
-            return False
+    if not _same_direction_guard_allows(s, side, time.time()):
+        return False
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -1572,10 +1534,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if margin<=0:
         return False
     leverage=int(s['leverage'])
-    risk_dist=abs(float(price)-float(sl))
-    risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
+    risk_usdt=_risk_usdt_for_entry(price, sl, margin, leverage)
     fee_estimate=round_trip_fee_usdt(margin,leverage)
-    if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+    if not _passes_min_risk_to_fee_ratio(risk_usdt, fee_estimate, MIN_RISK_TO_FEE_RATIO):
         return False
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
@@ -1588,7 +1549,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             market=ex.market(sym)
             lev_info=market.get('info') or {}
             max_lev=float(lev_info.get('max_leverage') or market.get('maxLeverage') or leverage)
-            if leverage>max_lev: leverage=int(max_lev); trade['leverage']=leverage
+            leverage=_capped_leverage(leverage, max_lev); trade['leverage']=leverage
             ex.set_margin_mode(MARGIN_MODE,sym,{'leverage':leverage})
         except Exception:
             try:
@@ -1598,7 +1559,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         amount=(margin*leverage)/price
         amount=normalize_amount(chat_id,symbol,amount)
         min_amt=float(((market.get('limits') or {}).get('amount') or {}).get('min') or 0)
-        if amount<=0 or (min_amt and amount<min_amt):
+        if not _meets_min_amount(amount, min_amt):
             send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
         try:
             norm_price = normalize_price(chat_id, symbol, price)
@@ -1615,8 +1576,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 except Exception:
                     confirmed = order
                 filled = float((confirmed or {}).get('filled') or 0)
-                status = str((confirmed or {}).get('status') or '').lower()
-                if filled > 0 and (status in ('closed', 'filled') or not status): break
+                if _is_order_filled(confirmed): break
                 time.sleep(ORDER_CONFIRM_DELAY)
 
             if confirmed is None: confirmed = order
@@ -1789,6 +1749,8 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
+
+
 async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
     if symbol.upper() in LEADER_SYMBOLS:
         return True, 'لیدر بازار است'
@@ -1833,16 +1795,15 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
 
         is_long = side_long(side)
         detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
-        if is_long:
-            if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
-                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
-            if any_crash and max_corr >= 0.65:
-                return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
-        else:
-            if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
-                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
-            if any_pump and max_corr >= 0.65:
-                return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+        allowed, block_reason = _leader_correlation_decision(leader_states, correlations, is_long)
+        if not allowed:
+            messages = {
+                'bearish_leaders_correlated': f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}',
+                'leader_crash_correlated': f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}',
+                'bullish_leaders_correlated': f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}',
+                'leader_pump_correlated': f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}',
+            }
+            return False, messages[block_reason]
 
         return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
     except Exception as exc:
@@ -1908,15 +1869,15 @@ def get_user_fee_rate(chat_id):
             finally:
                 conn.close()
         if row is not None:
-            return min(100.0, max(0.0, float(row[0])))
+            return _clamp_pct(row[0])
     except Exception:
         logger.exception('get user fee rate failed chat=%s', chat_id)
     s = get_session(chat_id)
-    return min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
+    return _clamp_pct(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))
 
 
 def set_user_fee_rate(chat_id, rate_pct):
-    rate = min(100.0, max(0.0, float(rate_pct)))
+    rate = _clamp_pct(rate_pct)
     with DB_LOCK:
         conn = db_connect()
         try:
@@ -1929,6 +1890,8 @@ def set_user_fee_rate(chat_id, rate_pct):
     s['platform_fee_rate_pct'] = rate
     save_session(chat_id)
     return rate
+
+
 
 
 def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
@@ -1950,7 +1913,7 @@ def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
                 if existing is not None:
                     return float(existing[0] or 0.0)
                 rate = get_user_fee_rate(chat_id)
-                fee = round(profit * rate / 100.0, 8)
+                fee = _platform_fee_amount(profit, rate, PLATFORM_FEE_MIN_PROFIT_USDT)
                 mode = 'REAL' if pos.get('is_real') else 'PAPER'
                 gross = float(pos.get('pnl_gross_usdt') or profit)
                 trading_cost = max(0.0, gross - profit)
@@ -2044,8 +2007,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
                 time.sleep(.5)
             realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
             if realized is None:
-                entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
-                pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+                frac = _directional_price_fraction(pos['side'], pos['entry_price'], price)
+                pnl_gross = _gross_pnl_usdt(pos['margin'], pos['leverage'], frac)
                 realized=pnl_gross-fee
                 pos['pnl_is_estimate']=True
                 pos['pnl_gross_usdt']=pnl_gross
@@ -2061,11 +2024,9 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
             slip = PAPER_SLIPPAGE_BPS / 10000.0
             price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
-        entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
-        pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
-        hours=max(0.0, time.time()-float(pos.get('opened_at',time.time()))) / 3600.0
-        funding_intervals=hours/8.0
-        funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
+        entry=float(pos['entry_price']); frac = _directional_price_fraction(pos['side'], entry, price)
+        pnl_gross = _gross_pnl_usdt(pos['margin'], pos['leverage'], frac)
+        funding_cost = _paper_funding_cost_usdt(pos['margin'], pos['leverage'], pos.get('opened_at', time.time()), time.time(), PAPER_FUNDING_RATE_PCT_8H)
         pnl=pnl_gross-fee-funding_cost
         s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
         pos['pnl_gross_usdt']=pnl_gross
@@ -2081,11 +2042,11 @@ def close_position(chat_id,pos,price=None,reason='manual'):
     pos['platform_fee_usdt'] = platform_fee
     pos['fee_usdt']=fee
     if not pos.get('risk_usdt'):
-        try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
+        try: pos['risk_usdt']=_risk_usdt_from_stop(pos['entry_price'], pos['sl'], pos['margin'], pos['leverage'])
         except Exception: pos['risk_usdt']=0.0
     pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
     pos['duration_seconds']=max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])))
-    pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
+    pos['realized_r']=_realized_r(pos.get('pnl_usdt'), pos.get('risk_usdt'))
     update_trade_excursions(pos, float(price), float(price))
     audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
     cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
@@ -2199,6 +2160,8 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         return False,[]
 
 
+
+
 def _build_open_positions_view(chat_id, prices=None):
     """Build the live open-position card. Prices are fetched fresh (with normal caches)."""
     s = get_session(chat_id)
@@ -2216,10 +2179,7 @@ def _build_open_positions_view(chat_id, prices=None):
             live = float(live or p.get('last_price') or p.get('entry_price') or 0)
             entry = float(p.get('entry_price') or live or 0)
             amount = abs(float(p.get('amount') or 0))
-            pnl = (live-entry)*amount if side_long(p['side']) else (entry-live)*amount
-            pct = ((live-entry)/entry*100.0) if side_long(p['side']) and entry>0 else ((entry-live)/entry*100.0 if entry>0 else 0.0)
-            risk = float(p.get('risk_usdt') or 0.0)
-            r = (pnl/risk) if risk>0 else 0.0
+            pnl, pct, r = _live_position_metrics(p['side'], entry, live, amount, p.get('risk_usdt'))
             side_label = '🟢 LONG' if side_long(p['side']) else '🔴 SHORT'
             lines += [
                 f'\n{side_label} `{symbol}`',
