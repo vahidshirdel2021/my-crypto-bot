@@ -693,7 +693,16 @@ def tg(method, payload=None, timeout=10):
     if not TELEGRAM_TOKEN: return None
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
-        if r.status_code != 200: logger.warning('Telegram %s: %s', method, r.text[:300]); return None
+        if r.status_code != 200:
+            logger.warning('Telegram %s: %s', method, r.text[:300])
+            # Telegram still returns a JSON body (with "description") on 4xx errors —
+            # e.g. Markdown parse failures. Return it instead of None so callers like
+            # send_message() can detect *why* it failed and retry (e.g. without
+            # parse_mode) instead of silently dropping the message.
+            try:
+                return r.json()
+            except Exception:
+                return None
         return r.json()
     except Exception as exc:
         logger.warning('Telegram request failed: %s', exc); return None
@@ -718,6 +727,11 @@ def answer_callback(cid):
     if cid: tg('answerCallbackQuery', {'callback_query_id':cid}, 5)
 
 
+def _tg_is_parse_error(res):
+    desc = ((res or {}).get('description') or '').lower()
+    return ("can't parse" in desc) or ('can\u2019t parse' in desc) or ('parse entities' in desc) or ('entity' in desc and 'offset' in desc)
+
+
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
     if not is_allowed(chat_id): return False
     s = get_session(chat_id)
@@ -730,10 +744,24 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
         desc = ((res or {}).get('description') or '').lower()
         if 'message is not modified' in desc:
             return True
+        if parse_mode and _tg_is_parse_error(res):
+            # The text broke Telegram's Markdown parser (unescaped brackets/backticks/
+            # underscores are common in raw reason/exception strings). Retry once as
+            # plain text instead of dropping the message silently.
+            logger.warning('Telegram editMessageText Markdown parse error for chat=%s, retrying as plain text', chat_id)
+            body.pop('parse_mode', None)
+            res = tg('editMessageText', body, 10)
+            if res and res.get('ok'): return True
     body = {'chat_id':chat_id,'text':text,'reply_markup':markup}
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
-    return bool(res and res.get('ok'))
+    if res and res.get('ok'): return True
+    if parse_mode and _tg_is_parse_error(res):
+        logger.warning('Telegram sendMessage Markdown parse error for chat=%s, retrying as plain text', chat_id)
+        body.pop('parse_mode', None)
+        res = tg('sendMessage', body, 10)
+        return bool(res and res.get('ok'))
+    return False
 
 
 def edit_page(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
@@ -2609,11 +2637,11 @@ def _entry_diag_raw_summary(chat_id):
         examples.setdefault(raw_reason, []).append(sym)
     if not reason_counts:
         return None
-    lines = ['🧬 *دلایل خام رد شدن (بدون ساده‌سازی، به ترتیب تکرار)*', '━━━━━━━━━━━━━━━━━━━━']
+    # Plain text (no Markdown parse_mode) on purpose — see note at the call site.
+    lines = ['🧬 دلایل خام رد شدن (بدون ساده‌سازی، به ترتیب تکرار)', '━━━━━━━━━━━━━━━━━━━━']
     for reason, count in reason_counts.most_common(15):
-        safe_reason = reason.replace('_', '\\_')
         syms = '، '.join(examples[reason][:6])
-        lines.append(f'• `{count}x` — {safe_reason}\n   نمونه: {syms}')
+        lines.append(f'• {count}x — {reason}\n   نمونه: {syms}')
     return '\n'.join(lines)
 
 
@@ -3329,21 +3357,27 @@ def process_command(cmd,chat_id,message_id=None):
         if not window:
             edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
         data_errs = [x for x in window if x.get('status') in ('data_error', 'insufficient_data')]
-        lines = ['📋 *آخرین موارد خطای داده (نماد مشخص)*', '━━━━━━━━━━━━━━━━━━━━']
+        lines = ['📋 آخرین موارد خطای داده (نماد مشخص)', '━━━━━━━━━━━━━━━━━━━━']
         if data_errs:
             seen_syms = {}
             for x in reversed(data_errs):
                 seen_syms.setdefault(x.get('symbol', '?'), x.get('reason', ''))
             for sym, reason in list(seen_syms.items())[:20]:
-                lines.append(f'• `{sym}` — {reason}')
+                lines.append(f'• {sym} — {reason}')
         else:
             lines.append('موردی یافت نشد.')
-        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id, parse_mode=None); return
     if cl == '/entry_diag_raw':
         summary = _entry_diag_raw_summary(chat_id)
         if not summary:
             edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
-        edit_page(chat_id, summary, get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        # Raw reason strings come straight from the strategy/exception layer and can
+        # contain unescaped Markdown-special characters (brackets, parentheses, stray
+        # backticks/underscores) that make Telegram reject the Markdown parse. When that
+        # happens, both the edit AND the sendMessage fallback fail silently — the button
+        # looks like it does nothing. This view is meant to be raw text anyway, so send
+        # it with no parse_mode instead of trying to escape every possible character.
+        edit_page(chat_id, summary, get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id, parse_mode=None); return
     if cl in ('/manual_trade','🖐 معامله دستی'):
         s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
         send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
