@@ -3438,6 +3438,12 @@ def process_command(cmd,chat_id,message_id=None):
             ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
         return
 
+    # Nothing matched above: this used to fail completely silently, which is exactly
+    # the kind of hidden bug that's hardest to diagnose from the user side (a button
+    # that "does nothing"). Log it so a stale-deploy / renamed-callback mismatch shows
+    # up in server logs instead of vanishing.
+    logger.warning('process_command: unmatched command cl=%r chat=%s', cl, chat_id)
+
 
 def start_backtest_flow(chat_id):
     s=get_session(chat_id)
