@@ -1684,6 +1684,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     trend_state = regime_info.get("trend_state", "NEUTRAL")
     vol_state = regime_info.get("volatility_state", "NORMAL")
     candidates = []
+    attempts = []  # diagnostic-only: records why each family did NOT become a candidate
 
     # Equilibrium (میان‌بها) = وسط PDH/PDL. فقط یک‌بار محاسبه می‌شود و بین همه‌ی
     # کاندیداها به‌اشتراک گذاشته می‌شود؛ اگر PDH/PDL هنوز کامل نشده باشد (روز اول)
@@ -1704,6 +1705,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
 
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
+            attempts.append(f"{family}: بدون سیگنال")
             return
         # Risk plan must use the signal timeframe. HTF is context, not execution.
         plan_tf = timeframe
@@ -1738,6 +1740,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                 defer_quality_gate=True
             )
         if not plan:
+            attempts.append(f"{family}/{sig}: بدون طرح معتبر (حد ضرر/ورود ساخته نشد)")
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
         score = float(plan.get("score", 0)) + float(bonus)
@@ -1795,6 +1798,10 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             min_score_gate += extra_score
             min_rr_gate += extra_rr
         if score < min_score_gate or rr < min_rr_gate:
+            attempts.append(
+                f"{family}/{sig}: امتیاز={score:.0f}(نیاز {min_score_gate:.0f}) "
+                f"RR={rr:.2f}(نیاز {min_rr_gate:.2f})"
+            )
             return
         if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
@@ -1860,9 +1867,11 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
+        attempts_txt = f" || {' | '.join(attempts)}" if attempts else ""
         return None, None, (
             f"V2: ستاپ مناسب پیدا نشد | regime={rname} trend={trend_state} "
             f"vol={vol_state} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+            f"{attempts_txt}"
         )
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, best_plan, best_sig, best_reason = candidates[0]
