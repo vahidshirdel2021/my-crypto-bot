@@ -1789,7 +1789,15 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             df_primary, timeframe, filters, cfg
         )
         if trend_sig:
-            add_candidate(trend_sig, trend_reason, "trend", 4.0)
+            add_candidate(trend_sig, trend_reason, "trend_pullback", 4.0)
+
+        # New independent family: local breakout -> retest -> continuation.
+        # It competes on the same V2 safety/quality gates; it does not weaken them.
+        br_sig, br_reason = strategy_breakout_retest_5m15m(
+            df_primary, filters, cfg
+        )
+        if br_sig:
+            add_candidate(br_sig, br_reason, "breakout_retest", 5.0)
     else:
         # Strategy selection is driven by trend state, while volatility only changes
         # strictness. This prevents high-vol trends from being treated as mean-reversion.
@@ -1810,6 +1818,65 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, best_plan, best_sig, best_reason = candidates[0]
     return best_sig, best_plan, best_reason
+
+
+
+def strategy_breakout_retest_5m15m(df, filters=None, strategy_config=None):
+    """Local breakout -> retest -> continuation candidate for 5m/15m.
+
+    This is deliberately an additional candidate family, not a bypass around
+    V2. It only proposes a setup after a confirmed local channel breakout,
+    followed by a fresh retest/hold on the latest closed candle. Final score,
+    RR, HTF context, regime and all safety gates are still applied downstream.
+    """
+    if df is None or len(df) < 65:
+        return None, "Breakout-retest: داده کافی نیست"
+
+    curr = df.iloc[-2]
+    prev = df.iloc[-3]
+    atr = _safe_float(curr.get("atr"), 0.0)
+    if atr <= 0:
+        return None, "Breakout-retest: ATR نامعتبر"
+
+    ch = _safe_float(prev.get("channel_high"), np.nan)
+    cl = _safe_float(prev.get("channel_low"), np.nan)
+    prev_ch = _safe_float(df.iloc[-4].get("channel_high"), np.nan)
+    prev_cl = _safe_float(df.iloc[-4].get("channel_low"), np.nan)
+
+    if not (np.isfinite(ch) and np.isfinite(cl) and np.isfinite(prev_ch) and np.isfinite(prev_cl)):
+        return None, "Breakout-retest: کانال آماده نیست"
+
+    vr = _safe_float(curr.get("volume_ratio"), 0.0)
+    body = _safe_float(curr.get("body_ratio"), 0.0)
+    adx = _safe_float(curr.get("adx"), 0.0)
+    tol = atr * 0.30
+
+    # Previous candle must have closed outside the local channel.
+    broke_up = float(prev["close"]) > ch and float(df.iloc[-4]["close"]) <= prev_ch
+    broke_down = float(prev["close"]) < cl and float(df.iloc[-4]["close"]) >= prev_cl
+
+    # Latest closed candle must retest the broken level and hold it.
+    if broke_up:
+        touched = float(curr["low"]) <= ch + tol
+        held = float(curr["close"]) > ch
+        directional = float(curr["close"]) > float(curr["open"])
+        if touched and held and directional and adx >= 18.0 and body >= 0.35 and vr >= 0.90:
+            return "BUY", (
+                f"Breakout-Retest صعودی | سطح={ch:.6g} | "
+                f"پولبک به شکست + حفظ سطح | ADX={adx:.1f} | حجم={vr:.2f}x"
+            )
+
+    if broke_down:
+        touched = float(curr["high"]) >= cl - tol
+        held = float(curr["close"]) < cl
+        directional = float(curr["close"]) < float(curr["open"])
+        if touched and held and directional and adx >= 18.0 and body >= 0.35 and vr >= 0.90:
+            return "SELL", (
+                f"Breakout-Retest نزولی | سطح={cl:.6g} | "
+                f"پولبک به شکست + حفظ سطح | ADX={adx:.1f} | حجم={vr:.2f}x"
+            )
+
+    return None, "Breakout-retest: شکست و پولبک معتبر هم‌زمان تشکیل نشده"
 
 
 def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, live_price=None):

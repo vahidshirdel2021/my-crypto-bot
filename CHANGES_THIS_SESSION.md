@@ -233,3 +233,10 @@ pytest tests/ -v
 - When the cap is reached, exactly one additional same-direction position is allowed only for an exceptional setup: final quality score >= 80 and planned RR >= 1.60.
 - A second overflow is never allowed.
 - Same-direction entry cooldown remains a hard anti-burst guard.
+
+
+### V14 candidate diversity
+- Added a conservative local Breakout-Retest candidate family for 5m/15m.
+- It requires a closed-candle local channel breakout followed by a fresh retest/hold.
+- It competes with Liquidity Sweep and Trend Pullback inside the same V2 ranking.
+- No final score/RR/safety gate was weakened.
