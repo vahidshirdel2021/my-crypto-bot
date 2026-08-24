@@ -1,4 +1,0 @@
-[
-  "test_candidate_diversity.py::test_breakout_retest_detects_bullish_candidate",
-  "test_candidate_diversity.py::test_breakout_retest_does_not_fire_without_retest_hold"
-]
