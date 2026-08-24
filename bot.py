@@ -2587,6 +2587,35 @@ def _entry_diag_batch_update(chat_id, results):
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
+def _entry_diag_raw_summary(chat_id):
+    """Show the exact, un-simplified 'reason' string behind every symbol's current
+    non-entry state, grouped by frequency. The compact live dashboard collapses many
+    different underlying reasons into the same generic 'بدون ستاپ' label; this view
+    exists specifically to see which single condition is blocking the most symbols,
+    instead of guessing which filter to loosen next.
+    """
+    state = ENTRY_DIAG_STATE.get(chat_id) or {}
+    symbol_states = state.get('symbol_states') or {}
+    if not symbol_states:
+        return None
+    from collections import Counter
+    reason_counts = Counter()
+    examples = {}
+    for sym, item in symbol_states.items():
+        if item.get('status') == 'entry_opened':
+            continue
+        raw_reason = str(item.get('reason') or '').strip() or f"(بدون متن دلیل — status={item.get('status')})"
+        reason_counts[raw_reason] += 1
+        examples.setdefault(raw_reason, []).append(sym)
+    if not reason_counts:
+        return None
+    lines = ['🧬 *دلایل خام رد شدن (بدون ساده‌سازی، به ترتیب تکرار)*', '━━━━━━━━━━━━━━━━━━━━']
+    for reason, count in reason_counts.most_common(15):
+        syms = '، '.join(examples[reason][:6])
+        lines.append(f'• `{count}x` — {reason}\n   نمونه: {syms}')
+    return '\n'.join(lines)
+
+
 async def _scan_symbol_impl(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -3309,6 +3338,11 @@ def process_command(cmd,chat_id,message_id=None):
         else:
             lines.append('موردی یافت نشد.')
         edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+    if cl == '/entry_diag_raw':
+        summary = _entry_diag_raw_summary(chat_id)
+        if not summary:
+            edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        edit_page(chat_id, summary, get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
     if cl in ('/manual_trade','🖐 معامله دستی'):
         s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
         send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return

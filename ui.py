@@ -173,6 +173,7 @@ def get_entry_diag_keyboard(enabled=True):
         [{"text": "🟢 فعال است — خاموش کردن" if enabled else "🔴 خاموش است — فعال کردن",
           "callback_data": "/toggle_entry_diag"}],
         [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
+        [{"text": "🧬 دلایل خام رد شدن (همه نمادها)", "callback_data": "/entry_diag_raw"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
