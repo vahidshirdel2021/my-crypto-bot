@@ -76,8 +76,6 @@ POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
 POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
 
 
-
-
 def _seconds_to_local_day_end():
     """ثانیه‌های باقی‌مانده تا پایان روز جاری بر اساس منطقه‌زمانی DAILY_CLOSE_TZ."""
     tz = None
@@ -88,8 +86,6 @@ def _seconds_to_local_day_end():
             tz = None
     now = datetime.now(tz) if tz else datetime.utcnow()
     return _seconds_until_next_midnight(now)
-
-
 
 
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
@@ -762,10 +758,6 @@ def send_photo(chat_id, img, caption='', markup=None):
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
 
-
-
-
-
 def normalize_klines(data):
     if not data: return pd.DataFrame()
     rows=[]
@@ -917,12 +909,6 @@ def call_implicit_any(ex, candidates, params):
     raise AttributeError('CoinEx implicit SL/TP method unavailable in this CCXT version')
 
 
-
-
-
-
-
-
 def _live_position_raw(chat_id, symbol):
     ex=get_exchange(chat_id)
     try:
@@ -984,15 +970,7 @@ def position_history_for(chat_id, symbol, since_ms):
     except Exception as exc: logger.debug('position history %s: %s',symbol,exc); return []
 
 
-
-
 def reserved_margin(s): return sum(float(p.get('margin',0)) for p in s['paper_positions'])
-
-
-
-
-
-
 
 
 def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
@@ -1028,8 +1006,6 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
     except Exception as exc:
         logger.debug('profit protection failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
         return False
-
-
 
 
 def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
@@ -1074,8 +1050,6 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
 
-
-
 def _maybe_close_before_day_end(chat_id, p, price):
     """
     برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
@@ -1095,16 +1069,6 @@ def reset_daily_if_needed(chat_id, equity):
         s['daily_start_date']=today; s['daily_start_equity']=float(equity); s['daily_stopped']=False; s['traded_levels']={}; save_session(chat_id)
 
 
-
-
-
-
-
-
-
-
-
-
 def current_paper_equity(s):
     eq=float(s['paper_balance'])
     for p in s['paper_positions']:
@@ -1113,8 +1077,6 @@ def current_paper_equity(s):
         frac = _directional_price_fraction(p['side'], p['entry_price'], price)
         eq += _gross_pnl_usdt(p.get('margin',0), p.get('leverage',1), frac)
     return eq
-
-
 
 
 def risk_guard(chat_id):
@@ -1455,20 +1417,6 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
@@ -1749,8 +1697,6 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
-
-
 async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
     if symbol.upper() in LEADER_SYMBOLS:
         return True, 'لیدر بازار است'
@@ -1890,8 +1836,6 @@ def set_user_fee_rate(chat_id, rate_pct):
     s['platform_fee_rate_pct'] = rate
     save_session(chat_id)
     return rate
-
-
 
 
 def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
@@ -2158,8 +2102,6 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
     except Exception as exc:
         logger.debug('weakness exit check failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
         return False,[]
-
-
 
 
 def _build_open_positions_view(chat_id, prices=None):
@@ -3051,7 +2993,6 @@ def apply_user_profile(s, profile):
     score,rr,risk,adx,label=presets[profile]
     s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
     return label,score,rr,risk
-
 
 
 def manual_signal_scan(chat_id, symbol=None):
