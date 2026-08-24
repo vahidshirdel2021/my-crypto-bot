@@ -2611,8 +2611,9 @@ def _entry_diag_raw_summary(chat_id):
         return None
     lines = ['🧬 *دلایل خام رد شدن (بدون ساده‌سازی، به ترتیب تکرار)*', '━━━━━━━━━━━━━━━━━━━━']
     for reason, count in reason_counts.most_common(15):
+        safe_reason = reason.replace('_', '\\_')
         syms = '، '.join(examples[reason][:6])
-        lines.append(f'• `{count}x` — {reason}\n   نمونه: {syms}')
+        lines.append(f'• `{count}x` — {safe_reason}\n   نمونه: {syms}')
     return '\n'.join(lines)
 
 

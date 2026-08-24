@@ -1844,16 +1844,14 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         trend_sig, trend_reason = strategy_trend_following(
             df_primary, timeframe, filters, cfg
         )
-        if trend_sig:
-            add_candidate(trend_sig, trend_reason, "trend_pullback", 4.0)
+        add_candidate(trend_sig, trend_reason, "trend_pullback", 4.0)
 
         # New independent family: local breakout -> retest -> continuation.
         # It competes on the same V2 safety/quality gates; it does not weaken them.
         br_sig, br_reason = strategy_breakout_retest_5m15m(
             df_primary, filters, cfg
         )
-        if br_sig:
-            add_candidate(br_sig, br_reason, "breakout_retest", 5.0)
+        add_candidate(br_sig, br_reason, "breakout_retest", 5.0)
     else:
         # Strategy selection is driven by trend state, while volatility only changes
         # strictness. This prevents high-vol trends from being treated as mean-reversion.
