@@ -1253,9 +1253,19 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
         return None, f"روند ضعیف است (ADX={adx:.1f})"
     up = curr["close"] > curr["ema50"] and curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
     down = curr["close"] < curr["ema50"] and curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    ema = _safe_float(prev["ema20"])
-    touch_buy = prev["low"] <= ema + atr * 0.25 and prev["high"] >= ema - atr * 0.5
-    touch_sell = prev["high"] >= ema - atr * 0.25 and prev["low"] <= ema + atr * 0.5
+    lookback = 3  # چند کندل قبل از کندل تأییدی برای برخورد به EMA20 بررسی شود (قبلاً فقط ۱ کندل)
+    touch_buy = touch_sell = False
+    for i in range(2, 2 + lookback):
+        if len(df) <= i + 1:
+            break
+        c = df.iloc[-1 - i]
+        ema_i = _safe_float(c.get("ema20"))
+        if c["low"] <= ema_i + atr * 0.25 and c["high"] >= ema_i - atr * 0.5:
+            touch_buy = True
+        if c["high"] >= ema_i - atr * 0.25 and c["low"] <= ema_i + atr * 0.5:
+            touch_sell = True
+        if touch_buy and touch_sell:
+            break
     f = _flt(filters)
 
     if up and touch_buy and curr["close"] > curr["ema20"]:
@@ -1705,7 +1715,8 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
 
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
-            attempts.append(f"{family}: بدون سیگنال")
+            detail = f" | {reason}" if reason else ""
+            attempts.append(f"{family}: بدون سیگنال{detail}")
             return
         # Risk plan must use the signal timeframe. HTF is context, not execution.
         plan_tf = timeframe
