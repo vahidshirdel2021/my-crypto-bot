@@ -92,14 +92,13 @@ def _verify_protection_prices(sls, tps, expected_sl, expected_tp):
 
 def side_long(side): return 'BUY' in str(side).upper() or 'LONG' in str(side).upper()
 
-def _same_direction_guard_allows(session, side, now_ts):
-    """Pure decision function for the correlated-exposure guard.
+def _same_direction_guard_allows(session, side, now_ts, quality_score=None, planned_rr=None):
+    """Adaptive correlated-exposure guard.
 
-    Returns True iff a new entry on `side` is allowed given the session's current
-    open positions and last-entry timestamps. Kept side-effect-free (no session
-    mutation, no time.time() call inside) specifically so it can be unit tested
-    without needing a live session, Telegram, or exchange state — see
-    tests/test_risk_guards.py.
+    The normal same-direction cap remains a soft exposure cap rather than a
+    blind trade-count wall. When the cap is reached, exactly one exceptional
+    setup may overflow it if final quality and planned RR are strong enough.
+    The cooldown remains a hard anti-burst protection.
     """
     max_same_dir = int(session.get('max_same_direction_positions', 0) or 0)
     if max_same_dir > 0:
@@ -108,7 +107,23 @@ def _same_direction_guard_allows(session, side, now_ts):
             if side_long(p.get('side', '')) == side_long(side)
         )
         if same_dir_open >= max_same_dir:
-            return False
+            try:
+                score = float(quality_score)
+            except (TypeError, ValueError):
+                score = float('-inf')
+            try:
+                rr = float(planned_rr)
+            except (TypeError, ValueError):
+                rr = float('-inf')
+
+            # Allow exactly one exceptional overflow position. This preserves
+            # exposure control while preventing a hard cap from discarding a
+            # genuinely superior third setup.
+            exceptional_score = 80.0
+            exceptional_rr = 1.60
+            if same_dir_open > max_same_dir or score < exceptional_score or rr < exceptional_rr:
+                return False
+
     same_dir_cooldown = float(session.get('same_direction_entry_cooldown_seconds', 0) or 0)
     if same_dir_cooldown > 0:
         dir_key = 'BUY' if side_long(side) else 'SELL'

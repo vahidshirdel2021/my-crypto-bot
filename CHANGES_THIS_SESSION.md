@@ -226,3 +226,10 @@ pytest tests/ -v
   از `bot.py` به ماژول خودش — آخرین بخش بزرگ باقی‌مونده
 - تست‌های integration برای مدیریت پوزیشن REAL باز (trailing/weakness-exit روی
   پوزیشن واقعی، نه فقط PAPER)
+
+
+### Adaptive same-direction exposure
+- Default same-direction cap remains active.
+- When the cap is reached, exactly one additional same-direction position is allowed only for an exceptional setup: final quality score >= 80 and planned RR >= 1.60.
+- A second overflow is never allowed.
+- Same-direction entry cooldown remains a hard anti-burst guard.

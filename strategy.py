@@ -343,7 +343,7 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None, defer_quality_gate=False):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         # Must reuse the SAME HTF context the signal pass used. Passing None here
         # silently drops HTF bias, causing this second candidate-selection run to
@@ -482,7 +482,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
+    if score < min_score and not defer_quality_gate:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
     plan = {
@@ -1011,7 +1011,7 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False, defer_quality_gate=False):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -1109,7 +1109,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
     min_score = float(cfg.get("min_trade_score", 58.0))
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
+    # In V2 the final decision belongs to the adaptive evidence engine after
+    # HTF/bias/direction adjustments.  Do not discard a structurally valid
+    # candidate here just because its *raw* score is slightly below the final
+    # threshold; otherwise HTF and direction evidence can never rescue it.
+    if score < min_score and not defer_quality_gate:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
     plan = {
@@ -1432,21 +1436,13 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     else:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
-    # --- محافظ خلاف‌جهت بازار ---
-    # این فیلتر روی خروجی *همه‌ی* مسیرهای بالا (شامل dynamic V2 که مسیر پیش‌فرض ربات است)
-    # به‌طور یکسان اعمال می‌شود - قبلاً مسیر V2 زودتر از این نقطه return می‌کرد و این فیلتر
-    # را دور می‌زد؛ این نقص برطرف شد.
-    # regime این‌جا یا از رژیم ماکرو (BTC/ETH روی 4 ساعته با ADX بالا) می‌آید یا از اجماع
-    # فوری همان تایم‌فریم معاملاتی با همان اکثریت ساده (>=۵۰٪) که در «وضعیت بازار» دیده
-    # می‌شود؛ یعنی هر وقت خودِ کاربر «وضعیت بازار» را صعودی/نزولی ببیند، همان لحظه این
-    # فیلتر هم فعال است. این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت رنج/نامشخص
-    # (نه اکثریت صعودی نه نزولی) هیچ تاثیری ندارد؛ فقط دقیقاً سناریویی را می‌گیرد که معامله
-    # *خلاف* جهت ارزیابی‌شده‌ی بازار باز می‌شود (مثل فروش وسط یک ارزیابی بازار صعودی).
+    # Market regime دیگر قفل سخت ورود نیست. V2 آن را داخل امتیاز و آستانه‌ی
+    # لازم برای ستاپ خلاف جهت اعمال می‌کند. برای استراتژی‌های قدیمی هم سیگنال
+    # خلاف جهت صرفاً اجازه‌ی بررسی بیشتر دارد و حذف نمی‌شود.
     if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH"):
-        if regime == "BULLISH" and sig == "SELL":
-            return None, f"وضعیت بازار صعودی ارزیابی شده - سیگنال فروش خلاف جهت بازار نادیده گرفته شد | {reason}"
-        if regime == "BEARISH" and sig == "BUY":
-            return None, f"وضعیت بازار نزولی ارزیابی شده - سیگنال خرید خلاف جهت بازار نادیده گرفته شد | {reason}"
+        direction_text = "صعودی" if regime == "BULLISH" else "نزولی"
+        side_text = "خرید" if sig == "BUY" else "فروش"
+        return sig, f"{reason} | جهت غالب بازار: {direction_text}؛ {side_text} به‌صورت فرصت خلاف‌جهت بررسی شد"
     return sig, reason
 
 # ========================= STRATEGY V2 =========================
@@ -1462,9 +1458,15 @@ V2_DEFAULTS = {
     "ema_slope_min_atr": 0.03,
     "min_edge_proxy": 0.10,
     "use_edge_proxy_gate": False,
-    "min_setup_score": 62.0,
-    "high_vol_min_score": 68.0,
-    "high_vol_min_rr": 1.50,
+    # ضد بیش‌فیلتر شدن: ستاپ خوب نباید به خاطر چند ناهماهنگی جزئی خفه شود.
+    "min_setup_score": 60.0,
+    "high_vol_min_score": 66.0,
+    "high_vol_min_rr": 1.45,
+    # Market bias فقط «مالیات خلاف جهت» است، نه دروازه‌ی ورود.
+    "directional_aligned_bonus": 2.0,
+    "directional_opposite_penalty": 6.0,
+    "directional_opposite_extra_score": 8.0,
+    "directional_opposite_extra_rr": 0.10,
     "range_max_adx": 20.0,
     "range_rsi_buy": 34.0,
     "range_rsi_sell": 66.0,
@@ -1629,14 +1631,21 @@ def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
 
 
 def _v2_score_thresholds(vol_state, cfg):
-    """Pure: pick the (min_score, min_rr) gate thresholds for a candidate
-    setup based on volatility regime. High volatility demands a stricter bar
-    (a strong trend may stay directional, but noise-driven setups need extra
-    confirmation) — extracted from _select_v2_setup's add_candidate closure.
+    """Return effective final-entry thresholds without weakening the active
+    user/session profile. V2 provides a safety floor; the effective gate is
+    the strictest applicable requirement.
     """
+    configured_score = float(cfg.get("min_trade_score", 0.0) or 0.0)
+    v2_score_floor = float(cfg.get("min_setup_score", 60.0))
+    min_score = max(configured_score, v2_score_floor)
+
+    configured_rr = float(cfg.get("min_rr", 0.0) or 0.0)
+    min_rr = max(configured_rr, 1.30)
+
     if vol_state == "HIGH":
-        return float(cfg["high_vol_min_score"]), float(cfg["high_vol_min_rr"])
-    return float(cfg["min_setup_score"]), float(cfg.get("min_rr", 1.3))
+        min_score = max(min_score, float(cfg.get("high_vol_min_score", 66.0)))
+        min_rr = max(min_rr, float(cfg.get("high_vol_min_rr", 1.45)))
+    return min_score, min_rr
 
 
 def _v2_passes_setup_gates(score, rr, vol_state, cfg, ev):
@@ -1696,25 +1705,52 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             plan, plan_reason = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels,
                 setup_index=active_setup_index, live_price=live_price,
-                anchor_level=anchor_level, target_level=target_level
+                anchor_level=anchor_level, target_level=target_level,
+                defer_quality_gate=True
             )
         else:
             plan, plan_reason = build_trade_plan(
                 df_primary, sig, cfg, family, strategy_timeframe=plan_tf,
-                grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price
+                grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price,
+                defer_quality_gate=True
             )
         if not plan:
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
         score = float(plan.get("score", 0)) + float(bonus)
         score += max(-8.0, min(8.0, htf * 8.0))
-        score = max(0.0, min(100.0, score))
+
+        # بازارخوانی یک «جهت ترجیحی» است، نه قفل ورود.
+        # اگر ستاپ خلاف جهت بازار شدیداً غالب باشد، فقط کمی مالیات کیفیت می‌گیرد
+        # و برای ورود باید امتیاز/RR بهتری نشان دهد؛ در غیر این صورت معامله همچنان ممکن است.
+        directional_context = "NEUTRAL"
+        directional_adjustment = 0.0
+        extra_score = 0.0
+        extra_rr = 0.0
+        if regime in ("BULLISH", "BEARISH"):
+            aligned = (regime == "BULLISH" and sig == "BUY") or (regime == "BEARISH" and sig == "SELL")
+            directional_context = "ALIGNED" if aligned else "COUNTER"
+            directional_adjustment = (
+                float(cfg.get("directional_aligned_bonus", 2.0))
+                if aligned else -float(cfg.get("directional_opposite_penalty", 6.0))
+            )
+            if not aligned:
+                extra_score = float(cfg.get("directional_opposite_extra_score", 8.0))
+                extra_rr = float(cfg.get("directional_opposite_extra_rr", 0.10))
+        score = max(0.0, min(100.0, score + directional_adjustment))
         rr = float(plan.get("rr", 0))
         ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
         # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
         # but high volatility requires stricter score/RR. Mean reversion is never selected
-        # merely because volatility is high.
-        if not _v2_passes_setup_gates(score, rr, vol_state, cfg, ev):
+        # merely because volatility is high. Market bias only raises the bar for a
+        # counter-directional setup; it never hard-blocks it.
+        min_score_gate, min_rr_gate = _v2_score_thresholds(vol_state, cfg)
+        if directional_context == "COUNTER":
+            min_score_gate += extra_score
+            min_rr_gate += extra_rr
+        if score < min_score_gate or rr < min_rr_gate:
+            return
+        if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
         plan = dict(plan)
         plan.update({
@@ -1728,13 +1764,32 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             "edge_proxy": round(ev, 4),
             "model_win_proxy": round(pwin, 4),
             "setup_family": family,
+            "directional_context": directional_context,
+            "directional_adjustment": round(directional_adjustment, 2),
+            "directional_gate_score": round(min_score_gate, 2),
+            "directional_gate_rr": round(min_rr_gate, 2),
         })
         candidates.append((_v2_rank_key(score, rr), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
     if timeframe in ("5min", "15min"):
-        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
+        # Keep the proven liquidity-sweep path, but let a clean trend-pullback
+        # setup compete for the same entry slot. This increases opportunity
+        # coverage without lowering the safety floors: both candidates still
+        # pass the same final V2 score/RR gates and only the best candidate wins.
+        sig, reason = strategy_liquidity_sweep_5m(
+            df_primary, filters, cfg, live_price=live_price, timeframe=timeframe
+        )
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
-        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
+        add_candidate(
+            sig, reason, family,
+            float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0
+        )
+
+        trend_sig, trend_reason = strategy_trend_following(
+            df_primary, timeframe, filters, cfg
+        )
+        if trend_sig:
+            add_candidate(trend_sig, trend_reason, "trend", 4.0)
     else:
         # Strategy selection is driven by trend state, while volatility only changes
         # strictness. This prevents high-vol trends from being treated as mean-reversion.

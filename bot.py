@@ -1448,13 +1448,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
         return False
-    # Correlated-exposure guard: cap how many positions can be open in the SAME
-    # direction at once (e.g. all Long on different alts), and throttle back-to-back
-    # same-direction entries opened seconds apart in one scan burst. This prevents a
-    # single market-wide move from hitting many correlated positions simultaneously,
-    # which independent per-trade risk sizing does not account for.
+    # Adaptive correlated-exposure guard: the normal same-direction cap remains,
+    # but one exceptional setup may exceed it by exactly one position when final
+    # quality and RR are strong enough. The cooldown still blocks burst entries.
     dir_key = 'BUY' if side_long(side) else 'SELL'
-    if not _same_direction_guard_allows(s, side, time.time()):
+    if not _same_direction_guard_allows(s, side, time.time(), quality_score=quality_score, planned_rr=planned_rr):
         return False
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
@@ -2466,14 +2464,13 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
     tf = TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))
 
     all_items = list(symbol_states.values()) or results
-    active_items = []
+    # گزارش دوره‌ای باید همه نمادهای بررسی‌شده را نشان دهد؛ این کار اجازه می‌دهد
+    # بعداً دقیقاً بفهمیم کدام فیلتر بیشتر از همه جلوی ورود را گرفته است.
+    report_items = []
     for item in all_items:
         icon, stage, desc = _entry_diag_stage(item)
-        # Keep the report focused on actionable/watch states. Pure idle/no-setup
-        # symbols are intentionally omitted from Telegram.
-        if stage in ('بدون ستاپ', 'داده ناقص'):
-            continue
-        active_items.append((item, icon, stage, desc))
+        report_items.append((item, icon, stage, desc))
+    active_items = [x for x in report_items if x[2] not in ('بدون ستاپ', 'داده ناقص')]
 
     long_active = sum(1 for item, *_ in active_items if 'LONG' in _entry_diag_direction(item))
     short_active = sum(1 for item, *_ in active_items if 'SHORT' in _entry_diag_direction(item))
@@ -2493,11 +2490,11 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
     elif active_items:
         lines.append(f'📌 فرصت‌های فعال: `{len(active_items)}`')
     else:
-        lines.append('💤 فعلاً فرصت فعال و قابل پیگیری وجود ندارد؛ موارد بدون ستاپ نمایش داده نمی‌شوند.')
+        lines.append('💤 فعلاً فرصت فعال نداریم؛ وضعیت همه نمادهای بررسی‌شده پایین گزارش آمده است.')
     if data_issues:
         lines.append(f'⚠️ `{data_issues}` مورد مشکل داده داشت و در فهرست فرصت‌های فعال نمایش داده نشده است.')
 
-    for item, icon, stage, desc in active_items:
+    for item, icon, stage, desc in report_items:
         sym = item.get('symbol','?')
         direction = _entry_diag_direction(item)
         prev = item.get('previous_stage')
@@ -2506,7 +2503,7 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
             change = f' | تغییر: {prev} → {stage}'
         lines.append(f'\n{icon} *{sym}* — {direction} — {stage}{change}\n   {desc}')
 
-    if active_items:
+    if report_items:
         lines.append('\n━━━━━━━━━━━━━━━━━━━━')
         lines.append(f'📊 *خلاصه فرصت‌ها:* `{len(active_items)}` فعال | 🟢 LONG: `{long_active}` | 🔴 SHORT: `{short_active}`')
         lines.append(f'⏳ منتظر تأیید: `{confirm_wait}` | 🔄 منتظر پولبک: `{pullback_wait}`')
@@ -2919,9 +2916,12 @@ async def refresh_timeframe_regime(http, timeframe):
         bullish = sum(1 for x in scores if x > 0)
         bearish = sum(1 for x in scores if x < 0)
         total = len(scores)
-        if bullish > bearish and bullish >= total * 0.5:
+        # 5/10 یا حتی 6/10 فقط «تمایل» است و نباید هیچ مسیری را ببندد.
+        # برای تبدیل اجماع به محافظ قوی، حداقل 70% و برتری حداقل 3 نماد لازم است.
+        strong_share = 0.70
+        if bullish > bearish and bullish >= total * strong_share and (bullish - bearish) >= 3:
             extreme = 'BULLISH'
-        elif bearish > bullish and bearish >= total * 0.5:
+        elif bearish > bullish and bearish >= total * strong_share and (bearish - bullish) >= 3:
             extreme = 'BEARISH'
     TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
     return extreme
@@ -2951,12 +2951,18 @@ def market_report(chat_id):
     bearish = sum(1 for x in results if x['score'] < 0)
     ranged = total - bullish - bearish
 
-    if bullish > bearish and bullish >= total * 0.5:
-        overall = '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.'
-    elif bearish > bullish and bearish >= total * 0.5:
-        overall = '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.'
+    bull_share = bullish / total if total else 0.0
+    bear_share = bearish / total if total else 0.0
+    if bullish > bearish and bull_share >= 0.70 and (bullish - bearish) >= 3:
+        overall = '🟢 بازار تمایل صعودی قوی دارد؛ با این حال مسیر مخالف کاملاً بسته نیست.'
+    elif bearish > bullish and bear_share >= 0.70 and (bearish - bullish) >= 3:
+        overall = '🔴 بازار تمایل نزولی قوی دارد؛ با این حال مسیر مخالف کاملاً بسته نیست.'
+    elif bullish > bearish and bull_share >= 0.60:
+        overall = '🟡 بازار تمایل صعودی دارد، اما اجماع هنوز برای بستن Short کافی نیست.'
+    elif bearish > bullish and bear_share >= 0.60:
+        overall = '🟡 بازار تمایل نزولی دارد، اما اجماع هنوز برای بستن Long کافی نیست.'
     else:
-        overall = '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.'
+        overall = '⚪️ بازار دوطرفه/خنثی است؛ هر دو مسیر آزاد هستند و کیفیت خود ستاپ تصمیم می‌گیرد.'
 
     return (
         '🌐 *داشبورد بازار*\n'
@@ -3011,8 +3017,23 @@ def manual_signal_scan(chat_id, symbol=None):
                         continue
                     ind = calculate_indicators(df)
                     strategy_type = s.get('active_strategy', 'dynamic')
+                    md = {}
+                    if strategy_type == 'dynamic':
+                        htf_specs = {
+                            '5min': [('1h', '1hour'), ('4h', '4hour')],
+                            '15min': [('1h', '1hour'), ('4h', '4hour')],
+                            '1hour': [('4h', '4hour'), ('1d', '1day')],
+                            '4hour': [('1d', '1day')],
+                        }.get(tf, [])
+                        for htf_key, htf_tf in htf_specs:
+                            try:
+                                hd = await get_klines_async(http, sym, htf_tf, 160)
+                                if hd is not None and not hd.empty:
+                                    md[htf_key] = calculate_indicators(hd)
+                            except Exception:
+                                continue
                     sig, reason = get_signal_with_reason(
-                        ind, None, 'single', tf, strategy_type,
+                        ind, md, 'single', tf, strategy_type,
                         s.get('filters'), s.get('strategy_config', STRATEGY_DEFAULTS)
                     )
                     if sig not in ('BUY','SELL'):
@@ -3588,7 +3609,8 @@ async def scan_loop():
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
+                    # رژیم معمولی فقط اطلاع‌رسان است؛ فقط EXTREME اجازه دارد واچ‌لیست را یک‌طرفه کند.
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), macro_extreme)
                     user_tf = s.get('timeframe', '5min')
                     combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme_by_tf.get(user_tf))
                     for sym in watchlist:
