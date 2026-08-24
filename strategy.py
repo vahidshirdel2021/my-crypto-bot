@@ -201,7 +201,7 @@ STRATEGY_DEFAULTS = {
     # Active setup only becomes valid after a confirmed PDH/PDL breakout
     # and sufficient distance from the previous-day range.
     "active_setup_require_daily_breakout": True,
-    "active_setup_breakout_distance_atr": 1.00,
+    "active_setup_breakout_distance_atr": 0.80,
     "active_setup_breakout_confirm_candles": 1,
     "active_structure_confirmation": True,
     "active_structure_lookback": 8,
