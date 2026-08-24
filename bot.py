@@ -590,6 +590,8 @@ def default_session():
         'platform_fee_trade_count': 0,
         'positions_message_id': None,
         'positions_message_last_edit': 0.0,
+        'opportunity_pool': [],
+        'near_miss': [],
     }
 
 
@@ -606,6 +608,8 @@ def normalize_session(data):
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['traded_levels'] = dict(data.get('traded_levels') or {})
     s['last_direction_entry_ts'] = dict(data.get('last_direction_entry_ts') or {})
+    s['opportunity_pool'] = list(data.get('opportunity_pool') or [])[-50:]
+    s['near_miss'] = list(data.get('near_miss') or [])[-50:]
     s['max_same_direction_positions'] = int(s.get('max_same_direction_positions', default_session()['max_same_direction_positions']) or 0)
     s['same_direction_entry_cooldown_seconds'] = float(s.get('same_direction_entry_cooldown_seconds', default_session()['same_direction_entry_cooldown_seconds']) or 0)
     stored_symbols = list(data.get('active_symbols') or [])
@@ -2670,6 +2674,35 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
     full_reason = full_reason[:500]
+
+    # V2 Adaptive Opportunity Engine: V1 has already produced a valid plan.
+    # This layer ranks the opportunity and can delay execution without weakening
+    # any existing score/RR/risk gate.
+    opportunity = build_opportunity(symbol, sig, plan, primary_tf, live_price=live_entry_price)
+    update_pool(s, opportunity)
+    rank = top_rank(s, opportunity)
+    plan['confidence'] = opportunity['confidence']
+    plan['opportunity_rank'] = opportunity['rank']
+    plan['timing_state'] = opportunity['timing']
+    full_reason = (
+        f"{full_reason} | V2 Quality={opportunity['quality']} "
+        f"Confidence={opportunity['confidence']:.1f} Rank={rank} "
+        f"Timing={opportunity['timing']}"
+    )[:500]
+    if opportunity['timing'] != 'TRADE_NOW':
+        return _entry_diag_result(
+            chat_id, symbol, 'wait', opportunity['timing_reason'],
+            'smart_timing', sig,
+            diagnostics={
+                'setup_family': opportunity['setup_family'],
+                'quality': opportunity['quality'],
+                'confidence': opportunity['confidence'],
+                'rr': opportunity['rr'],
+                'rank': rank,
+                'timing': opportunity['timing'],
+            }
+        )
+
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
