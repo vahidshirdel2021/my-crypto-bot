@@ -1,5 +1,7 @@
 import hashlib
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
+from dotenv import load_dotenv
+load_dotenv()
 import urllib.parse as urlparse
 from threading import Thread, RLock
 from typing import Dict, Any
