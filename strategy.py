@@ -343,14 +343,17 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None, defer_quality_gate=False):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None, defer_quality_gate=False, filters=None, regime=None):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        # Must reuse the SAME HTF context the signal pass used. Passing None here
-        # silently drops HTF bias, causing this second candidate-selection run to
+        # Must reuse the SAME context the signal pass used: HTF market data,
+        # the caller's filters and the macro `regime` (BULLISH/BEARISH/NEUTRAL).
+        # Dropping any of these makes this second candidate-selection run
         # score/gate differently from the first (see get_signal_with_reason_v2),
         # which produced duplicated/inconsistent reason strings and could let a
-        # plan through that the original V2 score/RR gates would have rejected.
-        sig, plan, reason = _select_v2_setup(df, market_data_dict, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
+        # plan through that the original V2 score/RR/directional gates would
+        # have rejected (e.g. a counter-trend setup losing its regime penalty).
+        effective_filters = filters if isinstance(filters, dict) else FILTER_DEFAULTS
+        sig, plan, reason = _select_v2_setup(df, market_data_dict, strategy_timeframe, effective_filters, strategy_config, regime, grid_levels, live_price=live_price)
         if sig == signal and plan:
             return plan, reason
     if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):
@@ -1467,6 +1470,12 @@ V2_DEFAULTS = {
     "directional_opposite_penalty": 6.0,
     "directional_opposite_extra_score": 8.0,
     "directional_opposite_extra_rr": 0.10,
+    # PDH/PDL Equilibrium (میان‌بها = وسط PDH و PDL، مفهوم Premium/Discount).
+    # همانند directional bias، فقط «مالیات» است: هرگز معامله را رد نمی‌کند،
+    # فقط امتیاز رتبه‌بندی بین کاندیداها را کمی جابه‌جا می‌کند.
+    "eq_bias_enabled": True,
+    "eq_aligned_bonus": 2.0,
+    "eq_counter_penalty": 3.0,
     "range_max_adx": 20.0,
     "range_rsi_buy": 34.0,
     "range_rsi_sell": 66.0,
@@ -1676,8 +1685,22 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     vol_state = regime_info.get("volatility_state", "NORMAL")
     candidates = []
 
-    if rconf < float(cfg.get("regime_confidence_min", 0.55)):
-        return None, None, f"V2: confidence رژیم پایین است | regime={rname} conf={rconf:.2f}"
+    # Equilibrium (میان‌بها) = وسط PDH/PDL. فقط یک‌بار محاسبه می‌شود و بین همه‌ی
+    # کاندیداها به‌اشتراک گذاشته می‌شود؛ اگر PDH/PDL هنوز کامل نشده باشد (روز اول)
+    # eq_level برابر None می‌ماند و این تعدیل به‌سادگی خاموش می‌شود.
+    eq_level = None
+    if bool(cfg.get("eq_bias_enabled", True)):
+        _, _eq_pdh, _eq_pdl = _compute_prev_day_levels(df_primary)
+        if _eq_pdh is not None and _eq_pdl is not None:
+            eq_level = (_eq_pdh + _eq_pdl) / 2.0
+
+    # Regime confidence is contextual evidence, not a hard entry gate.
+    # A neutral/mixed market (normally confidence=0.50) must still reach the
+    # existing setup families; each candidate is independently protected by
+    # score/RR, volatility, directional and execution-quality gates below.
+    # Keeping this as a diagnostic preserves observability without creating a
+    # dead-zone in 5m/15m where valid sweep/pullback/retest setups never get
+    # evaluated.
 
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
@@ -1738,6 +1761,29 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                 extra_score = float(cfg.get("directional_opposite_extra_score", 8.0))
                 extra_rr = float(cfg.get("directional_opposite_extra_rr", 0.10))
         score = max(0.0, min(100.0, score + directional_adjustment))
+
+        # PDH/PDL Equilibrium (میان‌بها): خرید در Discount (زیر EQ) و فروش در
+        # Premium (بالای EQ) هم‌جهت با منطق liquidity/PDH-PDL همین پروژه است.
+        # عمداً سبک‌تر از directional bias است و هرگز روی گیت امتیاز/RR اثر
+        # نمی‌گذارد — فقط رتبه‌بندی بین کاندیداهای موجود را کمی جابه‌جا می‌کند.
+        eq_context = "NEUTRAL"
+        eq_adjustment = 0.0
+        entry_px = _safe_float(plan.get("entry"), 0.0)
+        if eq_level is not None and entry_px > 0:
+            in_discount = entry_px < eq_level
+            in_premium = entry_px > eq_level
+            aligned_bonus = float(cfg.get("eq_aligned_bonus", 2.0))
+            counter_penalty = float(cfg.get("eq_counter_penalty", 3.0))
+            if sig == "BUY" and in_discount:
+                eq_context, eq_adjustment = "DISCOUNT_ALIGNED", aligned_bonus
+            elif sig == "BUY" and in_premium:
+                eq_context, eq_adjustment = "PREMIUM_COUNTER", -counter_penalty
+            elif sig == "SELL" and in_premium:
+                eq_context, eq_adjustment = "PREMIUM_ALIGNED", aligned_bonus
+            elif sig == "SELL" and in_discount:
+                eq_context, eq_adjustment = "DISCOUNT_COUNTER", -counter_penalty
+        score = max(0.0, min(100.0, score + eq_adjustment))
+
         rr = float(plan.get("rr", 0))
         ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
         # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
@@ -1768,8 +1814,11 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             "directional_adjustment": round(directional_adjustment, 2),
             "directional_gate_score": round(min_score_gate, 2),
             "directional_gate_rr": round(min_rr_gate, 2),
+            "eq_level": round(eq_level, 6) if eq_level is not None else None,
+            "eq_context": eq_context,
+            "eq_adjustment": round(eq_adjustment, 2),
         })
-        candidates.append((_v2_rank_key(score, rr), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+        candidates.append((_v2_rank_key(score, rr), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}" + (f" | EQ={eq_context}" if eq_context != "NEUTRAL" else "")))
 
     if timeframe in ("5min", "15min"):
         # Keep the proven liquidity-sweep path, but let a clean trend-pullback

@@ -31,7 +31,7 @@ from strategy import (
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
-    compute_log_grid_levels, nearest_grid_level,
+    compute_log_grid_levels, nearest_grid_level, _select_v2_setup, get_v2_config,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -2587,7 +2587,7 @@ def _entry_diag_batch_update(chat_id, results):
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
-async def scan_symbol(http,chat_id,symbol,regime=None):
+async def _scan_symbol_impl(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
@@ -2637,31 +2637,49 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
-    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
-    diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
+    # For dynamic V2 on 5m/15m, select the candidate and build its plan exactly
+    # once. Previously the signal pass selected a candidate and the later plan
+    # pass ran the selector again; if two families had the same BUY/SELL side,
+    # the second pass could silently attach a different Entry/SL/TP to the first
+    # signal's reason. The selected plan is now the single source of truth.
+    grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
+    v2_scalp = bool(is_scalp_strategy and strat == 'dynamic' and get_v2_config(s.get('strategy_config')).get('v2_enabled', True))
+    if v2_scalp:
+        sig, plan, reason = _select_v2_setup(
+            primary, md, primary_tf, s['filters'], s['strategy_config'],
+            regime, grid_levels, live_entry_price
+        )
+        diagnostics = {}
+    else:
+        # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
+        # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
+        sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
+        diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
+        plan = None
+
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
-    # V2 dynamic must use the same adaptive candidate-selection engine for BOTH
-    # signal and plan. The seller build previously forced 5m/15m into the legacy
-    # liquidity-sweep planner here, which could make signal and SL/TP come from
-    # different strategy families.
-    plan_strategy_type = 'dynamic' if (strat == 'dynamic' and s.get('strategy_config', {}).get('v2_enabled', True)) else ('liquidity_sweep' if is_scalp_strategy else strat)
-    active_setup_index = None
-    if is_scalp_strategy:
-        m_active = re.search(r'ACTIVE_SETUP_INDEX=(\d+)', reason or '')
-        if m_active:
-            active_setup_index = int(m_active.group(1))
-    plan, plan_reason = build_trade_plan(
-        primary, sig, s['strategy_config'], plan_strategy_type,
-        strategy_timeframe=primary_tf, grid_levels=grid_levels,
-        setup_index=active_setup_index, live_price=live_entry_price,
-        market_data_dict=md
-    )
-    if not plan:
-        return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
+
+    if not v2_scalp:
+        # Legacy/non-scalp paths keep their existing planner unchanged.
+        plan_strategy_type = 'dynamic' if (strat == 'dynamic' and s.get('strategy_config', {}).get('v2_enabled', True)) else ('liquidity_sweep' if is_scalp_strategy else strat)
+        active_setup_index = None
+        if is_scalp_strategy:
+            m_active = re.search(r'ACTIVE_SETUP_INDEX=(\d+)', reason or '')
+            if m_active:
+                active_setup_index = int(m_active.group(1))
+        plan, plan_reason = build_trade_plan(
+            primary, sig, s['strategy_config'], plan_strategy_type,
+            strategy_timeframe=primary_tf, grid_levels=grid_levels,
+            setup_index=active_setup_index, live_price=live_entry_price,
+            market_data_dict=md, filters=s['filters'], regime=regime
+        )
+        if not plan:
+            return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
+    else:
+        plan_reason = reason or plan.get('reason', '')
+        if not plan:
+            return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     # The V2 planner may return the same setup reason already emitted by the
     # signal engine. Do not concatenate duplicate evidence/EdgeProxy values.
@@ -2710,6 +2728,27 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
+
+
+async def scan_symbol(http, chat_id, symbol, regime=None):
+    """Fail-safe scan wrapper: no symbol may disappear silently.
+
+    The implementation is kept separate so every unexpected exception is
+    converted into the same diagnostic result consumed by the scan dashboard.
+    asyncio.CancelledError is intentionally re-raised so shutdown/cancellation
+    semantics remain correct.
+    """
+    try:
+        return await _scan_symbol_impl(http, chat_id, symbol, regime)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception('ENTRY_DIAG unexpected scan error chat=%s symbol=%s', chat_id, symbol)
+        return _entry_diag_result(
+            chat_id, symbol, 'scan_error',
+            f'خطای غیرمنتظره در اسکن؛ نماد حذف نشد و باید بررسی شود: {type(exc).__name__}: {exc}',
+            'scan_exception',
+        )
 
 
 def performance_period_report(chat_id, period='all'):
@@ -3071,7 +3110,10 @@ def manual_signal_scan(chat_id, symbol=None):
                     )
                     if sig not in ('BUY','SELL'):
                         continue
-                    plan, _plan_reason = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_type, strategy_timeframe=tf)
+                    plan, _plan_reason = build_trade_plan(
+                        ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_type,
+                        strategy_timeframe=tf, market_data_dict=md, filters=s.get('filters')
+                    )
                     if plan:
                         results.append((sym, sig, plan, reason))
                 except Exception:
@@ -3654,6 +3696,8 @@ async def scan_loop():
                     for item in batch:
                         if isinstance(item, dict) and item.get('chat_id') is not None:
                             by_chat.setdefault(item['chat_id'], []).append(item)
+                        elif isinstance(item, BaseException):
+                            logger.exception('scan loop task escaped wrapper', exc_info=item)
                     for cid, results in by_chat.items():
                         _entry_diag_batch_update(cid, results)
         except Exception as exc: logger.exception('scan loop: %s',exc)
