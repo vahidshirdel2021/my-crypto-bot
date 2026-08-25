@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 
@@ -254,7 +255,33 @@ TIMEFRAME_PARAM_ADJUST = TIMEFRAME_STRATEGY_PRESETS
 
 
 def get_timeframe_preset(timeframe):
-    return {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
+    preset = {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
+    # --- TEMP DEBUG SWITCH: isolate the execution path from the entry filters. ---
+    # Set env var DEBUG_FORCE_ENTRY_5M=1 on the host (no redeploy needed, no code
+    # touched) to zero out every 5m/15m entry gate. If a position still never
+    # opens with this on, the bug is downstream of signal generation (plan
+    # building / order execution). If it opens (with garbage quality — expected),
+    # the execution path is healthy and the real filters were correctly blocking
+    # entries. Turn the env var off (or unset it) to instantly restore the exact
+    # original thresholds — nothing here is a permanent change to STRATEGY_DEFAULTS
+    # or TIMEFRAME_STRATEGY_PRESETS. NEVER enable this in REAL trading mode.
+    if timeframe in ("5min", "15min") and os.environ.get("DEBUG_FORCE_ENTRY_5M", "").strip().lower() in ("1", "true", "yes"):
+        preset = {
+            **preset,
+            "min_adx": 0.0,
+            "min_volume_ratio": 0.0,
+            "min_body_ratio": 0.0,
+            "min_trade_score": 0.0,
+            "min_rr": 0.0,
+            "min_target_r": 0.10,
+            "sweep_min_distance_atr": 0.0,
+            "sweep_require_reclaim": False,
+            "sweep_require_reversal_candle": False,
+            "active_setup_require_daily_breakout": False,
+            "active_setup_breakout_distance_atr": 0.0,
+            "min_sl_percent": 0.0005,
+        }
+    return preset
 
 
 def _safe_float(value, default=0.0):
@@ -1353,6 +1380,27 @@ def _htf_trend_aligned(df, want_bullish):
         return None
 
 
+def _htf_period_extremes(daily_df, days):
+    """از دیتافریم روزانه (ستون‌های high/low + timestamp)، بالاترین/پایین‌ترین
+    N روز *کامل و قبلی* (بدون روز جاری ناقص) را برمی‌گرداند.
+    این جایگزین کلیدهای prev_week_high/prev_month_high است که قبلاً هرگز
+    توسط bot.py پر نمی‌شدند (md فقط دیتافریم بر اساس تایم‌فریم دارد، نه
+    مقادیر عددی از پیش محاسبه‌شده) و همیشه None برمی‌گشتند.
+    """
+    if daily_df is None or daily_df.empty or len(daily_df) < 3:
+        return None, None
+    d = daily_df.iloc[:-1]  # روز جاری (ناقص) را حذف کن
+    if d.empty:
+        return None, None
+    window = d.tail(int(days))
+    if window.empty or "high" not in window.columns or "low" not in window.columns:
+        return None, None
+    try:
+        return float(window["high"].max()), float(window["low"].min())
+    except Exception:
+        return None, None
+
+
 def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
     """HTF liquidity reversal model for 1H/4H.
     Uses higher-timeframe liquidity events instead of intraday breakout chasing.
@@ -1382,6 +1430,27 @@ def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe
     prev_month_low = anchors.get("prev_month_low")
     prev_day_high = anchors.get("prev_day_high")
     prev_day_low = anchors.get("prev_day_low")
+
+    # --- FIX: کلیدهای بالا (prev_week_high و ...) هیچ‌وقت توسط bot.py پر
+    # نمی‌شدند؛ آنچه واقعاً پاس داده می‌شود دیتافریم‌های OHLCV به‌ازای هر
+    # تایم‌فریم است (مثلاً md['1d'], md['4h']). این‌جا از همان دیتافریم
+    # واقعی، سطوح هفتگی/ماهانه را مستقیم محاسبه می‌کنیم.
+    daily_df = anchors.get("1d") if isinstance(anchors, dict) else None
+    if daily_df is not None and hasattr(daily_df, "empty"):
+        wk_h, wk_l = _htf_period_extremes(daily_df, 7)
+        mo_h, mo_l = _htf_period_extremes(daily_df, 30)
+        if prev_week_high is None:
+            prev_week_high = wk_h
+        if prev_week_low is None:
+            prev_week_low = wk_l
+        if prev_month_high is None:
+            prev_month_high = mo_h
+        if prev_month_low is None:
+            prev_month_low = mo_l
+        if prev_day_high is None and len(daily_df) >= 2:
+            prev_day_high = _safe_float(daily_df.iloc[-2].get("high"), None) if "high" in daily_df.columns else None
+        if prev_day_low is None and len(daily_df) >= 2:
+            prev_day_low = _safe_float(daily_df.iloc[-2].get("low"), None) if "low" in daily_df.columns else None
 
     if timeframe in ("4h", "4hour"):
         resistance = prev_month_high or prev_week_high
