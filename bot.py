@@ -2487,6 +2487,13 @@ def _entry_diag_stage(item):
     r = reason.lower()
     if 'trade_plan' in str(item.get('stage','')).lower() or 'حد ضرر منطقی' in reason or 'rr' in r:
         return '❌', 'رد شد', 'طرح معامله کیفیت لازم را نداشت'
+    # مهم: وقتی selector اصلی اصلاً هیچ کاندیدایی پیدا نکرده («ستاپ مناسب پیدا نشد»)،
+    # این همیشه یعنی «هیچی نیست» — حتی اگر جزئیات داخلی هر خانواده به‌طور تصادفی
+    # کلمه‌ی pullback/retest را داخل یک پیام رد‌شدن (یا نام خانواده‌ی breakout_retest)
+    # داشته باشد. این چک باید قبل از چک pullback بیاید وگرنه نمادهای بدون هیچ ستاپی
+    # به‌اشتباه «منتظر پولبک» نمایش داده می‌شوند.
+    if 'ستاپ مناسب پیدا نشد' in reason:
+        return '💤', 'بدون ستاپ', 'فعلاً ناحیه و ساختار مناسبی برای معامله نداریم'
     if 'pullback' in r or 'پولبک' in reason or 'retest' in r or 'بازآزمایی' in reason:
         return '🔄', 'منتظر پولبک', 'حرکت انجام شده؛ منتظر برگشت امن به ناحیه ورودیم'
     if 'active_setup' in r or 'ستاپ قبلی' in reason or 'نزدیک' in reason:
