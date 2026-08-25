@@ -1408,6 +1408,15 @@ V2_DEFAULTS = {
     "structure_flip_min_rr": 1.30,
     "structure_flip_min_score": 62.0,
     "structure_flip_volume_bonus_threshold": 1.05,
+    # --- V8: Structure First hard gate (5m/15m only) ---
+    # When enabled, no legacy entry family can open a trade on these TFs unless
+    # a confirmed Structure Flip exists. Set False to restore the previous V7
+    # behavior without changing the underlying legacy rules.
+    "structure_first_enabled": True,
+    "structure_first_timeframes": ("5min", "15min"),
+    "structure_first_min_score": 55.0,
+    "structure_first_use_htf_as_score": True,
+    "structure_first_use_regime_as_score": True,
 }
 
 
@@ -1825,7 +1834,7 @@ def _detect_structure_flip(df, cfg):
     return candidates[0]
 
 
-def _build_structure_flip_plan(df, flip, cfg):
+def _build_structure_flip_plan(df, flip, cfg, strict_mode=False):
     """Build a risk plan for a confirmed daily structure flip."""
     if not flip or df is None or len(df) < 30:
         return None, "Structure Flip داده کافی ندارد"
@@ -1857,7 +1866,8 @@ def _build_structure_flip_plan(df, flip, cfg):
     if risk > atr * 2.50:
         return None, "Structure Flip استاپ بیش از حد دور است"
     score = float(flip["score"])
-    min_score = float(cfg.get("structure_flip_min_score", 62.0))
+    min_score_key = "structure_first_min_score" if strict_mode else "structure_flip_min_score"
+    min_score = float(cfg.get(min_score_key, 55.0 if strict_mode else 62.0))
     if score < min_score:
         return None, f"Structure Flip کیفیت پایین است ({score:.0f}/100)"
     quality = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول"
@@ -2056,32 +2066,37 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         candidates.append((score * max(rr, 0.01), plan, sig, f"{version_label} {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
     if timeframe in ("5min", "15min"):
-        # Three competing intraday families: liquidity sweep, 3-candle trend pullback,
-        # and breakout-retest. The best valid candidate wins on score x R:R.
-        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
-        family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
-        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
-        sig, reason = strategy_trend_pullback(df_primary, timeframe, filters, cfg)
-        add_candidate(sig, reason, "trend_pullback", 4.0)
-        sig, reason = strategy_breakout_retest(df_primary, filters, cfg)
-        add_candidate(sig, reason, "breakout_retest", 6.0)
-
-        # Independent daily Structure Flip entry. It uses PDL/EQ/PDH and the
-        # mirrored outer levels, then requires break -> retest -> confirmation.
+        # V8 Structure First: on 5m/15m, Structure Flip is the hard entry gate.
+        # Legacy families remain available only when this gate is explicitly disabled.
+        structure_first = bool(cfg.get("structure_first_enabled", True)) and timeframe in tuple(cfg.get("structure_first_timeframes", ("5min", "15min")))
         flip_enabled = bool(cfg.get("structure_flip_enabled", True))
         flip_tfs = tuple(cfg.get("structure_flip_timeframes", ("5min", "15min")))
-        if flip_enabled and timeframe in flip_tfs:
-            flip = _detect_structure_flip(df_primary, cfg)
+
+        if structure_first:
+            # No legacy candidate is even constructed. This is intentional: HTF,
+            # volume, regime, EdgeProxy, etc. are confirmation/scoring layers only.
+            flip = _detect_structure_flip(df_primary, cfg) if (flip_enabled and timeframe in flip_tfs) else None
             if flip:
-                flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg)
+                flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg, strict_mode=True)
                 if flip_plan:
                     htf_flip, htf_flip_details = _v2_htf_bias(market_data_dict, flip["signal"] == "BUY")
+                    # Structure is the primary score; contextual signals can only
+                    # add/subtract points and cannot replace the structural setup.
                     flip_score = float(flip_plan.get("score", 0))
-                    flip_score += max(-6.0, min(6.0, htf_flip * 6.0))
+                    if bool(cfg.get("structure_first_use_htf_as_score", True)):
+                        flip_score += max(-6.0, min(6.0, htf_flip * 6.0))
+                    if bool(cfg.get("structure_first_use_regime_as_score", True)):
+                        if (rname == "TREND_BEAR" and flip["signal"] == "SELL") or (rname == "TREND_BULL" and flip["signal"] == "BUY"):
+                            flip_score += 4.0
+                        elif (rname == "TREND_BEAR" and flip["signal"] == "BUY") or (rname == "TREND_BULL" and flip["signal"] == "SELL"):
+                            flip_score -= 4.0
                     flip_score = max(0.0, min(100.0, flip_score))
                     rr_flip = float(flip_plan.get("rr", 0.0))
-                    ev_flip, pwin_flip = _v2_edge_proxy(flip_score, rr_flip, rname, regime_info["atr_ratio"])
-                    if flip_score >= float(cfg.get("structure_flip_min_score", 62.0)) and rr_flip >= float(cfg.get("structure_flip_min_rr", 1.30)):
+                    # Only the structural minimum score and structural R:R are hard
+                    # gates. Other model signals are scoring/diagnostic only.
+                    min_struct_score = float(cfg.get("structure_first_min_score", 55.0))
+                    if flip_score >= min_struct_score and rr_flip >= float(cfg.get("structure_flip_min_rr", 1.30)):
+                        ev_flip, pwin_flip = _v2_edge_proxy(flip_score, rr_flip, rname, regime_info["atr_ratio"])
                         fp = dict(flip_plan)
                         fp.update({
                             "score": int(round(flip_score)),
@@ -2097,8 +2112,47 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                             "model_win_proxy": round(pwin_flip, 4),
                             "setup_family": "structure_flip",
                         })
-                        flip_reason_full = f"V6 Structure Flip {rname}/{vol_state} | {flip_reason} | HTF={htf_flip:.2f} | EdgeProxy={ev_flip:.2f}"
+                        flip_reason_full = f"V8 Structure First {rname}/{vol_state} | {flip_reason} | HTF={htf_flip:.2f} | EdgeProxy={ev_flip:.2f}"
                         candidates.append((flip_score * max(rr_flip, 0.01), fp, flip["signal"], flip_reason_full))
+            # If no valid Structure Flip exists, candidates stays empty => NO TRADE.
+        else:
+            # V7 fallback: preserve the previous competing-family selector exactly.
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
+            family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
+            add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
+            sig, reason = strategy_trend_pullback(df_primary, timeframe, filters, cfg)
+            add_candidate(sig, reason, "trend_pullback", 4.0)
+            sig, reason = strategy_breakout_retest(df_primary, filters, cfg)
+            add_candidate(sig, reason, "breakout_retest", 6.0)
+
+            if flip_enabled and timeframe in flip_tfs:
+                flip = _detect_structure_flip(df_primary, cfg)
+                if flip:
+                    flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg)
+                    if flip_plan:
+                        htf_flip, htf_flip_details = _v2_htf_bias(market_data_dict, flip["signal"] == "BUY")
+                        flip_score = float(flip_plan.get("score", 0)) + max(-6.0, min(6.0, htf_flip * 6.0))
+                        flip_score = max(0.0, min(100.0, flip_score))
+                        rr_flip = float(flip_plan.get("rr", 0.0))
+                        ev_flip, pwin_flip = _v2_edge_proxy(flip_score, rr_flip, rname, regime_info["atr_ratio"])
+                        if flip_score >= float(cfg.get("structure_flip_min_score", 62.0)) and rr_flip >= float(cfg.get("structure_flip_min_rr", 1.30)):
+                            fp = dict(flip_plan)
+                            fp.update({
+                                "score": int(round(flip_score)),
+                                "regime": rname,
+                                "regime_confidence": rconf,
+                                "trend_state": trend_state,
+                                "volatility_state": vol_state,
+                                "htf_bias": float(htf_flip),
+                                "htf_details": htf_flip_details,
+                                "equilibrium_bias": 0.0,
+                                "equilibrium_mid": fp.get("daily_structure_levels", {}).get("eq"),
+                                "edge_proxy": round(ev_flip, 4),
+                                "model_win_proxy": round(pwin_flip, 4),
+                                "setup_family": "structure_flip",
+                            })
+                            flip_reason_full = f"V6 Structure Flip {rname}/{vol_state} | {flip_reason} | HTF={htf_flip:.2f} | EdgeProxy={ev_flip:.2f}"
+                            candidates.append((flip_score * max(rr_flip, 0.01), fp, flip["signal"], flip_reason_full))
     elif timeframe in ("1hour", "4hour"):
         # Dedicated HTF strategy: weekly/monthly liquidity reversal only. Generic V2
         # trend/breakout/mean-reversion selection is intentionally not used here.
@@ -2115,8 +2169,9 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
+        no_setup_label = "V8 Structure First: هیچ Structure Flip معتبری وجود ندارد؛ ورود ممنوع" if (timeframe in tuple(cfg.get("structure_first_timeframes", ("5min", "15min"))) and bool(cfg.get("structure_first_enabled", True))) else "V2: ستاپ مناسب پیدا نشد"
         return None, None, (
-            f"V2: ستاپ مناسب پیدا نشد | regime={rname} trend={trend_state} "
+            f"{no_setup_label} | regime={rname} trend={trend_state} "
             f"vol={vol_state} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
         )
     candidates.sort(key=lambda x: x[0], reverse=True)
