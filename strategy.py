@@ -1408,6 +1408,8 @@ V2_DEFAULTS = {
     "structure_flip_min_rr": 1.30,
     "structure_flip_min_score": 62.0,
     "structure_flip_volume_bonus_threshold": 1.05,
+    # V8.1: SL is placed behind the confirmed retest swing, with this ATR buffer.
+    "structure_flip_sl_buffer_atr": 0.20,
     # --- V8: Structure First hard gate (5m/15m only) ---
     # When enabled, no legacy entry family can open a trade on these TFs unless
     # a confirmed Structure Flip exists. Set False to restore the previous V7
@@ -1821,6 +1823,11 @@ def _detect_structure_flip(df, cfg):
                 "target_level": float(next_target),
                 "reaction": reaction,
                 "break_index": br,
+                # The retest candle is the confirmed swing used to invalidate the
+                # setup. Keep its actual wick extreme so the SL can sit behind the
+                # swing instead of being anchored to the flipped level.
+                "swing_index": swing_i,
+                "swing_level": float(sh if signal == "SELL" else sl),
                 "score": float(min(100.0, score)),
                 "volume_ratio": vr,
                 "body_ratio": body,
@@ -1847,13 +1854,20 @@ def _build_structure_flip_plan(df, flip, cfg, strict_mode=False):
     level = float(flip["level"])
     target = float(flip["target_level"])
     signal = flip["signal"]
-    buffer_atr = 0.35
+    # V8.1: the hard SL is structural. It must sit behind the exact swing that
+    # formed during the retest/confirmation, with only a small ATR buffer.
+    # The flipped level is NOT used as the primary SL anchor.
+    swing_level = _safe_float(flip.get("swing_level"), 0.0)
+    if swing_level <= 0:
+        return None, "Structure Flip سوینگ تأییدشده برای SL موجود نیست"
+    buffer_atr = float(cfg.get("structure_flip_sl_buffer_atr", 0.20))
+    buffer_atr = max(0.05, min(0.60, buffer_atr))
     if signal == "SELL":
-        sl = level + atr * buffer_atr
+        sl = swing_level + atr * buffer_atr
         risk = sl - entry
         reward = entry - target
     else:
-        sl = level - atr * buffer_atr
+        sl = swing_level - atr * buffer_atr
         risk = entry - sl
         reward = target - entry
     if risk <= 0 or reward <= 0:
@@ -1888,6 +1902,10 @@ def _build_structure_flip_plan(df, flip, cfg, strict_mode=False):
         "structure_flip_level": level,
         "structure_flip_level_name": flip["level_name"],
         "structure_flip_target": target,
+        "structure_flip_swing_level": float(swing_level),
+        "structure_flip_swing_index": int(flip.get("swing_index", -1)),
+        "structure_flip_sl_buffer_atr": float(buffer_atr),
+        "sl_basis": "confirmed_retest_swing",
         "daily_structure_levels": compute_daily_structure_levels(*_compute_prev_day_levels(df)[1:]),
         "reason": (
             f"Structure Flip | {flip['level_name']} به {flip['reaction']} تبدیل شد | "
