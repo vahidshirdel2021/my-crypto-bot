@@ -1,7 +1,5 @@
 import hashlib
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
-from dotenv import load_dotenv
-load_dotenv()
 import urllib.parse as urlparse
 from threading import Thread, RLock
 from typing import Dict, Any
@@ -2442,6 +2440,13 @@ def _entry_diag_stage(item):
     r = reason.lower()
     if 'trade_plan' in str(item.get('stage','')).lower() or 'حد ضرر منطقی' in reason or 'rr' in r:
         return '❌', 'رد شد', 'طرح معامله کیفیت لازم را نداشت'
+    # مهم: وقتی selector اصلی اصلاً هیچ کاندیدایی پیدا نکرده («ستاپ مناسب پیدا نشد»)،
+    # این همیشه یعنی «هیچی نیست» — حتی اگر جزئیات داخلی هر خانواده به‌طور تصادفی
+    # کلمه‌ی pullback/retest را داخل یک پیام رد‌شدن («بدون Pullback معتبر») داشته باشد.
+    # این چک باید قبل از چک pullback بیاید وگرنه نمادهای بدون هیچ ستاپی به‌اشتباه
+    # «منتظر پولبک» نمایش داده می‌شوند.
+    if 'ستاپ مناسب پیدا نشد' in reason:
+        return '💤', 'بدون ستاپ', 'فعلاً ناحیه و ساختار مناسبی برای معامله نداریم'
     if 'pullback' in r or 'پولبک' in reason or 'retest' in r or 'بازآزمایی' in reason:
         return '🔄', 'منتظر پولبک', 'حرکت انجام شده؛ منتظر برگشت امن به ناحیه ورودیم'
     if 'active_setup' in r or 'ستاپ قبلی' in reason or 'نزدیک' in reason:
@@ -2663,6 +2668,14 @@ async def _scan_symbol_impl(http,chat_id,symbol,regime=None):
     if d.empty:
         return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
     primary=calculate_indicators(d); primary_tf=tf; mode='single'
+    _atr_ok = False
+    try:
+        _atr_ok = len(primary) >= 60 and 'atr' in primary.columns and pd.notna(primary['atr'].iloc[-2]) and float(primary['atr'].iloc[-2]) > 0
+    except Exception:
+        _atr_ok = False
+    if not _atr_ok:
+        logger.warning('ENTRY_DIAG bad_indicators chat=%s symbol=%s tf=%s raw_rows=%s ind_rows=%s cols=%s',
+                        chat_id, symbol, tf, len(d), len(primary), list(primary.columns)[:20] if not primary.empty else [])
     # V2 نیاز به context واقعی HTF دارد: اجرای 5m/15m با 1h/4h،
     # 1h با 4h/1d و 4h با 1d بررسی می‌شود. HTF فقط filter است و execution نیست.
     if strat == 'dynamic':
@@ -2718,6 +2731,8 @@ async def _scan_symbol_impl(http,chat_id,symbol,regime=None):
         plan = None
 
     if not sig:
+        logger.info('ENTRY_DIAG no_signal chat=%s symbol=%s tf=%s strat=%s v2=%s reason=%s',
+                     chat_id, symbol, primary_tf, strat, v2_scalp, reason)
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
 
     if not v2_scalp:
