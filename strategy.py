@@ -198,6 +198,14 @@ STRATEGY_DEFAULTS = {
     "active_setup_max_age_candles": 3,
     "active_setup_max_distance_atr": 0.80,
     "active_setup_invalidation_atr": 0.25,
+    # Active setup only becomes valid after a confirmed PDH/PDL breakout
+    # and sufficient distance from the previous-day range.
+    "active_setup_require_daily_breakout": True,
+    "active_setup_breakout_distance_atr": 0.80,
+    "active_setup_breakout_confirm_candles": 1,
+    "active_structure_confirmation": True,
+    "active_structure_lookback": 8,
+    "active_structure_confirm_candles": 2,
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -210,9 +218,11 @@ STRATEGY_DEFAULTS = {
     "weakness_exit_min_r": 1.0,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
     "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
     "weakness_profit_lock_min_r": 1.0,
-    "early_loss_weakness_exit_enabled": False,
+    # مدیریت پوزیشن سمت ضرر هم مثل سمت سود روی تایم‌فریم سریع‌تر انجام می‌شود
+    # (نگاه کنید به POSITION_MANAGEMENT_TIMEFRAME_MAP در bot.py) و از همان
+    # آستانه‌ی زودهنگام (POSITION_MANAGEMENT_MIN_LOSS_R) استفاده می‌کند.
+    "early_loss_weakness_exit_enabled": True,
     "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
-    "early_loss_weakness_exit_enabled": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -333,9 +343,17 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None, defer_quality_gate=False, filters=None, regime=None):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
+        # Must reuse the SAME context the signal pass used: HTF market data,
+        # the caller's filters and the macro `regime` (BULLISH/BEARISH/NEUTRAL).
+        # Dropping any of these makes this second candidate-selection run
+        # score/gate differently from the first (see get_signal_with_reason_v2),
+        # which produced duplicated/inconsistent reason strings and could let a
+        # plan through that the original V2 score/RR/directional gates would
+        # have rejected (e.g. a counter-trend setup losing its regime penalty).
+        effective_filters = filters if isinstance(filters, dict) else FILTER_DEFAULTS
+        sig, plan, reason = _select_v2_setup(df, market_data_dict, strategy_timeframe, effective_filters, strategy_config, regime, grid_levels, live_price=live_price)
         if sig == signal and plan:
             return plan, reason
     if strategy_type == "liquidity_sweep" or (strategy_type == "dynamic" and strategy_timeframe in ("5min", "15min")):
@@ -467,7 +485,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
+    if score < min_score and not defer_quality_gate:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
     plan = {
@@ -700,7 +718,99 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
     return None, None
 
 
-def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None):
+
+def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
+    """Active setup guard:
+    Only allow recovery entries after a real PDH/PDL breakout with enough distance.
+    Prevents buying below PDH or selling above PDL from random intraday anchors.
+    """
+    if not bool(cfg.get("active_setup_require_daily_breakout", True)):
+        return True
+    if atr <= 0:
+        return False
+
+    distance = atr * float(cfg.get("active_setup_breakout_distance_atr", 1.0))
+    confirms = max(1, int(cfg.get("active_setup_breakout_confirm_candles", 1)))
+
+    start = max(0, before_idx - 20)
+    window = d.iloc[start:before_idx]
+
+    if signal == "BUY":
+        # Must have closed above PDH and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+
+    else:
+        # Must have closed below PDL and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+
+
+
+
+def _confirm_active_structure(d, idx, signal, cfg):
+    """Require a confirmed micro swing after PDH/PDL reclaim before active entry.
+    Prevents immediate breakout continuation entries without market structure.
+    """
+    lookback = int(cfg.get("active_structure_lookback", 8))
+    confirm = int(cfg.get("active_structure_confirm_candles", 2))
+    if idx < confirm + 2:
+        return False
+    end = idx
+    start = max(0, end - lookback)
+    w = d.iloc[start:end+1]
+    if len(w) < confirm + 2:
+        return False
+    recent = w.iloc[:-confirm] if confirm > 0 else w
+    last = w.iloc[-1]
+    if signal == "BUY":
+        swing_low = float(recent["low"].min())
+        recent_high = float(recent["high"].max())
+        # higher-low style confirmation: price must leave a defended low
+        return float(last["close"]) > recent_high and swing_low < float(last["close"])
+    else:
+        swing_high = float(recent["high"].max())
+        recent_low = float(recent["low"].min())
+        return float(last["close"]) < recent_low and swing_high > float(last["close"])
+
+def _active_setup_distance_check(live_price, level, atr, max_distance_atr, invalidation_atr, is_buy):
+    """Pure decision for the active-setup FOMO/invalidation guard: given how
+    far live price has moved from the original PDH/PDL sweep level, is a
+    pending active setup now too far to chase, or already invalidated by
+    moving the wrong way past the level? Extracted from
+    strategy_liquidity_sweep_5m for independent testing of this exact
+    anti-FOMO/anti-dead-bot boundary math.
+
+    Returns (too_far, invalidated).
+    """
+    max_dist = float(atr) * max(0.20, float(max_distance_atr))
+    invalid_dist = float(atr) * max(0.05, float(invalidation_atr))
+    if is_buy:
+        too_far = live_price > level + max_dist
+        invalidated = live_price < level - invalid_dist
+    else:
+        too_far = live_price < level - max_dist
+        invalidated = live_price > level + invalid_dist
+    return too_far, invalidated
+
+
+def _is_daily_level_unreachable(live_price, pdh, pdl, atr, activation_distance_atr):
+    """Pure decision: has price drifted so far from BOTH PDH and PDL that
+    chasing the original daily liquidity setup no longer makes sense, and the
+    strategy should instead rotate to an adaptive intraday level? This is the
+    'anti-dead-bot' mechanism described in strategy_liquidity_sweep_5m.
+    """
+    if not atr or atr <= 0:
+        return False
+    nearest_dist = min(abs(live_price - pdh), abs(live_price - pdl))
+    return nearest_dist >= float(atr) * float(activation_distance_atr)
+
+
+def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
     """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
 
     The primary signal still uses only the latest closed candle. If that exact
@@ -717,6 +827,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
+    # 5m is more noisy: require structure confirmation. Keep 15m faster.
+    require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
 
     def detect_at(idx):
         if idx < 0 or idx >= len(d):
@@ -755,10 +867,12 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         live_for_guard = float(d.iloc[latest_idx]["close"])
     if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
         level = pdl if sig == "BUY" else pdh
-        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
-        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
-        too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
-        invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
+        too_far, invalidated = _active_setup_distance_check(
+            live_for_guard, level, atr,
+            cfg.get("active_setup_max_distance_atr", 0.80),
+            cfg.get("active_setup_invalidation_atr", 0.25),
+            sig == "BUY",
+        )
         if not too_far and not invalidated:
             return sig, reason
         sig, reason = None, None
@@ -770,8 +884,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     try:
         guard_atr = float(atr) if atr is not None and np.isfinite(atr) and atr > 0 else _safe_float(d.iloc[latest_idx].get("atr"), 0.0)
         daily_activation_atr = float(cfg.get("adaptive_activation_distance_atr", 1.00))
-        daily_nearest_dist = min(abs(live_for_guard - pdh), abs(live_for_guard - pdl))
-        daily_far = daily_nearest_dist >= guard_atr * daily_activation_atr if guard_atr > 0 else False
+        daily_far = _is_daily_level_unreachable(live_for_guard, pdh, pdl, guard_atr, daily_activation_atr)
     except Exception:
         guard_atr = 0.0
         daily_far = False
@@ -779,7 +892,15 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     if daily_far:
         adaptive_sig, adaptive_reason, adaptive_atr = _detect_adaptive_liquidity(d, latest_idx, cfg)
         if adaptive_sig:
-            return adaptive_sig, adaptive_reason
+            # Do not allow adaptive continuation entries inside the previous-day range
+            # unless a confirmed PDH/PDL breakout already happened. This prevents
+            # buying below PDH or selling above PDL from intraday anchors.
+            if _has_confirmed_daily_breakout(
+                d, latest_idx, pdh, pdl, adaptive_sig,
+                adaptive_atr if adaptive_atr else guard_atr,
+                cfg
+            ):
+                return adaptive_sig, adaptive_reason
 
     if not bool(cfg.get("active_setup_enabled", True)):
         return None, "ستاپ جدیدی ثبت نشد"
@@ -804,6 +925,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             continue
         sig, reason, atr = detect_at(idx)
         if not sig or atr <= 0:
+            continue
+        if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
             continue
         level = pdl if sig == "BUY" else pdh
         tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
@@ -832,6 +955,10 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         else:
             if live > level + invalid_dist or live < level - max_dist:
                 continue
+        if bool(cfg.get("active_structure_confirmation", True)) or require_micro_structure:
+            if not _confirm_active_structure(d, latest_idx, sig, cfg):
+                continue
+
         age = latest_idx - idx
         return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
                      f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
@@ -887,7 +1014,7 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False, defer_quality_gate=False):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -985,7 +1112,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
     min_score = float(cfg.get("min_trade_score", 58.0))
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
+    # In V2 the final decision belongs to the adaptive evidence engine after
+    # HTF/bias/direction adjustments.  Do not discard a structurally valid
+    # candidate here just because its *raw* score is slightly below the final
+    # threshold; otherwise HTF and direction evidence can never rescue it.
+    if score < min_score and not defer_quality_gate:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
     plan = {
@@ -1122,9 +1253,19 @@ def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config
         return None, f"روند ضعیف است (ADX={adx:.1f})"
     up = curr["close"] > curr["ema50"] and curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
     down = curr["close"] < curr["ema50"] and curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    ema = _safe_float(prev["ema20"])
-    touch_buy = prev["low"] <= ema + atr * 0.25 and prev["high"] >= ema - atr * 0.5
-    touch_sell = prev["high"] >= ema - atr * 0.25 and prev["low"] <= ema + atr * 0.5
+    lookback = 3  # چند کندل قبل از کندل تأییدی برای برخورد به EMA20 بررسی شود (قبلاً فقط ۱ کندل)
+    touch_buy = touch_sell = False
+    for i in range(2, 2 + lookback):
+        if len(df) <= i + 1:
+            break
+        c = df.iloc[-1 - i]
+        ema_i = _safe_float(c.get("ema20"))
+        if c["low"] <= ema_i + atr * 0.25 and c["high"] >= ema_i - atr * 0.5:
+            touch_buy = True
+        if c["high"] >= ema_i - atr * 0.25 and c["low"] <= ema_i + atr * 0.5:
+            touch_sell = True
+        if touch_buy and touch_sell:
+            break
     f = _flt(filters)
 
     if up and touch_buy and curr["close"] > curr["ema20"]:
@@ -1212,6 +1353,100 @@ def _htf_trend_aligned(df, want_bullish):
         return None
 
 
+def _htf_period_extremes(daily_df, days):
+    """از دیتافریم روزانه (ستون‌های high/low + timestamp)، بالاترین/پایین‌ترین
+    N روز *کامل و قبلی* (بدون روز جاری ناقص) را برمی‌گرداند.
+    این جایگزین کلیدهای prev_week_high/prev_month_high است که قبلاً هرگز
+    توسط bot.py پر نمی‌شدند (md فقط دیتافریم بر اساس تایم‌فریم دارد، نه
+    مقادیر عددی از پیش محاسبه‌شده) و همیشه None برمی‌گشتند.
+    """
+    if daily_df is None or daily_df.empty or len(daily_df) < 3:
+        return None, None
+    d = daily_df.iloc[:-1]  # روز جاری (ناقص) را حذف کن
+    if d.empty:
+        return None, None
+    window = d.tail(int(days))
+    if window.empty or "high" not in window.columns or "low" not in window.columns:
+        return None, None
+    try:
+        return float(window["high"].max()), float(window["low"].min())
+    except Exception:
+        return None, None
+
+
+def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
+    """HTF liquidity reversal model for 1H/4H.
+    Uses higher-timeframe liquidity events instead of intraday breakout chasing.
+    Entry requires sweep/reclaim + structure confirmation.
+    """
+    if df_primary is None or len(df_primary) < 80:
+        return None, "HTF: داده کافی نیست"
+
+    d = df_primary.copy()
+    try:
+        atr = float(d.iloc[-2].get("atr", 0) or 0)
+    except Exception:
+        atr = 0
+    if atr <= 0:
+        return None, "HTF: ATR نامعتبر"
+
+    high = float(d.iloc[-2]["high"])
+    low = float(d.iloc[-2]["low"])
+    close = float(d.iloc[-2]["close"])
+
+    # HTF liquidity anchors. Prefer supplied higher timeframe levels;
+    # fallback to local structure if unavailable.
+    anchors = market_data_dict or {}
+    prev_week_high = anchors.get("prev_week_high")
+    prev_week_low = anchors.get("prev_week_low")
+    prev_month_high = anchors.get("prev_month_high")
+    prev_month_low = anchors.get("prev_month_low")
+    prev_day_high = anchors.get("prev_day_high")
+    prev_day_low = anchors.get("prev_day_low")
+
+    # --- FIX: کلیدهای بالا (prev_week_high و ...) هیچ‌وقت توسط bot.py پر
+    # نمی‌شدند؛ آنچه واقعاً پاس داده می‌شود دیتافریم‌های OHLCV به‌ازای هر
+    # تایم‌فریم است (مثلاً md['1d'], md['4h']). این‌جا از همان دیتافریم
+    # واقعی، سطوح هفتگی/ماهانه را مستقیم محاسبه می‌کنیم.
+    daily_df = anchors.get("1d") if isinstance(anchors, dict) else None
+    if daily_df is not None and hasattr(daily_df, "empty"):
+        wk_h, wk_l = _htf_period_extremes(daily_df, 7)
+        mo_h, mo_l = _htf_period_extremes(daily_df, 30)
+        if prev_week_high is None:
+            prev_week_high = wk_h
+        if prev_week_low is None:
+            prev_week_low = wk_l
+        if prev_month_high is None:
+            prev_month_high = mo_h
+        if prev_month_low is None:
+            prev_month_low = mo_l
+        if prev_day_high is None and len(daily_df) >= 2:
+            prev_day_high = _safe_float(daily_df.iloc[-2].get("high"), None) if "high" in daily_df.columns else None
+        if prev_day_low is None and len(daily_df) >= 2:
+            prev_day_low = _safe_float(daily_df.iloc[-2].get("low"), None) if "low" in daily_df.columns else None
+
+    if timeframe in ("4h", "4hour"):
+        resistance = prev_month_high or prev_week_high
+        support = prev_month_low or prev_week_low
+    else:
+        resistance = prev_week_high or prev_day_high
+        support = prev_week_low or prev_day_low
+
+    # Fallback keeps old datasets compatible.
+    highs = float(resistance) if resistance is not None else d["high"].rolling(20).max().iloc[-3]
+    lows = float(support) if support is not None else d["low"].rolling(20).min().iloc[-3]
+
+    # Long: liquidity grab below support + reclaim + bullish structure candle
+    if low < lows and close > lows and close > float(d.iloc[-3]["close"]):
+        return "BUY", "HTF Liquidity Sweep + Reclaim + ساختار صعودی تأیید شد"
+
+    # Short: liquidity grab above resistance + reclaim + bearish structure candle
+    if high > highs and close < highs and close < float(d.iloc[-3]["close"]):
+        return "SELL", "HTF Liquidity Sweep + Reclaim + ساختار نزولی تأیید شد"
+
+    return None, "HTF: ستاپ نقدینگی تشکیل نشده"
+
+
 def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
     break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
     if break_sig not in ("BUY", "SELL"):
@@ -1238,11 +1473,13 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
-    if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+    if st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour"):
+        sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
+    elif st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     elif st == "dynamic":
         if timeframe in ("5min", "15min"):
-            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price)
+            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price, timeframe=timeframe)
         else:
             sig, reason = strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
     elif st == "trend":
@@ -1254,21 +1491,13 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     else:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
-    # --- محافظ خلاف‌جهت بازار ---
-    # این فیلتر روی خروجی *همه‌ی* مسیرهای بالا (شامل dynamic V2 که مسیر پیش‌فرض ربات است)
-    # به‌طور یکسان اعمال می‌شود - قبلاً مسیر V2 زودتر از این نقطه return می‌کرد و این فیلتر
-    # را دور می‌زد؛ این نقص برطرف شد.
-    # regime این‌جا یا از رژیم ماکرو (BTC/ETH روی 4 ساعته با ADX بالا) می‌آید یا از اجماع
-    # فوری همان تایم‌فریم معاملاتی با همان اکثریت ساده (>=۵۰٪) که در «وضعیت بازار» دیده
-    # می‌شود؛ یعنی هر وقت خودِ کاربر «وضعیت بازار» را صعودی/نزولی ببیند، همان لحظه این
-    # فیلتر هم فعال است. این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت رنج/نامشخص
-    # (نه اکثریت صعودی نه نزولی) هیچ تاثیری ندارد؛ فقط دقیقاً سناریویی را می‌گیرد که معامله
-    # *خلاف* جهت ارزیابی‌شده‌ی بازار باز می‌شود (مثل فروش وسط یک ارزیابی بازار صعودی).
+    # Market regime دیگر قفل سخت ورود نیست. V2 آن را داخل امتیاز و آستانه‌ی
+    # لازم برای ستاپ خلاف جهت اعمال می‌کند. برای استراتژی‌های قدیمی هم سیگنال
+    # خلاف جهت صرفاً اجازه‌ی بررسی بیشتر دارد و حذف نمی‌شود.
     if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH"):
-        if regime == "BULLISH" and sig == "SELL":
-            return None, f"وضعیت بازار صعودی ارزیابی شده - سیگنال فروش خلاف جهت بازار نادیده گرفته شد | {reason}"
-        if regime == "BEARISH" and sig == "BUY":
-            return None, f"وضعیت بازار نزولی ارزیابی شده - سیگنال خرید خلاف جهت بازار نادیده گرفته شد | {reason}"
+        direction_text = "صعودی" if regime == "BULLISH" else "نزولی"
+        side_text = "خرید" if sig == "BUY" else "فروش"
+        return sig, f"{reason} | جهت غالب بازار: {direction_text}؛ {side_text} به‌صورت فرصت خلاف‌جهت بررسی شد"
     return sig, reason
 
 # ========================= STRATEGY V2 =========================
@@ -1284,9 +1513,21 @@ V2_DEFAULTS = {
     "ema_slope_min_atr": 0.03,
     "min_edge_proxy": 0.10,
     "use_edge_proxy_gate": False,
-    "min_setup_score": 62.0,
-    "high_vol_min_score": 68.0,
-    "high_vol_min_rr": 1.50,
+    # ضد بیش‌فیلتر شدن: ستاپ خوب نباید به خاطر چند ناهماهنگی جزئی خفه شود.
+    "min_setup_score": 60.0,
+    "high_vol_min_score": 66.0,
+    "high_vol_min_rr": 1.45,
+    # Market bias فقط «مالیات خلاف جهت» است، نه دروازه‌ی ورود.
+    "directional_aligned_bonus": 2.0,
+    "directional_opposite_penalty": 6.0,
+    "directional_opposite_extra_score": 8.0,
+    "directional_opposite_extra_rr": 0.10,
+    # PDH/PDL Equilibrium (میان‌بها = وسط PDH و PDL، مفهوم Premium/Discount).
+    # همانند directional bias، فقط «مالیات» است: هرگز معامله را رد نمی‌کند،
+    # فقط امتیاز رتبه‌بندی بین کاندیداها را کمی جابه‌جا می‌کند.
+    "eq_bias_enabled": True,
+    "eq_aligned_bonus": 2.0,
+    "eq_counter_penalty": 3.0,
     "range_max_adx": 20.0,
     "range_rsi_buy": 34.0,
     "range_rsi_sell": 66.0,
@@ -1450,6 +1691,43 @@ def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
     return float(ev), float(base_p)
 
 
+def _v2_score_thresholds(vol_state, cfg):
+    """Return effective final-entry thresholds without weakening the active
+    user/session profile. V2 provides a safety floor; the effective gate is
+    the strictest applicable requirement.
+    """
+    configured_score = float(cfg.get("min_trade_score", 0.0) or 0.0)
+    v2_score_floor = float(cfg.get("min_setup_score", 60.0))
+    min_score = max(configured_score, v2_score_floor)
+
+    configured_rr = float(cfg.get("min_rr", 0.0) or 0.0)
+    min_rr = max(configured_rr, 1.30)
+
+    if vol_state == "HIGH":
+        min_score = max(min_score, float(cfg.get("high_vol_min_score", 66.0)))
+        min_rr = max(min_rr, float(cfg.get("high_vol_min_rr", 1.45)))
+    return min_score, min_rr
+
+
+def _v2_passes_setup_gates(score, rr, vol_state, cfg, ev):
+    """Pure: does this candidate setup clear the score/RR/edge-proxy gates?"""
+    min_score, min_rr = _v2_score_thresholds(vol_state, cfg)
+    if score < min_score or rr < min_rr:
+        return False
+    if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
+        return False
+    return True
+
+
+def _v2_rank_key(score, rr):
+    """Pure: sort key used to pick the best among competing candidate setups
+    generated in the same scan cycle (e.g. a trend continuation vs a breakout
+    signal firing simultaneously). RR is floored at 0.01 so a zero/negative RR
+    plan never ranks as a false tie with a genuinely-zero-score plan.
+    """
+    return score * max(rr, 0.01)
+
+
 def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     cfg = get_v2_config(strategy_config)
     regime_info = detect_market_regime(df_primary, cfg)
@@ -1458,12 +1736,29 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     trend_state = regime_info.get("trend_state", "NEUTRAL")
     vol_state = regime_info.get("volatility_state", "NORMAL")
     candidates = []
+    attempts = []  # diagnostic-only: records why each family did NOT become a candidate
 
-    if rconf < float(cfg.get("regime_confidence_min", 0.55)):
-        return None, None, f"V2: confidence رژیم پایین است | regime={rname} conf={rconf:.2f}"
+    # Equilibrium (میان‌بها) = وسط PDH/PDL. فقط یک‌بار محاسبه می‌شود و بین همه‌ی
+    # کاندیداها به‌اشتراک گذاشته می‌شود؛ اگر PDH/PDL هنوز کامل نشده باشد (روز اول)
+    # eq_level برابر None می‌ماند و این تعدیل به‌سادگی خاموش می‌شود.
+    eq_level = None
+    if bool(cfg.get("eq_bias_enabled", True)):
+        _, _eq_pdh, _eq_pdl = _compute_prev_day_levels(df_primary)
+        if _eq_pdh is not None and _eq_pdl is not None:
+            eq_level = (_eq_pdh + _eq_pdl) / 2.0
+
+    # Regime confidence is contextual evidence, not a hard entry gate.
+    # A neutral/mixed market (normally confidence=0.50) must still reach the
+    # existing setup families; each candidate is independently protected by
+    # score/RR, volatility, directional and execution-quality gates below.
+    # Keeping this as a diagnostic preserves observability without creating a
+    # dead-zone in 5m/15m where valid sweep/pullback/retest setups never get
+    # evaluated.
 
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
+            detail = f" | {reason}" if reason else ""
+            attempts.append(f"{family}: بدون سیگنال{detail}")
             return
         # Risk plan must use the signal timeframe. HTF is context, not execution.
         plan_tf = timeframe
@@ -1488,31 +1783,78 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             plan, plan_reason = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels,
                 setup_index=active_setup_index, live_price=live_price,
-                anchor_level=anchor_level, target_level=target_level
+                anchor_level=anchor_level, target_level=target_level,
+                defer_quality_gate=True
             )
         else:
             plan, plan_reason = build_trade_plan(
                 df_primary, sig, cfg, family, strategy_timeframe=plan_tf,
-                grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price
+                grid_levels=grid_levels, setup_index=active_setup_index, live_price=live_price,
+                defer_quality_gate=True
             )
         if not plan:
+            attempts.append(f"{family}/{sig}: بدون طرح معتبر (حد ضرر/ورود ساخته نشد)")
             return
         htf, htf_details = _v2_htf_bias(market_data_dict, sig == "BUY")
         score = float(plan.get("score", 0)) + float(bonus)
         score += max(-8.0, min(8.0, htf * 8.0))
-        score = max(0.0, min(100.0, score))
+
+        # بازارخوانی یک «جهت ترجیحی» است، نه قفل ورود.
+        # اگر ستاپ خلاف جهت بازار شدیداً غالب باشد، فقط کمی مالیات کیفیت می‌گیرد
+        # و برای ورود باید امتیاز/RR بهتری نشان دهد؛ در غیر این صورت معامله همچنان ممکن است.
+        directional_context = "NEUTRAL"
+        directional_adjustment = 0.0
+        extra_score = 0.0
+        extra_rr = 0.0
+        if regime in ("BULLISH", "BEARISH"):
+            aligned = (regime == "BULLISH" and sig == "BUY") or (regime == "BEARISH" and sig == "SELL")
+            directional_context = "ALIGNED" if aligned else "COUNTER"
+            directional_adjustment = (
+                float(cfg.get("directional_aligned_bonus", 2.0))
+                if aligned else -float(cfg.get("directional_opposite_penalty", 6.0))
+            )
+            if not aligned:
+                extra_score = float(cfg.get("directional_opposite_extra_score", 8.0))
+                extra_rr = float(cfg.get("directional_opposite_extra_rr", 0.10))
+        score = max(0.0, min(100.0, score + directional_adjustment))
+
+        # PDH/PDL Equilibrium (میان‌بها): خرید در Discount (زیر EQ) و فروش در
+        # Premium (بالای EQ) هم‌جهت با منطق liquidity/PDH-PDL همین پروژه است.
+        # عمداً سبک‌تر از directional bias است و هرگز روی گیت امتیاز/RR اثر
+        # نمی‌گذارد — فقط رتبه‌بندی بین کاندیداهای موجود را کمی جابه‌جا می‌کند.
+        eq_context = "NEUTRAL"
+        eq_adjustment = 0.0
+        entry_px = _safe_float(plan.get("entry"), 0.0)
+        if eq_level is not None and entry_px > 0:
+            in_discount = entry_px < eq_level
+            in_premium = entry_px > eq_level
+            aligned_bonus = float(cfg.get("eq_aligned_bonus", 2.0))
+            counter_penalty = float(cfg.get("eq_counter_penalty", 3.0))
+            if sig == "BUY" and in_discount:
+                eq_context, eq_adjustment = "DISCOUNT_ALIGNED", aligned_bonus
+            elif sig == "BUY" and in_premium:
+                eq_context, eq_adjustment = "PREMIUM_COUNTER", -counter_penalty
+            elif sig == "SELL" and in_premium:
+                eq_context, eq_adjustment = "PREMIUM_ALIGNED", aligned_bonus
+            elif sig == "SELL" and in_discount:
+                eq_context, eq_adjustment = "DISCOUNT_COUNTER", -counter_penalty
+        score = max(0.0, min(100.0, score + eq_adjustment))
+
         rr = float(plan.get("rr", 0))
         ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
         # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
         # but high volatility requires stricter score/RR. Mean reversion is never selected
-        # merely because volatility is high.
-        if vol_state == "HIGH":
-            min_score = float(cfg["high_vol_min_score"])
-            min_rr = float(cfg["high_vol_min_rr"])
-        else:
-            min_score = float(cfg["min_setup_score"])
-            min_rr = float(cfg.get("min_rr", 1.3))
-        if score < min_score or rr < min_rr:
+        # merely because volatility is high. Market bias only raises the bar for a
+        # counter-directional setup; it never hard-blocks it.
+        min_score_gate, min_rr_gate = _v2_score_thresholds(vol_state, cfg)
+        if directional_context == "COUNTER":
+            min_score_gate += extra_score
+            min_rr_gate += extra_rr
+        if score < min_score_gate or rr < min_rr_gate:
+            attempts.append(
+                f"{family}/{sig}: امتیاز={score:.0f}(نیاز {min_score_gate:.0f}) "
+                f"RR={rr:.2f}(نیاز {min_rr_gate:.2f})"
+            )
             return
         if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
@@ -1528,13 +1870,41 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             "edge_proxy": round(ev, 4),
             "model_win_proxy": round(pwin, 4),
             "setup_family": family,
+            "directional_context": directional_context,
+            "directional_adjustment": round(directional_adjustment, 2),
+            "directional_gate_score": round(min_score_gate, 2),
+            "directional_gate_rr": round(min_rr_gate, 2),
+            "eq_level": round(eq_level, 6) if eq_level is not None else None,
+            "eq_context": eq_context,
+            "eq_adjustment": round(eq_adjustment, 2),
         })
-        candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+        candidates.append((_v2_rank_key(score, rr), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}" + (f" | EQ={eq_context}" if eq_context != "NEUTRAL" else "")))
 
     if timeframe in ("5min", "15min"):
-        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price)
+        # Keep the proven liquidity-sweep path, but let a clean trend-pullback
+        # setup compete for the same entry slot. This increases opportunity
+        # coverage without lowering the safety floors: both candidates still
+        # pass the same final V2 score/RR gates and only the best candidate wins.
+        sig, reason = strategy_liquidity_sweep_5m(
+            df_primary, filters, cfg, live_price=live_price, timeframe=timeframe
+        )
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
-        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
+        add_candidate(
+            sig, reason, family,
+            float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0
+        )
+
+        trend_sig, trend_reason = strategy_trend_following(
+            df_primary, timeframe, filters, cfg
+        )
+        add_candidate(trend_sig, trend_reason, "trend_pullback", 4.0)
+
+        # New independent family: local breakout -> retest -> continuation.
+        # It competes on the same V2 safety/quality gates; it does not weaken them.
+        br_sig, br_reason = strategy_breakout_retest_5m15m(
+            df_primary, filters, cfg
+        )
+        add_candidate(br_sig, br_reason, "breakout_retest", 5.0)
     else:
         # Strategy selection is driven by trend state, while volatility only changes
         # strictness. This prevents high-vol trends from being treated as mean-reversion.
@@ -1548,13 +1918,74 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
+        attempts_txt = f" || {' | '.join(attempts)}" if attempts else ""
         return None, None, (
             f"V2: ستاپ مناسب پیدا نشد | regime={rname} trend={trend_state} "
             f"vol={vol_state} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+            f"{attempts_txt}"
         )
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, best_plan, best_sig, best_reason = candidates[0]
     return best_sig, best_plan, best_reason
+
+
+
+def strategy_breakout_retest_5m15m(df, filters=None, strategy_config=None):
+    """Local breakout -> retest -> continuation candidate for 5m/15m.
+
+    This is deliberately an additional candidate family, not a bypass around
+    V2. It only proposes a setup after a confirmed local channel breakout,
+    followed by a fresh retest/hold on the latest closed candle. Final score,
+    RR, HTF context, regime and all safety gates are still applied downstream.
+    """
+    if df is None or len(df) < 65:
+        return None, "Breakout-retest: داده کافی نیست"
+
+    curr = df.iloc[-2]
+    prev = df.iloc[-3]
+    atr = _safe_float(curr.get("atr"), 0.0)
+    if atr <= 0:
+        return None, "Breakout-retest: ATR نامعتبر"
+
+    ch = _safe_float(prev.get("channel_high"), np.nan)
+    cl = _safe_float(prev.get("channel_low"), np.nan)
+    prev_ch = _safe_float(df.iloc[-4].get("channel_high"), np.nan)
+    prev_cl = _safe_float(df.iloc[-4].get("channel_low"), np.nan)
+
+    if not (np.isfinite(ch) and np.isfinite(cl) and np.isfinite(prev_ch) and np.isfinite(prev_cl)):
+        return None, "Breakout-retest: کانال آماده نیست"
+
+    vr = _safe_float(curr.get("volume_ratio"), 0.0)
+    body = _safe_float(curr.get("body_ratio"), 0.0)
+    adx = _safe_float(curr.get("adx"), 0.0)
+    tol = atr * 0.30
+
+    # Previous candle must have closed outside the local channel.
+    broke_up = float(prev["close"]) > ch and float(df.iloc[-4]["close"]) <= prev_ch
+    broke_down = float(prev["close"]) < cl and float(df.iloc[-4]["close"]) >= prev_cl
+
+    # Latest closed candle must retest the broken level and hold it.
+    if broke_up:
+        touched = float(curr["low"]) <= ch + tol
+        held = float(curr["close"]) > ch
+        directional = float(curr["close"]) > float(curr["open"])
+        if touched and held and directional and adx >= 18.0 and body >= 0.35 and vr >= 0.90:
+            return "BUY", (
+                f"Breakout-Retest صعودی | سطح={ch:.6g} | "
+                f"پولبک به شکست + حفظ سطح | ADX={adx:.1f} | حجم={vr:.2f}x"
+            )
+
+    if broke_down:
+        touched = float(curr["high"]) >= cl - tol
+        held = float(curr["close"]) < cl
+        directional = float(curr["close"]) < float(curr["open"])
+        if touched and held and directional and adx >= 18.0 and body >= 0.35 and vr >= 0.90:
+            return "SELL", (
+                f"Breakout-Retest نزولی | سطح={cl:.6g} | "
+                f"پولبک به شکست + حفظ سطح | ADX={adx:.1f} | حجم={vr:.2f}x"
+            )
+
+    return None, "Breakout-retest: شکست و پولبک معتبر هم‌زمان تشکیل نشده"
 
 
 def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, live_price=None):
