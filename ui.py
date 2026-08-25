@@ -59,6 +59,7 @@ def get_performance_keyboard():
     return {"inline_keyboard": [
         [{"text": "📅 امروز", "callback_data": "/performance_today"}, {"text": "📆 ۷ روز", "callback_data": "/performance_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/performance_month"}, {"text": "📊 کل سابقه", "callback_data": "/performance"}],
+        [{"text": "📋 معاملات امروز", "callback_data": "/today_trades"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
         [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],

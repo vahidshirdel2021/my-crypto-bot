@@ -334,9 +334,9 @@ def get_strategy_params(strategy_config=None):
     }
 
 
-def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
+def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None, market_data_dict=None, filters=None, regime=None, defer_quality_gate=False):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
+        sig, plan, reason = _select_v2_setup(df, market_data_dict, strategy_timeframe, filters or FILTER_DEFAULTS, strategy_config, regime, grid_levels, live_price=live_price, defer_quality_gate=defer_quality_gate)
         if sig == signal and plan:
             return plan, reason
     if strategy_type == "htf_liquidity_reversal":
@@ -1286,12 +1286,12 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
     return break_sig, f"[شکست-قوی] {break_reason}"
 
 
-def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None, live_price=None):
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None, live_price=None, defer_quality_gate=False):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
     if st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
+        sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price, defer_quality_gate=defer_quality_gate)
     elif st == "dynamic":
         if timeframe in ("5min", "15min"):
             sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price)
@@ -1358,6 +1358,18 @@ V2_DEFAULTS = {
     "adaptive_min_body_ratio": 0.50,
     "adaptive_min_target_distance_atr": 1.20,
     "adaptive_trend_adx": 23.0,
+
+    # --- 5m-only V2 filter (intentionally not used by 15m/1h/4h) ---
+    "five_m_filter_enabled": True,
+    "five_m_disable_breakout_retest": True,
+    "five_m_range_only_sweep": True,
+    "five_m_range_min_volume": 1.50,
+    "five_m_range_min_body": 0.70,
+    "five_m_htf_min_abs": 0.25,
+    "five_m_htf_max_abs": 0.85,
+    "five_m_trend_min_htf_abs": 0.15,
+    "five_m_trend_max_htf_abs": 0.85,
+    "five_m_min_score": 64.0,
 }
 
 
@@ -1530,12 +1542,14 @@ def _compute_period_liquidity_levels(df):
     return out
 
 
-def strategy_htf_liquidity_reversal(df, timeframe="1hour", filters=None, strategy_config=None):
+def strategy_htf_liquidity_reversal(df, timeframe="1hour", filters=None, strategy_config=None, market_data_dict=None):
     """Dedicated 1h/4h reversal strategy around completed weekly/monthly liquidity."""
     if timeframe not in ("1hour", "4hour") or df is None or len(df) < 80:
         return None, "HTF Liquidity Reversal فقط برای 1h/4h و با داده کافی فعال است"
     cfg = get_v2_config(strategy_config)
-    levels = _compute_period_liquidity_levels(df)
+    # Weekly/monthly liquidity must be derived from daily candles, not the execution TF.
+    level_source = (market_data_dict or {}).get("1d") if isinstance(market_data_dict, dict) else None
+    levels = _compute_period_liquidity_levels(level_source if level_source is not None and not level_source.empty else df)
     if not levels:
         return None, "سطوح هفتگی/ماهانه کافی نیستند"
     c = df.iloc[-2]
@@ -1650,7 +1664,61 @@ def _confirm_active_structure(d, before_idx, signal, lookback=3):
         return bool(highs[-1] >= highs[-2] and lows[-1] >= lows[-2])
     return bool(highs[-1] <= highs[-2] and lows[-1] <= lows[-2])
 
-def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
+def _five_min_candidate_allowed(df_primary, family, reason, regime_name, htf, score, cfg):
+    """5m-only entry gate. Returns (allowed, rejection_reason).
+
+    This gate is deliberately isolated from other timeframes so 15m/1h/4h
+    behavior remains unchanged. It uses only evidence already available to the
+    V2 selector; it does not invent a probability from EdgeProxy.
+    """
+    if not bool(cfg.get("five_m_filter_enabled", True)):
+        return True, ""
+
+    # Breakout-retest was the weakest family in the audit sample. Disable it
+    # only on 5m; other timeframes keep their existing behavior.
+    if family == "breakout_retest" and bool(cfg.get("five_m_disable_breakout_retest", True)):
+        return False, "5m Filter: breakout_retest موقتاً غیرفعال است"
+
+    # RANGE is treated as a liquidity-reversion environment on 5m.
+    if regime_name == "RANGE" and bool(cfg.get("five_m_range_only_sweep", True)) and family != "liquidity_sweep":
+        return False, "5m Filter: در RANGE فقط liquidity_sweep مجاز است"
+
+    # Directional HTF context: require a meaningful, not extreme, alignment.
+    htf = float(htf or 0.0)
+    if abs(htf) < float(cfg.get("five_m_trend_min_htf_abs", 0.15)):
+        return False, f"5m Filter: HTF ضعیف ({htf:.2f})"
+    if abs(htf) > float(cfg.get("five_m_trend_max_htf_abs", 0.85)):
+        return False, f"5m Filter: HTF بیش از حد شدید ({htf:.2f})"
+
+    # Range sweep needs stronger confirmation and a real structural anchor.
+    if regime_name == "RANGE" and family == "liquidity_sweep":
+        text = str(reason or "").upper()
+        valid_anchor = any(k in text for k in (
+            "PDH", "PDL", "LONDON", "NEW_YORK", "ASIA", "OPENING", "SWING"
+        ))
+        if not valid_anchor:
+            return False, "5m Filter: سطح نقدینگی معتبر برای RANGE پیدا نشد"
+        try:
+            c = df_primary.iloc[-2]
+            vr = float(c.get("volume_ratio", 0) or 0)
+            body = float(c.get("body_ratio", 0) or 0)
+        except Exception:
+            return False, "5m Filter: داده کندل تأیید نامعتبر است"
+        if vr < float(cfg.get("five_m_range_min_volume", 1.50)):
+            return False, f"5m Filter: حجم RANGE کم است ({vr:.2f}x)"
+        if body < float(cfg.get("five_m_range_min_body", 0.70)):
+            return False, f"5m Filter: بدنه کندل RANGE ضعیف است ({body:.2f})"
+        if not (float(cfg.get("five_m_htf_min_abs", 0.25)) <= abs(htf) <= float(cfg.get("five_m_htf_max_abs", 0.85))):
+            return False, f"5m Filter: HTF RANGE خارج از محدوده ({htf:.2f})"
+
+    # Trend pullback keeps the family alive, but demands a meaningful score.
+    if family == "trend_pullback" and float(score) < float(cfg.get("five_m_min_score", 64.0)):
+        return False, f"5m Filter: امتیاز trend_pullback پایین است ({score:.0f})"
+
+    return True, ""
+
+
+def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None, defer_quality_gate=False):
     cfg = get_v2_config(strategy_config)
     regime_info = detect_market_regime(df_primary, cfg)
     rname = regime_info["name"]
@@ -1710,21 +1778,40 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         elif regime == "BEARISH" and sig == "BUY":
             score -= float(cfg.get("regime_opposite_direction_penalty", 8.0))
         score = max(0.0, min(100.0, score))
+        if timeframe == "5min":
+            allowed_5m, reject_5m = _five_min_candidate_allowed(
+                df_primary, family, reason, rname, htf, score, cfg
+            )
+            if not allowed_5m:
+                return
         rr = float(plan.get("rr", 0))
         ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
         # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
         # but high volatility requires stricter score/RR. Mean reversion is never selected
         # merely because volatility is high.
         if vol_state == "HIGH":
-            min_score = float(cfg["high_vol_min_score"])
-            min_rr = float(cfg["high_vol_min_rr"])
+            min_score = max(float(cfg["high_vol_min_score"]), 60.0)
+            min_rr = max(float(cfg["high_vol_min_rr"]), 1.30)
         else:
-            min_score = float(cfg["min_setup_score"])
-            min_rr = float(cfg.get("min_rr", 1.3))
-        if score < min_score or rr < min_rr:
+            min_score = max(float(cfg["min_setup_score"]), 60.0)
+            min_rr = max(float(cfg.get("min_rr", 1.3)), 1.30)
+        if (not defer_quality_gate) and (score < min_score or rr < min_rr):
             return
         if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
+
+        if timeframe == "5min" and not defer_quality_gate:
+            htf_min = float(cfg.get("five_min_htf_min", -0.70))
+            htf_max = float(cfg.get("five_min_htf_max", -0.35))
+            edge_min = float(cfg.get("five_min_edge_min", 0.20))
+            if rname not in {"TREND_BEAR", "MIXED"}:
+                return
+            if sig != "SELL":
+                return
+            if not (htf_min <= htf <= htf_max):
+                return
+            if ev < edge_min:
+                return
         plan = dict(plan)
         plan.update({
             "score": int(round(score)),
@@ -1755,7 +1842,7 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     elif timeframe in ("1hour", "4hour"):
         # Dedicated HTF strategy: weekly/monthly liquidity reversal only. Generic V2
         # trend/breakout/mean-reversion selection is intentionally not used here.
-        sig, reason = strategy_htf_liquidity_reversal(df_primary, timeframe, filters, cfg)
+        sig, reason = strategy_htf_liquidity_reversal(df_primary, timeframe, filters, cfg, market_data_dict=market_data_dict)
         add_candidate(sig, reason, "htf_liquidity_reversal", float(cfg.get("htf_reversal_score_bonus", 8.0)))
     else:
         if trend_state in ("BULL", "BEAR", "NEUTRAL"):
@@ -1777,13 +1864,13 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     return best_sig, best_plan, best_reason
 
 
-def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, live_price=None):
-    sig, plan, reason = _select_v2_setup(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
+def strategy_dynamic_v2(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, live_price=None, defer_quality_gate=False):
+    sig, plan, reason = _select_v2_setup(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price, defer_quality_gate=defer_quality_gate)
     return sig, reason
 
-def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None):
+def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None, defer_quality_gate=False):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "V2: داده کافی نیست"
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
-        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
+        return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price, defer_quality_gate=defer_quality_gate)
     return get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime, live_price=live_price)

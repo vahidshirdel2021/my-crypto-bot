@@ -544,6 +544,8 @@ def default_session():
         'trade_amount_usdt': 50.0,
         'leverage': 5,
         'max_open_positions': 3,
+        'max_same_direction_positions': 2,
+        'same_direction_entry_cooldown_seconds': 900,
         'timeframe': '5min',
         'active_strategy': 'dynamic',
         'paper_positions': [],
@@ -1035,7 +1037,19 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
             return False
         is_long=side_long(p['side'])
         probe=float(favorable_price if favorable_price is not None else current_price)
-        lr=trailing_locked_r(entry,risk_distance,probe,is_long)
+        # 5m-only protection ladder: once the trade reaches +0.50R, move to
+        # breakeven; at +1.00R lock +0.30R. Other timeframes keep the
+        # existing ladder unchanged.
+        if str(p.get('timeframe') or '') == '5min':
+            probe_r=(probe-entry)/risk_distance if is_long else (entry-probe)/risk_distance
+            if probe_r >= 1.0:
+                lr=0.30
+            elif probe_r >= 0.50:
+                lr=0.0
+            else:
+                lr=None
+        else:
+            lr=trailing_locked_r(entry,risk_distance,probe,is_long)
         if lr is None:
             return False
         new_sl=entry+(lr*risk_distance if is_long else -lr*risk_distance)
@@ -1521,6 +1535,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
         return False
+    same_ok, same_reason = _same_direction_guard_allows(s, side, quality_score, planned_rr)
+    if not same_ok:
+        audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': False, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
+        return False
+    audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': True, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -1563,7 +1582,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             market=ex.market(sym)
             lev_info=market.get('info') or {}
             max_lev=float(lev_info.get('max_leverage') or market.get('maxLeverage') or leverage)
-            if leverage>max_lev: leverage=int(max_lev); trade['leverage']=leverage
+            capped = int(_capped_leverage(leverage, max_lev))
+            if leverage > capped: leverage=capped; trade['leverage']=leverage
             ex.set_margin_mode(MARGIN_MODE,sym,{'leverage':leverage})
         except Exception:
             try:
@@ -1762,6 +1782,45 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
+def _capped_leverage(leverage, max_leverage):
+    """Behavior-preserving leverage cap extracted from the inline REAL path."""
+    return min(float(leverage), float(max_leverage))
+
+
+def _leader_correlation_decision(side, both_bearish, both_bullish, any_crash, any_pump, max_corr, avg_positive_corr, detail):
+    """Pure/testable version of the BTC/ETH correlation guard decision."""
+    is_long = side_long(side)
+    if is_long:
+        if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+            return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
+        if any_crash and max_corr >= 0.65:
+            return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+    else:
+        if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+            return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
+        if any_pump and max_corr >= 0.65:
+            return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+    return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
+
+
+def _same_direction_guard_allows(session, side, score, rr, now=None):
+    """Soft cap + cooldown for same-direction entries; one exceptional setup may bypass it."""
+    now = time.time() if now is None else float(now)
+    positions = list(session.get('paper_positions') or [])
+    target_long = side_long(side)
+    same = [p for p in positions if side_long(p.get('side')) == target_long]
+    max_same = int(session.get('max_same_direction_positions', 2) or 0)
+    cooldown = float(session.get('same_direction_entry_cooldown_seconds', 900) or 0)
+    exceptional = float(score or 0) >= 80.0 and float(rr or 0) >= 1.60
+    if max_same > 0 and len(same) >= max_same and not exceptional:
+        return False, f'سقف پوزیشن‌های هم‌جهت پر است ({len(same)}/{max_same})'
+    if cooldown > 0 and not exceptional and same:
+        latest = max(float(p.get('opened_at', 0) or 0) for p in same)
+        if latest and now - latest < cooldown:
+            return False, f'کول‌داون ورود هم‌جهت فعال است ({cooldown-(now-latest):.0f}s باقی‌مانده)'
+    return True, 'محافظ هم‌جهت عبور کرد'
+
+
 async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
     if symbol.upper() in LEADER_SYMBOLS:
         return True, 'لیدر بازار است'
@@ -1804,20 +1863,8 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         max_corr = max(abs(x[1]) for x in correlations) if correlations else 0.0
         avg_positive_corr = sum(max(0.0, x[1]) for x in correlations) / len(correlations) if correlations else 0.0
 
-        is_long = side_long(side)
         detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
-        if is_long:
-            if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
-                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
-            if any_crash and max_corr >= 0.65:
-                return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
-        else:
-            if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
-                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
-            if any_pump and max_corr >= 0.65:
-                return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
-
-        return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
+        return _leader_correlation_decision(side, both_bearish, both_bullish, any_crash, any_pump, max_corr, avg_positive_corr, detail)
     except Exception as exc:
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
@@ -2141,6 +2188,12 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',True))
         early_loss_r=float(cfg.get('early_loss_weakness_exit_min_r', POSITION_MANAGEMENT_EARLY_LOSS_R))
         loss_score=float(cfg.get('early_loss_weakness_exit_score', POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE))
+        # The audit showed too many 5m trades being closed for weakness while
+        # still near entry. Give 5m positions more room; keep other timeframes
+        # exactly as before.
+        if primary_tf == '5min':
+            early_loss_r = min(early_loss_r, -0.25)
+            loss_score = max(loss_score, 55.0)
         need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=early_loss_r)
         if not need_weakness:
             return False,[]
@@ -2730,7 +2783,8 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     plan, plan_reason = build_trade_plan(
         primary, sig, s['strategy_config'], plan_strategy_type,
         strategy_timeframe=primary_tf, grid_levels=grid_levels,
-        setup_index=active_setup_index, live_price=live_entry_price
+        setup_index=active_setup_index, live_price=live_entry_price,
+        market_data_dict=md, filters=s['filters'], regime=regime
     )
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -2788,6 +2842,60 @@ def performance_period_report(chat_id, period='all'):
         lines.append(f'📐 R واقعی میانگین: `{sum(rvals)/len(rvals):+.2f}R`')
     return '\n'.join(lines)
 
+
+def today_trades_report(chat_id):
+    """Detailed list of trades closed on the current calendar day."""
+    s = get_session(chat_id)
+    closed = list(s.get('closed_positions') or [])
+
+    tz = None
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(DAILY_CLOSE_TZ)
+        except Exception:
+            tz = None
+    now_local = datetime.now(tz) if tz else datetime.utcnow()
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_ts = day_start.timestamp()
+
+    trades = [
+        p for p in closed
+        if float(p.get('close_timestamp', 0) or 0) >= day_start_ts
+    ]
+    trades.sort(key=lambda p: float(p.get('close_timestamp', 0) or 0), reverse=True)
+
+    if not trades:
+        return (
+            '📋 *معاملات امروز*\\n'
+            '━━━━━━━━━━━━━━━━━━━━\\n'
+            'امروز هنوز معامله بسته‌شده‌ای ثبت نشده است.'
+        )
+
+    lines = [
+        f'📋 *معاملات امروز* — `{len(trades)}` معامله',
+        '━━━━━━━━━━━━━━━━━━━━'
+    ]
+
+    for idx, p in enumerate(trades, 1):
+        pnl = float(p.get('pnl_usdt', 0) or 0)
+        side = '🟢 LONG' if side_long(p.get('side')) else '🔴 SHORT'
+        close_ts = float(p.get('close_timestamp', 0) or 0)
+        try:
+            close_dt = datetime.fromtimestamp(close_ts, tz=tz) if tz else datetime.fromtimestamp(close_ts)
+            close_time = close_dt.strftime('%H:%M')
+        except Exception:
+            close_time = '—'
+
+        lines.extend([
+            f'*{idx}. {p.get("symbol", "—")} | {side} | `{close_time}`*',
+            f'• ورود: `{fmt(p.get("entry_price", 0))}`',
+            f'• TP: `{fmt(p.get("tp", 0))}` | SL: `{fmt(p.get("sl", 0))}`',
+            f'• سود/زیان: `{pnl:+.2f} USDT`',
+            f'• علت بسته‌شدن: `{p.get("close_reason") or "—"}`',
+            '━━━━━━━━━━━━━━━━━━━━'
+        ])
+
+    return '\\n'.join(lines).rstrip('━\\n ')
 
 def trade_audit_report(chat_id):
     s=get_session(chat_id); positions=list(s.get('paper_positions') or []); closed=list(s.get('closed_positions') or [])
@@ -3298,11 +3406,12 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions'][:]:
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
         return
-    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
+    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
         elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
         elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
         elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
+        elif cl=='/today_trades': send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
         elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
         elif cl=='/export_trade_data': export_trade_data(chat_id)
         elif cl=='/reset_stats_prompt':
@@ -3319,6 +3428,7 @@ def handle_text(chat_id,text):
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
         '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
         '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
+        '📋 معاملات امروز':'/today_trades', 'معاملات امروز':'/today_trades',
         '📊 وضعیت بازار':'/market_report', 'وضعیت بازار':'/market_report',
         '⚙️ تنظیمات معامله':'/check_wizard', 'تنظیمات معامله':'/check_wizard',
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
