@@ -1002,28 +1002,30 @@ def round_trip_fee_usdt(margin, leverage):
         return 0.0
 
 
-def trailing_locked_r(entry, risk_distance, current_price, is_long):
-    """
-    Profit-protection ladder for an already profitable position.
+# Position-management only: entry/strategy logic is intentionally untouched.
+PROFIT_LADDERS_R = {
+    '5min':  [(0.50, 0.00), (0.75, 0.15), (1.00, 0.30), (1.25, 0.50), (1.50, 0.75), (2.00, 1.10)],
+    '15min': [(0.75, 0.00), (1.00, 0.15), (1.50, 0.50), (2.00, 1.00), (2.50, 1.50), (3.00, 2.00)],
+    '1hour': [(1.00, 0.00), (1.50, 0.50), (2.00, 1.00), (3.00, 1.75), (4.00, 2.50)],
+    '4hour': [(1.25, 0.00), (2.00, 0.50), (3.00, 1.50), (4.00, 2.50), (5.00, 3.50)],
+}
 
-    1.0R -> break-even
-    1.5R -> lock +0.5R
-    2.0R -> lock +1.0R
-    2.5R -> lock +1.5R
-    ...
-
-    This intentionally does not alter entry/TP logic; it only protects an
-    existing position after it has moved in the intended direction.
-    """
+def trailing_locked_r(entry, risk_distance, current_price, is_long, timeframe=None):
+    """Return the profit lock for the current favorable R, using a TF-specific ladder."""
     try:
         entry=float(entry); risk_distance=float(risk_distance); current_price=float(current_price)
     except Exception:
         return None
     if risk_distance<=0 or not math.isfinite(risk_distance): return None
     r=(current_price-entry)/risk_distance if is_long else (entry-current_price)/risk_distance
-    if r<1.0: return None
-    step=math.floor(r*2)/2.0
-    return max(0.0, step-1.0)
+    ladder=PROFIT_LADDERS_R.get(str(timeframe or ''), [(1.0,0.0),(1.5,0.5),(2.0,1.0),(2.5,1.5)])
+    locked=None
+    for trigger,lock in ladder:
+        if r >= trigger:
+            locked=lock
+        else:
+            break
+    return locked
 
 
 def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
@@ -1037,19 +1039,18 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
             return False
         is_long=side_long(p['side'])
         probe=float(favorable_price if favorable_price is not None else current_price)
-        # 5m-only protection ladder: once the trade reaches +0.50R, move to
-        # breakeven; at +1.00R lock +0.30R. Other timeframes keep the
-        # existing ladder unchanged.
-        if str(p.get('timeframe') or '') == '5min':
-            probe_r=(probe-entry)/risk_distance if is_long else (entry-probe)/risk_distance
-            if probe_r >= 1.0:
-                lr=0.30
-            elif probe_r >= 0.50:
-                lr=0.0
-            else:
+        tf=str(p.get('timeframe') or '')
+        # V5: use the best favorable excursion seen by the position, not only
+        # the latest price. This prevents a trade that reached +1R/+2R from
+        # surrendering most of that excursion during a normal pullback.
+        peak_price=p.get('peak_favorable_price')
+        peak_probe=float(peak_price) if peak_price is not None else probe
+        lr=trailing_locked_r(entry,risk_distance,peak_probe,is_long,tf)
+        # Safety: never place a stop beyond the currently tradable price.
+        if lr is not None:
+            proposed=entry+(lr*risk_distance if is_long else -lr*risk_distance)
+            if (is_long and proposed > float(current_price)) or ((not is_long) and proposed < float(current_price)):
                 lr=None
-        else:
-            lr=trailing_locked_r(entry,risk_distance,probe,is_long)
         if lr is None:
             return False
         new_sl=entry+(lr*risk_distance if is_long else -lr*risk_distance)
@@ -2168,6 +2169,36 @@ def _position_management_timeframe(p):
     return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, primary)
 
 
+def _mfe_protection_exit_check(p, current_r):
+    """Close a profitable position if it gives back too much of its locked MFE.
+
+    This is position management only. It never changes an entry, TP, or initial SL.
+    A small pullback allowance is retained so normal noise does not over-close trades.
+    """
+    try:
+        tf=str(p.get('timeframe') or '')
+        peak=float(p.get('mfe_r') or 0.0)
+        if peak <= 0:
+            return False, None
+        ladder=PROFIT_LADDERS_R.get(tf)
+        if not ladder:
+            return False, None
+        protected=None; trigger=None
+        for tr,lock in ladder:
+            if peak >= tr:
+                protected=lock; trigger=tr
+            else:
+                break
+        if protected is None:
+            return False, None
+        # Giveback tolerance grows slightly with timeframe.
+        tolerance={'5min':0.08,'15min':0.12,'1hour':0.18,'4hour':0.25}.get(tf,0.15)
+        if current_r < protected - tolerance:
+            return True, f"MFE protection: peak +{peak:.2f}R → current {current_r:.2f}R; minimum protected +{protected:.2f}R (trigger {trigger:.2f}R)"
+        return False, None
+    except Exception:
+        return False, None
+
 def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
     """Fast multi-timeframe position protection; entries remain untouched."""
     try:
@@ -2192,8 +2223,11 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         # still near entry. Give 5m positions more room; keep other timeframes
         # exactly as before.
         if primary_tf == '5min':
-            early_loss_r = min(early_loss_r, -0.25)
-            loss_score = max(loss_score, 55.0)
+            # 5m needs an earlier, graduated loss-protection path. A single hard
+            # threshold at -0.25R was too easy to miss before a fast candle reached
+            # the primary 5m SL. Use a lower weakness threshold as the loss deepens.
+            early_loss_r = min(early_loss_r, -0.20)
+            loss_score = max(loss_score, 45.0)
         need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=early_loss_r)
         if not need_weakness:
             return False,[]
@@ -2210,7 +2244,16 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         # enabled by default and activates at the configured small adverse R threshold.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if early_loss_enabled and current_r<=early_loss_r and wscore>=loss_score:
+        if early_loss_enabled and primary_tf == '5min':
+            # Graduated protection: the closer price gets to SL, the less evidence
+            # is required to cut the trade. This is intentionally 5m-only.
+            if current_r <= -0.50 and wscore >= 35.0:
+                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+            if current_r <= -0.35 and wscore >= 40.0:
+                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+            if current_r <= early_loss_r and wscore >= loss_score:
+                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+        elif early_loss_enabled and current_r<=early_loss_r and wscore>=loss_score:
             return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         return False,[]
     except Exception as exc:
@@ -2382,9 +2425,24 @@ def update_positions(chat_id):
         if risk_distance<=0: risk_distance=abs(entry-float(p.get('sl',entry)))
         current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance) if risk_distance>0 else 0.0
 
-        # Hard SL/TP is always checked before any discretionary stop movement.
+        # 5m early-loss protection gets first look using the faster management
+        # timeframe. This allows a confirmed deterioration to close before a fast
+        # 5m candle can jump straight into the primary SL. Other timeframes keep
+        # the original ordering.
         exit_price=None; reason=None
-        if s['trading_mode']=='PAPER' and not primary_df.empty:
+        # V5: MFE-based profit protection gets first decision for every timeframe.
+        mfe_exit,mfe_reason=_mfe_protection_exit_check(p,current_r)
+        if mfe_exit:
+            exit_price=price; reason='مدیریت سود هوشمند (حفاظت بر اساس MFE)'; p['mfe_protection_reason']=[mfe_reason]
+
+        if reason is None and primary_tf == '5min':
+            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
+            if should_exit:
+                exit_price=price; reason='مدیریت هوشمند (کاهش ریسک پیش از SL)'; p['weakness_exit_reasons']=wreasons
+
+        # Hard SL/TP remains the fallback and is still checked before discretionary
+        # stop movement.
+        if reason is None and s['trading_mode']=='PAPER' and not primary_df.empty:
             if side_long(p['side']):
                 hit_tp=high>=float(p['tp']); hit_sl=low<=float(p['sl'])
             else:
@@ -2405,7 +2463,7 @@ def update_positions(chat_id):
             if not primary_df.empty:
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
 
-        if reason is None:
+        if reason is None and primary_tf != '5min':
             should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
             if should_exit:
                 exit_price=price; reason='مدیریت هوشمند (ضعف روند / کاهش ریسک)'; p['weakness_exit_reasons']=wreasons

@@ -509,6 +509,33 @@ def _compute_prev_day_levels(df):
 
 
 
+def compute_daily_structure_levels(pdh, pdl):
+    """Return the five-level daily structure map built from PDH/PDL.
+
+    EQ is the midpoint. The outer reaction levels mirror each half-range:
+    lower = PDL - (EQ - PDL), upper = PDH + (PDH - EQ).
+    This function is descriptive/structural only; it does not alter entry rules.
+    """
+    try:
+        pdh = float(pdh); pdl = float(pdl)
+    except Exception:
+        return {}
+    if not (np.isfinite(pdh) and np.isfinite(pdl)) or pdh <= pdl:
+        return {}
+    eq = (pdh + pdl) / 2.0
+    lower = pdl - (eq - pdl)
+    upper = pdh + (pdh - eq)
+    return {
+        "pdh": pdh,
+        "eq": eq,
+        "pdl": pdl,
+        "upper_reaction": upper,
+        "lower_reaction": lower,
+        "upper_half_range": pdh - eq,
+        "lower_half_range": eq - pdl,
+    }
+
+
 def _adaptive_intraday_levels(d, before_idx, cfg):
     """Build conservative, non-future intraday liquidity anchors.
 
@@ -1044,6 +1071,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
         "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
+        "daily_structure_levels": compute_daily_structure_levels(pdh, pdl),
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
         "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
@@ -1370,6 +1398,16 @@ V2_DEFAULTS = {
     "five_m_trend_min_htf_abs": 0.15,
     "five_m_trend_max_htf_abs": 0.85,
     "five_m_min_score": 64.0,
+
+    # --- Daily Structure Flip (PDL / EQ / PDH + mirrored outer zones) ---
+    "structure_flip_enabled": True,
+    "structure_flip_timeframes": ("5min", "15min"),
+    "structure_flip_lookback": 14,
+    "structure_flip_retest_tolerance_atr": 0.18,
+    "structure_flip_min_break_distance_atr": 0.08,
+    "structure_flip_min_rr": 1.30,
+    "structure_flip_min_score": 62.0,
+    "structure_flip_volume_bonus_threshold": 1.05,
 }
 
 
@@ -1664,6 +1702,191 @@ def _confirm_active_structure(d, before_idx, signal, lookback=3):
         return bool(highs[-1] >= highs[-2] and lows[-1] >= lows[-2])
     return bool(highs[-1] <= highs[-2] and lows[-1] <= lows[-2])
 
+def _detect_structure_flip(df, cfg):
+    """Detect a confirmed break/retest of one of five daily structure levels.
+
+    Levels are: PDL-Range, PDL, EQ, PDH, PDH+Range.  A valid flip requires a
+    completed candle that breaks/ closes through a level, followed later by a
+    retest from the new side and a confirming rejection candle.  Only candles
+    before the latest closed candle are used, so the detector does not look ahead.
+
+    Returns a dict suitable for an entry candidate or None.
+    """
+    if df is None or len(df) < 70:
+        return None
+    d, pdh, pdl = _compute_prev_day_levels(df)
+    if pdh is None or pdl is None:
+        return None
+    levels = compute_daily_structure_levels(pdh, pdl)
+    if not levels:
+        return None
+
+    ordered = [
+        ("PDL_EXT", levels["lower_reaction"]),
+        ("PDL", levels["pdl"]),
+        ("EQ", levels["eq"]),
+        ("PDH", levels["pdh"]),
+        ("PDH_EXT", levels["upper_reaction"]),
+    ]
+    # Work only with fully closed candles. The last row is normally the live candle.
+    idx = len(d) - 2
+    if idx < 10:
+        return None
+    atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
+    if atr <= 0:
+        return None
+    tol = atr * float(cfg.get("structure_flip_retest_tolerance_atr", 0.18))
+    min_break = atr * float(cfg.get("structure_flip_min_break_distance_atr", 0.08))
+    lookback = max(6, int(cfg.get("structure_flip_lookback", 14)))
+    start = max(2, idx - lookback)
+
+    def _c(i, col):
+        return _safe_float(d.iloc[i].get(col), 0.0)
+
+    candidates = []
+    for pos, (name, level) in enumerate(ordered):
+        level = float(level)
+        # Search for the most recent clean break before the retest.
+        for br in range(idx - 2, start - 1, -1):
+            prev_close = _c(br - 1, "close")
+            br_close = _c(br, "close")
+            if not prev_close or not br_close:
+                continue
+            short_break = prev_close >= level and br_close < level - min_break
+            long_break = prev_close <= level and br_close > level + min_break
+            if not (short_break or long_break):
+                continue
+            # Need at least one completed candle after the break before the retest.
+            if idx - br < 1:
+                continue
+            # The candle immediately before the confirmation candle must form the
+            # swing/retest at the flipped level; the latest closed candle confirms it.
+            swing_i = idx - 1
+            if swing_i <= br:
+                continue
+            so = _c(swing_i, "open"); sh = _c(swing_i, "high"); sl = _c(swing_i, "low"); sc = _c(swing_i, "close")
+            o = _c(idx, "open"); h = _c(idx, "high"); l = _c(idx, "low"); c = _c(idx, "close")
+            vr = _safe_float(d.iloc[idx].get("volume_ratio"), 1.0)
+            body = _safe_float(d.iloc[idx].get("body_ratio"), 0.0)
+            swing_body = _safe_float(d.iloc[swing_i].get("body_ratio"), 0.0)
+            if short_break:
+                # Swing high retests the level from below, then the latest candle
+                # confirms continuation back down.
+                swing_retest = sh >= level - tol and sc < level and sh >= _c(swing_i - 1, "high") and sh >= h
+                confirmation = c < o and c < level and c <= sc
+                if not (swing_retest and confirmation):
+                    continue
+                signal = "SELL"
+                next_target = ordered[pos - 1][1] if pos > 0 else None
+                reaction = "مقاومت"
+                distance = level - (next_target if next_target is not None else c)
+            else:
+                # Swing low retests the level from above, then the latest candle
+                # confirms continuation back up.
+                swing_retest = sl <= level + tol and sc > level and sl <= _c(swing_i - 1, "low") and sl <= l
+                confirmation = c > o and c > level and c >= sc
+                if not (swing_retest and confirmation):
+                    continue
+                signal = "BUY"
+                next_target = ordered[pos + 1][1] if pos < len(ordered) - 1 else None
+                reaction = "حمایت"
+                distance = (next_target if next_target is not None else c) - level
+            if next_target is None or distance <= 0:
+                continue
+            # Fresh confirmation: both the swing and confirmation candles must show
+            # meaningful participation; this prevents a one-tick level touch.
+            if body < 0.35 or swing_body < 0.25:
+                continue
+            score = 55.0
+            score += min(15.0, body * 15.0)
+            score += min(10.0, max(0.0, (vr - 0.85) * 18.0))
+            # More recent break/retest gets a small priority bonus.
+            age = idx - br
+            score += max(0.0, 8.0 - age * 0.8)
+            rr_hint = distance / max(atr * 1.25, 1e-9)
+            score += min(12.0, max(0.0, (rr_hint - 1.0) * 6.0))
+            candidates.append({
+                "signal": signal,
+                "level_name": name,
+                "level": level,
+                "target_level": float(next_target),
+                "reaction": reaction,
+                "break_index": br,
+                "score": float(min(100.0, score)),
+                "volume_ratio": vr,
+                "body_ratio": body,
+                "atr": atr,
+            })
+            break
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: (x["score"], -x["break_index"]), reverse=True)
+    return candidates[0]
+
+
+def _build_structure_flip_plan(df, flip, cfg):
+    """Build a risk plan for a confirmed daily structure flip."""
+    if not flip or df is None or len(df) < 30:
+        return None, "Structure Flip داده کافی ندارد"
+    idx = len(df) - 2
+    c = df.iloc[idx]
+    entry = _safe_float(c.get("close"), 0.0)
+    atr = _safe_float(c.get("atr"), 0.0)
+    if entry <= 0 or atr <= 0:
+        return None, "Structure Flip قیمت/ATR نامعتبر است"
+    level = float(flip["level"])
+    target = float(flip["target_level"])
+    signal = flip["signal"]
+    buffer_atr = 0.35
+    if signal == "SELL":
+        sl = level + atr * buffer_atr
+        risk = sl - entry
+        reward = entry - target
+    else:
+        sl = level - atr * buffer_atr
+        risk = entry - sl
+        reward = target - entry
+    if risk <= 0 or reward <= 0:
+        return None, "Structure Flip فاصله ریسک/هدف نامعتبر است"
+    min_rr = float(cfg.get("structure_flip_min_rr", 1.30))
+    rr = reward / risk
+    if rr < min_rr:
+        return None, f"Structure Flip R:R ناکافی ({rr:.2f}R)"
+    # Avoid pathological stops in high volatility.
+    if risk > atr * 2.50:
+        return None, "Structure Flip استاپ بیش از حد دور است"
+    score = float(flip["score"])
+    min_score = float(cfg.get("structure_flip_min_score", 62.0))
+    if score < min_score:
+        return None, f"Structure Flip کیفیت پایین است ({score:.0f}/100)"
+    quality = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول"
+    plan = {
+        "entry": entry,
+        "sl": float(sl),
+        "tp": float(target),
+        "score": int(round(score)),
+        "quality_label": quality,
+        "rr": float(rr),
+        "risk_atr": float(risk / atr),
+        "target_r": float(rr),
+        "atr": atr,
+        "atr_ratio": 1.0,
+        "volume_ratio": float(flip.get("volume_ratio", 1.0)),
+        "body_ratio": float(flip.get("body_ratio", 0.0)),
+        "structure_flip": True,
+        "structure_flip_level": level,
+        "structure_flip_level_name": flip["level_name"],
+        "structure_flip_target": target,
+        "daily_structure_levels": compute_daily_structure_levels(*_compute_prev_day_levels(df)[1:]),
+        "reason": (
+            f"Structure Flip | {flip['level_name']} به {flip['reaction']} تبدیل شد | "
+            f"Break→Retest→Confirmation | Target={target:.6g} | R:R={rr:.2f}R"
+        ),
+    }
+    return plan, plan["reason"]
+
+
 def _five_min_candidate_allowed(df_primary, family, reason, regime_name, htf, score, cfg):
     """5m-only entry gate. Returns (allowed, rejection_reason).
 
@@ -1800,10 +2023,12 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):
             return
 
-        if timeframe == "5min" and not defer_quality_gate:
-            htf_min = float(cfg.get("five_min_htf_min", -0.70))
-            htf_max = float(cfg.get("five_min_htf_max", -0.35))
-            edge_min = float(cfg.get("five_min_edge_min", 0.20))
+        if timeframe == "5min" and not defer_quality_gate and family != "structure_flip":
+            # V3 research gate applies to the legacy 5m families. Structure Flip is
+            # an independent structure-based entry family and has its own quality/RR gate.
+            htf_min = float(cfg.get("five_m_htf_min", -0.70))
+            htf_max = float(cfg.get("five_m_htf_max", -0.35))
+            edge_min = float(cfg.get("five_m_edge_min", 0.20))
             if rname not in {"TREND_BEAR", "MIXED"}:
                 return
             if sig != "SELL":
@@ -1827,7 +2052,8 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             "model_win_proxy": round(pwin, 4),
             "setup_family": family,
         })
-        candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
+        version_label = "V3" if timeframe == "5min" else "V2"
+        candidates.append((score * max(rr, 0.01), plan, sig, f"{version_label} {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
     if timeframe in ("5min", "15min"):
         # Three competing intraday families: liquidity sweep, 3-candle trend pullback,
@@ -1839,6 +2065,40 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         add_candidate(sig, reason, "trend_pullback", 4.0)
         sig, reason = strategy_breakout_retest(df_primary, filters, cfg)
         add_candidate(sig, reason, "breakout_retest", 6.0)
+
+        # Independent daily Structure Flip entry. It uses PDL/EQ/PDH and the
+        # mirrored outer levels, then requires break -> retest -> confirmation.
+        flip_enabled = bool(cfg.get("structure_flip_enabled", True))
+        flip_tfs = tuple(cfg.get("structure_flip_timeframes", ("5min", "15min")))
+        if flip_enabled and timeframe in flip_tfs:
+            flip = _detect_structure_flip(df_primary, cfg)
+            if flip:
+                flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg)
+                if flip_plan:
+                    htf_flip, htf_flip_details = _v2_htf_bias(market_data_dict, flip["signal"] == "BUY")
+                    flip_score = float(flip_plan.get("score", 0))
+                    flip_score += max(-6.0, min(6.0, htf_flip * 6.0))
+                    flip_score = max(0.0, min(100.0, flip_score))
+                    rr_flip = float(flip_plan.get("rr", 0.0))
+                    ev_flip, pwin_flip = _v2_edge_proxy(flip_score, rr_flip, rname, regime_info["atr_ratio"])
+                    if flip_score >= float(cfg.get("structure_flip_min_score", 62.0)) and rr_flip >= float(cfg.get("structure_flip_min_rr", 1.30)):
+                        fp = dict(flip_plan)
+                        fp.update({
+                            "score": int(round(flip_score)),
+                            "regime": rname,
+                            "regime_confidence": rconf,
+                            "trend_state": trend_state,
+                            "volatility_state": vol_state,
+                            "htf_bias": float(htf_flip),
+                            "htf_details": htf_flip_details,
+                            "equilibrium_bias": 0.0,
+                            "equilibrium_mid": fp.get("daily_structure_levels", {}).get("eq"),
+                            "edge_proxy": round(ev_flip, 4),
+                            "model_win_proxy": round(pwin_flip, 4),
+                            "setup_family": "structure_flip",
+                        })
+                        flip_reason_full = f"V6 Structure Flip {rname}/{vol_state} | {flip_reason} | HTF={htf_flip:.2f} | EdgeProxy={ev_flip:.2f}"
+                        candidates.append((flip_score * max(rr_flip, 0.01), fp, flip["signal"], flip_reason_full))
     elif timeframe in ("1hour", "4hour"):
         # Dedicated HTF strategy: weekly/monthly liquidity reversal only. Generic V2
         # trend/breakout/mean-reversion selection is intentionally not used here.
