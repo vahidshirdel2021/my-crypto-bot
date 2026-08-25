@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import numpy as np
 
@@ -255,33 +254,7 @@ TIMEFRAME_PARAM_ADJUST = TIMEFRAME_STRATEGY_PRESETS
 
 
 def get_timeframe_preset(timeframe):
-    preset = {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
-    # --- TEMP DEBUG SWITCH: isolate the execution path from the entry filters. ---
-    # Set env var DEBUG_FORCE_ENTRY_5M=1 on the host (no redeploy needed, no code
-    # touched) to zero out every 5m/15m entry gate. If a position still never
-    # opens with this on, the bug is downstream of signal generation (plan
-    # building / order execution). If it opens (with garbage quality — expected),
-    # the execution path is healthy and the real filters were correctly blocking
-    # entries. Turn the env var off (or unset it) to instantly restore the exact
-    # original thresholds — nothing here is a permanent change to STRATEGY_DEFAULTS
-    # or TIMEFRAME_STRATEGY_PRESETS. NEVER enable this in REAL trading mode.
-    if timeframe in ("5min", "15min") and os.environ.get("DEBUG_FORCE_ENTRY_5M", "").strip().lower() in ("1", "true", "yes"):
-        preset = {
-            **preset,
-            "min_adx": 0.0,
-            "min_volume_ratio": 0.0,
-            "min_body_ratio": 0.0,
-            "min_trade_score": 0.0,
-            "min_rr": 0.0,
-            "min_target_r": 0.10,
-            "sweep_min_distance_atr": 0.0,
-            "sweep_require_reclaim": False,
-            "sweep_require_reversal_candle": False,
-            "active_setup_require_daily_breakout": False,
-            "active_setup_breakout_distance_atr": 0.0,
-            "min_sl_percent": 0.0005,
-        }
-    return preset
+    return {**STRATEGY_DEFAULTS, **TIMEFRAME_STRATEGY_PRESETS.get(timeframe, {})}
 
 
 def _safe_float(value, default=0.0):
