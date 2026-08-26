@@ -92,8 +92,8 @@ PLATFORM_FEE_RATE_PCT = min(100.0, max(0.0, float(os.environ.get('PLATFORM_FEE_R
 PLATFORM_FEE_MIN_PROFIT_USDT = max(0.0, float(os.environ.get('PLATFORM_FEE_MIN_PROFIT_USDT', '0.01')))
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in ADMIN_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
-# Project owner admin ID. Environment ADMIN_CHAT_IDS may add additional admins.
-ADMIN_CHAT_IDS.add(1878257830)
+# Fixed project admins. Environment ADMIN_CHAT_IDS may add additional admins.
+ADMIN_CHAT_IDS.update({115981067, 8621862979, 1878257830, 8714168271})
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -169,6 +169,9 @@ DB_LOCK = RLock()
 DATA_LOCK = RLock()
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
 ENTRY_DIAG_STATE: Dict[int, Dict[str, Any]] = {}
+HEARTBEAT_LAST_SENT: Dict[int, float] = {}
+HEARTBEAT_INTERVAL_SECONDS = 600.0
+HEARTBEAT_TEXT = '🤖 ربات معاملاتی فعال و درحال اسکن بازار و فرصت یابی می باشد'
 EXCHANGE_CACHE: Dict[int, Any] = {}
 DATA_CACHE: Dict[str, Any] = {}
 PRICE_CACHE: Dict[str, Any] = {}
@@ -2862,28 +2865,8 @@ def _entry_diag_batch_update(chat_id, results):
             state['transitions'].append(f'{sym}: {old_stage} → {stage}')
     state['transitions'] = state['transitions'][-20:]
 
-    # Always report periodically, even if a trade happened. This makes the log a real
-    # live dashboard instead of only a "why no entry" alarm.
-    if not state.get('no_entry_since'):
-        state['no_entry_since'] = now
-    last_report = float(state.get('last_report_at', 0.0) or 0.0)
-    if (not last_report) or now - last_report >= NO_ENTRY_REPORT_SECONDS:
-        try:
-            elapsed = now - float(state.get('no_entry_since') or now)
-            report = _entry_diag_report(
-                chat_id,
-                list(state['window_results']),
-                elapsed,
-                symbol_states=state['symbol_states'],
-                transitions=state['transitions'],
-            )
-            send_message(chat_id, report, parse_mode='Markdown')
-            state['last_report_at'] = now
-            state['window_results'] = []
-            state['transitions'] = []
-            state['no_entry_since'] = now
-        except Exception as exc:
-            logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
+    # Diagnostic results remain stored for the admin/audit UI, but are no longer
+    # pushed as periodic Telegram reports. A simple heartbeat is sent every 10 minutes.
 
 
 async def scan_symbol(http,chat_id,symbol,regime=None):
@@ -3080,6 +3063,22 @@ def trade_audit_report(chat_id):
     if p in closed:
         lines += [f'🚪 خروج: `{fmt(p.get("close_price",0))}`',f'💰 PnL: `{float(p.get("pnl_usdt",0) or 0):+.2f} USDT`',f'📝 علت خروج: `{p.get("close_reason","—")}`']
     return '\n'.join(lines)
+
+
+def trade_tracking_keyboard(chat_id):
+    s = get_session(chat_id)
+    enabled = bool(s.get('trade_pipeline_enabled', False))
+    icon = '🟢' if enabled else '🔴'
+    state = 'روشن' if enabled else 'خاموش'
+    return {
+        'inline_keyboard': [
+            [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
+            [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
+            [{'text': '🧭 نمایش آخرین مسیرهای ثبت‌شده', 'callback_data': '/trade_pipeline'}],
+            [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
+            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+        ]
+    }
 
 
 def trade_pipeline_report(chat_id):
@@ -3688,6 +3687,12 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions'][:]:
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
         return
+    if cl == '/trade_tracking':
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای Admin است.')
+            return
+        send_message(chat_id, '🧭 *ردیابی معاملات*\n\nاز این بخش می‌توانید ثبت مسیر معاملات را روشن/خاموش کنید یا خروجی کامل JSON بگیرید.', trade_tracking_keyboard(chat_id))
+        return
     if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/trade_pipeline','/toggle_trade_pipeline','/export_trade_pipeline','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard(chat_id, s))
         elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard(chat_id, s))
@@ -3698,9 +3703,15 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl=='/toggle_trade_pipeline':
             if not is_admin(chat_id):
                 send_message(chat_id, '⛔ این کنترل فقط برای Admin فعال است.'); return
-            s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False); save_session(chat_id); send_message(chat_id, f"🧭 ممیزی کامل مسیر معاملات: {'🟢 روشن' if s['trade_pipeline_enabled'] else '🔴 خاموش'}", get_performance_keyboard(chat_id, s))
-        elif cl=='/trade_pipeline': send_message(chat_id, trade_pipeline_report(chat_id), get_performance_keyboard(chat_id, s))
-        elif cl=='/export_trade_pipeline': export_trade_pipeline(chat_id)
+            s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False); save_session(chat_id); send_message(chat_id, f"🧭 ردیابی معاملات: {'🟢 روشن' if s['trade_pipeline_enabled'] else '🔴 خاموش'}", trade_tracking_keyboard(chat_id))
+        elif cl=='/trade_pipeline':
+            if not is_admin(chat_id):
+                send_message(chat_id, '⛔ این بخش فقط برای Admin است.'); return
+            send_message(chat_id, trade_pipeline_report(chat_id), trade_tracking_keyboard(chat_id))
+        elif cl=='/export_trade_pipeline':
+            if not is_admin(chat_id):
+                send_message(chat_id, '⛔ این بخش فقط برای Admin است.'); return
+            export_trade_pipeline(chat_id)
         elif cl=='/export_trade_data': export_trade_data(chat_id)
 
         elif cl=='/reset_stats_prompt':
@@ -3715,7 +3726,7 @@ def handle_text(chat_id,text):
     fixed_buttons={
         '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu',
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
-        '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
+        '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions', '🔄 پیگیری پوزیشن‌ها':'/open_positions', 'پیگیری پوزیشن‌ها':'/open_positions',
         '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
         '📋 معاملات امروز':'/today_trades', 'معاملات امروز':'/today_trades',
         '📊 وضعیت بازار':'/market_report', 'وضعیت بازار':'/market_report',
@@ -3890,6 +3901,20 @@ def telegram_listener():
             logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
 
+def _send_periodic_heartbeat():
+    now = time.time()
+    for cid, sess in list(USER_SESSIONS.items()):
+        if not sess.get('is_bot_active') or sess.get('daily_stopped'):
+            continue
+        last = float(HEARTBEAT_LAST_SENT.get(cid, 0.0) or 0.0)
+        if not last or now - last >= HEARTBEAT_INTERVAL_SECONDS:
+            try:
+                send_message(cid, HEARTBEAT_TEXT)
+                HEARTBEAT_LAST_SENT[cid] = now
+            except Exception as exc:
+                logger.warning('heartbeat send failed chat=%s: %s', cid, exc)
+
+
 async def scan_loop():
     global ASYNC_SEMAPHORE
     ASYNC_SEMAPHORE=asyncio.Semaphore(MAX_ASYNC_REQUESTS)
@@ -3942,6 +3967,7 @@ async def scan_loop():
                     for cid, results in by_chat.items():
                         _entry_diag_batch_update(cid, results)
         except Exception as exc: logger.exception('scan loop: %s',exc)
+        _send_periodic_heartbeat()
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 

@@ -2,6 +2,7 @@ from strategy import STRATEGY_DEFAULTS
 import os
 _ADMIN_CHAT_IDS_RAW = os.environ.get("ADMIN_CHAT_IDS", os.environ.get("ALLOWED_CHAT_IDS", "")).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in _ADMIN_CHAT_IDS_RAW.split(",") if x.strip().lstrip("-").isdigit()}
+ADMIN_CHAT_IDS.update({115981067, 8621862979, 1878257830, 8714168271})
 
 CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
 
@@ -10,7 +11,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     # کیبورد سفارشی سبک و ثابت (پایین صفحه) - همیشه در دسترس، مستقل از منوی این‌لاین
     return {
         "keyboard": [
-            [{"text": "📊 وضعیت بازار"}, {"text": "🔄 پوزیشن‌ها"}],
+            [{"text": "📊 وضعیت بازار"}, {"text": "🔄 پیگیری پوزیشن‌ها"}],
             [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
         ],
         "resize_keyboard": True,
@@ -76,9 +77,7 @@ def get_performance_keyboard(chat_id=None, session=None):
         icon = "🟢" if enabled else "🔴"
         state = "روشن" if enabled else "خاموش"
         k += [
-            [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}],
-            [{"text": f"{icon} ممیزی Pipeline: {state}", "callback_data": "/toggle_trade_pipeline"}],
-            [{"text": "📦 خروجی JSON ممیزی کامل", "callback_data": "/export_trade_pipeline"}],
+            [{"text": "🧭 ردیابی معاملات", "callback_data": "/trade_tracking"}],
         ]
     k += [
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
@@ -152,7 +151,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
-        [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
+        [{"text": "🔄 پیگیری پوزیشن‌ها", "callback_data": "/open_positions"},
          {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
         [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
         [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
@@ -163,9 +162,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         enabled = bool((session or {}).get("trade_pipeline_enabled", False))
         icon = "🟢" if enabled else "🔴"
         state = "روشن" if enabled else "خاموش"
-        rows.append([{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}])
-        rows.append([{"text": f"{icon} ممیزی Pipeline: {state}", "callback_data": "/toggle_trade_pipeline"}])
-        rows.append([{"text": "📦 خروجی JSON ممیزی کامل", "callback_data": "/export_trade_pipeline"}])
+        rows.append([{"text": "🧭 ردیابی معاملات", "callback_data": "/trade_tracking"}])
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
     return {"inline_keyboard": rows}
 
