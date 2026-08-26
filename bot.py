@@ -138,6 +138,27 @@ LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
 
+# Dynamic DEX-aware trading universe.  CoinGecko supplies the current market-cap
+# ranking; the candidate set below is deliberately limited to liquid/perpetual-style
+# assets commonly available on major on-chain venues (e.g. Hyperliquid/GMX).
+# The existing CoinEx/KuCoin market-data layer remains the execution/data source, so
+# a symbol is only useful to the scanner when candles are actually available there.
+DEX_WATCHLIST_ENABLED = os.environ.get('DEX_WATCHLIST_ENABLED', 'true').lower() not in ('0','false','no')
+DEX_WATCHLIST_SIZE = max(20, int(os.environ.get('DEX_WATCHLIST_SIZE', '100')))
+DEX_WATCHLIST_REFRESH_SECONDS = max(300, int(os.environ.get('DEX_WATCHLIST_REFRESH_SECONDS', '1800')))
+DEX_CANDIDATE_SYMBOLS = {
+    'BTC','ETH','BNB','SOL','XRP','DOGE','ADA','TRX','AVAX','LINK','DOT','TON','SUI','SHIB','LTC',
+    'BCH','UNI','AAVE','NEAR','APT','ARB','OP','INJ','ATOM','FIL','ETC','XLM','HBAR','ICP','CRO',
+    'ALGO','VET','MKR','QNT','EGLD','TIA','SEI','STX','IMX','RUNE','JUP','WIF','PEPE','BONK','ENA',
+    'ONDO','JTO','PYTH','JASMY','TAO','FET','RENDER','THETA','GRT','SAND','MANA','AXS','APE','CRV',
+    'SNX','DYDX','GMX','LDO','RPL','PENDLE','COMP','MKR','RAY','JTO','WLD','STRK','ZK','ZRO','POL',
+    'FLOW','XTZ','KAS','AR','MINA','KAVA','ROSE','ONE','ZEC','DASH','NEO','IOTA','KSM','WAVES','RUNE',
+    'RLC','ANKR','CHZ','ENJ','GALA','MASK','STORJ','ZIL','RSR','ZRX','SKL','RVN','HNT','SUSHI','YGG',
+    'BLUR','MEME','MANTA','ALT','DYM','ORDI','SATS','1000SATS','MEW','POPCAT','TURBO','FLOKI','BRETT',
+    'JUP','APT','SUI','SEI','TIA','INJ','TON','NEAR','ARB','OP','WIF','PEPE','BONK'
+}
+DEX_WATCHLIST_CACHE = {'ts': 0.0, 'symbols': [], 'source': 'fallback', 'tiers': {}}
+
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
 app = Flask(__name__)
@@ -1700,14 +1721,55 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     return True
 
 
+def _refresh_dynamic_dex_watchlist(force=False):
+    """Build a single Long/Short universe from current market-cap ranking.
+
+    This is intentionally best-effort: if CoinGecko is unavailable/rate-limited,
+    the previous universe (or the curated fallback) is retained.  We do not let a
+    watchlist refresh failure stop trading.
+    """
+    now = time.time()
+    if not DEX_WATCHLIST_ENABLED:
+        return list(dict.fromkeys(LONG_WATCHLIST + SHORT_WATCHLIST))
+    if not force and DEX_WATCHLIST_CACHE['symbols'] and now - DEX_WATCHLIST_CACHE['ts'] < DEX_WATCHLIST_REFRESH_SECONDS:
+        return list(DEX_WATCHLIST_CACHE['symbols'])
+    try:
+        r = requests.get(
+            'https://api.coingecko.com/api/v3/coins/markets',
+            params={'vs_currency':'usd','order':'market_cap_desc','per_page':max(100, DEX_WATCHLIST_SIZE),'page':1,'sparkline':'false'},
+            timeout=8,
+        )
+        if r.ok:
+            rows = r.json() or []
+            ranked = []
+            for row in rows:
+                sym = str(row.get('symbol') or '').upper()
+                if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked:
+                    ranked.append(sym)
+                if len(ranked) >= DEX_WATCHLIST_SIZE:
+                    break
+            if ranked:
+                # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
+                ranked = [x for x in ranked if x not in ('1000SATS',)]
+                DEX_WATCHLIST_CACHE.update({'ts': now, 'symbols': ranked, 'source':'coingecko_ranked', 'tiers': {
+                    'A': ranked[:40], 'B': ranked[40:70], 'C': ranked[70:DEX_WATCHLIST_SIZE]
+                }})
+                return list(ranked)
+    except Exception as exc:
+        logger.warning('dynamic DEX watchlist refresh failed: %s', exc)
+    if DEX_WATCHLIST_CACHE['symbols']:
+        return list(DEX_WATCHLIST_CACHE['symbols'])
+    fallback = list(dict.fromkeys([x for x in PAPER_DEFAULT_SYMBOLS if x in DEX_CANDIDATE_SYMBOLS] + list(LONG_WATCHLIST) + list(SHORT_WATCHLIST)))
+    fallback = fallback[:DEX_WATCHLIST_SIZE]
+    DEX_WATCHLIST_CACHE.update({'ts': now, 'symbols': fallback, 'source':'curated_fallback', 'tiers': {'A':fallback[:40], 'B':fallback[40:70], 'C':fallback[70:]}})
+    return fallback
+
+
 def scan_watchlist_for_timeframe(timeframe, regime=None):
-    if regime == 'BEARISH':
-        return list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))
-    if regime == 'BULLISH':
-        return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
-    long_list = WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min'])
-    short_list = WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min'])
-    return list(dict.fromkeys(list(long_list) + list(short_list)))
+    # One shared universe for both directions.  Regime no longer hard-switches
+    # Long vs Short symbols; it only affects scoring/filtering downstream.
+    symbols = _refresh_dynamic_dex_watchlist()
+    return symbols
 
 
 MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90}
