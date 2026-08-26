@@ -1416,7 +1416,11 @@ V2_DEFAULTS = {
     # behavior without changing the underlying legacy rules.
     "structure_first_enabled": True,
     "structure_first_timeframes": ("5min", "15min"),
+    # V8.2: tunable Structure First strictness. strict/balanced/flexible/off.
+    "structure_mode": "balanced",
     "structure_first_min_score": 55.0,
+    "structure_first_min_score_balanced": 55.0,
+    "structure_first_min_score_flexible": 52.0,
     "structure_first_use_htf_as_score": True,
     "structure_first_use_regime_as_score": True,
 }
@@ -1746,9 +1750,21 @@ def _detect_structure_flip(df, cfg):
     atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
     if atr <= 0:
         return None
-    tol = atr * float(cfg.get("structure_flip_retest_tolerance_atr", 0.18))
-    min_break = atr * float(cfg.get("structure_flip_min_break_distance_atr", 0.08))
-    lookback = max(6, int(cfg.get("structure_flip_lookback", 14)))
+    # V8.2: keep Structure mandatory, but allow a controlled amount of
+    # flexibility so 5m/15m do not become unnecessarily signal-starved.
+    mode = str(cfg.get("structure_mode", "strict")).lower()
+    base_tol = float(cfg.get("structure_flip_retest_tolerance_atr", 0.18))
+    base_break = float(cfg.get("structure_flip_min_break_distance_atr", 0.08))
+    base_lookback = int(cfg.get("structure_flip_lookback", 14))
+    if mode == "balanced":
+        tol_mult, break_mult, lookback_add = 1.25, 0.75, 4
+    elif mode == "flexible":
+        tol_mult, break_mult, lookback_add = 1.45, 0.60, 8
+    else:
+        tol_mult, break_mult, lookback_add = 1.0, 1.0, 0
+    tol = atr * base_tol * tol_mult
+    min_break = atr * base_break * break_mult
+    lookback = max(6, base_lookback + lookback_add)
     start = max(2, idx - lookback)
 
     def _c(i, col):
@@ -1804,9 +1820,16 @@ def _detect_structure_flip(df, cfg):
                 distance = (next_target if next_target is not None else c) - level
             if next_target is None or distance <= 0:
                 continue
-            # Fresh confirmation: both the swing and confirmation candles must show
-            # meaningful participation; this prevents a one-tick level touch.
-            if body < 0.35 or swing_body < 0.25:
+            # V8.2 confirmation strictness. Structure remains mandatory in every
+            # non-off mode, but balanced/flexible modes accept a cleaner rejection
+            # with less candle-body strength than strict mode.
+            if mode == "balanced":
+                min_body, min_swing_body = 0.28, 0.18
+            elif mode == "flexible":
+                min_body, min_swing_body = 0.22, 0.12
+            else:
+                min_body, min_swing_body = 0.35, 0.25
+            if body < min_body or swing_body < min_swing_body:
                 continue
             score = 55.0
             score += min(15.0, body * 15.0)
@@ -2086,7 +2109,12 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     if timeframe in ("5min", "15min"):
         # V8 Structure First: on 5m/15m, Structure Flip is the hard entry gate.
         # Legacy families remain available only when this gate is explicitly disabled.
-        structure_first = bool(cfg.get("structure_first_enabled", True)) and timeframe in tuple(cfg.get("structure_first_timeframes", ("5min", "15min")))
+        structure_mode = str(cfg.get("structure_mode", "strict")).lower()
+        structure_first = (
+            bool(cfg.get("structure_first_enabled", True))
+            and structure_mode != "off"
+            and timeframe in tuple(cfg.get("structure_first_timeframes", ("5min", "15min")))
+        )
         flip_enabled = bool(cfg.get("structure_flip_enabled", True))
         flip_tfs = tuple(cfg.get("structure_flip_timeframes", ("5min", "15min")))
 
@@ -2112,7 +2140,12 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                     rr_flip = float(flip_plan.get("rr", 0.0))
                     # Only the structural minimum score and structural R:R are hard
                     # gates. Other model signals are scoring/diagnostic only.
-                    min_struct_score = float(cfg.get("structure_first_min_score", 55.0))
+                    if structure_mode == "flexible":
+                        min_struct_score = float(cfg.get("structure_first_min_score_flexible", 52.0))
+                    elif structure_mode == "balanced":
+                        min_struct_score = float(cfg.get("structure_first_min_score_balanced", 55.0))
+                    else:
+                        min_struct_score = float(cfg.get("structure_first_min_score", 55.0))
                     if flip_score >= min_struct_score and rr_flip >= float(cfg.get("structure_flip_min_rr", 1.30)):
                         ev_flip, pwin_flip = _v2_edge_proxy(flip_score, rr_flip, rname, regime_info["atr_ratio"])
                         fp = dict(flip_plan)
