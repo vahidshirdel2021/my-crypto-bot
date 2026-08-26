@@ -1526,7 +1526,7 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1585,11 +1585,31 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         price = price * (1.0 + slip) if side_long(side) else price * (1.0 - slip)
     gap_sl=abs(float(signal_price)-float(sl))
     gap_tp=abs(float(tp)-float(signal_price))
-    if side_long(side):
+    # Structural SL (5m Swing->Break only, opt-in via swing_level/swing_sl_buffer):
+    # if the real fill price slipped away from the signal price, re-anchor SL to
+    # the actual swing level + its original ATR buffer instead of blindly
+    # shifting the old fixed distance forward. A flat shift keeps the *distance*
+    # but silently breaks the "SL sits behind the swing" guarantee once the
+    # entry itself has moved. If the slip is bad enough that price is now at or
+    # past the structural stop, the setup is stale and the trade is skipped.
+    if swing_level is not None and swing_sl_buffer is not None:
+        if side_long(side):
+            structural_sl = float(swing_level) - float(swing_sl_buffer)
+            if structural_sl >= price:
+                return False
+            sl = structural_sl
+        else:
+            structural_sl = float(swing_level) + float(swing_sl_buffer)
+            if structural_sl <= price:
+                return False
+            sl = structural_sl
+    elif side_long(side):
         sl=price-gap_sl
-        tp=float(tp) if (structural_tp and float(tp)>price) else price+gap_tp
     else:
         sl=price+gap_sl
+    if side_long(side):
+        tp=float(tp) if (structural_tp and float(tp)>price) else price+gap_tp
+    else:
         tp=float(tp) if (structural_tp and float(tp)<price) else price-gap_tp
     s['_symbol_tmp']=symbol
     margin, amount_or_reason=safe_size(chat_id,s,price,sl)
@@ -1602,7 +1622,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1941,7 +1961,7 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -1951,7 +1971,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -2960,7 +2980,14 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)))
+    # 5m Swing->Break only: carry the structural swing level + its original ATR
+    # buffer through to execution so a slipped fill re-anchors SL to real
+    # structure instead of shifting the signal-time SL by a fixed distance.
+    swing_level = None; swing_sl_buffer = None
+    if primary_tf == '5min' and plan.get('setup_family') == 'swing_break' and plan.get('swing_level') is not None:
+        swing_level = float(plan['swing_level'])
+        swing_sl_buffer = abs(float(plan['swing_level']) - sl)
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer)
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)

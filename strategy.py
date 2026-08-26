@@ -1432,6 +1432,10 @@ V2_DEFAULTS = {
     "5min_swing_left": 2, "5min_swing_right": 2, "5min_break_retest_bars": 5,
     "5min_break_min_atr": 0.10, "5min_retest_tolerance_atr": 0.18, "5min_confirmation_body": 0.22,
     "5min_sl_buffer_atr": 0.12, "5min_target_atr": 1.50, "5min_structure_min_rr": 1.25,
+    # V13: 5m-only recency guards for _detect_swing_break_entry. Without these
+    # a stale break/retest (many hours old, on a ~200-candle window) could be
+    # "confirmed" by an unrelated later candle. Not used by 15m.
+    "5min_confirm_gap_bars": 3, "5min_max_setup_age_bars": 48,
     "15min_swing_left": 3, "15min_swing_right": 3, "15min_break_retest_bars": 7,
     "15min_break_min_atr": 0.08, "15min_retest_tolerance_atr": 0.24, "15min_confirmation_body": 0.18,
     "15min_sl_buffer_atr": 0.15, "15min_target_atr": 1.80, "15min_structure_min_rr": 1.20,
@@ -2012,16 +2016,29 @@ def _five_min_candidate_allowed(df_primary, family, reason, regime_name, htf, sc
 def _detect_swing_break_entry(df, cfg, timeframe="5min"):
     """Primary Swing -> Break -> Retest -> Confirmation detector for 5m/15m.
     Uses confirmed pivots only; a wick through a level is not a break.
+
+    5m-only fix: the "confirmation" candle was always the current closed
+    candle (idx), with no bound on how long ago the break/retest happened.
+    On a ~200-candle 5m window that let a break/retest from many hours
+    earlier be "confirmed" by an unrelated, much later candle just because
+    it closed in the right direction — anchoring SL to a stale, no-longer-
+    relevant swing instead of the structure actually forming right now.
+    `5min_confirm_gap_bars` bounds how far the confirmation may sit from the
+    retest, and `5min_max_setup_age_bars` bounds how old the pivot itself may
+    be. Both are gated behind `is_5m` so 15m keeps its exact prior behavior.
     """
     if df is None or len(df) < 40:
         return None
     tf = "15min" if timeframe == "15min" else "5min"
+    is_5m = (tf == "5min")
     left = int(cfg.get(f"{tf}_swing_left", 2))
     right = int(cfg.get(f"{tf}_swing_right", 2))
     max_retest = int(cfg.get(f"{tf}_break_retest_bars", 5))
     break_atr = float(cfg.get(f"{tf}_break_min_atr", 0.10))
     tol_atr = float(cfg.get(f"{tf}_retest_tolerance_atr", 0.18))
     min_body = float(cfg.get(f"{tf}_confirmation_body", 0.22))
+    max_confirm_gap = int(cfg.get("5min_confirm_gap_bars", 3))
+    max_setup_age = int(cfg.get("5min_max_setup_age_bars", 48))
     idx = len(df) - 2
     atr = _safe_float(df.iloc[idx].get("atr"), 0.0)
     if atr <= 0: return None
@@ -2033,11 +2050,13 @@ def _detect_swing_break_entry(df, cfg, timeframe="5min"):
         if lows[i] < min(lows[i-left:i]) and lows[i] <= min(lows[i+1:i+1+right]): piv_l.append(i)
     candidates=[]
     for pi in piv_h[-8:]:
+        if is_5m and (idx - pi) > max_setup_age: continue
         level=highs[pi]
         for br in range(pi+1, idx):
             if closes[br] <= level + atr*break_atr: continue
             # break must close beyond the pivot, not just wick through it
             for r in range(br+1, min(idx, br+1+max_retest)):
+                if is_5m and (idx - r) > max_confirm_gap: continue
                 if lows[r] > level + atr*tol_atr: continue
                 if closes[r] < level: continue
                 conf_o, conf_c = opens[idx], closes[idx]
@@ -2048,10 +2067,12 @@ def _detect_swing_break_entry(df, cfg, timeframe="5min"):
                     break
             if candidates: break
     for pi in piv_l[-8:]:
+        if is_5m and (idx - pi) > max_setup_age: continue
         level=lows[pi]
         for br in range(pi+1, idx):
             if closes[br] >= level - atr*break_atr: continue
             for r in range(br+1, min(idx, br+1+max_retest)):
+                if is_5m and (idx - r) > max_confirm_gap: continue
                 if highs[r] < level - atr*tol_atr: continue
                 if closes[r] > level: continue
                 conf_o, conf_c = opens[idx], closes[idx]
@@ -2224,7 +2245,10 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                     fp=dict(swing_plan); fp.update({"score":int(round(sb_score)),"regime":rname,"regime_confidence":rconf,"trend_state":trend_state,"volatility_state":vol_state,"htf_bias":float(htf_sb),"htf_details":htf_sb_details,"setup_family":"swing_break"})
                     candidates.append((sb_score*max(float(fp.get("rr",0.01)),0.01),fp,swing_setup["signal"],f"V9 Swing First {rname}/{vol_state} | {swing_reason} | HTF={htf_sb:.2f}"))
             # Daily Structure Flip is retained only as a structural variant; it no longer bypasses local Swing→Break validation.
-            flip = _detect_structure_flip(df_primary, cfg) if (flip_enabled and timeframe in flip_tfs and swing_setup) else None
+            # 5m-only: Structure Flip and Swing->Break are independent signals, so on 5m Flip is no
+            # longer required to wait on a swing_setup match (15m keeps its original coupled behavior).
+            flip_gate = swing_setup if timeframe != "5min" else True
+            flip = _detect_structure_flip(df_primary, cfg) if (flip_enabled and timeframe in flip_tfs and flip_gate) else None
             if flip:
                 flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg, strict_mode=True)
                 if flip_plan:
