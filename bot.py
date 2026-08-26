@@ -2240,13 +2240,36 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
             return False,[]
         is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
 
+        # ATR is a volatility ruler, not an alternative SL/TP.  Measure how large
+        # the adverse move is relative to the current market's normal range and
+        # use that only to strengthen the early-loss decision.
+        atr_pressure = 0.0
+        atr_now = 0.0
+        try:
+            c_atr = wdf.iloc[-2]
+            atr_now = float(c_atr.get('atr') or 0.0)
+            ref_price = float(current_price if current_price is not None else c_atr.get('close'))
+            entry_price = float(p.get('entry_price') or 0.0)
+            if atr_now > 0 and entry_price > 0:
+                adverse_move = (entry_price - ref_price) if side_long(p['side']) else (ref_price - entry_price)
+                atr_pressure = max(0.0, adverse_move / atr_now)
+        except Exception:
+            atr_pressure = 0.0
+
+        if atr_pressure > 0:
+            wreasons = list(wreasons) + [f"فشار مخالف: {atr_pressure:.2f} ATR"]
+
         # Profitable trades use confirmed weakness; the evolved early-loss path is also
         # enabled by default and activates at the configured small adverse R threshold.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         if early_loss_enabled and primary_tf == '5min':
-            # Graduated protection: the closer price gets to SL, the less evidence
-            # is required to cut the trade. This is intentionally 5m-only.
+            # Graduated protection: ATR pressure is an additional volatility-aware
+            # trigger. It never replaces the structural Swing SL.
+            if atr_pressure >= float(cfg.get('atr_early_exit_extreme', 0.85)) and current_r < 0 and wscore >= float(cfg.get('atr_early_exit_extreme_score', 25.0)):
+                return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
+            if atr_pressure >= float(cfg.get('atr_early_exit_strong', 0.60)) and current_r <= -0.30 and wscore >= float(cfg.get('atr_early_exit_strong_score', 30.0)):
+                return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
             if current_r <= -0.50 and wscore >= 35.0:
                 return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
             if current_r <= -0.35 and wscore >= 40.0:

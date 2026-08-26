@@ -214,6 +214,11 @@ STRATEGY_DEFAULTS = {
     "early_loss_weakness_exit_min_r": -0.10,
     "early_loss_weakness_exit_score": 45.0,
     "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
+    # --- ATR فقط برای سنجش فشار حرکت مخالف در مدیریت هوشمند؛ جایگزین SL/TP نیست ---
+    "atr_early_exit_extreme": 0.85,
+    "atr_early_exit_extreme_score": 25.0,
+    "atr_early_exit_strong": 0.60,
+    "atr_early_exit_strong_score": 30.0,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
