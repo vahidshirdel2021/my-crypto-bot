@@ -1428,6 +1428,13 @@ V2_DEFAULTS = {
     "structure_first_min_score_flexible": 52.0,
     "structure_first_use_htf_as_score": True,
     "structure_first_use_regime_as_score": True,
+    # Primary local structure gate: deliberately separate 5m and 15m behavior.
+    "5min_swing_left": 2, "5min_swing_right": 2, "5min_break_retest_bars": 5,
+    "5min_break_min_atr": 0.10, "5min_retest_tolerance_atr": 0.18, "5min_confirmation_body": 0.22,
+    "5min_sl_buffer_atr": 0.12, "5min_target_atr": 1.50, "5min_structure_min_rr": 1.25,
+    "15min_swing_left": 3, "15min_swing_right": 3, "15min_break_retest_bars": 7,
+    "15min_break_min_atr": 0.08, "15min_retest_tolerance_atr": 0.24, "15min_confirmation_body": 0.18,
+    "15min_sl_buffer_atr": 0.15, "15min_target_atr": 1.80, "15min_structure_min_rr": 1.20,
 }
 
 
@@ -2000,6 +2007,84 @@ def _five_min_candidate_allowed(df_primary, family, reason, regime_name, htf, sc
     return True, ""
 
 
+
+
+def _detect_swing_break_entry(df, cfg, timeframe="5min"):
+    """Primary Swing -> Break -> Retest -> Confirmation detector for 5m/15m.
+    Uses confirmed pivots only; a wick through a level is not a break.
+    """
+    if df is None or len(df) < 40:
+        return None
+    tf = "15min" if timeframe == "15min" else "5min"
+    left = int(cfg.get(f"{tf}_swing_left", 2))
+    right = int(cfg.get(f"{tf}_swing_right", 2))
+    max_retest = int(cfg.get(f"{tf}_break_retest_bars", 5))
+    break_atr = float(cfg.get(f"{tf}_break_min_atr", 0.10))
+    tol_atr = float(cfg.get(f"{tf}_retest_tolerance_atr", 0.18))
+    min_body = float(cfg.get(f"{tf}_confirmation_body", 0.22))
+    idx = len(df) - 2
+    atr = _safe_float(df.iloc[idx].get("atr"), 0.0)
+    if atr <= 0: return None
+    highs=df["high"].astype(float).to_numpy(); lows=df["low"].astype(float).to_numpy()
+    closes=df["close"].astype(float).to_numpy(); opens=df["open"].astype(float).to_numpy()
+    piv_h=[]; piv_l=[]
+    for i in range(left, idx-right+1):
+        if highs[i] > max(highs[i-left:i]) and highs[i] >= max(highs[i+1:i+1+right]): piv_h.append(i)
+        if lows[i] < min(lows[i-left:i]) and lows[i] <= min(lows[i+1:i+1+right]): piv_l.append(i)
+    candidates=[]
+    for pi in piv_h[-8:]:
+        level=highs[pi]
+        for br in range(pi+1, idx):
+            if closes[br] <= level + atr*break_atr: continue
+            # break must close beyond the pivot, not just wick through it
+            for r in range(br+1, min(idx, br+1+max_retest)):
+                if lows[r] > level + atr*tol_atr: continue
+                if closes[r] < level: continue
+                conf_o, conf_c = opens[idx], closes[idx]
+                body=abs(conf_c-conf_o)/max(float(df.iloc[idx]["high"]-df.iloc[idx]["low"]),1e-12)
+                if conf_c > conf_o and conf_c > closes[r] and body >= min_body:
+                    sl=lows[r]
+                    candidates.append({"signal":"BUY","break_index":br,"swing_index":r,"break_level":level,"swing_level":sl,"confirmation_index":idx,"atr":atr,"body_ratio":body,"reason":f"Swing→Break→Retest→Confirmation | {tf}"})
+                    break
+            if candidates: break
+    for pi in piv_l[-8:]:
+        level=lows[pi]
+        for br in range(pi+1, idx):
+            if closes[br] >= level - atr*break_atr: continue
+            for r in range(br+1, min(idx, br+1+max_retest)):
+                if highs[r] < level - atr*tol_atr: continue
+                if closes[r] > level: continue
+                conf_o, conf_c = opens[idx], closes[idx]
+                body=abs(conf_c-conf_o)/max(float(df.iloc[idx]["high"]-df.iloc[idx]["low"]),1e-12)
+                if conf_c < conf_o and conf_c < closes[r] and body >= min_body:
+                    sl=highs[r]
+                    candidates.append({"signal":"SELL","break_index":br,"swing_index":r,"break_level":level,"swing_level":sl,"confirmation_index":idx,"atr":atr,"body_ratio":body,"reason":f"Swing→Break→Retest→Confirmation | {tf}"})
+                    break
+            if candidates: break
+    if not candidates: return None
+    candidates.sort(key=lambda x: x["break_index"], reverse=True)
+    return candidates[0]
+
+def _build_swing_break_plan(df, setup, cfg, timeframe):
+    if not setup: return None, "Swing/Break معتبر وجود ندارد"
+    idx=len(df)-2; entry=_safe_float(df.iloc[idx].get("close"),0); atr=_safe_float(df.iloc[idx].get("atr"),0)
+    swing=_safe_float(setup.get("swing_level"),0); level=_safe_float(setup.get("break_level"),0)
+    if entry<=0 or atr<=0 or swing<=0: return None, "Swing معتبر برای SL وجود ندارد"
+    buf=float(cfg.get(f"{timeframe}_sl_buffer_atr",0.12))
+    if setup["signal"]=="BUY":
+        sl=swing-atr*buf
+        if sl>=entry: return None,"SL پشت Swing قرار نگرفت"
+        tp=level + max(atr*float(cfg.get(f"{timeframe}_target_atr",1.5)), atr)
+    else:
+        sl=swing+atr*buf
+        if sl<=entry: return None,"SL پشت Swing قرار نگرفت"
+        tp=level - max(atr*float(cfg.get(f"{timeframe}_target_atr",1.5)), atr)
+    risk=abs(entry-sl); reward=abs(tp-entry); rr=reward/max(risk,1e-12)
+    minrr=float(cfg.get(f"{timeframe}_structure_min_rr",1.25))
+    if rr<minrr: return None,f"R:R ناکافی ({rr:.2f}R)"
+    return {"entry":entry,"sl":float(sl),"tp":float(tp),"rr":float(rr),"score":70,"quality_label":"ساختاری","atr":atr,"swing_level":swing,"swing_index":int(setup["swing_index"]),"break_level":level,"break_index":int(setup["break_index"]),"confirmation_index":int(setup["confirmation_index"]),"sl_basis":"confirmed_retest_swing","setup_family":"swing_break","reason":setup["reason"]}, setup["reason"]
+
+
 def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None, defer_quality_gate=False):
     cfg = get_v2_config(strategy_config)
     regime_info = detect_market_regime(df_primary, cfg)
@@ -2129,7 +2214,17 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         if structure_first:
             # No legacy candidate is even constructed. This is intentional: HTF,
             # volume, regime, EdgeProxy, etc. are confirmation/scoring layers only.
-            flip = _detect_structure_flip(df_primary, cfg) if (flip_enabled and timeframe in flip_tfs) else None
+            swing_setup = _detect_swing_break_entry(df_primary, cfg, timeframe)
+            if swing_setup:
+                swing_plan, swing_reason = _build_swing_break_plan(df_primary, swing_setup, cfg, timeframe)
+                if swing_plan:
+                    htf_sb, htf_sb_details = _v2_htf_bias(market_data_dict, swing_setup["signal"] == "BUY")
+                    sb_score = float(swing_plan.get("score",70)) + max(-5.0, min(5.0, htf_sb*5.0))
+                    sb_score = max(0.0,min(100.0,sb_score))
+                    fp=dict(swing_plan); fp.update({"score":int(round(sb_score)),"regime":rname,"regime_confidence":rconf,"trend_state":trend_state,"volatility_state":vol_state,"htf_bias":float(htf_sb),"htf_details":htf_sb_details,"setup_family":"swing_break"})
+                    candidates.append((sb_score*max(float(fp.get("rr",0.01)),0.01),fp,swing_setup["signal"],f"V9 Swing First {rname}/{vol_state} | {swing_reason} | HTF={htf_sb:.2f}"))
+            # Daily Structure Flip is retained only as a structural variant; it no longer bypasses local Swing→Break validation.
+            flip = _detect_structure_flip(df_primary, cfg) if (flip_enabled and timeframe in flip_tfs and swing_setup) else None
             if flip:
                 flip_plan, flip_reason = _build_structure_flip_plan(df_primary, flip, cfg, strict_mode=True)
                 if flip_plan:

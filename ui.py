@@ -1,4 +1,7 @@
 from strategy import STRATEGY_DEFAULTS
+import os
+_ADMIN_CHAT_IDS_RAW = os.environ.get("ADMIN_CHAT_IDS", os.environ.get("ALLOWED_CHAT_IDS", "")).strip()
+ADMIN_CHAT_IDS = {int(x.strip()) for x in _ADMIN_CHAT_IDS_RAW.split(",") if x.strip().lstrip("-").isdigit()}
 
 CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
 
@@ -55,17 +58,34 @@ def get_learn_menu_keyboard():
     ]}
 
 
-def get_performance_keyboard():
-    return {"inline_keyboard": [
+def get_performance_keyboard(chat_id=None, session=None):
+    k = [
         [{"text": "📅 امروز", "callback_data": "/performance_today"}, {"text": "📆 ۷ روز", "callback_data": "/performance_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/performance_month"}, {"text": "📊 کل سابقه", "callback_data": "/performance"}],
         [{"text": "📋 معاملات امروز", "callback_data": "/today_trades"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
-        [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}, {"text": "⚙️ روشن/خاموش ممیزی", "callback_data": "/toggle_trade_pipeline"}],
+    ]
+    # Audit controls are admin-only. The toggle status is shown with a real-state icon.
+    is_admin = False
+    try:
+        is_admin = int(chat_id) in ADMIN_CHAT_IDS
+    except Exception:
+        pass
+    if is_admin:
+        enabled = bool((session or {}).get("trade_pipeline_enabled", False))
+        icon = "🟢" if enabled else "🔴"
+        state = "روشن" if enabled else "خاموش"
+        k += [
+            [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}],
+            [{"text": f"{icon} ممیزی Pipeline: {state}", "callback_data": "/toggle_trade_pipeline"}],
+            [{"text": "📦 خروجی JSON ممیزی کامل", "callback_data": "/export_trade_pipeline"}],
+        ]
+    k += [
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
         [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
-    ]}
+    ]
+    return {"inline_keyboard": k}
 
 
 def get_positions_keyboard(positions):

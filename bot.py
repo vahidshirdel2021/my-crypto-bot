@@ -3100,6 +3100,31 @@ def trade_pipeline_report(chat_id):
     return '\n'.join(lines)
 
 
+def export_trade_pipeline(chat_id):
+    if not is_admin(chat_id) or not TELEGRAM_TOKEN:
+        return False
+    s=get_session(chat_id)
+    payload={
+        'generated_at': time.time(),
+        'chat_id': chat_id,
+        'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
+        'watchlist': {
+            'source': DEX_WATCHLIST_CACHE.get('source','fallback'),
+            'size': len(_refresh_dynamic_dex_watchlist()),
+            'symbols': _refresh_dynamic_dex_watchlist(),
+            'tiers': DEX_WATCHLIST_CACHE.get('tiers',{}),
+        },
+        'pipeline_events': s.get('trade_pipeline_audit', []),
+        'open_positions': [audit_trade_record(p) for p in s.get('paper_positions',[])],
+        'closed_positions': [audit_trade_record(p) for p in s.get('closed_positions',[])],
+    }
+    raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
+    try:
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'🧭 خروجی کامل ممیزی Pipeline معاملات'},files={'document':('trade_pipeline_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        return True
+    except Exception as exc:
+        logger.warning('export trade pipeline failed: %s',exc); return False
+
 def export_trade_data(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s=get_session(chat_id)
@@ -3412,7 +3437,7 @@ def process_command(cmd,chat_id,message_id=None):
         edit_page(chat_id, fee_report(chat_id,period), get_fee_menu_keyboard(), message_id)
         return
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
-        send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
+        send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard(chat_id, s)); return
     if cmd in ('/audit','audit','🧪 ممیزی ربات'):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active'])); return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
@@ -3598,21 +3623,25 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions'][:]:
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
         return
-    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/trade_pipeline','/toggle_trade_pipeline','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
-        if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
-        elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
-        elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
-        elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
-        elif cl=='/today_trades': send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
-        elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
+    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/trade_pipeline','/toggle_trade_pipeline','/export_trade_pipeline','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
+        if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard(chat_id, s))
+        elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard(chat_id, s))
+        elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard(chat_id, s))
+        elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard(chat_id, s))
+        elif cl=='/today_trades': send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard(chat_id, s))
+        elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard(chat_id, s))
         elif cl=='/toggle_trade_pipeline':
-            s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False); save_session(chat_id); send_message(chat_id, f"🔎 ممیزی کامل مسیر معاملات: {'🟢 فعال شد' if s['trade_pipeline_enabled'] else '🔴 خاموش شد'}", get_performance_keyboard())
-        elif cl=='/trade_pipeline': send_message(chat_id, trade_pipeline_report(chat_id), get_performance_keyboard())
+            if not is_admin(chat_id):
+                send_message(chat_id, '⛔ این کنترل فقط برای Admin فعال است.'); return
+            s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False); save_session(chat_id); send_message(chat_id, f"🧭 ممیزی کامل مسیر معاملات: {'🟢 روشن' if s['trade_pipeline_enabled'] else '🔴 خاموش'}", get_performance_keyboard(chat_id, s))
+        elif cl=='/trade_pipeline': send_message(chat_id, trade_pipeline_report(chat_id), get_performance_keyboard(chat_id, s))
+        elif cl=='/export_trade_pipeline': export_trade_pipeline(chat_id)
         elif cl=='/export_trade_data': export_trade_data(chat_id)
+
         elif cl=='/reset_stats_prompt':
             send_message(chat_id,'⚠️ آیا از ریست آمار عملکرد اطمینان دارید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
         elif cl=='/reset_stats_confirm':
-            ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
+            ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard(chat_id, s) if ok else None)
         return
 
 
