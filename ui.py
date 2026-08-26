@@ -144,7 +144,7 @@ def get_timeframe_keyboard():
     ]}
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, session=None):
     rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
@@ -158,9 +158,14 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
         [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
-        [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}, {"text": "⚙️ روشن/خاموش ممیزی", "callback_data": "/toggle_trade_pipeline"}],
     ]
     if is_admin_user:
+        enabled = bool((session or {}).get("trade_pipeline_enabled", False))
+        icon = "🟢" if enabled else "🔴"
+        state = "روشن" if enabled else "خاموش"
+        rows.append([{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}])
+        rows.append([{"text": f"{icon} ممیزی Pipeline: {state}", "callback_data": "/toggle_trade_pipeline"}])
+        rows.append([{"text": "📦 خروجی JSON ممیزی کامل", "callback_data": "/export_trade_pipeline"}])
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
     return {"inline_keyboard": rows}
 
