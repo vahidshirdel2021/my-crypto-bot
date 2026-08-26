@@ -1802,10 +1802,11 @@ def _detect_structure_flip(df, cfg):
             body = _safe_float(d.iloc[idx].get("body_ratio"), 0.0)
             swing_body = _safe_float(d.iloc[swing_i].get("body_ratio"), 0.0)
             if short_break:
-                # Swing high retests the level from below, then the latest candle
-                # confirms continuation back down.
-                swing_retest = sh >= level - tol and sc < level and sh >= _c(swing_i - 1, "high") and sh >= h
-                confirmation = c < o and c < level and c <= sc
+                # Confirm a real local swing high on the retest candle: its high must
+                # exceed the two candles to its left and the confirmation candle.
+                swing_is_pivot = (sh >= _c(swing_i - 1, "high") and sh >= _c(swing_i - 2, "high") and sh >= h)
+                swing_retest = sh >= level - tol and sc < level and swing_is_pivot
+                confirmation = c < o and c < level and c < sc
                 if not (swing_retest and confirmation):
                     continue
                 signal = "SELL"
@@ -1813,10 +1814,11 @@ def _detect_structure_flip(df, cfg):
                 reaction = "مقاومت"
                 distance = level - (next_target if next_target is not None else c)
             else:
-                # Swing low retests the level from above, then the latest candle
-                # confirms continuation back up.
-                swing_retest = sl <= level + tol and sc > level and sl <= _c(swing_i - 1, "low") and sl <= l
-                confirmation = c > o and c > level and c >= sc
+                # Confirm a real local swing low on the retest candle: its low must
+                # be below the two candles to its left and the confirmation candle.
+                swing_is_pivot = (sl <= _c(swing_i - 1, "low") and sl <= _c(swing_i - 2, "low") and sl <= l)
+                swing_retest = sl <= level + tol and sc > level and swing_is_pivot
+                confirmation = c > o and c > level and c > sc
                 if not (swing_retest and confirmation):
                     continue
                 signal = "BUY"
@@ -1886,7 +1888,8 @@ def _build_structure_flip_plan(df, flip, cfg, strict_mode=False):
     # formed during the retest/confirmation, with only a small ATR buffer.
     # The flipped level is NOT used as the primary SL anchor.
     swing_level = _safe_float(flip.get("swing_level"), 0.0)
-    if swing_level <= 0:
+    swing_index = int(flip.get("swing_index", -1))
+    if swing_level <= 0 or swing_index < 0:
         return None, "Structure Flip سوینگ تأییدشده برای SL موجود نیست"
     buffer_atr = float(cfg.get("structure_flip_sl_buffer_atr", 0.20))
     buffer_atr = max(0.05, min(0.60, buffer_atr))

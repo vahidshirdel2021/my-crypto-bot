@@ -61,6 +61,7 @@ def get_performance_keyboard():
         [{"text": "🗓 ۳۰ روز", "callback_data": "/performance_month"}, {"text": "📊 کل سابقه", "callback_data": "/performance"}],
         [{"text": "📋 معاملات امروز", "callback_data": "/today_trades"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+        [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}, {"text": "⚙️ روشن/خاموش ممیزی", "callback_data": "/toggle_trade_pipeline"}],
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
         [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
@@ -137,6 +138,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
         [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+        [{"text": "🧭 ممیزی کامل مسیر معاملات", "callback_data": "/trade_pipeline"}, {"text": "⚙️ روشن/خاموش ممیزی", "callback_data": "/toggle_trade_pipeline"}],
     ]
     if is_admin_user:
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])

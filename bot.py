@@ -589,6 +589,8 @@ def default_session():
         'created_at': int(time.time()),
         'bottom_menu_open': True,
         'entry_diag_enabled': True,
+        'trade_pipeline_enabled': False,
+        'trade_pipeline_audit': [],
         'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT,
         'platform_fee_total_usdt': 0.0,
         'platform_fee_trade_count': 0,
@@ -626,6 +628,8 @@ def normalize_session(data):
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
     s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
+    s['trade_pipeline_enabled'] = bool(s.get('trade_pipeline_enabled', False))
+    s['trade_pipeline_audit'] = list(data.get('trade_pipeline_audit') or [])[-5000:]
     s['platform_fee_rate_pct'] = min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
     s['platform_fee_total_usdt'] = max(0.0, float(s.get('platform_fee_total_usdt', 0.0)))
     s['platform_fee_trade_count'] = max(0, int(s.get('platform_fee_trade_count', 0) or 0))
@@ -2619,7 +2623,35 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
     return out
 
 
+def _pipeline_record(chat_id, symbol, stage, status='', reason='', signal=None, data=None):
+    """Persist an end-to-end scan/entry pipeline event when the audit toggle is on."""
+    try:
+        s = get_session(chat_id)
+        if not s.get('trade_pipeline_enabled', False):
+            return
+        wl = _refresh_dynamic_dex_watchlist()
+        event = {
+            'pipeline_id': f"{symbol}:{s.get('timeframe','5min')}:{int(time.time()*1000)}",
+            'symbol': symbol, 'timeframe': s.get('timeframe','5min'),
+            'stage': str(stage), 'status': str(status or ''),
+            'reason': str(reason or ''), 'signal': signal, 'ts': time.time(),
+            'watchlist_source': DEX_WATCHLIST_CACHE.get('source','fallback'),
+            'watchlist_size': len(wl), 'watchlist_tier': ('A' if symbol in DEX_WATCHLIST_CACHE.get('tiers',{}).get('A',[]) else 'B' if symbol in DEX_WATCHLIST_CACHE.get('tiers',{}).get('B',[]) else 'C' if symbol in DEX_WATCHLIST_CACHE.get('tiers',{}).get('C',[]) else '—'),
+            'data': data or {},
+        }
+        s.setdefault('trade_pipeline_audit', []).append(event)
+        s['trade_pipeline_audit'] = s['trade_pipeline_audit'][-5000:]
+        save_session(chat_id)
+    except Exception:
+        logger.exception('pipeline audit failed chat=%s symbol=%s stage=%s', chat_id, symbol, stage)
+
+
+def _pipeline_start(chat_id, symbol):
+    _pipeline_record(chat_id, symbol, 'watchlist_review', 'review_started', 'نماد وارد مرحله بررسی شد')
+
+
 def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None, diagnostics=None):
+    _pipeline_record(chat_id, symbol, stage or status, status, reason, signal, diagnostics)
     return {
         'chat_id': chat_id,
         'symbol': symbol,
@@ -2714,14 +2746,9 @@ def _entry_diag_direction(item):
     if sig == 'SELL':
         return '🔴 SHORT'
     sym = str(item.get('symbol') or '').upper()
-    in_long = sym in SHARED_LONG_WATCHLIST
-    in_short = sym in SHARED_SHORT_WATCHLIST
-    if in_long and in_short:
+    dynamic_wl = set(_refresh_dynamic_dex_watchlist())
+    if sym in dynamic_wl:
         return '🟡 LONG/SHORT'
-    if in_long:
-        return '🟢 LONG'
-    if in_short:
-        return '🔴 SHORT'
     return '⚪️'
 
 
@@ -2750,13 +2777,14 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
     confirm_wait = sum(1 for _, _, stage, _ in active_items if stage in ('منتظر تأیید', 'نزدیک ورود', 'منتظر حرکت واضح', 'در انتظار'))
     pullback_wait = sum(1 for _, _, stage, _ in active_items if stage == 'منتظر پولبک')
 
+    dynamic_wl = _refresh_dynamic_dex_watchlist()
+    wl_source = DEX_WATCHLIST_CACHE.get('source','fallback')
     lines = [
         '🧠 *داشبورد زنده فرصت‌ها*',
         '━━━━━━━━━━━━━━━━━━━━',
         f'⏱ گزارش دوره‌ای: هر ۱۰ دقیقه | تایم‌فریم: `{tf}`',
-        f'🟢 LONG زیر نظر: `{len(SHARED_LONG_WATCHLIST)}` نماد',
-        f'🔴 SHORT زیر نظر: `{len(SHARED_SHORT_WATCHLIST)}` نماد',
-        f'🔎 مجموع مسیرهای بررسی: `{len(SHARED_LONG_WATCHLIST) + len(SHARED_SHORT_WATCHLIST)}`',
+        f'📋 واچ‌لیست فعال: `{len(dynamic_wl)}` نماد | منبع: `{wl_source}`',
+        f'🧭 بررسی جهت‌دار: `Long/Short مشترک`',
     ]
     if opened:
         lines.append(f'🟢 در این چرخه `{opened}` ورود انجام شد.')
@@ -2858,6 +2886,7 @@ def _entry_diag_batch_update(chat_id, results):
 
 async def scan_symbol(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
+    _pipeline_start(chat_id, symbol)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
     scan_generation=int(s.get('scan_generation',0))
@@ -3051,10 +3080,30 @@ def trade_audit_report(chat_id):
     return '\n'.join(lines)
 
 
+def trade_pipeline_report(chat_id):
+    s=get_session(chat_id)
+    events=list(s.get('trade_pipeline_audit') or [])
+    if not events:
+        return '🔎 *ممیزی کامل مسیر معاملات*\n\nهنوز داده‌ای ثبت نشده است.'
+    events=events[-120:]
+    lines=['🔎 *ممیزی کامل مسیر معاملات*','━━━━━━━━━━━━━━━━━━━━',f'📌 آخرین رویدادها: `{len(events)}`','📍 واچ‌لیست: Dynamic DEX | هر دو جهت از یک Universe مشترک','']
+    grouped={}
+    for e in events:
+        key=f"{e.get('symbol','?')}|{e.get('timeframe','?')}"
+        grouped.setdefault(key,[]).append(e)
+    for key, rows in list(grouped.items())[-40:]:
+        last=rows[-1]
+        path=' → '.join(str(x.get('stage') or '—') for x in rows[-8:])
+        status=last.get('status','—')
+        reason=last.get('reason','—')
+        lines.append(f"• `{key}` → `{status}`\n  مسیر: `{path}`\n  علت نهایی: {reason}")
+    return '\n'.join(lines)
+
+
 def export_trade_data(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s=get_session(chat_id)
-    payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[])}
+    payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[]),'trade_pipeline_audit':s.get('trade_pipeline_audit',[])}
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
         requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
@@ -3068,6 +3117,7 @@ def reset_stats(chat_id):
         return False, '❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'
     s['closed_positions'] = []
     s['trade_audit'] = []
+    s['trade_pipeline_audit'] = []
     s['scan_stats'] = {'scans':0,'symbols':0,'signals':0,'entries':0,'blocked':0,'data_errors':0,'reason_counts':{}}
     s['daily_stopped'] = False
     equity = exchange_balance(chat_id) if s.get('trading_mode') == 'REAL' else float(s.get('paper_balance', 1000.0))
@@ -3491,14 +3541,13 @@ def process_command(cmd,chat_id,message_id=None):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
     if cl in ('/manage_watchlist','/watchlist_list'):
-        long_list='، '.join(SHARED_LONG_WATCHLIST)
-        short_list='، '.join(SHARED_SHORT_WATCHLIST)
-        edit_page(
-            chat_id,
-            f"📋 *واچ‌لیست فعال*\n\n"
-            f"🟢 *Long* ({len(SHARED_LONG_WATCHLIST)} نماد):\n`{long_list}`\n\n"
-            f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`",
-            get_watchlist_manage_keyboard(),message_id); return
+        wl = _refresh_dynamic_dex_watchlist(force=True)
+        tiers = DEX_WATCHLIST_CACHE.get('tiers', {})
+        source = DEX_WATCHLIST_CACHE.get('source','fallback')
+        lines = [f'📋 *واچ‌لیست فعال Dynamic DEX*', '━━━━━━━━━━━━━━━━━━━━', f'📊 تعداد: `{len(wl)}` نماد', f'🔄 منبع: `{source}`', '', f'🅰️ Tier A: `{len(tiers.get("A",[]))}` نماد', f'🅱️ Tier B: `{len(tiers.get("B",[]))}` نماد', f'🅲 Tier C: `{len(tiers.get("C",[]))}` نماد', '']
+        if wl:
+            lines.append('`' + '، '.join(wl) + '`')
+        edit_page(chat_id, '\n'.join(lines), get_watchlist_manage_keyboard(), message_id); return
     if cl.startswith('/manage_'):
         sym=cl.replace('/manage_','').upper()
         for p in s['paper_positions']:
@@ -3549,13 +3598,16 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions'][:]:
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
         return
-    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
+    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/trade_pipeline','/toggle_trade_pipeline','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
         elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
         elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
         elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
         elif cl=='/today_trades': send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
         elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
+        elif cl=='/toggle_trade_pipeline':
+            s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False); save_session(chat_id); send_message(chat_id, f"🔎 ممیزی کامل مسیر معاملات: {'🟢 فعال شد' if s['trade_pipeline_enabled'] else '🔴 خاموش شد'}", get_performance_keyboard())
+        elif cl=='/trade_pipeline': send_message(chat_id, trade_pipeline_report(chat_id), get_performance_keyboard())
         elif cl=='/export_trade_data': export_trade_data(chat_id)
         elif cl=='/reset_stats_prompt':
             send_message(chat_id,'⚠️ آیا از ریست آمار عملکرد اطمینان دارید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
