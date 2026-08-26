@@ -3100,27 +3100,64 @@ def trade_pipeline_report(chat_id):
     return '\n'.join(lines)
 
 
+def _export_timeframe_context(s, records):
+    """Build an explicit, validated timeframe identity for every export."""
+    account_tf = str(s.get('timeframe') or '5min')
+    counts = {}
+    for r in records:
+        tf = str(r.get('timeframe') or '')
+        if tf:
+            counts[tf] = counts.get(tf, 0) + 1
+    # An export belongs to exactly one Telegram session/timeframe. Mixed records are
+    # retained for diagnostics but flagged so an external model cannot mistake them.
+    present = sorted(counts)
+    consistent = all(tf == account_tf for tf in present)
+    return {
+        'account_timeframe': account_tf,
+        'account_timeframe_display': TF_DISPLAY.get(account_tf, account_tf),
+        'timeframes_present': present,
+        'timeframe_counts': counts,
+        'timeframe_consistent': consistent,
+        'export_scope': 'single_telegram_session',
+    }
+
+def _export_filename(prefix, timeframe):
+    tf = str(timeframe or '5min').replace('min','m').replace('/','_')
+    stamp = time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())
+    return f'{prefix}_{tf}_{stamp}.json'
+
 def export_trade_pipeline(chat_id):
     if not is_admin(chat_id) or not TELEGRAM_TOKEN:
         return False
     s=get_session(chat_id)
+    pipeline=list(s.get('trade_pipeline_audit') or [])
+    opens=[audit_trade_record(p) for p in s.get('paper_positions',[])]
+    closes=[audit_trade_record(p) for p in s.get('closed_positions',[])]
+    records=opens+closes+pipeline
+    tfmeta=_export_timeframe_context(s, records)
     payload={
-        'generated_at': time.time(),
-        'chat_id': chat_id,
-        'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
+        'report_metadata': {
+            'report_type': 'trade_pipeline_audit',
+            'generated_at': time.time(),
+            'chat_id': chat_id,
+            **tfmeta,
+            'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
+        },
         'watchlist': {
             'source': DEX_WATCHLIST_CACHE.get('source','fallback'),
             'size': len(_refresh_dynamic_dex_watchlist()),
             'symbols': _refresh_dynamic_dex_watchlist(),
             'tiers': DEX_WATCHLIST_CACHE.get('tiers',{}),
         },
-        'pipeline_events': s.get('trade_pipeline_audit', []),
-        'open_positions': [audit_trade_record(p) for p in s.get('paper_positions',[])],
-        'closed_positions': [audit_trade_record(p) for p in s.get('closed_positions',[])],
+        'pipeline_events': pipeline,
+        'open_positions': opens,
+        'closed_positions': closes,
     }
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
-        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'🧭 خروجی کامل ممیزی Pipeline معاملات'},files={'document':('trade_pipeline_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        fname=_export_filename('trade_pipeline_audit', s.get('timeframe'))
+        caption=f'🧭 خروجی کامل ممیزی Pipeline | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))} | {"✅ یکسان" if tfmeta["timeframe_consistent"] else "⚠️ مخلوط"}'
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':caption},files={'document':(fname,io.BytesIO(raw),'application/json')},timeout=30)
         return True
     except Exception as exc:
         logger.warning('export trade pipeline failed: %s',exc); return False
@@ -3128,10 +3165,30 @@ def export_trade_pipeline(chat_id):
 def export_trade_data(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s=get_session(chat_id)
-    payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[]),'trade_pipeline_audit':s.get('trade_pipeline_audit',[])}
+    opens=[audit_trade_record(p) for p in s.get('paper_positions',[])]
+    closes=[audit_trade_record(p) for p in s.get('closed_positions',[])]
+    audit=list(s.get('trade_audit',[]))
+    pipeline=list(s.get('trade_pipeline_audit',[]))
+    records=opens+closes+audit+pipeline
+    tfmeta=_export_timeframe_context(s, records)
+    payload={
+        'report_metadata': {
+            'report_type': 'complete_trade_export',
+            'generated_at': time.time(),
+            'chat_id': chat_id,
+            **tfmeta,
+            'trade_count': len(opens)+len(closes),
+        },
+        'open_positions': opens,
+        'closed_positions': closes,
+        'trade_audit': audit,
+        'trade_pipeline_audit': pipeline,
+    }
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
-        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        fname=_export_filename('trades', s.get('timeframe'))
+        caption=f'📦 خروجی کامل معاملات | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))} | {"✅ یکسان" if tfmeta["timeframe_consistent"] else "⚠️ مخلوط"}'
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':caption},files={'document':(fname,io.BytesIO(raw),'application/json')},timeout=30)
         return True
     except Exception as exc: logger.warning('export trade data failed: %s',exc); return False
 
