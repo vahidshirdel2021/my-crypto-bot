@@ -32,6 +32,10 @@ STRATEGY_DEFAULTS = {
     "cooldown_seconds": 1200,
     "v2_enabled": True,
 }
+def compute_prev_day_levels(df):
+    from pdh_eq_pdl_engine import compute_prev_day_levels as engine_cpdl
+    return engine_cpdl(df)
+    
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return _ensure_atr(df)
 
