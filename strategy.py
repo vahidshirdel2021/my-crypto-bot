@@ -864,5 +864,3 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
 
     best = max(candidates, key=lambda c: c["total_score"])
     return best
-
-فایل اول (`pdh_eq_pdl_engine.py`) کامل شد. حالا فایل دوم — `strategy.py` — را که از این موتور استفاده می‌کند به‌روزرسانی می‌کنم تا از `compute_swing_stop_v2` و `tp_ladder` جدید استفاده کند:
