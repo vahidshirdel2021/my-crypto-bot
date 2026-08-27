@@ -879,3 +879,6 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
 
     best = max(candidates, key=lambda c: c["total_score"])
     return best
+def calculate_indicators(df):
+    from pdh_eq_pdl_engine import _ensure_atr
+    return _ensure_atr(df)
