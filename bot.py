@@ -60,10 +60,16 @@ RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
 DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 
-# تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
+# تایم‌فریم مدیریت برای غیر از ۵ دقیقه سریع‌تر از تایم‌فریم اصلی معامله است؛
+# برای ۵ دقیقه از V14 به بعد خودِ همون تایم‌فریمه (به دلیل نویز، پایین‌تر توضیح داده شده).
 # این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
-    '5min': '1min',
+    # V14: 5m weakness checks used to run on 1m indicators (ADX/DI/RSI/EMA20) —
+    # a timeframe 5x faster/noisier than the entry timeframe, which combined with
+    # the old graduated exit ladder to cut trades on transient 1m noise. Now reads
+    # the position's own 5m indicators, matching the timeframe the entry logic
+    # actually used to judge the trend.
+    '5min': '5min',
     '15min': '5min',
     '1hour': '15min',
     '4hour': '1hour',
@@ -2310,15 +2316,18 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',True))
         early_loss_r=float(cfg.get('early_loss_weakness_exit_min_r', POSITION_MANAGEMENT_EARLY_LOSS_R))
         loss_score=float(cfg.get('early_loss_weakness_exit_score', POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE))
-        # The audit showed too many 5m trades being closed for weakness while
-        # still near entry. Give 5m positions more room; keep other timeframes
-        # exactly as before.
+        # V13 first tried giving 5m more room with a graduated early-loss ladder.
+        # V14 5m-only rebalance: that ladder was measured against real trades and
+        # made things worse, not better — avg realized R on 5m weakness-managed
+        # trades went from -0.09R (pre-V13) to -0.54R (post-V13), with the TP rate
+        # dropping to 0/17. The "extreme" ATR-pressure branch could fire on almost
+        # any negative R (current_r<0) combined with a trivially-reached weakness
+        # score (wscore>=25), so on a noisy 1m read it was cutting trades that
+        # still had room to recover. Every 5m early-loss branch below now requires
+        # a genuinely negative R *and* a materially higher weakness score.
         if primary_tf == '5min':
-            # 5m needs an earlier, graduated loss-protection path. A single hard
-            # threshold at -0.25R was too easy to miss before a fast candle reached
-            # the primary 5m SL. Use a lower weakness threshold as the loss deepens.
-            early_loss_r = min(early_loss_r, -0.20)
-            loss_score = max(loss_score, 45.0)
+            early_loss_r = min(early_loss_r, -0.30)
+            loss_score = max(loss_score, 55.0)
         need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=early_loss_r)
         if not need_weakness:
             return False,[]
@@ -2355,15 +2364,13 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         if early_loss_enabled and primary_tf == '5min':
-            # Graduated protection: ATR pressure is an additional volatility-aware
-            # trigger. It never replaces the structural Swing SL.
-            if atr_pressure >= float(cfg.get('atr_early_exit_extreme', 0.85)) and current_r < 0 and wscore >= float(cfg.get('atr_early_exit_extreme_score', 25.0)):
+            # ATR pressure is kept only as an *additional* required confirmation for
+            # a faster exit when the loss is already real (current_r <= -0.40) and the
+            # weakness score is strong (>=50) — never as a cheaper alternate path on
+            # a barely-negative trade the way the old "extreme" branch allowed.
+            if atr_pressure >= float(cfg.get('atr_early_exit_strong', 0.85)) and current_r <= -0.40 and wscore >= float(cfg.get('atr_early_exit_strong_score', 50.0)):
                 return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if atr_pressure >= float(cfg.get('atr_early_exit_strong', 0.60)) and current_r <= -0.30 and wscore >= float(cfg.get('atr_early_exit_strong_score', 30.0)):
-                return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if current_r <= -0.50 and wscore >= 35.0:
-                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if current_r <= -0.35 and wscore >= 40.0:
+            if current_r <= -0.50 and wscore >= 45.0:
                 return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
             if current_r <= early_loss_r and wscore >= loss_score:
                 return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
@@ -2552,7 +2559,17 @@ def update_positions(chat_id):
         if reason is None and primary_tf == '5min':
             should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
             if should_exit:
-                exit_price=price; reason='مدیریت هوشمند (کاهش ریسک پیش از SL)'; p['weakness_exit_reasons']=wreasons
+                # V14: 5m weakness is checked before the hard SL/TP check below so it
+                # can react to a fast candle before it reaches the primary SL. But if
+                # price has already gapped past SL/TP by this scan (seen live: a trade
+                # closed at -1.43R here, worse than a full -1R stop), the exit must
+                # never be priced worse than the stated stop/target — clamp to it.
+                sl_val=float(p.get('sl', price)); tp_val=float(p.get('tp', price))
+                if side_long(p['side']):
+                    exit_price=max(sl_val, min(price, tp_val))
+                else:
+                    exit_price=min(sl_val, max(price, tp_val))
+                reason='مدیریت هوشمند (کاهش ریسک پیش از SL)'; p['weakness_exit_reasons']=wreasons
 
         # Hard SL/TP remains the fallback and is still checked before discretionary
         # stop movement.
