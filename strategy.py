@@ -429,3 +429,22 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                       strategy_config=None, regime=None, grid_levels=None, live_price=None,
                       defer_quality_gate=False):
     return None, None, "موتور legacy v2 حذف شده؛ از get_signal_with_reason/build_trade_plan جدید استفاده کنید"
+def get_signal_with_reason(df, md, mode, timeframe, strategy_name, filters, strategy_config, regime=None, live_price=None):
+    from pdh_eq_pdl_engine import evaluate_scenarios
+    best = evaluate_scenarios(df, timeframe, strategy_config)
+    if not best:
+        return None, "بدون ستاپ (یا مسدودشده توسط Dead-Zone Gate)"
+    score = float(best.get("total_score", 0.0))
+    min_score = float(strategy_config.get("min_score_to_trade", 65.0))
+    if score < min_score:
+        return None, f"امتیاز کیفیت پایین ({score}/{min_score})"
+    direction = best.get("direction")
+    code = best.get("code")
+    reasons = " | ".join(best.get("reasons", []))
+    if regime:
+        if regime == 'BULLISH' and direction == 'SELL':
+            return None, "محافظ رژیم بازار: ورود شورت در روند صعودی مسدود است"
+        if regime == 'BEARISH' and direction == 'BUY':
+            return None, "محافظ رژیم بازار: ورود لانگ در روند نزولی مسدود است"
+    reason_str = f"[{code}] کیفیت {score}/100 ({best.get('level_label','PDH/PDL')}) | {reasons}"
+    return direction, reason_str
