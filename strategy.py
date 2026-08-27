@@ -57,7 +57,16 @@ FILTER_DEFAULTS = {
     "no_short_filter": False,
     "no_buy_filter": False,
 }
-
+STRATEGY_DEFAULTS = {
+    "swing_lookback": 12,
+    "swing_confirm_candles": 2,
+    "swing_buffer_atr": 0.40,
+    "min_trade_score": 65.0,
+    "min_rr": 1.10,
+    "min_adx": 18.0,
+    "cooldown_seconds": 1200,
+    "v2_enabled": True,
+}
 # ============================================================================
 # ۱) تنظیمات پیش‌فرض موتور
 # ============================================================================
