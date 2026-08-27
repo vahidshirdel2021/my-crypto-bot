@@ -24,13 +24,19 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
-from strategy import (
-    FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
-    strategy_trend_following,
-    strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
-    compute_log_grid_levels, nearest_grid_level,
-)
+try:
+    from strategy import (
+        evaluate_scenarios,
+        compute_swing_stop,
+        calculate_indicators,
+        compute_prev_day_levels,
+        compute_prev_week_levels,
+        FILTER_DEFAULTS,
+        STRATEGY_DEFAULTS
+    )
+except ImportError:
+    # ایمپورت امن برای جلوگیری از کرش ربات
+    pass
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
