@@ -4,9 +4,7 @@ strategy.py
 -----------
 موتور یکپارچه‌ی استراتژی و مدیریت ریسک هماهنگ با bot.py
 """
-
 from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 from pdh_eq_pdl_engine import (
@@ -17,7 +15,6 @@ from pdh_eq_pdl_engine import (
     compute_prev_week_levels, 
     get_reference_levels
 )
-
 FILTER_DEFAULTS = {
     "volume_filter": True,
     "candlestick_filter": True,
@@ -25,7 +22,6 @@ FILTER_DEFAULTS = {
     "no_short_filter": False,
     "no_buy_filter": False,
 }
-
 STRATEGY_DEFAULTS = {
     "swing_lookback": 12,
     "swing_confirm_candles": 2,
@@ -36,7 +32,6 @@ STRATEGY_DEFAULTS = {
     "cooldown_seconds": 1200,
     "v2_enabled": True,
 }
-
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return _ensure_atr(df)
 
