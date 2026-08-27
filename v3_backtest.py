@@ -46,6 +46,7 @@ import pandas as pd
 
 from strategy import (
     calculate_indicators,
+    evaluate_trend_weakness,
     detect_market_regime,
     _select_v2_setup,
     FILTER_DEFAULTS,
@@ -332,7 +333,16 @@ def run_single(df: pd.DataFrame, symbol: str, timeframe: str, start: str, end: s
                         ns = pos.entry + lr*pos.risk_distance if is_long else pos.entry - lr*pos.risk_distance
                         if (ns > pos.sl_current if is_long else ns < pos.sl_current):
                             pos.sl_current, pos.locked_r, pos.trailing_activated = ns, lr, True
-
+                current_r = ((close-pos.entry)/pos.risk_distance if is_long else (pos.entry-close)/pos.risk_distance)
+                if current_r >= float(scfg.get('weakness_exit_min_r',0.8)) or current_r <= float(scfg.get('early_loss_weakness_exit_min_r', -0.10)):
+                    mg=mgmt_ind[mgmt_ind.ts <= ts]
+                    if len(mg) >= 60:
+                        weak, ws, _ = evaluate_trend_weakness(mg, 'BUY' if is_long else 'SELL', scfg)
+                        min_weak_r = max(1.0, float(scfg.get('weakness_exit_min_r',1.0)))
+                        if current_r >= min_weak_r and weak:
+                            exit_px, reason = close, 'WEAKNESS_EXIT'
+                        elif bool(scfg.get('early_loss_weakness_exit_enabled', True)) and current_r <= float(scfg.get('early_loss_weakness_exit_min_r', -0.10)) and ws >= float(scfg.get('early_loss_weakness_exit_score', 45.0)):
+                            exit_px, reason = close, 'SMART_LOSS_CUT'
             if exit_px is not None:
                 tr = close_position(pos, exit_px, ts, reason, cfg, i-pos.entry_idx, timeframe)
                 balance += tr['pnl_net']

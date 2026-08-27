@@ -5,7 +5,7 @@ strategy.py  —  بازنویسی کامل (صفر تا صد) بر اساس ا�
 طبق درخواست صریح کاربر، تمام منطق قبلی تصمیم‌گیری این فایل (dynamic v2،
 liquidity sweep، structure flip، trend/breakout/mean-reversion قدیمی و…)
 کنار گذاشته شده و با یک موتور واحد در ماژول `pdh_eq_pdl_engine.py`
-جایگزین شده است که ۱۰ سناریوی B1..B5 / S1..S5 فایل استراتژی کاربر را
+جایگزین شده است که ۱۲ سناریوی B1..B6 / S1..S6 فایل استراتژی کاربر را
 هم‌زمان ارزیابی و بهترین‌شان را بر اساس امتیاز انتخاب می‌کند.
 
 نگاشت تایم‌فریم → منبع سطح مرجع (طبق درخواست کاربر):
@@ -27,7 +27,6 @@ from pdh_eq_pdl_engine import (
     compute_prev_day_levels,
     compute_prev_week_levels,
     get_reference_levels,
-    compute_swings,
 )
 
 
@@ -88,57 +87,38 @@ FILTER_DEFAULTS = {
 
 
 def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candles=2):
-    """Return a trailing stop behind the latest *validated* structural swing.
-    Swings must pass the engine's wick/volume quality gates and must be fully
-    confirmed before they can move an existing stop."""
-    if df is None or df.empty or "atr" not in df.columns:
-        return None, None
-    if len(df) < lookback + confirm_candles + 3:
-        return None, None
-    cfg = STRATEGY_DEFAULTS if 'STRATEGY_DEFAULTS' in globals() else ENGINE_DEFAULTS
-    d = compute_swings(
-        df,
-        lookback=max(2, min(int(lookback // 3 or 3), 8)),
-        min_wick_atr=float(cfg.get("min_swing_wick_atr", 0.20)),
-        min_wick_pct=float(cfg.get("min_swing_wick_pct", 0.0008)),
-        min_volume_ratio=float(cfg.get("min_swing_volume_ratio", 1.05)),
-        require_volume=bool(cfg.get("require_swing_volume", True)),
-    )
-    idx_now = len(d) - 2
-    if idx_now <= 0:
-        return None, None
-    # A fractal at i is only tradable after `lookback` candles to its right
-    # have closed.  Never use the still-forming latest candle as structure.
-    confirmed_hi = [i for i in d.index if i <= idx_now - max(1, int(lookback)) and bool(d.at[i, "swing_high"])]
-    confirmed_lo = [i for i in d.index if i <= idx_now - max(1, int(lookback)) and bool(d.at[i, "swing_low"])]
-    candidates = confirmed_lo if is_long else confirmed_hi
-    if not candidates:
-        return None, None
+    """
+    استاپ‌لاس بر اساس آخرین سوینگ معاملاتی تاییدشده (نه فاصله ثابت ATR).
+    این تابع مستقل از موتور سناریو است و توسط bot.py هم مستقیماً برای
+    مدیریت تریلینگ‌استاپ پوزیشن‌های باز استفاده می‌شود؛ بدون تغییر نگه داشته شده.
 
-    # Structure-aware trailing: a Long may only advance behind a new Higher Low;
-    # a Short may only advance behind a new Lower High. This prevents a fresh but
-    # insignificant fractal from ratcheting the stop.
-    valid = []
-    prev_level = None
-    for ci in candidates:
-        level = float(d.at[ci, "low"] if is_long else d.at[ci, "high"])
-        if prev_level is None:
-            valid.append(ci)
-        elif (is_long and level > prev_level) or ((not is_long) and level < prev_level):
-            valid.append(ci)
-        prev_level = level
-    if not valid:
+    خروجی: (sl, swing_level) یا (None, None) اگر داده کافی نبود.
+    """
+    if df is None or df.empty:
         return None, None
-    i = valid[-1]
-    # Require the selected pivot to have a non-trivial structural score.
-    structure_score = float(d.at[i, "swing_structure_score"]) if "swing_structure_score" in d.columns else 1.0
-    if structure_score < 1.0:
+    need = lookback + confirm_candles
+    if len(df) < need + 1:
         return None, None
-    atr = float(pd.to_numeric(d.at[idx_now, "atr"], errors="coerce"))
+    if "atr" not in df.columns:
+        return None, None
+    atr = pd.to_numeric(df["atr"], errors="coerce").iloc[-1]
     if not np.isfinite(atr) or atr <= 0:
         return None, None
-    swing = float(d.at[i, "low"] if is_long else d.at[i, "high"])
-    sl = swing - atr * float(buffer_atr) if is_long else swing + atr * float(buffer_atr)
+    end = -confirm_candles if confirm_candles > 0 else None
+    start = -(lookback + confirm_candles)
+    window = df.iloc[start:end]
+    if window.empty:
+        return None, None
+    if is_long:
+        swing = float(pd.to_numeric(window["low"], errors="coerce").min())
+        if not np.isfinite(swing):
+            return None, None
+        sl = swing - atr * buffer_atr
+    else:
+        swing = float(pd.to_numeric(window["high"], errors="coerce").max())
+        if not np.isfinite(swing):
+            return None, None
+        sl = swing + atr * buffer_atr
     return float(sl), float(swing)
 
 
@@ -146,6 +126,7 @@ def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candle
 # STRATEGY_DEFAULTS / presetهای هر تایم‌فریم
 # کلیدهایی که bot.py مستقیماً (خارج از این فایل) برای مدیریت پوزیشن می‌خواند
 # عیناً حفظ شده‌اند: swing_lookback, swing_confirm_candles, swing_buffer_atr,
+# cooldown_seconds, weakness_exit_*, early_loss_weakness_exit_*.
 # ============================================================================
 
 STRATEGY_DEFAULTS = {
@@ -161,13 +142,7 @@ STRATEGY_DEFAULTS = {
     "extension_atr_mult": ENGINE_DEFAULTS["extension_atr_mult"],
     "base_scores": dict(ENGINE_DEFAULTS["base_scores"]),
     "bonus_weights": dict(ENGINE_DEFAULTS["bonus_weights"]),
-     "penalty_weights": dict(ENGINE_DEFAULTS["penalty_weights"]),
-    "min_swing_wick_atr": ENGINE_DEFAULTS["min_swing_wick_atr"],
-    "min_swing_wick_pct": ENGINE_DEFAULTS["min_swing_wick_pct"],
-    "min_swing_volume_ratio": ENGINE_DEFAULTS["min_swing_volume_ratio"],
-    "require_swing_volume": ENGINE_DEFAULTS["require_swing_volume"],
-    "max_entry_event_age_bars": ENGINE_DEFAULTS["max_entry_event_age_bars"],
-    "tp1_pct": 50.0, "tp2_pct": 30.0, "tp3_pct": 20.0,
+    "penalty_weights": dict(ENGINE_DEFAULTS["penalty_weights"]),
 
     "max_sl_atr": 4.0,           # سقف مطلق فاصله SL بر حسب ATR (فیوز ایمنی، نه بخشی از سناریوها)
     "min_sl_percent": 0.005,
@@ -178,6 +153,18 @@ STRATEGY_DEFAULTS = {
     "swing_lookback": 12,
     "swing_confirm_candles": 2,
     "swing_buffer_atr": 0.40,
+
+    # --- مدیریت هوشمند پوزیشن باز (خوانده‌شده مستقیم توسط bot.py) ---
+    "weakness_exit_min_r": 1.0,
+    "weakness_exit_score": 55.0,
+    "weakness_profit_lock_min_r": 1.0,
+    "early_loss_weakness_exit_enabled": True,
+    "early_loss_weakness_exit_min_r": -0.10,
+    "early_loss_weakness_exit_score": 45.0,
+    "atr_early_exit_extreme": 0.85,
+    "atr_early_exit_extreme_score": 25.0,
+    "atr_early_exit_strong": 0.60,
+    "atr_early_exit_strong_score": 30.0,
 
     "v2_enabled": False,  # موتور قدیمی v2 کاملاً غیرفعال است؛ فقط برای سازگاری با کد قدیمی نگه داشته شده
 }
@@ -221,6 +208,7 @@ def get_strategy_params(strategy_config=None):
 # ============================================================================
 # calculate_indicators — بدون تغییر نسبت به نسخه قبلی.
 # bot.py این تابع را در چندین جای مستقل (چارت، تشخیص رژیم بازار، تریلینگ‌استاپ،
+# evaluate_trend_weakness) صدا می‌زند؛ ستون‌های خروجی باید همان‌ها بمانند.
 # ============================================================================
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -289,6 +277,126 @@ def _compute_prev_day_levels(df):
 
 
 # ============================================================================
+# evaluate_trend_weakness — بدون تغییر نسبت به نسخه قبلی (فقط برای مدیریت
+# پوزیشن باز استفاده می‌شود؛ به موتور ورود ربطی ندارد).
+# ============================================================================
+
+def evaluate_trend_weakness(df, side, strategy_config=None):
+    """
+    بررسی می‌کند آیا روند معامله باز در حال از دست دادن قدرت است یا نه
+    (برای بستن زودهنگام معامله‌ی سودده قبل از رسیدن به هدف ساختاری).
+    خروجی: (is_weak: bool, score: int 0-100, reasons: list[str])
+    """
+    if df is None or len(df) < 20:
+        return False, 0, []
+    required_cols = {"adx", "rsi", "ema20", "plus_di", "minus_di", "body_ratio", "volume_ratio"}
+    if not required_cols.issubset(df.columns):
+        return False, 0, []
+
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    curr = df.iloc[-2]
+    prev = df.iloc[-3] if len(df) >= 3 else curr
+    is_long = isinstance(side, str) and ("BUY" in side.upper() or "LONG" in side.upper())
+
+    adx = _safe_float(curr.get("adx"), 0)
+    prev_adx = _safe_float(prev.get("adx"), adx)
+    rsi = _safe_float(curr.get("rsi"), 50)
+    plus_di = _safe_float(curr.get("plus_di"), 0)
+    minus_di = _safe_float(curr.get("minus_di"), 0)
+    ema20 = _safe_float(curr.get("ema20"), 0)
+    close = _safe_float(curr.get("close"), 0)
+    open_ = _safe_float(curr.get("open"), 0)
+    body_ratio = _safe_float(curr.get("body_ratio"), 0)
+    vr = _safe_float(curr.get("volume_ratio"), 1)
+
+    score = 0.0
+    reasons = []
+
+    if is_long:
+        if minus_di > plus_di:
+            score += 30.0; reasons.append("DI منفی از DI مثبت عبور کرد (تغییر جهت روند)")
+        if adx < prev_adx and adx < 22:
+            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
+        if close < ema20:
+            score += 20.0; reasons.append("قیمت زیر EMA20 بسته شد")
+        if rsi < 45:
+            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
+        if close < open_ and body_ratio >= 0.55 and vr >= 1.0:
+            score += 20.0; reasons.append("کندل نزولی قدرتمند مخالف روند با حجم بالا")
+    else:
+        if plus_di > minus_di:
+            score += 30.0; reasons.append("DI مثبت از DI منفی عبور کرد (تغییر جهت روند)")
+        if adx < prev_adx and adx < 22:
+            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
+        if close > ema20:
+            score += 20.0; reasons.append("قیمت بالای EMA20 بسته شد")
+        if rsi > 55:
+            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
+        if close > open_ and body_ratio >= 0.55 and vr >= 1.0:
+            score += 20.0; reasons.append("کندل صعودی قدرتمند مخالف روند با حجم بالا")
+
+    score = max(0.0, min(100.0, score))
+    threshold = float(cfg.get("weakness_exit_score", 45.0))
+    is_weak = score >= threshold
+    return is_weak, int(round(score)), reasons
+
+
+# ============================================================================
+# هسته‌ی جدید تصمیم‌گیری: یک بار موتور سناریو را اجرا می‌کند و بین
+# get_signal_with_reason و build_trade_plan به اشتراک گذاشته می‌شود
+# (به‌جای کش کردن، هر بار دوباره محاسبه می‌شود تا هیچ ریسک ناهم‌خوانی
+# بین سیگنال و پلن معامله وجود نداشته باشد؛ محاسبه سبک و سریع است).
+# ============================================================================
+
+def _run_engine(df, timeframe, strategy_config=None):
+    return evaluate_scenarios(df, timeframe or "5min", strategy_config)
+
+
+def _format_reason(best):
+    if not best:
+        return ""
+    parts = [
+        f"{best['code']}",
+        f"امتیاز {best['total_score']}/100 (پایه {best['base_score']} + بونوس {best['bonus']} − جریمه {best['penalty']})",
+        best["reasons"][0] if best.get("reasons") else "",
+    ]
+    if best.get("tp_partial"):
+        hi_lbl, lo_lbl = best["level_label"].split("/")
+        final_lbl = hi_lbl if best["direction"] == "BUY" else lo_lbl
+        parts.append(f"TP پله‌ای: EQ={best['tp_partial']:.10g} سپس {final_lbl}={best['tp']:.10g}")
+    extra_notes = best["reasons"][1:]
+    if extra_notes:
+        parts.append(" | ".join(extra_notes))
+    return " | ".join([p for p in parts if p])
+
+
+# ============================================================================
+# get_signal_with_reason — امضای قدیمی کاملاً حفظ شده؛ محتوا صفر تا صد جدید.
+# ============================================================================
+
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single",
+                            timeframe="5min", strategy_type="dynamic", filters=None,
+                            strategy_config=None, regime=None, live_price=None,
+                            defer_quality_gate=False):
+    """
+    سیگنال نهایی بر اساس موتور سناریوهای PDH/EQ/PDL (یا PWH/PWL/EQ برای ۱ و ۴
+    ساعته). هیچ‌کدام از پارامترهای strategy_type/regime/market_data_dict/
+    live_price در تصمیم‌گیری اثر ندارند (طبق درخواست کاربر: صرف‌نظر از
+    استراتژی انتخاب‌شده در منو، همیشه همین موتور واحد اجرا می‌شود).
+
+    خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
+    """
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    best = _run_engine(df_primary, timeframe, cfg)
+    if not best:
+        return None, "هیچ‌کدام از ۱۲ سناریوی PDH/EQ/PDL (یا PWH/PWL/EQ) تایید نشد"
+    min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
+    if best["total_score"] < min_score:
+        return None, f"بهترین سناریو {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
+    return best["direction"], _format_reason(best)
+
+
+# ============================================================================
 # build_trade_plan — امضای قدیمی کاملاً حفظ شده؛ محتوا صفر تا صد جدید.
 # ============================================================================
 
@@ -341,17 +449,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
                       "خوب" if best["total_score"] >= 78 else
                       "قابل قبول" if best["total_score"] >= min_score else "ضعیف")
 
-    # Explicit three-tier target ladder.  TP1 is exactly EQ, TP2 is the
-    # opposite reference boundary, TP3 is the range-extension target.
-    # `tp` remains the legacy final target field (TP3) for compatibility.
-    tp1 = _safe_float(best.get("tp1"), best.get("tp_partial", 0.0))
-    tp2 = _safe_float(best.get("tp2"), hi_level if signal == "BUY" else lo_level) if "hi_level" in locals() else _safe_float(best.get("tp2"))
-    tp3 = _safe_float(best.get("tp3"), tp)
     plan = {
-        "entry": entry, "sl": float(sl), "tp": float(tp3),
-        "tp1": tp1, "tp1_pct": 50.0,
-        "tp2": tp2, "tp2_pct": 30.0,
-        "tp3": tp3, "tp3_pct": 20.0,
+        "entry": entry, "sl": float(sl), "tp": float(tp),
         "score": int(round(best["total_score"])),
         "quality_label": quality_label,
         "rr": float(rr),
@@ -429,22 +528,3 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                       strategy_config=None, regime=None, grid_levels=None, live_price=None,
                       defer_quality_gate=False):
     return None, None, "موتور legacy v2 حذف شده؛ از get_signal_with_reason/build_trade_plan جدید استفاده کنید"
-def get_signal_with_reason(df, md, mode, timeframe, strategy_name, filters, strategy_config, regime=None, live_price=None):
-    from pdh_eq_pdl_engine import evaluate_scenarios
-    best = evaluate_scenarios(df, timeframe, strategy_config)
-    if not best:
-        return None, "بدون ستاپ (یا مسدودشده توسط Dead-Zone Gate)"
-    score = float(best.get("total_score", 0.0))
-    min_score = float(strategy_config.get("min_score_to_trade", 65.0))
-    if score < min_score:
-        return None, f"امتیاز کیفیت پایین ({score}/{min_score})"
-    direction = best.get("direction")
-    code = best.get("code")
-    reasons = " | ".join(best.get("reasons", []))
-    if regime:
-        if regime == 'BULLISH' and direction == 'SELL':
-            return None, "محافظ رژیم بازار: ورود شورت در روند صعودی مسدود است"
-        if regime == 'BEARISH' and direction == 'BUY':
-            return None, "محافظ رژیم بازار: ورود لانگ در روند نزولی مسدود است"
-    reason_str = f"[{code}] کیفیت {score}/100 ({best.get('level_label','PDH/PDL')}) | {reasons}"
-    return direction, reason_str
