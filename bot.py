@@ -28,7 +28,7 @@ from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
+    _compute_prev_day_levels, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
 )
 from ui import (
@@ -57,7 +57,6 @@ MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 # تایم‌فریم‌هایی که هرگز نباید معامله‌شان به روز بعد منتقل شود (چه با سود چه با ضرر)
-NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
 DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 
 # تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
@@ -68,9 +67,6 @@ POSITION_MANAGEMENT_TIMEFRAME_MAP = {
     '1hour': '15min',
     '4hour': '1hour',
 }
-POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
-POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
-POSITION_MANAGEMENT_EARLY_LOSS_R = -0.10
 
 
 def _seconds_to_local_day_end():
@@ -978,6 +974,21 @@ def _halt_real_trading(chat_id, reason):
     send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت CoinEx، معامله جدید مجاز نیست.")
 
 
+def set_stop_loss_only(chat_id, symbol, sl):
+    ex = get_exchange(chat_id)
+    if not ex:
+        return False, 'exchange unavailable'
+    try:
+        call_implicit_any(ex, ['v2PrivatePostFuturesSetPositionStopLoss',
+                               'v2_private_post_futures_set_position_stop_loss'],
+                          {'market': market_name(symbol), 'market_type': 'FUTURES',
+                           'stop_loss_type': PROTECTION_TRIGGER,
+                           'stop_loss_price': str(sl)})
+        return True, 'OK'
+    except Exception as e:
+        return False, str(e)
+
+
 def set_protection(chat_id, symbol, sl, tp):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
@@ -1033,13 +1044,6 @@ def round_trip_fee_usdt(margin, leverage):
 
 
 # Position-management only: entry/strategy logic is intentionally untouched.
-PROFIT_LADDERS_R = {
-    '5min':  [(0.50, 0.00), (0.75, 0.15), (1.00, 0.30), (1.25, 0.50), (1.50, 0.75), (2.00, 1.10)],
-    '15min': [(0.75, 0.00), (1.00, 0.15), (1.50, 0.50), (2.00, 1.00), (2.50, 1.50), (3.00, 2.00)],
-    '1hour': [(1.00, 0.00), (1.50, 0.50), (2.00, 1.00), (3.00, 1.75), (4.00, 2.50)],
-    '4hour': [(1.25, 0.00), (2.00, 0.50), (3.00, 1.50), (4.00, 2.50), (5.00, 3.50)],
-}
-
 def trailing_locked_r(entry, risk_distance, current_price, is_long, timeframe=None):
     """Return the profit lock for the current favorable R, using a TF-specific ladder."""
     try:
@@ -1056,55 +1060,6 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long, timeframe=No
         else:
             break
     return locked
-
-
-def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
-    """Apply the position-management trailing ladder without changing entries."""
-    try:
-        entry=float(p['entry_price'])
-        risk_distance=float(p.get('risk_distance') or 0.0)
-        if risk_distance <= 0:
-            risk_distance=abs(entry-float(p.get('sl', entry)))
-        if risk_distance <= 0:
-            return False
-        is_long=side_long(p['side'])
-        probe=float(favorable_price if favorable_price is not None else current_price)
-        tf=str(p.get('timeframe') or '')
-        # V5: use the best favorable excursion seen by the position, not only
-        # the latest price. This prevents a trade that reached +1R/+2R from
-        # surrendering most of that excursion during a normal pullback.
-        peak_price=p.get('peak_favorable_price')
-        peak_probe=float(peak_price) if peak_price is not None else probe
-        lr=trailing_locked_r(entry,risk_distance,peak_probe,is_long,tf)
-        # Safety: never place a stop beyond the currently tradable price.
-        if lr is not None:
-            proposed=entry+(lr*risk_distance if is_long else -lr*risk_distance)
-            if (is_long and proposed > float(current_price)) or ((not is_long) and proposed < float(current_price)):
-                lr=None
-        if lr is None:
-            return False
-        new_sl=entry+(lr*risk_distance if is_long else -lr*risk_distance)
-        old_sl=float(p['sl'])
-        is_better=(new_sl>old_sl) if is_long else (new_sl<old_sl)
-        locked=float(p.get('trailing_locked_r') or 0.0)
-        # First activation is allowed at exactly 1R: 0R is a valid lock level.
-        first_activation=not bool(p.get('trailing_activated'))
-        if not is_better or not (lr>locked or (first_activation and lr>=locked)):
-            return False
-        if p.get('is_real'):
-            ok,err=move_stop_loss(chat_id,p['symbol'],normalize_price(chat_id,p['symbol'],new_sl))
-            if not ok:
-                logger.warning('profit-protection SL move failed symbol=%s: %s',p.get('symbol'),err)
-                return False
-        p['sl']=new_sl
-        p['trailing_activated']=True
-        p['trailing_locked_r']=lr
-        if first_activation or lr>locked:
-            send_message(chat_id, f"🛡️ مدیریت سود فعال شد: `{p['symbol']}`\n• قفل سود: `{lr:.1f}R`\n• حد ضرر جدید: `{fmt(new_sl)}`")
-        return True
-    except Exception as exc:
-        logger.debug('profit protection failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
-        return False
 
 
 def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
@@ -1155,21 +1110,6 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         send_message(chat_id, f"🔄 استاپ‌لاس *{p['symbol']}* به‌دلیل تشکیل سوینگ جدید تغییر کرد\n• قبلی: `{fmt(old_sl)}`\n• جدید: `{fmt(new_sl)}`")
     except Exception as exc:
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
-
-
-def _maybe_close_before_day_end(chat_id, p, price):
-    """
-    برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
-    چه با ضرر. اگر تا پایان روز (بر اساس DAILY_CLOSE_TZ) کمتر از یک چرخه اسکن باقی مانده
-    باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
-    """
-    tf = p.get('timeframe', '5min')
-    if tf not in NO_OVERNIGHT_TIMEFRAMES:
-        return False
-    if _seconds_to_local_day_end() > SCAN_INTERVAL_SECONDS:
-        return False
-    close_position(chat_id, p, price, 'پایان روز - بستن اجباری (معاملات ۵ و ۱۵ دقیقه هرگز به روز بعد منتقل نمی‌شوند)')
-    return True
 
 
 def reset_daily_if_needed(chat_id, equity):
@@ -1526,7 +1466,7 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None,tp1=None,tp2=None,tp3=None,tp1_pct=0.50,tp2_pct=0.30,tp3_pct=0.20):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1622,7 +1562,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None,
+           'original_amount':0.0,'tp1':tp1,'tp1_pct':float(tp1_pct),'tp2':tp2,'tp2_pct':float(tp2_pct),'tp3':tp3 if tp3 is not None else tp,'tp3_pct':float(tp3_pct),
+           'tp1_hit':False,'tp2_hit':False,'tp3_hit':False,'break_even_after_tp1':False,'tp_ladder_complete':False,'tp_ladder_history':[]}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1686,6 +1628,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
 
             trade['entry_price'] = exec_price
             trade['amount'] = filled
+            trade['original_amount'] = filled
             trade['margin'] = exec_price * filled / max(leverage, 1)
             trade['is_real'] = True
             trade['order_id'] = order_id
@@ -1702,8 +1645,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             trade['risk_usdt'] = abs(float(trade['entry_price']) - float(trade['sl'])) / max(float(trade['entry_price']), 1e-12) * float(trade['margin']) * float(trade['leverage'])
 
             audit_event(chat_id, trade_id, 'order_filled', {'entry_price': trade['entry_price'], 'amount': trade['amount'], 'order_id': order_id})
-            ok, err = set_protection(chat_id, symbol, trade['sl'], trade['tp'])
-            audit_event(chat_id, trade_id, 'protection_set', {'ok': ok, 'detail': err, 'sl': trade.get('sl'), 'tp': trade.get('tp')})
+            ok, err = set_stop_loss_only(chat_id, symbol, trade['sl'])
+            audit_event(chat_id, trade_id, 'protection_set', {'ok': ok, 'detail': err, 'sl': trade.get('sl'), 'tp_ladder': {'tp1': trade.get('tp1'), 'tp2': trade.get('tp2'), 'tp3': trade.get('tp3')}})
             if not ok:
                 _halt_real_trading(chat_id, f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
                 try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
@@ -1725,6 +1668,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         if float(s['paper_balance']) - reserved_margin(s) < margin:
             return False
         trade['amount'] = (margin * leverage) / price
+        trade['original_amount'] = trade['amount']
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
     consumed = s.setdefault('consumed_setups', [])
@@ -1961,7 +1905,7 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp1=None,tp2=None,tp3=None,tp1_pct=0.50,tp2_pct=0.30,tp3_pct=0.20):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -1971,7 +1915,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp1=tp1,tp2=tp2,tp3=tp3,tp1_pct=tp1_pct,tp2_pct=tp2_pct,tp3_pct=tp3_pct)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -2136,6 +2080,22 @@ def admin_set_fee_command(chat_id, text):
 def close_position(chat_id,pos,price=None,reason='manual'):
     s=get_session(chat_id)
     if pos not in s['paper_positions']: return False
+    # TP3/ladder may have already closed the final exchange quantity. In that
+    # case only finalize the local record; do not send another close order or
+    # book PnL a second time.
+    if float(pos.get('amount') or 0) <= 0 and pos.get('tp_ladder_complete'):
+        pos['close_price'] = float(price or pos.get('last_partial_close_price') or pos.get('entry_price'))
+        pos['close_timestamp'] = time.time()
+        pos['close_reason'] = reason
+        pos['pnl_usdt'] = float(pos.get('pnl_usdt') or pos.get('partial_realized_usdt') or 0.0)
+        pos['realized_r'] = (pos['pnl_usdt'] / float(pos.get('risk_usdt') or 1.0))
+        s['closed_positions'].append(pos.copy())
+        s['paper_positions'].remove(pos)
+        save_session(chat_id)
+        audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')),
+                    'position_closed', {'close_price': pos['close_price'], 'pnl_usdt': pos['pnl_usdt'],
+                                        'reason': reason, 'tp_ladder': pos.get('tp_ladder_history', [])})
+        return True
     fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
     fee_note=''
     if pos.get('is_real'):
@@ -2209,6 +2169,121 @@ def close_position(chat_id,pos,price=None,reason='manual'):
     return True
 
 
+
+def _close_position_partial(chat_id, pos, fraction, price, reason):
+    """Close a fixed fraction of the ORIGINAL position volume, preserving the
+    remainder and its structural SL. Used for the TP ladder."""
+    s = get_session(chat_id)
+    if pos not in s.get('paper_positions', []):
+        return False
+    try:
+        fraction = float(fraction)
+        if not (0 < fraction <= 1):
+            return False
+        original = float(pos.get('original_amount') or pos.get('amount') or 0)
+        remaining = float(pos.get('amount') or 0)
+        qty = min(remaining, original * fraction)
+        if qty <= 0:
+            return False
+        entry = float(pos['entry_price'])
+        lev = float(pos.get('leverage') or 1)
+        margin_before = float(pos.get('margin') or 0)
+        ratio = qty / max(remaining, 1e-12)
+
+        if pos.get('is_real'):
+            ex = get_exchange(chat_id)
+            if not ex:
+                return False
+            sym = ccxt_symbol(pos['symbol'])
+            live = find_position(chat_id, pos['symbol'])
+            live_amt = float(live.get('amount') or 0) if live else 0.0
+            qty = min(qty, live_amt)
+            qty = normalize_amount(chat_id, pos['symbol'], qty)
+            if qty <= 0:
+                return False
+            order = ex.close_position(sym, None, {'type':'market','amount':qty})
+            fill = float(order.get('average') or order.get('price') or price or latest_price(pos['symbol']) or entry)
+            pos['amount'] = max(0.0, remaining - qty)
+            pos['margin'] = margin_before * max(0.0, 1.0 - qty / max(remaining, 1e-12))
+            pos['last_partial_close_price'] = fill
+        else:
+            fill = float(price or latest_price(pos['symbol']) or entry)
+            if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+                slip = PAPER_SLIPPAGE_BPS / 10000.0
+                fill = fill * (1.0 - slip) if side_long(pos['side']) else fill * (1.0 + slip)
+            frac = ((fill-entry)/entry) if side_long(pos['side']) else ((entry-fill)/entry)
+            pnl_gross = margin_before * ratio * frac * lev
+            fee = round_trip_fee_usdt(margin_before * ratio, lev)
+            funding = 0.0
+            s['paper_balance'] += pnl_gross - fee - funding
+            pos['amount'] = max(0.0, remaining - qty)
+            pos['margin'] = margin_before * max(0.0, 1.0 - ratio)
+            pos['pnl_usdt'] = float(pos.get('pnl_usdt') or 0.0) + pnl_gross - fee - funding
+            pos['partial_realized_usdt'] = float(pos.get('partial_realized_usdt') or 0.0) + pnl_gross - fee - funding
+            pos['last_partial_close_price'] = fill
+
+        pos.setdefault('tp_ladder_history', []).append({
+            'fraction_original': fraction, 'quantity': qty, 'price': fill,
+            'reason': reason, 'timestamp': time.time()
+        })
+        audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')),
+                    'partial_position_closed', {
+                        'fraction_original': fraction, 'quantity': qty, 'price': fill,
+                        'reason': reason, 'remaining_amount': pos.get('amount')
+                    })
+        save_session(chat_id)
+        return True
+    except Exception as exc:
+        logger.warning('partial close failed symbol=%s: %s', pos.get('symbol'), exc)
+        return False
+
+
+def _process_tp_ladder(chat_id, s, p, high, low, price):
+    """Execute TP1 50%, TP2 30%, TP3 20% in order. TP1 moves remaining SL to BE."""
+    if p.get('tp_ladder_complete'):
+        return False
+    try:
+        is_long = side_long(p['side'])
+        levels = [
+            ('tp1', float(p.get('tp1') or 0), 0.50, 'TP1 — ۵۰٪ در EQ'),
+            ('tp2', float(p.get('tp2') or 0), 0.30, 'TP2 — ۳۰٪ در مرز مقابل'),
+            ('tp3', float(p.get('tp3') or p.get('tp') or 0), 0.20, 'TP3 — ۲۰٪ در امتداد رنج'),
+        ]
+        changed = False
+        for key, target, fraction, reason in levels:
+            if p.get(f'{key}_hit') or target <= 0:
+                continue
+            hit = (high >= target) if is_long else (low <= target)
+            favorable = (target > float(p['entry_price'])) if is_long else (target < float(p['entry_price']))
+            # A target behind entry is not a valid profit target for this setup
+            # (e.g. a post-breakout long whose EQ is below entry).
+            if not hit or not favorable:
+                continue
+            if _close_position_partial(chat_id, p, fraction, target, reason):
+                p[f'{key}_hit'] = True
+                changed = True
+                if key == 'tp1':
+                    be = float(p['entry_price'])
+                    old = float(p.get('sl') or be)
+                    better = (be > old) if is_long else (be < old)
+                    if better:
+                        if p.get('is_real'):
+                            ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], be))
+                            if not ok:
+                                logger.warning('break-even SL move failed symbol=%s: %s', p['symbol'], err)
+                            else:
+                                p['sl'] = be
+                        else:
+                            p['sl'] = be
+                        p['break_even_after_tp1'] = True
+                send_message(chat_id, f"🎯 `{p['symbol']}` {reason} در `{fmt(target)}` اجرا شد.")
+        if float(p.get('amount') or 0) <= 0 or all(p.get(f'{k}_hit') or float(p.get(k) or 0) <= 0 for k,_,_,_ in levels):
+            p['tp_ladder_complete'] = True
+        return changed
+    except Exception as exc:
+        logger.debug('TP ladder failed symbol=%s: %s', p.get('symbol'), exc)
+        return False
+
 def reconcile_real(chat_id):
     s=get_session(chat_id)
     if s['trading_mode']!='REAL': return True
@@ -2254,127 +2329,6 @@ def reconcile_real(chat_id):
     s['last_reconcile']=time.time(); save_session(chat_id); return True
 
 
-def _position_management_timeframe(p):
-    """Use a genuinely faster timeframe to detect weakness earlier."""
-    primary = str(p.get('timeframe') or '5min')
-    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, primary)
-
-
-def _mfe_protection_exit_check(p, current_r):
-    """Close a profitable position if it gives back too much of its locked MFE.
-
-    This is position management only. It never changes an entry, TP, or initial SL.
-    A small pullback allowance is retained so normal noise does not over-close trades.
-    """
-    try:
-        tf=str(p.get('timeframe') or '')
-        peak=float(p.get('mfe_r') or 0.0)
-        if peak <= 0:
-            return False, None
-        ladder=PROFIT_LADDERS_R.get(tf)
-        if not ladder:
-            return False, None
-        protected=None; trigger=None
-        for tr,lock in ladder:
-            if peak >= tr:
-                protected=lock; trigger=tr
-            else:
-                break
-        if protected is None:
-            return False, None
-        # Giveback tolerance grows slightly with timeframe.
-        tolerance={'5min':0.08,'15min':0.12,'1hour':0.18,'4hour':0.25}.get(tf,0.15)
-        if current_r < protected - tolerance:
-            return True, f"MFE protection: peak +{peak:.2f}R → current {current_r:.2f}R; minimum protected +{protected:.2f}R (trigger {trigger:.2f}R)"
-        return False, None
-    except Exception:
-        return False, None
-
-def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
-    """Fast multi-timeframe position protection; entries remain untouched."""
-    try:
-        cfg=s.get('strategy_config') or STRATEGY_DEFAULTS
-        min_profit_r=float(cfg.get('weakness_exit_min_r',1.0))
-        min_profit_r=max(1.0, min_profit_r)
-        primary_tf=str(p.get('timeframe') or '5min')
-        management_tf=_position_management_timeframe(p)
-        p['management_timeframe']=management_tf
-        peak_r=float(p.get('mfe_r') or 0.0)
-
-        # Fast profit protection is based on live price/MFE and remains independent
-        # of indicator weakness. Indicator weakness starts only after a real profit
-        # buffer (>= 1R), so normal pullbacks cannot close a marginally profitable trade.
-        if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
-            return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
-
-        early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',True))
-        early_loss_r=float(cfg.get('early_loss_weakness_exit_min_r', POSITION_MANAGEMENT_EARLY_LOSS_R))
-        loss_score=float(cfg.get('early_loss_weakness_exit_score', POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE))
-        # The audit showed too many 5m trades being closed for weakness while
-        # still near entry. Give 5m positions more room; keep other timeframes
-        # exactly as before.
-        if primary_tf == '5min':
-            # 5m needs an earlier, graduated loss-protection path. A single hard
-            # threshold at -0.25R was too easy to miss before a fast candle reached
-            # the primary 5m SL. Use a lower weakness threshold as the loss deepens.
-            early_loss_r = min(early_loss_r, -0.20)
-            loss_score = max(loss_score, 45.0)
-        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=early_loss_r)
-        if not need_weakness:
-            return False,[]
-        if wdf is None:
-            wdf=get_klines(p['symbol'],management_tf,150)
-        if wdf is None or wdf.empty or len(wdf)<60:
-            return False,[]
-        wdf=calculate_indicators(wdf)
-        if wdf.empty or len(wdf)<60:
-            return False,[]
-        is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
-
-        # ATR is a volatility ruler, not an alternative SL/TP.  Measure how large
-        # the adverse move is relative to the current market's normal range and
-        # use that only to strengthen the early-loss decision.
-        atr_pressure = 0.0
-        atr_now = 0.0
-        try:
-            c_atr = wdf.iloc[-2]
-            atr_now = float(c_atr.get('atr') or 0.0)
-            ref_price = float(current_price if current_price is not None else c_atr.get('close'))
-            entry_price = float(p.get('entry_price') or 0.0)
-            if atr_now > 0 and entry_price > 0:
-                adverse_move = (entry_price - ref_price) if side_long(p['side']) else (ref_price - entry_price)
-                atr_pressure = max(0.0, adverse_move / atr_now)
-        except Exception:
-            atr_pressure = 0.0
-
-        if atr_pressure > 0:
-            wreasons = list(wreasons) + [f"فشار مخالف: {atr_pressure:.2f} ATR"]
-
-        # Profitable trades use confirmed weakness; the evolved early-loss path is also
-        # enabled by default and activates at the configured small adverse R threshold.
-        if current_r>=min_profit_r and is_weak:
-            return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if early_loss_enabled and primary_tf == '5min':
-            # Graduated protection: ATR pressure is an additional volatility-aware
-            # trigger. It never replaces the structural Swing SL.
-            if atr_pressure >= float(cfg.get('atr_early_exit_extreme', 0.85)) and current_r < 0 and wscore >= float(cfg.get('atr_early_exit_extreme_score', 25.0)):
-                return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if atr_pressure >= float(cfg.get('atr_early_exit_strong', 0.60)) and current_r <= -0.30 and wscore >= float(cfg.get('atr_early_exit_strong_score', 30.0)):
-                return True,[f"کاهش ریسک پیش از SL | فشار مخالف {atr_pressure:.2f} ATR",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if current_r <= -0.50 and wscore >= 35.0:
-                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if current_r <= -0.35 and wscore >= 40.0:
-                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-            if current_r <= early_loss_r and wscore >= loss_score:
-                return True,[f"کاهش ریسک پیش از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        elif early_loss_enabled and current_r<=early_loss_r and wscore>=loss_score:
-            return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        return False,[]
-    except Exception as exc:
-        logger.debug('weakness exit check failed trade=%s symbol=%s: %s',p.get('trade_id'),p.get('symbol'),exc)
-        return False,[]
-
-
 def _build_open_positions_view(chat_id, prices=None):
     """Build the live open-position card. Prices are fetched fresh (with normal caches)."""
     s = get_session(chat_id)
@@ -2402,7 +2356,8 @@ def _build_open_positions_view(chat_id, prices=None):
                 f'↳ ورود: `{fmt(entry)}` | فعلی: `{fmt(live)}`',
                 f'↳ 📈 سود/زیان لحظه‌ای: `{pnl:+.2f} USDT`',
                 f'↳ 📊 بازده: `{pct:+.2f}%` | R: `{r:+.2f}`',
-                f'↳ 🎯 TP: `{fmt(p["tp"])}` | 🛑 SL: `{fmt(p["sl"])}`',
+                f'↳ 🎯 TP Ladder: 50% `{fmt(p.get("tp1") or p.get("tp"))}` | 30% `{fmt(p.get("tp2") or p.get("tp"))}` | 20% `{fmt(p.get("tp3") or p.get("tp"))}`',
+                f'↳ 🛑 SL: `{fmt(p["sl"])}`' ,
             ]
         except Exception as exc:
             logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
@@ -2531,56 +2486,37 @@ def update_positions(chat_id):
             update_trade_excursions(p, float(price), float(price))
             p['last_unrealized_pnl']=float(p.get('margin',0))*(((price-float(p['entry_price']))/float(p['entry_price'])) if side_long(p['side']) else ((float(p['entry_price'])-price)/float(p['entry_price'])))*float(p['leverage'])
             p['last_price']=float(price)
-        if _maybe_close_before_day_end(chat_id,p,price):
-            continue
-
         entry=float(p['entry_price'])
         risk_distance=float(p.get('risk_distance') or 0.0)
         if risk_distance<=0: risk_distance=abs(entry-float(p.get('sl',entry)))
         current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance) if risk_distance>0 else 0.0
 
-        # 5m early-loss protection gets first look using the faster management
-        # timeframe. This allows a confirmed deterioration to close before a fast
-        # 5m candle can jump straight into the primary SL. Other timeframes keep
-        # the original ordering.
-        exit_price=None; reason=None
-        # V5: MFE-based profit protection gets first decision for every timeframe.
-        mfe_exit,mfe_reason=_mfe_protection_exit_check(p,current_r)
-        if mfe_exit:
-            exit_price=price; reason='مدیریت سود هوشمند (حفاظت بر اساس MFE)'; p['mfe_protection_reason']=[mfe_reason]
+        # TP ladder is the only profit-taking mechanism: 50% at EQ, 30% at
+        # the opposite reference boundary, 20% at range extension.  A paper
+        # candle that touches SL and a TP simultaneously remains conservative:
+        # SL wins and the ladder is not credited on that ambiguous bar.
+        paper_sl_hit = False
+        if s['trading_mode']=='PAPER' and not primary_df.empty:
+            paper_sl_hit = (low <= float(p['sl'])) if side_long(p['side']) else (high >= float(p['sl']))
+        if not paper_sl_hit:
+            _process_tp_ladder(chat_id, s, p, high, low, price)
+            if float(p.get('amount') or 0) <= 0:
+                # TP3 consumed the last 20%; finalize the trade record.
+                reason = 'TP ladder completed'
+                exit_price = float(p.get('last_partial_close_price') or price)
 
-        if reason is None and primary_tf == '5min':
-            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
-            if should_exit:
-                exit_price=price; reason='مدیریت هوشمند (کاهش ریسک پیش از SL)'; p['weakness_exit_reasons']=wreasons
-
-        # Hard SL/TP remains the fallback and is still checked before discretionary
-        # stop movement.
         if reason is None and s['trading_mode']=='PAPER' and not primary_df.empty:
             if side_long(p['side']):
-                hit_tp=high>=float(p['tp']); hit_sl=low<=float(p['sl'])
+                hit_sl=low<=float(p['sl'])
             else:
-                hit_tp=low<=float(p['tp']); hit_sl=high>=float(p['sl'])
-            if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
-                exit_price=float(p['sl']); reason='SL (same candle)'
-            elif hit_tp: exit_price=float(p['tp']); reason='TP'
-            elif hit_sl: exit_price=float(p['sl']); reason='SL'
-
-        if reason is None and s['filters'].get('trailing_stop',True) and risk_distance>0:
-            favorable_price=(high if side_long(p['side']) else low) if s['trading_mode']=='PAPER' else (p.get('peak_favorable_price') or price)
-            _apply_profit_protection(chat_id,s,p,favorable_price,price)
-            # Re-read current R after a possible stop update.
-            current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance)
+                hit_sl=high>=float(p['sl'])
+            if hit_sl:
+                exit_price=float(p['sl']); reason='SL'
 
         if reason is None:
             # Structural swing stop intentionally remains on the primary trading timeframe.
             if not primary_df.empty:
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
-
-        if reason is None and primary_tf != '5min':
-            should_exit,wreasons=_weakness_exit_check(chat_id,s,p,current_r,management_df,price)
-            if should_exit:
-                exit_price=price; reason='مدیریت هوشمند (ضعف روند / کاهش ریسک)'; p['weakness_exit_reasons']=wreasons
 
         if reason:
             close_position(chat_id,p,exit_price,reason)
@@ -2987,7 +2923,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if primary_tf == '5min' and plan.get('setup_family') == 'swing_break' and plan.get('swing_level') is not None:
         swing_level = float(plan['swing_level'])
         swing_sl_buffer = abs(float(plan['swing_level']) - sl)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer)
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp1=plan.get('tp1'),tp2=plan.get('tp2'),tp3=plan.get('tp3'),tp1_pct=plan.get('tp1_pct',50)/100.0,tp2_pct=plan.get('tp2_pct',30)/100.0,tp3_pct=plan.get('tp3_pct',20)/100.0)
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)

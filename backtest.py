@@ -47,7 +47,6 @@ import pandas as pd
 
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan,
-    evaluate_trend_weakness,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
@@ -215,20 +214,6 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
                         locked_r = lr
                         trailing_activated = True
 
-            # --- مدیریت هوشمند: خروج زودهنگام با سود اگر علائم ضعف روند دیده شود
-            # (دقیقاً همان منطق _weakness_exit_check در bot.py) ---
-            current_r = ((close - entry) / risk_distance) if is_long else ((entry - close) / risk_distance)
-            weak_min_r = float(strategy_config.get('weakness_exit_min_r', 0.8))
-            if current_r >= weak_min_r:
-                wdf = ind.iloc[: j + 2]
-                if len(wdf) >= 60:
-                    is_weak, _wscore, _wreasons = evaluate_trend_weakness(
-                        wdf, 'BUY' if is_long else 'SELL', strategy_config
-                    )
-                    if is_weak:
-                        exit_price, exit_reason = close, 'مدیریت هوشمند (ضعف روند)'
-                        exit_idx = j
-                        break
 
             j += 1
 

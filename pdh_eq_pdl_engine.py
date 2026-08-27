@@ -10,7 +10,7 @@ pdh_eq_pdl_engine.py
   - تایم‌فریم‌های ۵ و ۱۵ دقیقه: سطوح مرجع از PDH/PDL/EQ *روزانه* گرفته می‌شود.
   - تایم‌فریم‌های ۱ و ۴ ساعته: سطوح مرجع از PWH/PWL/EQ *هفتگی* گرفته می‌شود
     (دقیقاً همان منطق PDH/PDL روزانه، فقط روی دوره‌ی هفتگی).
-  - همه‌ی ۱۲ سناریو در هر بار بررسی، هم‌زمان ارزیابی می‌شوند و سناریویی که
+  - همه‌ی ۱۰ سناریو در هر بار بررسی، هم‌زمان ارزیابی می‌شوند و سناریویی که
     بیشترین امتیاز نهایی (پایه + بونوس اندیکاتورها − جریمه‌ی سابقه فیک‌اوت)
     را داشته باشد انتخاب می‌شود؛ دقیقاً طبق pseudocode بخش ۴ فایل استراتژی.
   - اندیکاتورهای کمکی (حجم، بدنه کندل نسبت به ATR، RSI، هم‌جهتی با EMA50)
@@ -37,7 +37,12 @@ ENGINE_DEFAULTS = {
     "touch_tolerance_pct": 0.0006,    # ۰.۰۶٪ تلورانس «برخورد به سطح»
     "break_confirm_pct": 0.0003,      # حداقل فاصله close از سطح برای «شکست واقعی»
     "min_confirm_body_ratio": 0.20,   # حداقل کیفیت بدنه برای «کندل تاییدی»
-    "swing_search_window_mult": 4,    # پنجره جست‌وجوی سوئینگ = lookback * این عدد
+    "swing_search_window_mult": 4,
+    "min_swing_wick_atr": 0.15,
+    "min_swing_wick_pct": 0.0005,
+    "min_swing_volume_ratio": 1.02,
+    "require_swing_volume": True,
+    "max_entry_event_age_bars": 9,  # interaction must be recent, not merely somewhere in today
 
     # --- امتیاز پایه سناریوها (دقیقاً از فایل استراتژی) ---
     "base_scores": {
@@ -56,6 +61,8 @@ ENGINE_DEFAULTS = {
     # --- جریمه سابقه فیک‌اوت (پروکسی: تعداد برخوردهای تکراری به همان سطح در همین دوره) ---
     "penalty_weights": {
         "fakeout_history": 15.0,
+        "fakeout_min_penalty": 2.0,
+        "fakeout_decay_touches": 4.0,
     },
 
     "rsi_oversold": 35.0,
@@ -138,63 +145,83 @@ def _timestamp_to_datetime(df: pd.DataFrame) -> pd.Series:
     return pd.to_datetime(ts, unit=unit, utc=True)
 
 
-# ============================================================================
-# ۳) محاسبه سطوح مرجع: روزانه (PDH/PDL/EQ) و هفتگی (PWH/PWL/EQ)
-# ============================================================================
+def _timeframe_minutes(timeframe: str) -> int:
+    return {"5min": 5, "15min": 15, "1hour": 60, "4hour": 240}.get(str(timeframe), 5)
 
-def compute_prev_day_levels(df: pd.DataFrame):
-    """سطوح PDH/PDL/EQ روزانه (برای تایم‌فریم‌های ۵ و ۱۵ دقیقه)."""
-    if df is None or len(df) < 50 or "timestamp" not in df.columns:
+
+def _last_closed_index(d: pd.DataFrame, timeframe: str) -> int:
+    """Return the latest candle that is definitely closed.
+
+    Live feeds often append the currently-forming candle.  Historical/backtest
+    data normally ends on a closed candle.  We therefore inspect the candle's
+    UTC open timestamp against current UTC time rather than blindly using -2.
+    """
+    if d is None or d.empty or "timestamp" not in d.columns:
+        return -1
+    ts = pd.to_numeric(d["timestamp"], errors="coerce")
+    unit = "ms" if float(ts.dropna().median() or 0) > 1e12 else "s"
+    dt = pd.to_datetime(ts, unit=unit, utc=True)
+    last_i = len(d) - 1
+    if pd.isna(dt.iloc[last_i]):
+        return max(-1, last_i - 1)
+    close_at = dt.iloc[last_i] + pd.Timedelta(minutes=_timeframe_minutes(timeframe))
+    # If the last candle is still forming, use the preceding one; otherwise use it.
+    return last_i - 1 if close_at > pd.Timestamp.now(tz="UTC") else last_i
+
+
+def compute_prev_day_levels(df: pd.DataFrame, timeframe: str = "5min"):
+    """PDH/PDL/EQ from the completed UTC calendar day immediately before the
+    day containing the latest *closed* intraday candle."""
+    if df is None or len(df) < 2 or "timestamp" not in df.columns:
         return None, None, None, None
     d = df.copy()
     d["_dt"] = _timestamp_to_datetime(d)
-    if d["_dt"].isna().all():
-        return None, None, None, None
-    d["_period"] = d["_dt"].dt.date
-    grp = d.groupby("_period").agg(_hi=("high", "max"), _lo=("low", "min"))
+    d = d.dropna(subset=["_dt"]).reset_index(drop=True)
+    if d.empty:
+        return d, None, None, None
+    for col in ("high", "low"):
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d["_period"] = d["_dt"].dt.strftime("%Y-%m-%d")
+    grp = d.groupby("_period", sort=True).agg(_hi=("high", "max"), _lo=("low", "min"))
     grp["_pdh"] = grp["_hi"].shift(1)
     grp["_pdl"] = grp["_lo"].shift(1)
     d = d.merge(grp[["_pdh", "_pdl"]], left_on="_period", right_index=True, how="left")
-    d = d.reset_index(drop=True)
-    idx_now = len(d) - 2  # آخرین کندل بسته‌شده (مطابق قرارداد کل ربات)
+    idx_now = _last_closed_index(d, timeframe)
     if idx_now < 0:
         return d, None, None, None
     pdh, pdl = d.at[idx_now, "_pdh"], d.at[idx_now, "_pdl"]
     if pd.isna(pdh) or pd.isna(pdl):
         return d, None, None, None
     pdh, pdl = float(pdh), float(pdl)
-    eq = (pdh + pdl) / 2.0
-    return d, pdh, pdl, eq
+    return d, pdh, pdl, (pdh + pdl) / 2.0
 
 
-def compute_prev_week_levels(df: pd.DataFrame):
-    """سطوح PWH/PWL/EQ هفتگی (برای تایم‌فریم‌های ۱ و ۴ ساعته)."""
-    if df is None or len(df) < 50 or "timestamp" not in df.columns:
+def compute_prev_week_levels(df: pd.DataFrame, timeframe: str = "1hour"):
+    """PWH/PWL/EQ from the completed UTC ISO week immediately before the week
+    containing the latest closed candle."""
+    if df is None or len(df) < 2 or "timestamp" not in df.columns:
         return None, None, None, None
     d = df.copy()
     d["_dt"] = _timestamp_to_datetime(d)
-    if d["_dt"].isna().all():
-        return None, None, None, None
-    # شروع هفته را دوشنبه در نظر می‌گیریم (قابل تغییر در صورت نیاز به هفته کریپتویی یکشنبه‌شروع)
+    d = d.dropna(subset=["_dt"]).reset_index(drop=True)
+    if d.empty:
+        return d, None, None, None
+    for col in ("high", "low"):
+        d[col] = pd.to_numeric(d[col], errors="coerce")
     iso = d["_dt"].dt.isocalendar()
     d["_period"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
-    grp = d.groupby("_period", sort=False).agg(_hi=("high", "max"), _lo=("low", "min"))
-    # ترتیب دوره‌ها باید زمانی باشد نه الفبایی؛ با اولین timestamp هر دوره مرتب می‌کنیم
-    order = d.groupby("_period", sort=False)["_dt"].min().sort_values().index
-    grp = grp.reindex(order)
+    grp = d.groupby("_period", sort=True).agg(_hi=("high", "max"), _lo=("low", "min"))
     grp["_pwh"] = grp["_hi"].shift(1)
     grp["_pwl"] = grp["_lo"].shift(1)
     d = d.merge(grp[["_pwh", "_pwl"]], left_on="_period", right_index=True, how="left")
-    d = d.reset_index(drop=True)
-    idx_now = len(d) - 2
+    idx_now = _last_closed_index(d, timeframe)
     if idx_now < 0:
         return d, None, None, None
     pwh, pwl = d.at[idx_now, "_pwh"], d.at[idx_now, "_pwl"]
     if pd.isna(pwh) or pd.isna(pwl):
         return d, None, None, None
     pwh, pwl = float(pwh), float(pwl)
-    eq = (pwh + pwl) / 2.0
-    return d, pwh, pwl, eq
+    return d, pwh, pwl, (pwh + pwl) / 2.0
 
 
 LEVEL_SOURCE_BY_TIMEFRAME = {
@@ -213,9 +240,9 @@ def get_reference_levels(df: pd.DataFrame, timeframe: str):
     """
     source = LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
     if source == "weekly":
-        d, hi, lo, eq = compute_prev_week_levels(df)
+        d, hi, lo, eq = compute_prev_week_levels(df, timeframe)
         return d, hi, lo, eq, "PWH/PWL", source
-    d, hi, lo, eq = compute_prev_day_levels(df)
+    d, hi, lo, eq = compute_prev_day_levels(df, timeframe)
     return d, hi, lo, eq, "PDH/PDL", source
 
 
@@ -223,24 +250,76 @@ def get_reference_levels(df: pd.DataFrame, timeframe: str):
 # ۴) تشخیص سوئینگ (فرکتال ساده)
 # ============================================================================
 
-def compute_swings(df: pd.DataFrame, lookback: int = 3) -> pd.DataFrame:
-    d = df.copy()
+def compute_swings(df: pd.DataFrame, lookback: int = 3,
+                  min_wick_atr: float = 0.15, min_wick_pct: float = 0.0005,
+                  min_volume_ratio: float = 1.02, require_volume: bool = True) -> pd.DataFrame:
+    """Confirmed fractal swings with minimum wick and meaningful-volume gates."""
+    d = _ensure_atr(df)
     n = len(d)
     highs = pd.to_numeric(d["high"], errors="coerce").values
     lows = pd.to_numeric(d["low"], errors="coerce").values
+    opens = pd.to_numeric(d["open"], errors="coerce").values
+    closes = pd.to_numeric(d["close"], errors="coerce").values
+    atrs = pd.to_numeric(d.get("atr", pd.Series(np.nan, index=d.index)), errors="coerce").values
+    vrs = pd.to_numeric(d.get("volume_ratio", pd.Series(1.0, index=d.index)), errors="coerce").fillna(1.0).values
     swing_high = np.zeros(n, dtype=bool)
     swing_low = np.zeros(n, dtype=bool)
     for i in range(lookback, n - lookback):
-        h_win = highs[i - lookback: i + lookback + 1]
-        l_win = lows[i - lookback: i + lookback + 1]
+        h_win = highs[i - lookback:i + lookback + 1]
+        l_win = lows[i - lookback:i + lookback + 1]
         if np.isnan(h_win).any() or np.isnan(l_win).any():
             continue
-        if highs[i] == h_win.max() and (h_win == highs[i]).sum() == 1:
-            swing_high[i] = True
-        if lows[i] == l_win.min() and (l_win == lows[i]).sum() == 1:
-            swing_low[i] = True
+        rng = max(highs[i] - lows[i], 1e-12)
+        body_hi = max(opens[i], closes[i])
+        body_lo = min(opens[i], closes[i])
+        upper_wick = max(0.0, highs[i] - body_hi)
+        lower_wick = max(0.0, body_lo - lows[i])
+        atr = float(atrs[i]) if np.isfinite(atrs[i]) else 0.0
+        wick_floor = max(float(min_wick_pct) * max(abs(closes[i]), 1e-12),
+                         float(min_wick_atr) * atr if atr > 0 else 0.0)
+        volume_ok = (not require_volume) or float(vrs[i]) >= float(min_volume_ratio)
+        # A candidate must first pass the local fractal + rejection + volume gates.
+        # We also require meaningful displacement away from the candidate. This
+        # prevents tiny local pivots from being promoted to structural swings.
+        left_hi = float(np.nanmax(h_win[:lookback])) if lookback else highs[i]
+        right_hi = float(np.nanmax(h_win[lookback + 1:])) if lookback else highs[i]
+        left_lo = float(np.nanmin(l_win[:lookback])) if lookback else lows[i]
+        right_lo = float(np.nanmin(l_win[lookback + 1:])) if lookback else lows[i]
+        excursion_hi = max(0.0, highs[i] - min(left_hi, right_hi))
+        excursion_lo = max(0.0, max(left_lo, right_lo) - lows[i])
+        displacement_floor = max(0.25 * atr, float(min_wick_pct) * max(abs(closes[i]), 1e-12) * 2.0)
+        high_local = highs[i] == h_win.max() and (h_win == highs[i]).sum() == 1
+        low_local = lows[i] == l_win.min() and (l_win == lows[i]).sum() == 1
+        if high_local:
+            swing_high[i] = (upper_wick >= wick_floor and volume_ok and excursion_hi >= displacement_floor)
+        if low_local:
+            swing_low[i] = (lower_wick >= wick_floor and volume_ok and excursion_lo >= displacement_floor)
     d["swing_high"] = swing_high
     d["swing_low"] = swing_low
+
+    # Structure-aware validation: keep only pivots that participate in a
+    # meaningful HH/HL or LH/LL progression. The first valid pivot of a type
+    # is retained as an anchor; subsequent pivots receive a structure score.
+    d["swing_structure_score"] = 0.0
+    prev_hi = None
+    prev_lo = None
+    for i in range(n):
+        if swing_high[i]:
+            if prev_hi is None:
+                score = 1.0
+            else:
+                delta = abs(highs[i] - highs[prev_hi]) / max(float(atrs[i]) if np.isfinite(atrs[i]) and atrs[i] > 0 else 1.0, 1e-12)
+                score = 1.0 + min(delta, 3.0)
+            d.at[d.index[i], "swing_structure_score"] = max(float(d.at[d.index[i], "swing_structure_score"]), score)
+            prev_hi = i
+        if swing_low[i]:
+            if prev_lo is None:
+                score = 1.0
+            else:
+                delta = abs(lows[i] - lows[prev_lo]) / max(float(atrs[i]) if np.isfinite(atrs[i]) and atrs[i] > 0 else 1.0, 1e-12)
+                score = 1.0 + min(delta, 3.0)
+            d.at[d.index[i], "swing_structure_score"] = max(float(d.at[d.index[i], "swing_structure_score"]), score)
+            prev_lo = i
     return d
 
 
@@ -300,7 +379,13 @@ def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: d
     # جریمه سابقه فیک‌اوت: پروکسی = تعداد برخوردهای تکراری به همان سطح در همین دوره
     # (هرچه یک سطح بیشتر لمس شده باشد بدون شکست قطعی، احتمال فیک‌اوت بعدی بیشتر است)
     extra_touches = max(0, touch_count - 1)
-    penalty_total = min(pw["fakeout_history"], extra_touches * (pw["fakeout_history"] / 3.0))
+    # Adaptive penalty: first repeat touch is only a light warning; repeated
+    # touches increase the penalty with diminishing returns and never erase a
+    # high-quality core setup by themselves.
+    max_pen = float(pw.get("fakeout_history", 15.0))
+    min_pen = float(pw.get("fakeout_min_penalty", 2.0))
+    decay = max(1.0, float(pw.get("fakeout_decay_touches", 4.0)))
+    penalty_total = 0.0 if extra_touches <= 0 else min(max_pen, min_pen + (max_pen - min_pen) * (1.0 - np.exp(-extra_touches / decay)))
     if penalty_total > 0.5:
         notes.append(f"سابقه {touch_count} برخورد قبلی به همین سطح (ریسک فیک‌اوت)")
 
@@ -321,7 +406,7 @@ def _is_bearish_confirm(row, min_body_ratio):
 
 def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None):
     """
-    ارزیابی هم‌زمان ۱۲ سناریوی B1..B6 / S1..S6 روی df (که باید ستون‌های
+    ارزیابی هم‌زمان ۱۰ سناریوی B1..B5 / S1..S5 روی df (که باید ستون‌های
     open/high/low/close/volume/timestamp داشته باشد؛ اندیکاتورها در صورت نبود
     به‌صورت خودکار ساخته می‌شوند).
 
@@ -343,8 +428,8 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
         return None
 
     lookback = int(cfg["swing_lookback_fractal"])
-    d = compute_swings(d, lookback)
-    idx_now = len(d) - 2  # آخرین کندل بسته‌شده
+    d = compute_swings(d, lookback, cfg.get("min_swing_wick_atr", 0.20), cfg.get("min_swing_wick_pct", 0.0008), cfg.get("min_swing_volume_ratio", 1.05), cfg.get("require_swing_volume", True))
+    idx_now = _last_closed_index(d, timeframe)  # آخرین کندل کاملاً بسته‌شده
     if idx_now < lookback * 3:
         return None
 
@@ -374,6 +459,23 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     curr_row = d.loc[idx_now]
     close_now = _safe_float(curr_row.get("close"))
 
+    # HARD DEAD-ZONE GATE:
+    # Being touched once earlier in the session is NOT enough.  A signal in the
+    # middle of the range must be causally tied to a RECENT boundary interaction
+    # (touch/sweep/break). This prevents stale events from authorizing mid-range
+    # entries hours later.
+    in_dead_zone = (lo_level * (1 + tol) < close_now < hi_level * (1 - tol))
+    last_hi_event = max(hi_touch_idxs + hi_break_idxs) if (hi_touch_idxs or hi_break_idxs) else None
+    last_lo_event = max(lo_touch_idxs + lo_break_idxs) if (lo_touch_idxs or lo_break_idxs) else None
+    event_age = max(1, int(cfg.get("max_entry_event_age_bars", 9)))
+    recent_hi_event = last_hi_event is not None and (idx_now - last_hi_event) <= event_age
+    recent_lo_event = last_lo_event is not None and (idx_now - last_lo_event) <= event_age
+    if in_dead_zone and not (recent_hi_event or recent_lo_event):
+        return None
+
+    def recent_event(idx):
+        return idx is not None and (idx_now - idx) <= event_age
+
     candidates = []
 
     def add_candidate(code, direction, sl, tp, tp_partial, extra_reason, touch_count):
@@ -386,6 +488,10 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
             "base_score": base, "bonus": round(bonus, 1), "penalty": round(penalty, 1),
             "total_score": round(total, 1),
             "entry": close_now, "sl": sl, "tp": tp, "tp_partial": tp_partial,
+            "tp1": eq, "tp1_pct": 50.0, "tp2": hi_level if direction == "BUY" else lo_level,
+            "tp2_pct": 30.0, "tp3": (hi_level + (hi_level - lo_level) * cfg["extension_atr_mult"])
+                if direction == "BUY" else (lo_level - (hi_level - lo_level) * cfg["extension_atr_mult"]),
+            "tp3_pct": 20.0,
             "level_label": label, "reasons": reasons,
         })
 
@@ -396,7 +502,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     bullish_confirm_now = _is_bullish_confirm(curr_row, min_body)
 
     # B1: سوییپ PDH/PWH سپس سوییپ PDL/PWL و بازگشت
-    if first_hi is not None and first_lo is not None and first_hi < first_lo and bullish_confirm_now and recent_swing_lows:
+    if first_hi is not None and first_lo is not None and first_hi < first_lo and recent_event(last_lo_event) and bullish_confirm_now and recent_swing_lows:
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
         if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
@@ -406,7 +512,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(lo_touch_idxs))
 
     # B3: سوییپ مستقیم PDL/PWL بدون عبور قبلی از PDH/PWH
-    if first_lo is not None and (first_hi is None or first_hi > first_lo) and bullish_confirm_now and recent_swing_lows:
+    if first_lo is not None and (first_hi is None or first_hi > first_lo) and recent_event(last_lo_event) and bullish_confirm_now and recent_swing_lows:
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
         if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
@@ -416,7 +522,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(lo_touch_idxs))
 
     # B4: ری‌کلیم EQ پس از سوییپ PDL/PWL
-    if first_lo is not None:
+    if first_lo is not None and recent_event(last_lo_event):
         eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_lo
                           and _safe_float(d.at[i - 1, "close"]) < eq <= _safe_float(d.at[i, "close"])]
         if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bullish_confirm_now:
@@ -428,7 +534,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(lo_touch_idxs))
 
     # B2: سوییپ PDH/PWH، پولبک مضاعف، سوئینگ (کف بالاتر) نزدیک مقاومت
-    if first_hi is not None and bullish_confirm_now:
+    if first_hi is not None and recent_event(last_hi_event) and bullish_confirm_now:
         swings_after = [i for i in recent_swing_lows if i > first_hi]
         if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "low"]) > _safe_float(d.at[swings_after[-2], "low"]):
             if idx_now - swings_after[-1] <= lookback + 3:
@@ -439,7 +545,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                                len(hi_touch_idxs))
 
     # B5: بریک‌اند‌ریتست PDH/PWH (شکسته‌شدن مقاومت و تبدیل آن به حمایت)
-    if hi_break_idxs and bullish_confirm_now:
+    if hi_break_idxs and recent_event(last_hi_event) and bullish_confirm_now:
         first_break = hi_break_idxs[0]
         after_break = period.loc[first_break:idx_now]
         min_close_after = _safe_float(after_break["close"].min()) if len(after_break) else None
@@ -451,16 +557,6 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
                            len(hi_touch_idxs))
 
-    # B6: ورود دیسکانت (زیر EQ) بدون لمس دقیق PDL/PWL
-    if first_lo is None and close_now < eq and bullish_confirm_now and recent_swing_lows:
-        swing_idx = recent_swing_lows[-1]
-        swing_price = _safe_float(d.at[swing_idx, "low"])
-        if lo_level < swing_price < eq and idx_now - swing_idx <= lookback + 3:
-            sl = swing_price - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B6", "BUY", sl, hi_level, eq,
-                           "ورود در ناحیه دیسکانت (زیر EQ) بدون لمس دقیق کف رنج",
-                           len(lo_touch_idxs))
-
     # ------------------------------------------------------------------
     # سناریوهای فروش (SELL) — دقیقاً معکوس سناریوهای خرید
     # ------------------------------------------------------------------
@@ -468,7 +564,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     bearish_confirm_now = _is_bearish_confirm(curr_row, min_body)
 
     # S1: سوییپ PDL/PWL سپس سوییپ PDH/PWH و بازگشت
-    if first_lo is not None and first_hi is not None and first_lo < first_hi and bearish_confirm_now and recent_swing_highs:
+    if first_lo is not None and first_hi is not None and first_lo < first_hi and recent_event(last_hi_event) and bearish_confirm_now and recent_swing_highs:
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
         if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
@@ -478,7 +574,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(hi_touch_idxs))
 
     # S3: سوییپ مستقیم PDH/PWH بدون عبور قبلی از PDL/PWL
-    if first_hi is not None and (first_lo is None or first_lo > first_hi) and bearish_confirm_now and recent_swing_highs:
+    if first_hi is not None and (first_lo is None or first_lo > first_hi) and recent_event(last_hi_event) and bearish_confirm_now and recent_swing_highs:
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
         if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
@@ -488,7 +584,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(hi_touch_idxs))
 
     # S4: ری‌کلیم EQ پس از سوییپ PDH/PWH
-    if first_hi is not None:
+    if first_hi is not None and recent_event(last_hi_event):
         eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_hi
                           and _safe_float(d.at[i - 1, "close"]) > eq >= _safe_float(d.at[i, "close"])]
         if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bearish_confirm_now:
@@ -500,7 +596,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(hi_touch_idxs))
 
     # S2: سوییپ PDL/PWL، پولبک مضاعف، سوئینگ (سقف پایین‌تر) نزدیک حمایت
-    if first_lo is not None and bearish_confirm_now:
+    if first_lo is not None and recent_event(last_lo_event) and bearish_confirm_now:
         swings_after = [i for i in recent_swing_highs if i > first_lo]
         if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "high"]) < _safe_float(d.at[swings_after[-2], "high"]):
             if idx_now - swings_after[-1] <= lookback + 3:
@@ -511,7 +607,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                                len(lo_touch_idxs))
 
     # S5: بریک‌اند‌ریتست PDL/PWL (شکسته‌شدن حمایت و تبدیل آن به مقاومت)
-    if lo_break_idxs and bearish_confirm_now:
+    if lo_break_idxs and recent_event(last_lo_event) and bearish_confirm_now:
         first_break = lo_break_idxs[0]
         after_break = period.loc[first_break:idx_now]
         max_close_after = _safe_float(after_break["close"].max()) if len(after_break) else None
@@ -522,16 +618,6 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
             add_candidate("S5", "SELL", sl, tp_ext, None,
                            f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
                            len(lo_touch_idxs))
-
-    # S6: ورود پریمیوم (بالای EQ) بدون لمس دقیق PDH/PWH
-    if first_hi is None and close_now > eq and bearish_confirm_now and recent_swing_highs:
-        swing_idx = recent_swing_highs[-1]
-        swing_price = _safe_float(d.at[swing_idx, "high"])
-        if eq < swing_price < hi_level and idx_now - swing_idx <= lookback + 3:
-            sl = swing_price + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S6", "SELL", sl, lo_level, eq,
-                           "ورود در ناحیه پریمیوم (بالای EQ) بدون لمس دقیق سقف رنج",
-                           len(hi_touch_idxs))
 
     if not candidates:
         return None
