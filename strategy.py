@@ -50,7 +50,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
+FILTER_DEFAULTS = {
+    "volume_filter": True,
+    "candlestick_filter": True,
+    "trailing_stop": True,
+    "no_short_filter": False,
+    "no_buy_filter": False,
+}
 
 # ============================================================================
 # ۱) تنظیمات پیش‌فرض موتور
