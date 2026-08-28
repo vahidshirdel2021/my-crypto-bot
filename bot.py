@@ -26,12 +26,13 @@ from flask import Flask, request
 
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
+    compute_swing_stop_v2,
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, compute_swing_stop,
+    compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
 )
-from pdh_eq_pdl_engine import min_klines_for_levels
+from pdh_eq_pdl_engine import min_klines_for_levels, get_reference_levels
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
@@ -1061,11 +1062,28 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
             return
         is_long = side_long(p['side'])
         cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
-        lookback_n = int(cfg.get('swing_lookback', 12))
-        confirm_n = int(cfg.get('swing_confirm_candles', 2))
-        buffer_atr = float(cfg.get('swing_buffer_atr', 0.40))
-        buffer_wick_pct = float(cfg.get('swing_buffer_wick_pct', 0.0015))
-        new_sl, swing_level = compute_swing_stop(sdf, is_long, lookback_n, buffer_atr, confirm_n, buffer_wick_pct)
+        # اگر use_advanced_swing_stop فعال باشد، به‌جای پنجره‌ی ثابت lookback از
+        # کتابخانه swing_detection.py (سوینگ واقعی رجکشن/فراکتال تاییدشده)
+        # استفاده می‌شود؛ در غیر این صورت (پیش‌فرض) دقیقاً رفتار قبلی حفظ می‌شود.
+        if bool(cfg.get('use_advanced_swing_stop', False)):
+            atr_period = int(cfg.get('advanced_swing_atr_period', 14))
+            atr_buffer_mult = float(cfg.get('advanced_swing_atr_buffer_mult', 0.25))
+            pct_buffer = float(cfg.get('advanced_swing_pct_buffer', 0.0015))
+            new_sl, swing_level = compute_swing_stop_v2(sdf, is_long, atr_period, atr_buffer_mult, pct_buffer)
+            if new_sl is None or swing_level is None:
+                # اگر کتابخانه جدید سوینگی پیدا نکرد، به روش قدیمی به‌عنوان
+                # fallback ایمن برمی‌گردیم تا تریلینگ‌استاپ کلاً غیرفعال نشود.
+                lookback_n = int(cfg.get('swing_lookback', 12))
+                confirm_n = int(cfg.get('swing_confirm_candles', 2))
+                buffer_atr = float(cfg.get('swing_buffer_atr', 0.40))
+                buffer_wick_pct = float(cfg.get('swing_buffer_wick_pct', 0.0015))
+                new_sl, swing_level = compute_swing_stop(sdf, is_long, lookback_n, buffer_atr, confirm_n, buffer_wick_pct)
+        else:
+            lookback_n = int(cfg.get('swing_lookback', 12))
+            confirm_n = int(cfg.get('swing_confirm_candles', 2))
+            buffer_atr = float(cfg.get('swing_buffer_atr', 0.40))
+            buffer_wick_pct = float(cfg.get('swing_buffer_wick_pct', 0.0015))
+            new_sl, swing_level = compute_swing_stop(sdf, is_long, lookback_n, buffer_atr, confirm_n, buffer_wick_pct)
         if new_sl is None or swing_level is None:
             return
         cur_sl = float(p['sl'])
@@ -1315,6 +1333,38 @@ def format_trade_status(p, price=None):
     return '\n'.join(lines)
 
 
+def _merge_chart_levels(levels):
+    """چند سطح قیمتی که عملاً برابرند (مثلاً وقتی TP1=TP2=TP3 یا SL1=SL3 یا
+    SL2(Break-even)=ENTRY) را در یک خط/برچسب واحد ادغام می‌کند تا برچسب‌های
+    تکراری روی هم ننشینند. اولین عضو هر گروه رنگ/استایل خط را تعیین می‌کند و
+    برچسب‌ها با '/' به هم متصل می‌شوند (مثلاً 'ENTRY/SL2')."""
+    groups = []
+    for lv in levels:
+        placed = False
+        for g in groups:
+            ref = g[0][0]
+            tol = max(abs(ref), 1e-9) * 1e-6
+            if abs(lv[0] - ref) <= tol:
+                g.append(lv)
+                placed = True
+                break
+        if not placed:
+            groups.append([lv])
+    merged = []
+    for g in groups:
+        value = g[0][0]
+        seen = []
+        for x in g:
+            if x[2] not in seen:
+                seen.append(x[2])
+        label = '/'.join(seen)
+        color = g[0][1]
+        style = g[0][3]
+        width = max(x[4] for x in g)
+        merged.append((value, color, label, style, width))
+    return merged
+
+
 def chart(chat_id, symbol, df, trade):
     try:
         if df.empty or len(df) < 5:
@@ -1322,21 +1372,42 @@ def chart(chat_id, symbol, df, trade):
 
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
-        pdh = pdl = None
+
+        # سطوح مرجع رنج: PDH/PDL/EQ برای 5m/15m و PWH/PWL/EQ برای 1h/4h
+        # (get_reference_levels خودش بر اساس تایم‌فریم منبع درست را انتخاب می‌کند).
+        range_hi = range_lo = range_eq = None
+        hi_label, lo_label = 'PDH', 'PDL'
+        dated_df = None
+        try:
+            dated_df, range_hi, range_lo, range_eq, range_label, _src = get_reference_levels(df, tf)
+            if range_label and '/' in range_label:
+                hi_label, lo_label = range_label.split('/', 1)
+        except Exception:
+            dated_df = None
 
         if tf in ('5min', '15min'):
-            try:
-                dated_df, pdh, pdl = _compute_prev_day_levels(df)
-            except Exception:
-                dated_df = None
-            if dated_df is not None and '_date' in dated_df.columns:
-                today_date = dated_df['_date'].iloc[-1]
-                today_df = dated_df[dated_df['_date'] == today_date]
+            if dated_df is not None and '_period' in dated_df.columns:
+                today_period = dated_df['_period'].iloc[-1]
+                today_df = dated_df[dated_df['_period'] == today_period]
                 d = today_df.copy().reset_index(drop=True) if len(today_df) >= 10 else df.tail(60).copy().reset_index(drop=True)
             else:
                 d = df.tail(60).copy().reset_index(drop=True)
         else:
             d = df.tail(50).copy().reset_index(drop=True)
+
+        # اکستنشن بالا/پایین رنج (همان extension_atr_mult که موتور PDH/EQ/PDL
+        # برای tier3/TP3 استفاده می‌کند): EXT+ = HI + عرض‌رنج×ضریب، EXT- = LO - عرض‌رنج×ضریب
+        range_ext_up = range_ext_down = None
+        try:
+            sess = get_session(chat_id)
+            strat_cfg = (sess.get('strategy_config') if isinstance(sess, dict) else None) or STRATEGY_DEFAULTS
+            ext_mult = float(strat_cfg.get('extension_atr_mult', STRATEGY_DEFAULTS.get('extension_atr_mult', 0.5)))
+        except Exception:
+            ext_mult = float(STRATEGY_DEFAULTS.get('extension_atr_mult', 0.5))
+        if range_hi is not None and range_lo is not None and float(range_hi) > float(range_lo):
+            range_width = float(range_hi) - float(range_lo)
+            range_ext_up = float(range_hi) + range_width * ext_mult
+            range_ext_down = float(range_lo) - range_width * ext_mult
 
         fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
         fig.patch.set_facecolor('#0f172a')
@@ -1357,28 +1428,39 @@ def chart(chat_id, symbol, df, trade):
             ax.add_patch(rect)
 
         entry = float(trade['entry_price'])
-        tp = float(trade['tp'])
-        sl = float(trade['sl'])
+        tp = float(trade['tp'])          # = TP3 نهایی
+        sl = float(trade['sl'])          # SL فعال کنونی (= SL3)
         is_long = side_long(trade.get('side', 'BUY'))
 
+        tp1 = float(trade['tp1']) if trade.get('tp1') is not None else tp
+        tp2 = float(trade['tp2']) if trade.get('tp2') is not None else tp
+        tp3 = float(trade['tp3']) if trade.get('tp3') is not None else tp
+        initial_sl = float(trade['initial_sl']) if trade.get('initial_sl') is not None else sl
+
+        # پلکان سه‌مرحله‌ای TP + سه‌مرحله‌ی SL (اولیه→برک‌اِوِن→تریل کنونی).
+        # وقتی معامله دستی باشد یا هنوز به برک‌اِوِن نرسیده باشد، مقادیر برابر
+        # می‌شوند و _merge_chart_levels آن‌ها را در یک برچسب ادغام می‌کند.
         levels = [
             (entry, '#60a5fa', 'ENTRY', '-', 1.8),
-            (tp, '#22c55e', 'TP', '--', 2.0),
-            (sl, '#ef4444', 'SL', '--', 2.0),
+            (entry, '#60a5fa', 'SL2 (BE)', '-', 1.8),
+            (tp1, '#86efac', 'TP1', '--', 1.4),
+            (tp2, '#4ade80', 'TP2', '--', 1.7),
+            (tp3, '#16a34a', 'TP3', '--', 2.0),
+            (initial_sl, '#fca5a5', 'SL1', ':', 1.4),
+            (sl, '#ef4444', 'SL3', '--', 2.0),
         ]
-        if pdh is not None:
-            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
-        if pdl is not None:
-            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
+        if range_hi is not None:
+            levels.append((float(range_hi), '#f97316', hi_label, ':', 1.4))
+        if range_lo is not None:
+            levels.append((float(range_lo), '#f97316', lo_label, ':', 1.4))
+        if range_eq is not None:
+            levels.append((float(range_eq), '#a78bfa', 'EQ', '-.', 1.3))
+        if range_ext_up is not None:
+            levels.append((range_ext_up, '#38bdf8', 'EXT+', '-.', 1.1))
+        if range_ext_down is not None:
+            levels.append((range_ext_down, '#38bdf8', 'EXT-', '-.', 1.1))
 
-        x_right = len(d) + 1.8
-        for value, color, label, style, width in levels:
-            ax.axhline(value, color=color, linestyle=style, linewidth=width, alpha=0.95, zorder=1)
-            ax.text(x_right, value, f' {label}  {fmt(value)} ',
-                    va='center', ha='left', fontsize=9.5, fontweight='bold',
-                    color='white',
-                    bbox=dict(boxstyle='round,pad=0.28', facecolor=color, edgecolor='none', alpha=0.95),
-                    clip_on=False, zorder=5)
+        merged_levels = sorted(_merge_chart_levels(levels), key=lambda x: x[0])
 
         entry_idx = int((d['close'] - entry).abs().idxmin())
         entry_y = float(d.loc[entry_idx, 'low'] if is_long else d.loc[entry_idx, 'high'])
@@ -1396,9 +1478,35 @@ def chart(chat_id, symbol, df, trade):
 
         ax.set_xlim(-1, len(d) + 5.5)
         ymin = float(d['low'].min()); ymax = float(d['high'].max())
-        pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
-        extra_vals = [v for v in (pdh, pdl) if v is not None]
-        ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
+        all_vals = [lv[0] for lv in merged_levels] + [ymin, ymax]
+        y_lo_data = min(all_vals); y_hi_data = max(all_vals)
+        pad = max((y_hi_data - y_lo_data) * 0.08, abs(entry) * 0.002)
+        y_lo, y_hi = y_lo_data - pad, y_hi_data + pad
+        ax.set_ylim(y_lo, y_hi)
+
+        # چیدمان برچسب‌های سمت راست: وقتی چند سطح به هم خیلی نزدیک‌اند، برچسب‌ها
+        # را عمودی از هم فاصله می‌دهیم و با یک خط رابط نازک به قیمت واقعی وصل
+        # می‌کنیم تا روی هم ننشینند و PDH/EQ/PDL/EXT/TP/SL همه خوانا بمانند.
+        min_gap = (y_hi - y_lo) * 0.052
+        label_positions = []
+        last_y = None
+        for value, color, label, style, width in merged_levels:
+            ax.axhline(value, color=color, linestyle=style, linewidth=width, alpha=0.92, zorder=1)
+            label_y = value if last_y is None else max(value, last_y + min_gap)
+            label_positions.append((value, label_y, color, label))
+            last_y = label_y
+
+        x_right = len(d) + 1.8
+        for value, label_y, color, label in label_positions:
+            if abs(label_y - value) > (y_hi - y_lo) * 0.004:
+                ax.plot([len(d) + 0.3, x_right - 0.25], [value, label_y],
+                        color=color, linewidth=0.7, alpha=0.55, zorder=4, clip_on=False)
+            ax.text(x_right, label_y, f' {label}  {fmt(value)} ',
+                    va='center', ha='left', fontsize=8.6, fontweight='bold',
+                    color='white',
+                    bbox=dict(boxstyle='round,pad=0.22', facecolor=color, edgecolor='none', alpha=0.95),
+                    clip_on=False, zorder=5)
+
         ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
         ax.grid(False, axis='x')
         ax.tick_params(axis='both', colors='#94a3b8', labelsize=8.5)
@@ -1576,6 +1684,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None,
+        # initial_sl: مقدار اولیه‌ی SL در لحظه‌ی باز شدن معامله — برخلاف 'sl' که با
+        # breakeven/تریل ساختاری تغییر می‌کند، این مقدار ثابت می‌ماند تا در چارت
+        # پوزیشن به‌عنوان SL1 (مرجع تاریخی) در کنار SL3 (استاپ فعال کنونی) نمایش
+        # داده شود (بند تصویر چارت پوزیشن - PDH/EQ/PDL + اکستنشن + TP1-3/SL1-3).
+        'initial_sl': sl,
         # --- پلکان سه‌مرحله‌ای TP (بند ۴ درخواست کاربر) ---
         # original_amount/original_margin برای محاسبه‌ی درست سهم هر پله (٪) از
         # حجم *اولیه* معامله نگه داشته می‌شوند (چون amount/margin بعد از هر

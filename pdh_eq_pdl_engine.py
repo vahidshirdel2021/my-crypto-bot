@@ -26,6 +26,22 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# کتابخانه تشخیص سوینگ (swing_detection.py) — موتور شناسایی سوینگ اصلی این
+# فایل اکنون از این کتابخانه استفاده می‌کند (به‌جای فرکتال سادهٔ قدیمی خودش).
+# ایمپورت اختیاری/دفاعی: اگر فایل موجود نباشد یا خطا بدهد، موتور به‌صورت
+# خودکار و بی‌صدا روی همان فرکتال قدیمی (legacy) fallback می‌کند تا هیچ‌وقت
+# کل ربات به‌خاطر این ماژول از کار نیفتد.
+try:
+    from swing_detection import (
+        detect_three_bar_rejection_swings as _sw_detect_rejection,
+        detect_classic_three_bar_swings as _sw_detect_classic,
+        SwingType as _SwingType,
+        SwingDetectionError as _SwingDetectionError,
+    )
+    _SWING_LIB_AVAILABLE = True
+except Exception:
+    _SWING_LIB_AVAILABLE = False
+
 
 # ============================================================================
 # ۱) تنظیمات پیش‌فرض موتور (این‌ها از strategy.py هم قابل بازنویسی/override اند)
@@ -40,6 +56,16 @@ ENGINE_DEFAULTS = {
     "swing_search_window_mult": 4,    # پنجره جست‌وجوی سوئینگ = lookback * این عدد
     "swing_min_wick_atr_ratio": 0.15,  # حداقل دم کندل سوئینگ نسبت به ATR (فیلتر فیک‌اوت)
     "swing_min_volume_ratio": 0.60,    # حداقل نسبت حجم کندل سوئینگ به میانگین ۲۰ کندل
+
+    # --- روش تشخیص سوینگ ---
+    # "advanced": از کتابخانه swing_detection.py استفاده می‌شود؛ کندلی سوینگ
+    #   شناخته می‌شود که هم در پنجره lookback اکسترمم باشد (مثل قبل) و هم با
+    #   یکی از دو الگوی «فراکتال کلاسیک» یا «ریجکشن/ویک سه‌کندلی» کتابخانه
+    #   جدید منطبق باشد. فیلترهای کیفیت قبلی (wick/ATR و حجم) هم‌چنان اعمال
+    #   می‌شوند. اگر کتابخانه در دسترس نباشد یا خطا بدهد، به‌طور خودکار به
+    #   "legacy" برمی‌گردد.
+    # "legacy": همان فرکتال ساده‌ی قدیمی (بدون وابستگی به swing_detection.py).
+    "swing_detection_mode": "advanced",
 
     # --- امتیاز پایه سناریوها (دقیقاً از فایل استراتژی) ---
     "base_scores": {
@@ -312,8 +338,144 @@ def get_reference_levels(df: pd.DataFrame, timeframe: str):
 
 def compute_swings(df: pd.DataFrame, lookback: int = 3,
                     min_wick_atr_ratio: float = 0.15,
-                    min_volume_ratio: float = 0.60) -> pd.DataFrame:
-    """تشخیص سوئینگ فرکتال + دو فیلتر کیفیت برای حذف سوئینگ‌های نویزی/فیک:
+                    min_volume_ratio: float = 0.60,
+                    mode: str = "advanced") -> pd.DataFrame:
+    """تشخیص سوئینگ (نقطه ورود موتور).
+
+    mode="advanced" (پیش‌فرض): از کتابخانه swing_detection.py استفاده
+        می‌کند — کندلی swing_high/swing_low شناخته می‌شود که:
+          (الف) در پنجره‌ی ±lookback کندل، اکسترمم منحصربه‌فرد باشد (دقیقاً
+                همان شرط ساختاری قبلی، برای حفظ معنای cfg["swing_lookback_fractal"]
+                و پنجره‌های جست‌وجوی وابسته به آن)، **و**
+          (ب) با حداقل یکی از دو الگوی کتابخانه منطبق باشد: «فراکتال کلاسیک
+                سه‌کندلی» یا «ریجکشن/ویک سه‌کندلی» (که سخت‌گیرانه‌تر است و
+                اگر رخ دهد، برچسب سوینگ به‌جای classic روی rejection ست
+                می‌شود).
+        سپس دقیقاً همان دو فیلتر کیفیت قبلی (نسبت دم به ATR، نسبت حجم) روی
+        این کاندیدها اعمال می‌شود — یعنی خروجی این تابع در بدترین حالت
+        زیرمجموعه‌ای از خروجی legacy است (چون شرط (ب) یک قید اضافه است)،
+        و در نتیجه سیگنال‌ها دقیق‌تر/کم‌نویزتر می‌شوند نه برعکس.
+        اگر کتابخانه در دسترس نباشد یا با خطا مواجه شود، به‌صورت خودکار و
+        بی‌صدا به mode="legacy" سقوط می‌کند (fallback ایمن).
+
+    mode="legacy": فرکتال ساده‌ی قدیمی (بدون وابستگی به swing_detection.py):
+        صرفاً اکسترمم‌بودن در پنجره‌ی lookback + همان فیلترهای کیفیت.
+
+    خروجی در هر دو حالت: همان DataFrame ورودی به‌علاوه دو ستون بولی
+    ``swing_high`` / ``swing_low`` (دقیقاً همان قرارداد قبلی، بدون تغییر
+    برای کد پایین‌دستی مثل ``_recent_confirmed_swings``). در حالت advanced
+    یک ستون اضافه‌ی صرفاً اطلاعاتی ``swing_pattern`` هم اضافه می‌شود
+    (مقدار: "classic_three_bar" یا "three_bar_rejection" یا None).
+    """
+    if mode == "advanced":
+        out = _compute_swings_advanced(df, lookback, min_wick_atr_ratio, min_volume_ratio)
+        if out is not None:
+            return out
+        # کتابخانه در دسترس نبود/شکست خورد → سقوط ایمن به فرکتال قدیمی
+    return _compute_swings_legacy(df, lookback, min_wick_atr_ratio, min_volume_ratio)
+
+
+def _compute_swings_advanced(df: pd.DataFrame, lookback: int,
+                              min_wick_atr_ratio: float,
+                              min_volume_ratio: float):
+    """پیاده‌سازی mode="advanced" برای compute_swings. در صورت هر مشکلی
+    (کتابخانه در دسترس نبودن، دیتای نامعتبر، ناهم‌ترازی طول) None برمی‌گرداند
+    تا caller به‌صورت خودکار به legacy سقوط کند — هرگز exception پرتاب نمی‌کند.
+    """
+    if not _SWING_LIB_AVAILABLE:
+        return None
+    if df is None or df.empty:
+        return None
+
+    d = df.copy()
+    n = len(d)
+    if n < 3:
+        return None
+
+    try:
+        rejection_swings = _sw_detect_rejection(df, max_body_ratio=0.5, require_full_confirmation=True)
+        classic_swings = _sw_detect_classic(df, strict=True)
+    except _SwingDetectionError:
+        return None
+    except Exception:
+        return None
+
+    highs = pd.to_numeric(d["high"], errors="coerce").values
+    lows = pd.to_numeric(d["low"], errors="coerce").values
+    opens = pd.to_numeric(d["open"], errors="coerce").values
+    closes = pd.to_numeric(d["close"], errors="coerce").values
+    atr = pd.to_numeric(d["atr"], errors="coerce").values if "atr" in d.columns else np.full(n, np.nan)
+    vol_ratio = pd.to_numeric(d["volume_ratio"], errors="coerce").values if "volume_ratio" in d.columns else np.full(n, np.nan)
+
+    # اگر هر یک از اندیس‌های برگشتی از کتابخانه خارج از بازه‌ی df باشد یعنی
+    # کتابخانه (به‌خاطر ردیف نامعتبر) طول/تراز متفاوتی تولید کرده؛ برای
+    # جلوگیری از هر گونه ناهم‌ترازی احتمالی، ایمن‌ترین کار سقوط به legacy است.
+    for sp in rejection_swings + classic_swings:
+        if sp.index < 0 or sp.index >= n:
+            return None
+
+    def _quality_ok(i: int, is_low: bool) -> bool:
+        atr_i = atr[i] if np.isfinite(atr[i]) else 0.0
+        vr_i = vol_ratio[i] if np.isfinite(vol_ratio[i]) else 1.0
+        volume_ok = (not np.isfinite(vol_ratio[i])) or (vr_i >= min_volume_ratio)
+        body_top = max(opens[i], closes[i])
+        body_bottom = min(opens[i], closes[i])
+        if is_low:
+            lower_wick = body_bottom - lows[i]
+            wick_ok = (atr_i <= 0) or (lower_wick >= atr_i * min_wick_atr_ratio)
+        else:
+            upper_wick = highs[i] - body_top
+            wick_ok = (atr_i <= 0) or (upper_wick >= atr_i * min_wick_atr_ratio)
+        return bool(wick_ok and volume_ok)
+
+    def _window_extreme_ok(i: int, is_low: bool) -> bool:
+        # دقیقاً همان بازه‌ی legacy: فقط کندل‌هایی با پنجره‌ی کامل ±lookback
+        # (بدون کوتاه‌شدن نزدیک ابتدا/انتهای دیتافریم) واجد شرایط‌اند، تا
+        # نتیجه با legacy در مرزها هم‌تراز/زیرمجموعه بماند.
+        if i < lookback or i >= n - lookback:
+            return False
+        lo_b = i - lookback
+        hi_b = i + lookback + 1
+        if is_low:
+            win = lows[lo_b:hi_b]
+            return bool(np.isfinite(win).all() and lows[i] == win.min() and (win == lows[i]).sum() == 1)
+        else:
+            win = highs[lo_b:hi_b]
+            return bool(np.isfinite(win).all() and highs[i] == win.max() and (win == highs[i]).sum() == 1)
+
+    # اولویت برچسب: اگر یک کندل هم classic و هم rejection باشد (rejection
+    # شرط سخت‌گیرانه‌تری‌ست)، برچسب rejection غالب می‌شود.
+    candidates: dict = {}
+    for sp in classic_swings:
+        is_low = sp.swing_type == _SwingType.LOW
+        candidates[(sp.index, is_low)] = "classic_three_bar"
+    for sp in rejection_swings:
+        is_low = sp.swing_type == _SwingType.LOW
+        candidates[(sp.index, is_low)] = "three_bar_rejection"
+
+    swing_high = np.zeros(n, dtype=bool)
+    swing_low = np.zeros(n, dtype=bool)
+    swing_pattern = np.array([None] * n, dtype=object)
+
+    for (i, is_low), label in candidates.items():
+        if _window_extreme_ok(i, is_low) and _quality_ok(i, is_low):
+            if is_low:
+                swing_low[i] = True
+            else:
+                swing_high[i] = True
+            swing_pattern[i] = label
+
+    d["swing_high"] = swing_high
+    d["swing_low"] = swing_low
+    d["swing_pattern"] = swing_pattern
+    return d
+
+
+def _compute_swings_legacy(df: pd.DataFrame, lookback: int = 3,
+                            min_wick_atr_ratio: float = 0.15,
+                            min_volume_ratio: float = 0.60) -> pd.DataFrame:
+    """تشخیص سوئینگ فرکتال + دو فیلتر کیفیت برای حذف سوئینگ‌های نویزی/فیک
+    (پیاده‌سازی قدیمی/اصلی، مستقل از swing_detection.py):
 
     - min_wick_atr_ratio: کندل سوئینگ باید حداقل یک دم (wick) به این نسبت از
       ATR داشته باشد (سمت مرتبط: پایین برای swing_low، بالا برای swing_high).
@@ -468,6 +630,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
         d, lookback,
         min_wick_atr_ratio=float(cfg.get("swing_min_wick_atr_ratio", 0.15)),
         min_volume_ratio=float(cfg.get("swing_min_volume_ratio", 0.60)),
+        mode=str(cfg.get("swing_detection_mode", "advanced")),
     )
     idx_now = len(d) - 2  # آخرین کندل بسته‌شده
     if idx_now < lookback * 3:
