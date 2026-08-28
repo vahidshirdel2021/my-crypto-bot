@@ -2477,8 +2477,26 @@ def _build_open_positions_view(chat_id, prices=None):
                 f'↳ ورود: `{fmt(entry)}` | فعلی: `{fmt(live)}`',
                 f'↳ 📈 سود/زیان لحظه‌ای: `{pnl:+.2f} USDT`',
                 f'↳ 📊 بازده: `{pct:+.2f}%` | R: `{r:+.2f}`',
-                f'↳ 🎯 TP: `{fmt(p["tp"])}` | 🛑 SL: `{fmt(p["sl"])}`',
             ]
+            tp1, tp2, tp3 = p.get('tp1'), p.get('tp2'), (p.get('tp3') if p.get('tp3') is not None else p.get('tp'))
+            if tp1 is not None and tp2 is not None:
+                tp1_done = bool(p.get('tp1_done')); tp2_done = bool(p.get('tp2_done'))
+                m1 = '✅' if tp1_done else '⏳'
+                m2 = '✅' if tp2_done else ('⏳' if tp1_done else '🔒')
+                m3 = '⏳' if tp2_done else '🔒'  # اگر TP3 هم بخورد کل پوزیشن بسته و از این لیست حذف می‌شود
+                p1 = p.get('tp1_pct'); p2 = p.get('tp2_pct'); p3 = p.get('tp3_pct')
+                lbl1 = f' ({p1*100:.0f}٪)' if p1 else ''
+                lbl2 = f' ({p2*100:.0f}٪)' if p2 else ''
+                lbl3 = f' ({p3*100:.0f}٪)' if p3 else ''
+                lines += [
+                    f'↳ 🎯 TP1{lbl1}: `{fmt(tp1)}` {m1}',
+                    f'↳ 🎯 TP2{lbl2}: `{fmt(tp2)}` {m2}',
+                    f'↳ 🎯 TP3{lbl3}: `{fmt(tp3)}` {m3}',
+                ]
+            else:
+                lines.append(f'↳ 🎯 TP: `{fmt(p.get("tp"))}`')
+            sl_state = 'Break-even/تریل‌شده 🟢' if p.get('breakeven_done') else 'اولیه'
+            lines.append(f'↳ 🛑 SL: `{fmt(p.get("sl"))}` ({sl_state})')
         except Exception as exc:
             logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
     return '\n'.join(lines), get_positions_keyboard(positions)
@@ -3202,6 +3220,7 @@ def trade_tracking_keyboard(chat_id):
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '🧭 نمایش آخرین مسیرهای ثبت‌شده', 'callback_data': '/trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
+            [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
     }
@@ -3340,6 +3359,20 @@ def reset_stats(chat_id):
     s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime())
     save_session(chat_id)
     return True, f"✅ *آمار تست ریست شد*\n\nمبنای ریسک جدید: `{equity:.2f} USDT`"
+
+
+def full_reset(chat_id):
+    """پاک کردن کامل سشن این کاربر (پوزیشن‌ها، آمار، تنظیمات، فیلترها، همه‌چیز) و
+    بازگشت به حالت پیش‌فرض کاملاً تازه — دقیقاً مثل یک کاربر جدید."""
+    s = get_session(chat_id)
+    if s.get('paper_positions'):
+        return False, '❌ تا وقتی پوزیشن باز دارید، ریست کامل مجاز نیست. ابتدا همه پوزیشن‌ها را ببندید.'
+    if s.get('is_bot_active'):
+        stop_scan(chat_id, 'full-reset')
+    with STATE_LOCK:
+        USER_SESSIONS[chat_id] = default_session()
+    save_session(chat_id)
+    return True, '✅ *همه‌چیز پاک شد.*\nحالا از صفر شروع می‌کنیم؛ لطفاً تنظیمات را قدم‌به‌قدم دوباره انتخاب کنید.'
 
 
 def analyze(chat_id,symbol):
@@ -3818,6 +3851,16 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id, '⛔ این بخش فقط برای Admin است.')
             return
         send_message(chat_id, '🧭 *ردیابی معاملات*\n\nاز این بخش می‌توانید ثبت مسیر معاملات را روشن/خاموش کنید یا خروجی کامل JSON بگیرید.', trade_tracking_keyboard(chat_id))
+        return
+    if cl == '/full_reset_prompt':
+        send_message(chat_id, '⚠️ *ریست کامل ربات*\n\nاین کار همه‌چیز را برای همیشه پاک می‌کند: پوزیشن‌ها، تاریخچه معاملات، آمار، فیلترها و تمام تنظیمات شما (تایم‌فریم، حالت حساب، مارجین، اهرم و...).\nبعد از تأیید، دوباره از صفر و قدم‌به‌قدم تنظیمات را از شما می‌پرسیم.\n\nآیا مطمئن هستید؟', {"inline_keyboard": [[{"text":"🗑 بله، همه‌چیز پاک شود","callback_data":"/full_reset_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
+        return
+    if cl == '/full_reset_confirm':
+        ok, msg = full_reset(chat_id)
+        send_message(chat_id, msg)
+        if ok:
+            send_message(chat_id, '🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.', get_start_keyboard())
+            sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
         return
     if cl in ('/performance_today','/performance_week','/performance_month','/performance','/today_trades','/trade_audit','/trade_pipeline','/toggle_trade_pipeline','/export_trade_pipeline','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard(chat_id, s))

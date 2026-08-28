@@ -82,6 +82,7 @@ def get_performance_keyboard(chat_id=None, session=None):
     k += [
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],
         [{"text": "🔄 ریست آمار تست", "callback_data": "/reset_stats_prompt"}],
+        [{"text": "🗑 ریست کامل ربات (شروع از صفر)", "callback_data": "/full_reset_prompt"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]
     return {"inline_keyboard": k}
