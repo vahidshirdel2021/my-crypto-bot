@@ -57,6 +57,14 @@ ENGINE_DEFAULTS = {
     "swing_min_wick_atr_ratio": 0.15,  # حداقل دم کندل سوئینگ نسبت به ATR (فیلتر فیک‌اوت)
     "swing_min_volume_ratio": 0.60,    # حداقل نسبت حجم کندل سوئینگ به میانگین ۲۰ کندل
 
+    # اگر True باشد، B1/B3 (و معادل Sell: S1/S3) علاوه بر کندل تاییدی، ملزم به
+    # ری‌کلیم واقعی سطح هستند: کلوز کندل تاییدی باید دوباره بالای PDL/PWL
+    # (برای Buy) یا پایین PDH/PWH (برای Sell) قرار گرفته باشد — نه فقط یک
+    # کندل سبز/قرمز با بدنه کافی جایی که هنوز عمیقاً آن‌طرف سطح است. سراسری
+    # روی هر ۴ تایم‌فریم اعمال می‌شود (طبق تصمیم کاربر)؛ در صورت نیاز بعداً از
+    # طریق TIMEFRAME_STRATEGY_PRESETS قابل override به‌ازای هر تایم‌فریم است.
+    "require_reclaim_confirm": True,
+
     # --- روش تشخیص سوینگ ---
     # "advanced": از کتابخانه swing_detection.py استفاده می‌شود؛ کندلی سوینگ
     #   شناخته می‌شود که هم در پنجره lookback اکسترمم باشد (مثل قبل) و هم با
@@ -71,6 +79,10 @@ ENGINE_DEFAULTS = {
     "base_scores": {
         "B1": 95, "B2": 90, "B3": 80, "B4": 75, "B5": 70, "B6": 60,
         "S1": 95, "S2": 90, "S3": 80, "S4": 75, "S5": 70, "S6": 60,
+        # B7/S7: ادامه‌ی مومنتوم بدون ری‌تست (پامپ/دامپ) — پایین‌ترین امتیاز
+        # پایه‌ی خانواده، چون بر خلاف B1..B5 هیچ لمس/ری‌تست واقعی به سطح
+        # ندارد و صرفاً بر پایه فاصله + مومنتوم + یک پولبک کوتاه بنا شده.
+        "B7": 55, "S7": 55,
     },
 
     # --- وزن بونوس‌ها (جمع حداکثر = ۱۰+۵+۵+۵+۵ = ۳۰) ---
@@ -110,6 +122,11 @@ ENGINE_DEFAULTS = {
     "sl_atr_buffer_tight": 0.20,  # بافر کوچک‌تر برای B5/S5 (بریک‌اند‌ریتست)
     "extension_atr_mult": 0.50,  # ضریب اکستنشن برای اهداف فراتر از رنج (B5/S5)
     "min_rr": 1.10,               # حداقل نسبت ریسک به ریوارد قابل قبول
+
+    # --- B7/S7: ادامه مومنتوم پامپ/دامپ بدون ری‌تست ---
+    "momentum_dist_atr_mult": 1.5,   # حداقل فاصله از سطح = این‌ضریب × ATR ...
+    "momentum_dist_pct": 0.012,      # ... یا این‌درصد از سطح، هرکدام بزرگ‌تر بود (۱.۲٪)
+    "momentum_tp_atr_mult": 2.0,     # هدف سود = قیمت فعلی ± این‌ضریب × ATR (چون سطح ساختاری جلوتری در کار نیست)
 }
 
 
@@ -705,25 +722,29 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # ------------------------------------------------------------------
     recent_swing_lows = _recent_confirmed_swings(d, idx_now, lookback, "swing_low", search_back)
     bullish_confirm_now = _is_bullish_confirm(curr_row, min_body)
+    # ری‌کلیم واقعی: کلوز کندل تاییدی باید دوباره بالای PDL/PWL برگشته باشد
+    # (نه صرفاً یک کندل سبز جایی که قیمت هنوز عمیقاً زیر سطح است).
+    require_reclaim = bool(cfg.get("require_reclaim_confirm", True))
+    long_reclaimed = (not require_reclaim) or (close_now >= lo_level * (1 - tol))
 
     # B1: سوییپ PDH/PWH سپس سوییپ PDL/PWL و بازگشت
-    if first_hi is not None and first_lo is not None and first_hi < first_lo and bullish_confirm_now and recent_swing_lows:
+    if first_hi is not None and first_lo is not None and first_hi < first_lo and bullish_confirm_now and long_reclaimed and recent_swing_lows:
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
         if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
             sl = min(swing_price, lo_level) - atr_now * cfg["sl_atr_buffer"]
             add_candidate("B1", "BUY", sl, hi_level, eq,
-                           f"سوییپ {label.split('/')[0]} سپس سوییپ {label.split('/')[1]} و بازگشت صعودی",
+                           f"سوییپ {label.split('/')[0]} سپس سوییپ {label.split('/')[1]} و بازگشت صعودی (ری‌کلیم تاییدشده)",
                            len(lo_touch_idxs))
 
     # B3: سوییپ مستقیم PDL/PWL بدون عبور قبلی از PDH/PWH
-    if first_lo is not None and (first_hi is None or first_hi > first_lo) and bullish_confirm_now and recent_swing_lows:
+    if first_lo is not None and (first_hi is None or first_hi > first_lo) and bullish_confirm_now and long_reclaimed and recent_swing_lows:
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
         if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
             sl = min(swing_price, lo_level) - atr_now * cfg["sl_atr_buffer"]
             add_candidate("B3", "BUY", sl, hi_level, eq,
-                           f"سوییپ مستقیم {label.split('/')[1]} بدون عبور قبلی از {label.split('/')[0]}",
+                           f"سوییپ مستقیم {label.split('/')[1]} بدون عبور قبلی از {label.split('/')[0]} (ری‌کلیم تاییدشده)",
                            len(lo_touch_idxs))
 
     # B4: ری‌کلیم EQ پس از سوییپ PDL/PWL
@@ -772,25 +793,27 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # ------------------------------------------------------------------
     recent_swing_highs = _recent_confirmed_swings(d, idx_now, lookback, "swing_high", search_back)
     bearish_confirm_now = _is_bearish_confirm(curr_row, min_body)
+    # ری‌کلیم واقعی: کلوز کندل تاییدی باید دوباره پایین PDH/PWH برگشته باشد.
+    short_reclaimed = (not require_reclaim) or (close_now <= hi_level * (1 + tol))
 
     # S1: سوییپ PDL/PWL سپس سوییپ PDH/PWH و بازگشت
-    if first_lo is not None and first_hi is not None and first_lo < first_hi and bearish_confirm_now and recent_swing_highs:
+    if first_lo is not None and first_hi is not None and first_lo < first_hi and bearish_confirm_now and short_reclaimed and recent_swing_highs:
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
         if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
             sl = max(swing_price, hi_level) + atr_now * cfg["sl_atr_buffer"]
             add_candidate("S1", "SELL", sl, lo_level, eq,
-                           f"سوییپ {label.split('/')[1]} سپس سوییپ {label.split('/')[0]} و بازگشت نزولی",
+                           f"سوییپ {label.split('/')[1]} سپس سوییپ {label.split('/')[0]} و بازگشت نزولی (ری‌کلیم تاییدشده)",
                            len(hi_touch_idxs))
 
     # S3: سوییپ مستقیم PDH/PWH بدون عبور قبلی از PDL/PWL
-    if first_hi is not None and (first_lo is None or first_lo > first_hi) and bearish_confirm_now and recent_swing_highs:
+    if first_hi is not None and (first_lo is None or first_lo > first_hi) and bearish_confirm_now and short_reclaimed and recent_swing_highs:
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
         if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
             sl = max(swing_price, hi_level) + atr_now * cfg["sl_atr_buffer"]
             add_candidate("S3", "SELL", sl, lo_level, eq,
-                           f"سوییپ مستقیم {label.split('/')[0]} بدون عبور قبلی از {label.split('/')[1]}",
+                           f"سوییپ مستقیم {label.split('/')[0]} بدون عبور قبلی از {label.split('/')[1]} (ری‌کلیم تاییدشده)",
                            len(hi_touch_idxs))
 
     # S4: ری‌کلیم EQ پس از سوییپ PDH/PWH
@@ -830,6 +853,52 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            len(lo_touch_idxs))
 
     # S6 حذف شد: معکوس B6، همان دلیل بالا (ورود میان‌رنج بدون لمس/سوییپ واقعی PDH).
+
+    # ------------------------------------------------------------------
+    # B7/S7: ادامه‌ی مومنتوم پامپ/دامپ — بدون نیاز به ری‌تست سطح شکسته
+    # ------------------------------------------------------------------
+    # پوشش حالتی که در بررسی مشترک با کاربر مشخص شد: وقتی قیمت با یک پامپ/
+    # دامپ شدید از PDH/PDL فاصله می‌گیرد و هرگز برای ری‌تست برنمی‌گردد، هیچ‌کدام
+    # از B1..B5/S1..S5 سیگنالی نمی‌دهند (B5/S5 صریحاً منتظر ری‌تست‌اند). این
+    # دو سناریو، با سه معیار مستقل، مومنتوم رو به‌جای ری‌تست معتبر می‌دانند:
+    #   ۱) فاصله: قیمت حداقل max(momentum_dist_atr_mult×ATR, momentum_dist_pct×سطح)
+    #      از PDH (برای B7) یا PDL (برای S7) دورتر رفته باشد.
+    #   ۲) پولبک کوتاه: کندل قبلی خلاف جهت مومنتوم بوده (نه یک کندل تصادفی
+    #      وسط روند، بلکه حداقل یک وقفه/نفس کوتاه) — طبق تصمیم کاربر، به‌جای
+    #      ورود آنی یا صبر برای ری‌تست کامل به سطح.
+    #   ۳) هم‌جهتی با EMA50 (فیلتر مومنتوم واقعی، نه فقط نویز).
+    # SL پشت همان کندل پولبک (با بافر ATR استاندارد) + TP بر اساس اکستنشن ATR
+    # (چون دیگر مرز مقابل رنج به‌عنوان هدف معتبر جلوتر از قیمت وجود ندارد).
+    momentum_dist_atr_mult = float(cfg.get("momentum_dist_atr_mult", 1.5))
+    momentum_dist_pct = float(cfg.get("momentum_dist_pct", 0.012))
+    momentum_tp_atr_mult = float(cfg.get("momentum_tp_atr_mult", 2.0))
+    prev_row = d.loc[idx_now - 1] if (idx_now - 1) in d.index else None
+    ema50_now = _safe_float(curr_row.get("ema50"), close_now)
+
+    if prev_row is not None:
+        dist_above_hi = close_now - hi_level
+        min_dist_up = max(atr_now * momentum_dist_atr_mult, hi_level * momentum_dist_pct)
+        prev_pullback_down = _safe_float(prev_row.get("close")) < _safe_float(prev_row.get("open"))
+        if (dist_above_hi >= min_dist_up and bullish_confirm_now
+                and prev_pullback_down and close_now > ema50_now):
+            swing_price = _safe_float(prev_row.get("low"))
+            sl = swing_price - atr_now * cfg["sl_atr_buffer"]
+            tp = close_now + atr_now * momentum_tp_atr_mult
+            add_candidate("B7", "BUY", sl, tp, None,
+                           f"ادامه‌ی مومنتوم صعودی؛ فاصله {dist_above_hi:.6g} از {label.split('/')[0]} بدون ری‌تست + پولبک کوتاه",
+                           0)
+
+        dist_below_lo = lo_level - close_now
+        min_dist_down = max(atr_now * momentum_dist_atr_mult, lo_level * momentum_dist_pct)
+        prev_pullback_up = _safe_float(prev_row.get("close")) > _safe_float(prev_row.get("open"))
+        if (dist_below_lo >= min_dist_down and bearish_confirm_now
+                and prev_pullback_up and close_now < ema50_now):
+            swing_price = _safe_float(prev_row.get("high"))
+            sl = swing_price + atr_now * cfg["sl_atr_buffer"]
+            tp = close_now - atr_now * momentum_tp_atr_mult
+            add_candidate("S7", "SELL", sl, tp, None,
+                           f"ادامه‌ی مومنتوم نزولی؛ فاصله {dist_below_lo:.6g} از {label.split('/')[1]} بدون ری‌تست + پولبک کوتاه",
+                           0)
 
     if not candidates:
         return None
