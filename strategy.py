@@ -86,11 +86,17 @@ FILTER_DEFAULTS = {
 }
 
 
-def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candles=2):
+def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candles=2, buffer_wick_pct=0.0015):
     """
-    استاپ‌لاس بر اساس آخرین سوینگ معاملاتی تاییدشده (نه فاصله ثابت ATR).
+    استاپ‌لاس بر اساس آخرین سوینگ معاملاتی تاییدشده (نه فاصله ثابت ATR)، به‌اضافه‌ی
+    یک بافر ایمنی پشت سوینگ که مانع استاپ‌اوت با نویز/دم‌های عادی بازار می‌شود.
+
+    بافر نهایی = بزرگ‌تر از (ATR × buffer_atr) و (قیمت سوینگ × buffer_wick_pct)؛
+    یعنی هم نوسان مطلق بازار (ATR) و هم نوسان نسبی دم کندل‌ها (wick %) لحاظ
+    می‌شود تا یک دم کوچک معمولی باعث خروج زودهنگام از معامله نشود.
+
     این تابع مستقل از موتور سناریو است و توسط bot.py هم مستقیماً برای
-    مدیریت تریلینگ‌استاپ پوزیشن‌های باز استفاده می‌شود؛ بدون تغییر نگه داشته شده.
+    مدیریت تریلینگ‌استاپ پوزیشن‌های باز استفاده می‌شود.
 
     خروجی: (sl, swing_level) یا (None, None) اگر داده کافی نبود.
     """
@@ -113,20 +119,29 @@ def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candle
         swing = float(pd.to_numeric(window["low"], errors="coerce").min())
         if not np.isfinite(swing):
             return None, None
-        sl = swing - atr * buffer_atr
+        buffer_dist = max(atr * buffer_atr, swing * float(buffer_wick_pct))
+        sl = swing - buffer_dist
     else:
         swing = float(pd.to_numeric(window["high"], errors="coerce").max())
         if not np.isfinite(swing):
             return None, None
-        sl = swing + atr * buffer_atr
+        buffer_dist = max(atr * buffer_atr, swing * float(buffer_wick_pct))
+        sl = swing + buffer_dist
     return float(sl), float(swing)
 
 
 # ============================================================================
 # STRATEGY_DEFAULTS / presetهای هر تایم‌فریم
 # کلیدهایی که bot.py مستقیماً (خارج از این فایل) برای مدیریت پوزیشن می‌خواند
-# عیناً حفظ شده‌اند: swing_lookback, swing_confirm_candles, swing_buffer_atr,
-# cooldown_seconds, weakness_exit_*, early_loss_weakness_exit_*.
+# عیناً حفظ شده‌اند: swing_lookback, swing_confirm_candles, swing_buffer_atr،
+# swing_buffer_wick_pct, cooldown_seconds, tp_tier_pct.
+#
+# توجه: مدیریت هوشمند/زودهنگام پوزیشن باز (weakness_exit_*،
+# early_loss_weakness_exit_*، atr_early_exit_*) طبق درخواست صریح کاربر کاملاً
+# حذف شده است. تنها راه خروج از معامله باز اکنون این‌هاست: برخورد به یکی از
+# پله‌های TP، برخورد به SL (که پس از پله‌ی اول به Break-even و سپس با سوینگ
+# ساختاری تریل می‌شود)، یا بستن اجباری پایان‌روز برای تایم‌فریم‌های ۵/۱۵ دقیقه
+# (که مربوط به قانون rollover است، نه «مدیریت هوشمند»).
 # ============================================================================
 
 STRATEGY_DEFAULTS = {
@@ -143,6 +158,9 @@ STRATEGY_DEFAULTS = {
     "base_scores": dict(ENGINE_DEFAULTS["base_scores"]),
     "bonus_weights": dict(ENGINE_DEFAULTS["bonus_weights"]),
     "penalty_weights": dict(ENGINE_DEFAULTS["penalty_weights"]),
+    "penalty_scale_by_code": dict(ENGINE_DEFAULTS["penalty_scale_by_code"]),
+    "swing_min_wick_atr_ratio": ENGINE_DEFAULTS["swing_min_wick_atr_ratio"],
+    "swing_min_volume_ratio": ENGINE_DEFAULTS["swing_min_volume_ratio"],
 
     "max_sl_atr": 4.0,           # سقف مطلق فاصله SL بر حسب ATR (فیوز ایمنی، نه بخشی از سناریوها)
     "min_sl_percent": 0.005,
@@ -153,18 +171,10 @@ STRATEGY_DEFAULTS = {
     "swing_lookback": 12,
     "swing_confirm_candles": 2,
     "swing_buffer_atr": 0.40,
+    "swing_buffer_wick_pct": 0.0015,  # بافر نسبی (٪ از قیمت سوینگ) در کنار بافر ATR
 
-    # --- مدیریت هوشمند پوزیشن باز (خوانده‌شده مستقیم توسط bot.py) ---
-    "weakness_exit_min_r": 1.0,
-    "weakness_exit_score": 55.0,
-    "weakness_profit_lock_min_r": 1.0,
-    "early_loss_weakness_exit_enabled": True,
-    "early_loss_weakness_exit_min_r": -0.10,
-    "early_loss_weakness_exit_score": 45.0,
-    "atr_early_exit_extreme": 0.85,
-    "atr_early_exit_extreme_score": 25.0,
-    "atr_early_exit_strong": 0.60,
-    "atr_early_exit_strong_score": 30.0,
+    # --- پلکان سه‌مرحله‌ای TP (Tier1=EQ/میانه، Tier2=مرز مقابل، Tier3=اکستنشن) ---
+    "tp_tier_pct": [0.50, 0.30, 0.20],
 
     "v2_enabled": False,  # موتور قدیمی v2 کاملاً غیرفعال است؛ فقط برای سازگاری با کد قدیمی نگه داشته شده
 }
@@ -181,6 +191,14 @@ TIMEFRAME_STRATEGY_PRESETS = {
         "level_source": "daily",
         "min_trade_score": 63.0, "min_rr": 1.10,
         "cooldown_seconds": 1200,
+        # --- تنظیم دقیق مخصوص ۱۵ دقیقه (درخواست کاربر) ---
+        # بافر SL بزرگ‌تر از پیش‌فرض سراسری (۰.۳۵) برای جلوگیری از استاپ‌اوت
+        # زودهنگام روی دم‌های نویزی نسبت به تایم‌فریم‌های کوتاه‌تر (۵ دقیقه).
+        "sl_atr_buffer": 0.45,
+        # آستانه حجم سخت‌گیرانه‌تر از پیش‌فرض سراسری (۰.۶۰) برای تایید سوییپ
+        # نقدینگی روی ۱۵ دقیقه؛ سوئینگ‌هایی با حجم کمتر از ۱.۲× میانگین ۲۰
+        # کندل دیگر مبنای سوییپ/ورود قرار نمی‌گیرند.
+        "swing_min_volume_ratio": 1.2,
     },
     "1hour": {
         "level_source": "weekly",
@@ -270,77 +288,28 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ============================================================================
 # _compute_prev_day_levels — امضای قدیمی حفظ شده (bot.py مستقیماً ایمپورت می‌کند)
 # ============================================================================
+#
+# رفع باگ (بند ۱ درخواست کاربر - چارت‌های TAO/QNT): موتور جدید ستون دوره‌ی
+# روزانه را `_period` نام‌گذاری می‌کند، اما مصرف‌کننده‌ی قدیمی این تابع در
+# bot.py (تابع chart) به‌دنبال ستونی به نام `_date` می‌گشت. چون این ستون هرگز
+# وجود نداشت، شرط فیلتر «فقط کندل‌های امروز» همیشه false می‌شد و چارت به‌جای
+# کندل‌های واقعی همان روز/سشن جاری، صرفاً ۶۰ کندل آخر خام را نشان می‌داد — که
+# می‌توانست باعث دیده‌شدن PDH/PDL به‌صورت نامتناسب/معکوس با کندل‌های چارت شود.
+# اینجا یک ستون `_date` (برابر با `_period`) هم اضافه می‌شود تا مصرف‌کننده‌ی
+# قدیمی بدون نیاز به تغییر در بقیه‌ی bot.py درست کار کند.
 
 def _compute_prev_day_levels(df):
     d, pdh, pdl, _eq = compute_prev_day_levels(df)
+    if d is not None and "_period" in d.columns and "_date" not in d.columns:
+        d = d.copy()
+        d["_date"] = d["_period"]
     return d, pdh, pdl
 
 
 # ============================================================================
-# evaluate_trend_weakness — بدون تغییر نسبت به نسخه قبلی (فقط برای مدیریت
-# پوزیشن باز استفاده می‌شود؛ به موتور ورود ربطی ندارد).
-# ============================================================================
-
-def evaluate_trend_weakness(df, side, strategy_config=None):
-    """
-    بررسی می‌کند آیا روند معامله باز در حال از دست دادن قدرت است یا نه
-    (برای بستن زودهنگام معامله‌ی سودده قبل از رسیدن به هدف ساختاری).
-    خروجی: (is_weak: bool, score: int 0-100, reasons: list[str])
-    """
-    if df is None or len(df) < 20:
-        return False, 0, []
-    required_cols = {"adx", "rsi", "ema20", "plus_di", "minus_di", "body_ratio", "volume_ratio"}
-    if not required_cols.issubset(df.columns):
-        return False, 0, []
-
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    curr = df.iloc[-2]
-    prev = df.iloc[-3] if len(df) >= 3 else curr
-    is_long = isinstance(side, str) and ("BUY" in side.upper() or "LONG" in side.upper())
-
-    adx = _safe_float(curr.get("adx"), 0)
-    prev_adx = _safe_float(prev.get("adx"), adx)
-    rsi = _safe_float(curr.get("rsi"), 50)
-    plus_di = _safe_float(curr.get("plus_di"), 0)
-    minus_di = _safe_float(curr.get("minus_di"), 0)
-    ema20 = _safe_float(curr.get("ema20"), 0)
-    close = _safe_float(curr.get("close"), 0)
-    open_ = _safe_float(curr.get("open"), 0)
-    body_ratio = _safe_float(curr.get("body_ratio"), 0)
-    vr = _safe_float(curr.get("volume_ratio"), 1)
-
-    score = 0.0
-    reasons = []
-
-    if is_long:
-        if minus_di > plus_di:
-            score += 30.0; reasons.append("DI منفی از DI مثبت عبور کرد (تغییر جهت روند)")
-        if adx < prev_adx and adx < 22:
-            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
-        if close < ema20:
-            score += 20.0; reasons.append("قیمت زیر EMA20 بسته شد")
-        if rsi < 45:
-            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
-        if close < open_ and body_ratio >= 0.55 and vr >= 1.0:
-            score += 20.0; reasons.append("کندل نزولی قدرتمند مخالف روند با حجم بالا")
-    else:
-        if plus_di > minus_di:
-            score += 30.0; reasons.append("DI مثبت از DI منفی عبور کرد (تغییر جهت روند)")
-        if adx < prev_adx and adx < 22:
-            score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
-        if close > ema20:
-            score += 20.0; reasons.append("قیمت بالای EMA20 بسته شد")
-        if rsi > 55:
-            score += 15.0; reasons.append(f"RSI ضعیف شده ({rsi:.1f})")
-        if close > open_ and body_ratio >= 0.55 and vr >= 1.0:
-            score += 20.0; reasons.append("کندل صعودی قدرتمند مخالف روند با حجم بالا")
-
-    score = max(0.0, min(100.0, score))
-    threshold = float(cfg.get("weakness_exit_score", 45.0))
-    is_weak = score >= threshold
-    return is_weak, int(round(score)), reasons
-
-
+# evaluate_trend_weakness حذف شد (طبق درخواست کاربر، بند ۳): این تابع صرفاً
+# برای منطق «مدیریت هوشمند/خروج زودهنگام» پوزیشن باز استفاده می‌شد که کاملاً
+# حذف شده. bot.py دیگر آن را ایمپورت نمی‌کند.
 # ============================================================================
 # هسته‌ی جدید تصمیم‌گیری: یک بار موتور سناریو را اجرا می‌کند و بین
 # get_signal_with_reason و build_trade_plan به اشتراک گذاشته می‌شود
@@ -436,6 +405,15 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
             sl = entry * (1.0 + min_sl_pct)
         risk_dist = abs(entry - sl)
 
+    # فیوز ایمنی: هدف (tp) باید واقعاً *جلوتر* از قیمت ورود در جهت معامله باشد.
+    # محاسبه‌ی rr با abs() این جهت را نادیده می‌گرفت؛ در نتیجه اگر (به‌ندرت، مثلاً
+    # در B5/S5 با یک کندل تاییدِ خیلی بزرگ) هدف محاسبه‌شده عملاً پشت سر قیمت
+    # ورود بیفتد، معامله‌ای با هدف نامعتبر (بدون پاداش واقعی) رد نمی‌شد. این
+    # دقیقاً همان پیش‌نیازی است که ساخت پلکان سه‌مرحله‌ای TP هم به آن متکی است.
+    target_ahead = (tp > entry) if signal == "BUY" else (tp < entry)
+    if not target_ahead:
+        return None, f"هدف سناریو {best['code']} جلوتر از قیمت ورود نیست (احتمالاً کندل تایید خیلی بزرگ بوده)؛ معامله رد شد"
+
     rr = abs(tp - entry) / risk_dist
     min_rr = float(cfg.get("min_rr", ENGINE_DEFAULTS["min_rr"]))
     if rr < min_rr:
@@ -449,8 +427,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
                       "خوب" if best["total_score"] >= 78 else
                       "قابل قبول" if best["total_score"] >= min_score else "ضعیف")
 
+    tp1, tp2, tp3, tier_pcts = _build_tp_ladder(entry, tp, signal, best, cfg)
+
     plan = {
-        "entry": entry, "sl": float(sl), "tp": float(tp),
+        "entry": entry, "sl": float(sl), "tp": float(tp3),
         "score": int(round(best["total_score"])),
         "quality_label": quality_label,
         "rr": float(rr),
@@ -463,8 +443,87 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         "structural_target": True,  # هدف، سطح ساختاری (PDH/PDL یا PWH/PWL) است نه RR ثابت
         "setup_family": f"pdh_eq_pdl_{best['code']}",
         "reason": _format_reason(best),
+        # --- پلکان سه‌مرحله‌ای TP (طبق درخواست کاربر، بند ۴) ---
+        # tp1: ۵۰٪ حجم دقیقاً روی EQ (یا نقطه‌ی میانی معادل وقتی EQ پشت سر
+        #      گذاشته شده - مثل B5/S5)، سپس SL کل باقی‌مانده روی Break-even.
+        # tp2: ۳۰٪ حجم روی مرز مقابل رنج (PDH برای Long / PDL برای Short).
+        # tp3: ۲۰٪ باقی‌مانده برای اکستنشن رنج و اهداف بالاتر.
+        "tp1": float(tp1), "tp2": float(tp2), "tp3": float(tp3),
+        "tp1_pct": tier_pcts[0], "tp2_pct": tier_pcts[1], "tp3_pct": tier_pcts[2],
+        "breakeven_after_tp1": True,
     }
     return plan, plan["reason"]
+
+
+def _build_tp_ladder(entry, boundary_tp, signal, best, cfg):
+    """
+    پلکان سه‌مرحله‌ای TP را می‌سازد.
+
+    دو حالت متفاوت وجود دارد:
+
+    ۱) حالت عادی (اکثر سناریوها - B1/B2/B3/B4 و معادل Sell): ورود از یک مرز
+       رنج انجام شده و هم EQ و هم مرز مقابل واقعاً *جلوتر* از قیمت ورود
+       هستند. اینجا:
+         tier1 = EQ رنج
+         tier2 = مرز مقابل خام رنج (PDH برای Long / PDL برای Short)
+         tier3 = اکستنشن فراتر از مرز مقابل (extension_atr_mult × عرض رنج)
+
+    ۲) حالت بریک‌اند‌ریتست (B5/S5): چون ورود *پس از* شکستن مرز و ریتست آن رخ
+       می‌دهد، هم مرز خام و هم EQ پشت سر قیمت ورود قرار دارند و دیگر اهداف
+       معتبری برای «جلوتر از ورود» نیستند (استفاده از آن‌ها باعث می‌شد tier1
+       به‌اشتباه *پشت* قیمت ورود بیفتد - یعنی در همان لحظه‌ی ورود لمس شده
+       باشد). در این حالت، `boundary_tp` که موتور سناریو محاسبه کرده همان
+       هدف اکستنشن نهایی است؛ کل مسیر entry→هدف نهایی به سه پله‌ی پیش‌رونده
+       (۴۰٪ / ۷۰٪ / ۱۰۰٪ مسیر) تقسیم می‌شود تا هر سه پله واقعاً جلوتر از ورود
+       باشند.
+
+    خروجی: (tp1, tp2, tp3, [pct1, pct2, pct3])
+    """
+    is_long = signal == "BUY"
+    tier_pcts = list(cfg.get("tp_tier_pct", [0.50, 0.30, 0.20]))
+    if len(tier_pcts) != 3 or abs(sum(tier_pcts) - 1.0) > 1e-6:
+        tier_pcts = [0.50, 0.30, 0.20]
+
+    range_hi = best.get("range_hi"); range_lo = best.get("range_lo"); range_eq = best.get("range_eq")
+    ext_mult = _safe_float(best.get("extension_atr_mult"), 0.50)
+    final_target = float(boundary_tp)
+
+    range_width = None
+    if range_hi is not None and range_lo is not None and range_hi > range_lo:
+        range_width = float(range_hi) - float(range_lo)
+
+    raw_boundary = None
+    if is_long and range_hi is not None:
+        raw_boundary = float(range_hi)
+    elif (not is_long) and range_lo is not None:
+        raw_boundary = float(range_lo)
+
+    boundary_ahead = raw_boundary is not None and (
+        (is_long and raw_boundary > entry) or ((not is_long) and raw_boundary < entry)
+    )
+    eq_ahead = range_eq is not None and (
+        (is_long and float(range_eq) > entry) or ((not is_long) and float(range_eq) < entry)
+    )
+
+    if boundary_ahead and eq_ahead:
+        # حالت ۱: پلکان دقیقاً طبق تعریف کاربر (EQ → مرز مقابل → اکستنشن)
+        tp2 = raw_boundary
+        tp1 = float(range_eq)
+        if range_width is not None:
+            tp3 = tp2 + range_width * ext_mult if is_long else tp2 - range_width * ext_mult
+        else:
+            leg = abs(final_target - tp2) or abs(tp2 - entry)
+            tp3 = tp2 + leg * ext_mult if is_long else tp2 - leg * ext_mult
+    else:
+        # حالت ۲ (بریک‌اند‌ریتست B5/S5 یا هر حالت دیگری که EQ/مرز پشت سر
+        # گذاشته شده‌اند): سه پله‌ی پیش‌رونده بین entry و هدف نهایی، بدون
+        # اتکا به EQ/مرز خام که دیگر جلوتر از قیمت نیستند.
+        leg = final_target - entry
+        tp1 = entry + leg * 0.40
+        tp2 = entry + leg * 0.70
+        tp3 = final_target
+
+    return tp1, tp2, tp3, tier_pcts
 
 
 # ============================================================================

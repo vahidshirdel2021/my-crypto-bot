@@ -38,6 +38,8 @@ ENGINE_DEFAULTS = {
     "break_confirm_pct": 0.0003,      # حداقل فاصله close از سطح برای «شکست واقعی»
     "min_confirm_body_ratio": 0.20,   # حداقل کیفیت بدنه برای «کندل تاییدی»
     "swing_search_window_mult": 4,    # پنجره جست‌وجوی سوئینگ = lookback * این عدد
+    "swing_min_wick_atr_ratio": 0.15,  # حداقل دم کندل سوئینگ نسبت به ATR (فیلتر فیک‌اوت)
+    "swing_min_volume_ratio": 0.60,    # حداقل نسبت حجم کندل سوئینگ به میانگین ۲۰ کندل
 
     # --- امتیاز پایه سناریوها (دقیقاً از فایل استراتژی) ---
     "base_scores": {
@@ -56,6 +58,18 @@ ENGINE_DEFAULTS = {
     # --- جریمه سابقه فیک‌اوت (پروکسی: تعداد برخوردهای تکراری به همان سطح در همین دوره) ---
     "penalty_weights": {
         "fakeout_history": 15.0,
+    },
+
+    # --- ضریب کاهش جریمه‌ی فیک‌اوت به تفکیک سناریو ---
+    # برخی ستاپ‌های باکیفیت (B5/S5: بریک‌اند‌ریتست، B3/S3: سوییپ مستقیم بدون
+    # عبور قبلی، B2/S2: پولبک مضاعف) ذاتاً نیازمند چند برخورد متوالی به همان
+    # سطح هستند (رفتار طبیعی و مثبت ستاپ، نه ریسک فیک‌اوت). جریمه‌ی ثابت -15
+    # این ستاپ‌های معتبر را به‌ناحق زیر آستانه‌ی ورود (min_score_to_trade)
+    # می‌انداخت. این ضرایب جریمه‌ی نهایی هر کد را کم می‌کنند (1.0 = بدون تغییر).
+    "penalty_scale_by_code": {
+        "B5": 0.35, "S5": 0.35,
+        "B3": 0.65, "S3": 0.65,
+        "B2": 0.60, "S2": 0.60,
     },
 
     "rsi_oversold": 35.0,
@@ -138,61 +152,116 @@ def _timestamp_to_datetime(df: pd.DataFrame) -> pd.Series:
     return pd.to_datetime(ts, unit=unit, utc=True)
 
 
+def _infer_bar_seconds(d: pd.DataFrame) -> float:
+    """میانه فاصله بین کندل‌ها بر حسب ثانیه؛ برای برآورد تعداد کندل موردانتظار هر دوره."""
+    diffs = d["_dt"].diff().dropna()
+    if diffs.empty:
+        return 0.0
+    return float(diffs.dt.total_seconds().median() or 0.0)
+
+
+# حداقل نسبت کندل‌های موجود یک دوره (روز/هفته) نسبت به تعداد موردانتظار تا آن دوره
+# «کامل» در نظر گرفته شود. اگر داده کافی برای دوره‌ی قبلی موجود نباشد (مثلاً به این
+# دلیل که پنجره‌ی دریافتی kline خیلی کوتاه بوده)، سطح PDH/PDL/PWH/PWL به‌جای یک
+# مقدار نادرست/بریده‌شده، None برمی‌گردد تا هیچ سیگنالی بر مبنای سطح غلط ساخته نشود.
+MIN_PERIOD_COMPLETENESS_RATIO = 0.85
+
+
 # ============================================================================
 # ۳) محاسبه سطوح مرجع: روزانه (PDH/PDL/EQ) و هفتگی (PWH/PWL/EQ)
 # ============================================================================
+#
+# نکته حیاتی (رفع باگ سطوح نادرست/معکوس روی چارت‌های TAO/QNT و مشابه):
+# اگر دیتافریم ورودی به‌اندازه‌ی کافی کندل نداشته باشد (کمتر از یک روز/هفته کامل
+# برای دوره‌ی «قبلی»)، گروه‌بندی بر اساس تاریخ ممکن است دوره‌ی قبلی را به‌صورت
+# بریده (truncated) ببیند؛ در نتیجه PDH/PDL محاسبه‌شده واقعاً high/low کل روز/هفته
+# قبل نیست بلکه فقط بخشی از آن است و می‌تواند نسبت به کندل‌های زنده معکوس/غلط
+# به نظر برسد. برای همین، پیش از اعتماد به هر دوره‌ی «قبلی»، تعداد کندل‌های آن با
+# تعداد موردانتظار (بر اساس فاصله واقعی بین کندل‌ها و طول دوره) مقایسه می‌شود.
+# ============================================================================
 
 def compute_prev_day_levels(df: pd.DataFrame):
-    """سطوح PDH/PDL/EQ روزانه (برای تایم‌فریم‌های ۵ و ۱۵ دقیقه)."""
+    """سطوح PDH/PDL/EQ روزانه (برای تایم‌فریم‌های ۵ و ۱۵ دقیقه).
+
+    سطوح همیشه بر اساس کندل‌های ۲۴ ساعته‌ی *کامل و بسته‌شده* UTC روز قبل
+    محاسبه می‌شوند. اگر دیتای کافی برای اثبات کامل بودن روز قبل وجود نداشته
+    باشد، (None, None, None) برگردانده می‌شود تا هیچ سطح نادرستی وارد تصمیم‌گیری
+    نشود.
+    """
     if df is None or len(df) < 50 or "timestamp" not in df.columns:
         return None, None, None, None
     d = df.copy()
     d["_dt"] = _timestamp_to_datetime(d)
     if d["_dt"].isna().all():
         return None, None, None, None
-    d["_period"] = d["_dt"].dt.date
-    grp = d.groupby("_period").agg(_hi=("high", "max"), _lo=("low", "min"))
+    d = d.sort_values("_dt").reset_index(drop=True)
+    # سشن روزانه دقیقاً روی مرز نیمه‌شب UTC ریست می‌شود (بدون آفست تایم‌زون محلی).
+    d["_period"] = d["_dt"].dt.floor("D").dt.date
+    bar_seconds = _infer_bar_seconds(d)
+    grp = d.groupby("_period").agg(_hi=("high", "max"), _lo=("low", "min"), _n=("high", "size"))
     grp["_pdh"] = grp["_hi"].shift(1)
     grp["_pdl"] = grp["_lo"].shift(1)
-    d = d.merge(grp[["_pdh", "_pdl"]], left_on="_period", right_index=True, how="left")
+    grp["_prev_n"] = grp["_n"].shift(1)
+    if bar_seconds > 0:
+        expected_bars = max(1.0, 86400.0 / bar_seconds)
+        grp["_prev_complete"] = grp["_prev_n"] >= expected_bars * MIN_PERIOD_COMPLETENESS_RATIO
+    else:
+        grp["_prev_complete"] = False
+    d = d.merge(grp[["_pdh", "_pdl", "_prev_complete"]], left_on="_period", right_index=True, how="left")
     d = d.reset_index(drop=True)
     idx_now = len(d) - 2  # آخرین کندل بسته‌شده (مطابق قرارداد کل ربات)
     if idx_now < 0:
         return d, None, None, None
     pdh, pdl = d.at[idx_now, "_pdh"], d.at[idx_now, "_pdl"]
-    if pd.isna(pdh) or pd.isna(pdl):
+    if pd.isna(pdh) or pd.isna(pdl) or not bool(d.at[idx_now, "_prev_complete"]):
         return d, None, None, None
     pdh, pdl = float(pdh), float(pdl)
+    if pdh <= pdl:
+        return d, None, None, None
     eq = (pdh + pdl) / 2.0
     return d, pdh, pdl, eq
 
 
 def compute_prev_week_levels(df: pd.DataFrame):
-    """سطوح PWH/PWL/EQ هفتگی (برای تایم‌فریم‌های ۱ و ۴ ساعته)."""
+    """سطوح PWH/PWL/EQ هفتگی (برای تایم‌فریم‌های ۱ و ۴ ساعته).
+
+    مشابه compute_prev_day_levels: اگر هفته‌ی قبل به‌طور کامل در داده موجود
+    نباشد، (None, None, None) برگردانده می‌شود.
+    """
     if df is None or len(df) < 50 or "timestamp" not in df.columns:
         return None, None, None, None
     d = df.copy()
     d["_dt"] = _timestamp_to_datetime(d)
     if d["_dt"].isna().all():
         return None, None, None, None
-    # شروع هفته را دوشنبه در نظر می‌گیریم (قابل تغییر در صورت نیاز به هفته کریپتویی یکشنبه‌شروع)
+    d = d.sort_values("_dt").reset_index(drop=True)
+    bar_seconds = _infer_bar_seconds(d)
+    # شروع هفته را دوشنبه ۰۰:۰۰ UTC در نظر می‌گیریم (ISO week، هفته کریپتویی ۲۴/۷).
     iso = d["_dt"].dt.isocalendar()
     d["_period"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
-    grp = d.groupby("_period", sort=False).agg(_hi=("high", "max"), _lo=("low", "min"))
+    grp = d.groupby("_period", sort=False).agg(_hi=("high", "max"), _lo=("low", "min"), _n=("high", "size"))
     # ترتیب دوره‌ها باید زمانی باشد نه الفبایی؛ با اولین timestamp هر دوره مرتب می‌کنیم
     order = d.groupby("_period", sort=False)["_dt"].min().sort_values().index
     grp = grp.reindex(order)
     grp["_pwh"] = grp["_hi"].shift(1)
     grp["_pwl"] = grp["_lo"].shift(1)
-    d = d.merge(grp[["_pwh", "_pwl"]], left_on="_period", right_index=True, how="left")
+    grp["_prev_n"] = grp["_n"].shift(1)
+    if bar_seconds > 0:
+        expected_bars = max(1.0, (7 * 86400.0) / bar_seconds)
+        grp["_prev_complete"] = grp["_prev_n"] >= expected_bars * MIN_PERIOD_COMPLETENESS_RATIO
+    else:
+        grp["_prev_complete"] = False
+    d = d.merge(grp[["_pwh", "_pwl", "_prev_complete"]], left_on="_period", right_index=True, how="left")
     d = d.reset_index(drop=True)
     idx_now = len(d) - 2
     if idx_now < 0:
         return d, None, None, None
     pwh, pwl = d.at[idx_now, "_pwh"], d.at[idx_now, "_pwl"]
-    if pd.isna(pwh) or pd.isna(pwl):
+    if pd.isna(pwh) or pd.isna(pwl) or not bool(d.at[idx_now, "_prev_complete"]):
         return d, None, None, None
     pwh, pwl = float(pwh), float(pwl)
+    if pwh <= pwl:
+        return d, None, None, None
     eq = (pwh + pwl) / 2.0
     return d, pwh, pwl, eq
 
@@ -203,6 +272,24 @@ LEVEL_SOURCE_BY_TIMEFRAME = {
     "1hour": "weekly",
     "4hour": "weekly",
 }
+
+# حداقل تعداد کندلی که هر تایم‌فریم باید از صرافی بگیرد تا دوره‌ی «قبلی»
+# (روز کامل قبل برای 5m/15m، هفته‌ی کامل قبل برای 1h/4h) به‌طور کامل در پنجره‌ی
+# دریافتی جا بگیرد و PDH/PDL/EQ به‌جای بریده‌شدن به‌درستی محاسبه شود. bot.py هر
+# جایی که df می‌سازد که قرار است وارد evaluate_scenarios شود باید حداقل همین
+# مقدار را از get_klines/get_klines_async درخواست کند. اعداد با کمی حاشیه‌ی
+# اطمینان (نسبت به دقیقاً ۲ دوره) انتخاب شده‌اند تا نوسان جزئی در timestampها
+# یا کندل‌های ازدست‌رفته باعث ناقص دیده‌شدن دوره‌ی قبل نشود.
+MIN_KLINES_FOR_LEVELS = {
+    "5min": 3 * 288 + 20,   # ~3 روز کامل (۲۸۸ کندل ۵دقیقه‌ای در روز) + حاشیه
+    "15min": 3 * 96 + 20,   # ~3 روز کامل (۹۶ کندل ۱۵دقیقه‌ای در روز) + حاشیه
+    "1hour": 3 * 168 + 20,  # ~3 هفته کامل (۱۶۸ کندل ۱ساعته در هفته) + حاشیه
+    "4hour": 3 * 42 + 20,   # ~3 هفته کامل (۴۲ کندل ۴ساعته در هفته) + حاشیه
+}
+
+
+def min_klines_for_levels(timeframe: str) -> int:
+    return int(MIN_KLINES_FOR_LEVELS.get(timeframe, 300))
 
 
 def get_reference_levels(df: pd.DataFrame, timeframe: str):
@@ -223,11 +310,27 @@ def get_reference_levels(df: pd.DataFrame, timeframe: str):
 # ۴) تشخیص سوئینگ (فرکتال ساده)
 # ============================================================================
 
-def compute_swings(df: pd.DataFrame, lookback: int = 3) -> pd.DataFrame:
+def compute_swings(df: pd.DataFrame, lookback: int = 3,
+                    min_wick_atr_ratio: float = 0.15,
+                    min_volume_ratio: float = 0.60) -> pd.DataFrame:
+    """تشخیص سوئینگ فرکتال + دو فیلتر کیفیت برای حذف سوئینگ‌های نویزی/فیک:
+
+    - min_wick_atr_ratio: کندل سوئینگ باید حداقل یک دم (wick) به این نسبت از
+      ATR داشته باشد (سمت مرتبط: پایین برای swing_low، بالا برای swing_high).
+      یک فرکتال با دم بسیار کوچک معمولاً نشانه‌ی یک نوسان بی‌اهمیت/نویز است و
+      نباید مبنای سوئیپ/سوئینگ برای سناریوهای ورود قرار گیرد.
+    - min_volume_ratio: کندل سوئینگ باید حداقل این نسبت از میانگین حجم ۲۰
+      کندل اخیر را داشته باشد؛ سوئینگ‌هایی که با حجم بسیار کم شکل گرفته‌اند
+      قابل‌اتکا نیستند و زمینه‌ساز breakoutهای فیک هستند.
+    """
     d = df.copy()
     n = len(d)
     highs = pd.to_numeric(d["high"], errors="coerce").values
     lows = pd.to_numeric(d["low"], errors="coerce").values
+    opens = pd.to_numeric(d["open"], errors="coerce").values
+    closes = pd.to_numeric(d["close"], errors="coerce").values
+    atr = pd.to_numeric(d["atr"], errors="coerce").values if "atr" in d.columns else np.full(n, np.nan)
+    vol_ratio = pd.to_numeric(d["volume_ratio"], errors="coerce").values if "volume_ratio" in d.columns else np.full(n, np.nan)
     swing_high = np.zeros(n, dtype=bool)
     swing_low = np.zeros(n, dtype=bool)
     for i in range(lookback, n - lookback):
@@ -235,10 +338,22 @@ def compute_swings(df: pd.DataFrame, lookback: int = 3) -> pd.DataFrame:
         l_win = lows[i - lookback: i + lookback + 1]
         if np.isnan(h_win).any() or np.isnan(l_win).any():
             continue
+        atr_i = atr[i] if np.isfinite(atr[i]) else 0.0
+        vr_i = vol_ratio[i] if np.isfinite(vol_ratio[i]) else 1.0
+        # حجم کافی طبق فیلتر بالا (اگر داده حجم موجود نباشد، این فیلتر عبور می‌کند)
+        volume_ok = (not np.isfinite(vol_ratio[i])) or (vr_i >= min_volume_ratio)
+        body_top = max(opens[i], closes[i])
+        body_bottom = min(opens[i], closes[i])
+        upper_wick = highs[i] - body_top
+        lower_wick = body_bottom - lows[i]
         if highs[i] == h_win.max() and (h_win == highs[i]).sum() == 1:
-            swing_high[i] = True
+            wick_ok = (atr_i <= 0) or (upper_wick >= atr_i * min_wick_atr_ratio)
+            if wick_ok and volume_ok:
+                swing_high[i] = True
         if lows[i] == l_win.min() and (l_win == lows[i]).sum() == 1:
-            swing_low[i] = True
+            wick_ok = (atr_i <= 0) or (lower_wick >= atr_i * min_wick_atr_ratio)
+            if wick_ok and volume_ok:
+                swing_low[i] = True
     d["swing_high"] = swing_high
     d["swing_low"] = swing_low
     return d
@@ -258,9 +373,10 @@ def _recent_confirmed_swings(d: pd.DataFrame, idx_now: int, lookback: int, col: 
 # ۵) بونوس/جریمه امتیاز پویا (اندیکاتورهای کمکی - فقط امتیازدهی)
 # ============================================================================
 
-def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: dict, touch_count: int):
+def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: dict, touch_count: int, code: str = ""):
     """
     direction: +1 برای سناریوهای خرید، -1 برای سناریوهای فروش
+    code: کد سناریو (B1..B6/S1..S6) برای اعمال ضریب کاهش جریمه‌ی مخصوص آن ستاپ
     خروجی: (bonus_total, penalty_total, notes:list[str])
     """
     bw = cfg["bonus_weights"]
@@ -300,9 +416,14 @@ def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: d
     # جریمه سابقه فیک‌اوت: پروکسی = تعداد برخوردهای تکراری به همان سطح در همین دوره
     # (هرچه یک سطح بیشتر لمس شده باشد بدون شکست قطعی، احتمال فیک‌اوت بعدی بیشتر است)
     extra_touches = max(0, touch_count - 1)
-    penalty_total = min(pw["fakeout_history"], extra_touches * (pw["fakeout_history"] / 3.0))
+    raw_penalty = min(pw["fakeout_history"], extra_touches * (pw["fakeout_history"] / 3.0))
+    scale = float(cfg.get("penalty_scale_by_code", {}).get(str(code), 1.0))
+    penalty_total = raw_penalty * scale
     if penalty_total > 0.5:
-        notes.append(f"سابقه {touch_count} برخورد قبلی به همین سطح (ریسک فیک‌اوت)")
+        note = f"سابقه {touch_count} برخورد قبلی به همین سطح (ریسک فیک‌اوت)"
+        if scale < 1.0:
+            note += f" — جریمه با ضریب {scale:.2f} برای ستاپ {code} کاهش یافت"
+        notes.append(note)
 
     return bonus_total, penalty_total, notes
 
@@ -343,7 +464,11 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
         return None
 
     lookback = int(cfg["swing_lookback_fractal"])
-    d = compute_swings(d, lookback)
+    d = compute_swings(
+        d, lookback,
+        min_wick_atr_ratio=float(cfg.get("swing_min_wick_atr_ratio", 0.15)),
+        min_volume_ratio=float(cfg.get("swing_min_volume_ratio", 0.60)),
+    )
     idx_now = len(d) - 2  # آخرین کندل بسته‌شده
     if idx_now < lookback * 3:
         return None
@@ -373,12 +498,31 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
 
     curr_row = d.loc[idx_now]
     close_now = _safe_float(curr_row.get("close"))
+    high_now = _safe_float(curr_row.get("high"))
+    low_now = _safe_float(curr_row.get("low"))
+
+    # ------------------------------------------------------------------
+    # دروازه‌ی سخت‌گیرانه‌ی ممنوعیت ورود میان‌رنج (dead-zone gate)
+    # ------------------------------------------------------------------
+    # طبق قانون هسته‌ی استراتژی، هیچ ورودی بدون برخورد/سوییپ/ریتست واقعی به
+    # PDH یا PDL (یا PWH/PWL) مجاز نیست. اگر در طول کل دوره‌ی جاری (از شروع
+    # روز/هفته تا کندل فعلی) هیچ لمس یا شکستی به هیچ‌کدام از دو مرز رخ نداده
+    # باشد، و کندل فعلی هم خودش دقیقاً روی مرز نباشد، یعنی قیمت هنوز کاملاً
+    # وسط رنج (dead-zone) است؛ در این حالت هیچ سناریویی ارزیابی نمی‌شود و
+    # تابع فوراً None برمی‌گرداند — صرف‌نظر از فاصله تا EQ یا جهت قیمت.
+    range_touched_this_period = bool(hi_touch_idxs) or bool(lo_touch_idxs) or bool(hi_break_idxs) or bool(lo_break_idxs)
+    touching_boundary_now = (
+        high_now >= hi_level * (1 - tol) or low_now <= lo_level * (1 + tol) or
+        close_now >= hi_level * (1 - tol) or close_now <= lo_level * (1 + tol)
+    )
+    if not range_touched_this_period and not touching_boundary_now:
+        return None
 
     candidates = []
 
     def add_candidate(code, direction, sl, tp, tp_partial, extra_reason, touch_count):
         base = cfg["base_scores"][code]
-        bonus, penalty, notes = _dynamic_bonus_penalty(d, idx_now, 1 if direction == "BUY" else -1, cfg, touch_count)
+        bonus, penalty, notes = _dynamic_bonus_penalty(d, idx_now, 1 if direction == "BUY" else -1, cfg, touch_count, code)
         total = max(0.0, min(cfg["max_score"], base + bonus - penalty))
         reasons = [extra_reason] + notes
         candidates.append({
@@ -387,6 +531,10 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
             "total_score": round(total, 1),
             "entry": close_now, "sl": sl, "tp": tp, "tp_partial": tp_partial,
             "level_label": label, "reasons": reasons,
+            # سطوح خام رنج، برای ساخت پلکان سه‌مرحله‌ای TP (Tier1=EQ/Tier2=مرز
+            # مقابل/Tier3=اکستنشن) در strategy.build_trade_plan
+            "range_hi": hi_level, "range_lo": lo_level, "range_eq": eq,
+            "extension_atr_mult": float(cfg.get("extension_atr_mult", 0.50)),
         })
 
     # ------------------------------------------------------------------
@@ -451,15 +599,10 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
                            len(hi_touch_idxs))
 
-    # B6: ورود دیسکانت (زیر EQ) بدون لمس دقیق PDL/PWL
-    if first_lo is None and close_now < eq and bullish_confirm_now and recent_swing_lows:
-        swing_idx = recent_swing_lows[-1]
-        swing_price = _safe_float(d.at[swing_idx, "low"])
-        if lo_level < swing_price < eq and idx_now - swing_idx <= lookback + 3:
-            sl = swing_price - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B6", "BUY", sl, hi_level, eq,
-                           "ورود در ناحیه دیسکانت (زیر EQ) بدون لمس دقیق کف رنج",
-                           len(lo_touch_idxs))
+    # B6 حذف شد: این سناریو ذاتاً یک ورود میان‌رنج بدون لمس/سوییپ واقعی PDL بود
+    # («بدون لمس دقیق کف رنج») و مستقیماً ناقض قانون ممنوعیت ورود میان‌رنج است
+    # (درخواست کاربر، بند ۲). دروازه‌ی dead-zone بالا هم به‌صورت عمومی از تکرار
+    # این نوع ورود در سناریوهای آینده جلوگیری می‌کند.
 
     # ------------------------------------------------------------------
     # سناریوهای فروش (SELL) — دقیقاً معکوس سناریوهای خرید
@@ -523,15 +666,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
                            len(lo_touch_idxs))
 
-    # S6: ورود پریمیوم (بالای EQ) بدون لمس دقیق PDH/PWH
-    if first_hi is None and close_now > eq and bearish_confirm_now and recent_swing_highs:
-        swing_idx = recent_swing_highs[-1]
-        swing_price = _safe_float(d.at[swing_idx, "high"])
-        if eq < swing_price < hi_level and idx_now - swing_idx <= lookback + 3:
-            sl = swing_price + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S6", "SELL", sl, lo_level, eq,
-                           "ورود در ناحیه پریمیوم (بالای EQ) بدون لمس دقیق سقف رنج",
-                           len(hi_touch_idxs))
+    # S6 حذف شد: معکوس B6، همان دلیل بالا (ورود میان‌رنج بدون لمس/سوییپ واقعی PDH).
 
     if not candidates:
         return None

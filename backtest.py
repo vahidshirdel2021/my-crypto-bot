@@ -26,28 +26,33 @@
         --strategy breakout --side short
 
 مثال اجرا — تست استراتژی واقعی زنده (Liquidity Sweep روی 5 دقیقه‌ای، همان
-چیزی که در ربات با active_strategy=dynamic اجرا می‌شود، شامل هدف PDH/PDL و
-خروج زودهنگام روی ضعف روند):
+چیزی که در ربات با active_strategy=dynamic اجرا می‌شود، شامل پلکان سه‌مرحله‌ای
+TP و تریلینگ‌استاپ ساختاری):
     python backtest.py --symbol DOT/USDT:USDT --timeframe 5m \
         --start 2026-07-01 --end 2026-08-01 \
         --strategy dynamic --side both
 
 استراتژی‌های قابل انتخاب: trend | breakout | mean_reversion | dynamic
 (دقیقاً همان‌هایی که در منوی ربات هستند. برای 5m/15m، dynamic دقیقاً همان
-منطق Liquidity Sweep + هدف PDH/PDL + خروج زودهنگام روی ضعف روند را که در
-bot.py فعال است شبیه‌سازی می‌کند. برای تایم‌فریم‌های بالاتر [1h/4h]، dynamic
-معادل breakout با فیلتر جهت دستی شبیه‌سازی می‌شود؛ یعنی --strategy breakout
---side long/short همان رفتار dynamic را در یک رژیم قطعی شبیه‌سازی می‌کند.)
+منطق Liquidity Sweep + پلکان PDH/EQ/PDL را که در bot.py فعال است شبیه‌سازی
+می‌کند. برای تایم‌فریم‌های بالاتر [1h/4h]، dynamic معادل breakout با فیلتر
+جهت دستی شبیه‌سازی می‌شود؛ یعنی --strategy breakout --side long/short همان
+رفتار dynamic را در یک رژیم قطعی شبیه‌سازی می‌کند.)
+
+توجه (به‌روزرسانی معماری): این بک‌تست اکنون دقیقاً همان رفتار جدید bot.py را
+شبیه‌سازی می‌کند: پلکان سه‌مرحله‌ای TP (۵۰٪ روی EQ + انتقال SL به Break-even،
+۳۰٪ روی مرز مقابل رنج، ۲۰٪ باقی‌مانده روی اکستنشن)، تریلینگ‌استاپ ساختاری بر
+اساس سوینگ (compute_swing_stop، همان تابع bot.py)، و **بدون** هیچ خروج
+زودهنگام/هوشمند بر اساس ضعف اندیکاتور یا MFE (آن منطق طبق تصمیم معماری از
+bot.py و از این بک‌تست هر دو حذف شده است).
 """
 
 import argparse
-import math
 
 import pandas as pd
 
 from strategy import (
-    calculate_indicators, get_signal_with_reason, build_trade_plan,
-    evaluate_trend_weakness,
+    calculate_indicators, get_signal_with_reason, build_trade_plan, compute_swing_stop,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
@@ -55,20 +60,10 @@ PAPER_CONSERVATIVE_OHLC = True  # اگر در یک کندل هم SL و هم TP �
 
 
 # ---------------------------------------------------------------------------
-# همان فرمول قفل حد ضرر دنبال‌کننده که در bot.py هست (خط به خط یکسان)
+# تریلینگ‌استاپ ساختاری بر اساس سوینگ — دقیقاً همان تابع strategy.compute_swing_stop
+# که bot.py هم برای مدیریت پوزیشن باز استفاده می‌کند (به‌جای پلکان قدیمی R که
+# اینجا بود و اکنون از هر دو فایل حذف شده است).
 # ---------------------------------------------------------------------------
-def trailing_locked_r(entry, risk_distance, current_price, is_long):
-    try:
-        entry = float(entry); risk_distance = float(risk_distance); current_price = float(current_price)
-    except Exception:
-        return None
-    if risk_distance <= 0 or not math.isfinite(risk_distance):
-        return None
-    r = (current_price - entry) / risk_distance if is_long else (entry - current_price) / risk_distance
-    if r < 1.0:
-        return None
-    step = math.floor(r * 2) / 2.0
-    return max(0.0, step - 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -170,88 +165,118 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
             continue
 
         entry = plan['entry']; sl = plan['sl']; tp = plan['tp']
+        tp1 = plan.get('tp1', tp); tp2 = plan.get('tp2', tp); tp3 = plan.get('tp3', tp)
+        tp1_pct = float(plan.get('tp1_pct') or 0.0); tp2_pct = float(plan.get('tp2_pct') or 0.0)
+        tp3_pct = float(plan.get('tp3_pct') or (1.0 - tp1_pct - tp2_pct))
         is_long = (sig == 'BUY')
         risk_distance = abs(entry - sl)
         entry_idx = i  # کندل i همان کندلی است که سیگنال روی close آن صادر شده (window.iloc[-2])
         entry_time = ind.iloc[entry_idx]['ts'] if 'ts' in ind.columns else entry_idx
 
         cur_sl = sl
-        locked_r = 0.0
-        trailing_activated = False
+        tp1_done = False; tp2_done = False; breakeven_done = False
+        trailing_activated = False; swing_level = None
         exit_price = None
         exit_reason = None
         exit_idx = None
+
+        # پلکان سه‌مرحله‌ای TP (بند ۴): سود/کارمزد هر پله جداگانه محاسبه و
+        # در پایان با پای نهایی جمع می‌شود — دقیقاً مطابق _partial_close_position
+        # + close_position در bot.py.
+        notional_full = margin_usdt * leverage
+        fee_pct = taker_fee_pct / 100.0
+        partial_legs = []  # هر ورودی: (fraction, exit_price, reason)
 
         j = entry_idx + 1
         while j < n:
             row = ind.iloc[j]
             high, low, close = float(row['high']), float(row['low']), float(row['close'])
 
-            if is_long:
-                hit_tp = high >= tp
-                hit_sl = low <= cur_sl
-            else:
-                hit_tp = low <= tp
-                hit_sl = high >= cur_sl
+            # --- Tier 1: نیمی از حجم دقیقاً روی EQ ---
+            if not tp1_done and tp1_pct > 0:
+                hit1 = (high >= tp1) if is_long else (low <= tp1)
+                if hit1:
+                    tp1_done = True
+                    partial_legs.append((tp1_pct, tp1, 'TP1 (EQ)'))
+                    cur_sl = entry  # Break-even کل باقی‌مانده بلافاصله پس از پله اول
+                    breakeven_done = True
 
-            if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
-                exit_price, exit_reason = cur_sl, 'SL (همان کندل)'
-            elif hit_tp:
-                exit_price, exit_reason = tp, 'TP'
+            # --- Tier 2: ۳۰٪ حجم روی مرز مقابل رنج (فقط پس از تکمیل پله اول) ---
+            if tp1_done and not tp2_done and tp2_pct > 0:
+                hit2 = (high >= tp2) if is_long else (low <= tp2)
+                if hit2:
+                    tp2_done = True
+                    partial_legs.append((tp2_pct, tp2, 'TP2 (مرز مقابل)'))
+
+            # --- Tier 3 (باقی‌مانده) و SL نهایی ---
+            hit_tp3 = (high >= tp3) if is_long else (low <= tp3)
+            hit_sl = (low <= cur_sl) if is_long else (high >= cur_sl)
+            if hit_tp3 and hit_sl and PAPER_CONSERVATIVE_OHLC:
+                exit_price, exit_reason = cur_sl, ('SL (Break-even)' if breakeven_done else 'SL')
+            elif hit_tp3:
+                exit_price, exit_reason = tp3, 'TP3 (اکستنشن نهایی)'
             elif hit_sl:
-                exit_price, exit_reason = cur_sl, 'SL'
+                exit_price, exit_reason = cur_sl, ('SL (Break-even)' if breakeven_done else 'SL')
 
             if exit_price is not None:
                 exit_idx = j
                 break
 
+            # --- تریلینگ‌استاپ ساختاری بر اساس سوینگ (بند ۵)، فقط بهبود SL، هرگز بدتر ---
             if use_trailing and filters.get('trailing_stop', True):
-                lr = trailing_locked_r(entry, risk_distance, close, is_long)
-                if lr is not None:
-                    new_sl = entry + (lr * risk_distance if is_long else -lr * risk_distance)
+                swing_df = ind.iloc[: j + 1]
+                new_sl, sw_level = compute_swing_stop(
+                    swing_df, is_long,
+                    lookback=int(strategy_config.get('swing_lookback', 12)),
+                    buffer_atr=float(strategy_config.get('swing_buffer_atr', 0.40)),
+                    confirm_candles=int(strategy_config.get('swing_confirm_candles', 2)),
+                    buffer_wick_pct=float(strategy_config.get('swing_buffer_wick_pct', 0.0015)),
+                )
+                if new_sl is not None:
                     is_better = (new_sl > cur_sl) if is_long else (new_sl < cur_sl)
-                    if is_better and lr > locked_r:
+                    if is_better:
                         cur_sl = new_sl
-                        locked_r = lr
+                        swing_level = sw_level
                         trailing_activated = True
 
-            # --- مدیریت هوشمند: خروج زودهنگام با سود اگر علائم ضعف روند دیده شود
-            # (دقیقاً همان منطق _weakness_exit_check در bot.py) ---
-            current_r = ((close - entry) / risk_distance) if is_long else ((entry - close) / risk_distance)
-            weak_min_r = float(strategy_config.get('weakness_exit_min_r', 0.8))
-            if current_r >= weak_min_r:
-                wdf = ind.iloc[: j + 2]
-                if len(wdf) >= 60:
-                    is_weak, _wscore, _wreasons = evaluate_trend_weakness(
-                        wdf, 'BUY' if is_long else 'SELL', strategy_config
-                    )
-                    if is_weak:
-                        exit_price, exit_reason = close, 'مدیریت هوشمند (ضعف روند)'
-                        exit_idx = j
-                        break
+            # مدیریت هوشمند/خروج زودهنگام بر اساس ضعف روند یا MFE عمداً اینجا
+            # وجود ندارد (بند ۳ درخواست کاربر): تنها راه خروج، پلکان TP یا SL است.
 
             j += 1
 
         if exit_price is None:
-            # پوزیشن تا انتهای بازه داده بسته نشد؛ روی آخرین قیمت موجود می‌بندیم و علامت‌گذاری می‌کنیم
             exit_price = float(ind.iloc[-1]['close'])
             exit_reason = 'پایان بازه داده (باز مانده)'
             exit_idx = n - 1
 
-        price_change_frac = ((exit_price - entry) / entry) if is_long else ((entry - exit_price) / entry)
-        notional = margin_usdt * leverage
-        fee_usdt = notional * (taker_fee_pct / 100.0) * 2
-        pnl_usdt = notional * price_change_frac - fee_usdt
-        realized_r = (pnl_usdt + fee_usdt) / (margin_usdt * leverage * (risk_distance / entry)) if risk_distance else 0.0
+        # --- جمع‌بندی PnL کل معامله (پله‌های جزئی + پای نهایی) ---
+        total_pnl_usdt = 0.0
+        total_fee_usdt = 0.0
+        for frac, leg_price, _leg_reason in partial_legs:
+            leg_notional = notional_full * frac
+            leg_move = ((leg_price - entry) / entry) if is_long else ((entry - leg_price) / entry)
+            leg_fee = leg_notional * fee_pct  # فقط پای خروج این پله (تقریب معقول، مطابق _partial_close_position)
+            total_pnl_usdt += leg_notional * leg_move - leg_fee
+            total_fee_usdt += leg_fee
+
+        final_frac = max(0.0, 1.0 - sum(f for f, _, _ in partial_legs))
+        final_notional = notional_full * final_frac
+        final_move = ((exit_price - entry) / entry) if is_long else ((entry - exit_price) / entry)
+        final_fee = final_notional * fee_pct * 2  # پای ورود + پای خروج نهایی (تقریب رفت‌وبرگشت کامل)
+        total_pnl_usdt += final_notional * final_move - final_fee
+        total_fee_usdt += final_fee
+
+        realized_r = (total_pnl_usdt + total_fee_usdt) / (margin_usdt * leverage * (risk_distance / entry)) if risk_distance else 0.0
+        tiers_hit = '+'.join([leg_reason for _, _, leg_reason in partial_legs] + [exit_reason])
 
         trades.append({
             'side': 'LONG' if is_long else 'SHORT',
             'entry_time': entry_time,
-            'entry': entry, 'sl_initial': sl, 'tp': tp,
-            'exit': exit_price, 'exit_reason': exit_reason,
-            'trailing_activated': trailing_activated, 'locked_r': locked_r,
+            'entry': entry, 'sl_initial': sl, 'tp1': tp1, 'tp2': tp2, 'tp': tp3,
+            'exit': exit_price, 'exit_reason': exit_reason, 'tiers_hit': tiers_hit,
+            'trailing_activated': trailing_activated, 'breakeven_done': breakeven_done,
             'quality_score': plan['score'], 'planned_rr': plan['rr'],
-            'realized_r': realized_r, 'pnl_usdt': pnl_usdt, 'fee_usdt': fee_usdt,
+            'realized_r': realized_r, 'pnl_usdt': total_pnl_usdt, 'fee_usdt': total_fee_usdt,
         })
         i = exit_idx + 1 if exit_idx else i + 1  # تا بسته شدن پوزیشن، سیگنال جدید بررسی نمی‌شود (هم‌زمان با ربات: یک پوزیشن هر نماد)
 
