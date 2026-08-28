@@ -29,20 +29,6 @@ from pdh_eq_pdl_engine import (
     get_reference_levels,
 )
 
-# کتابخانه جدید تشخیص سوینگ (رجکشن سه‌کندلی / فراکتال کلاسیک / ساختار بازار
-# BOS-ChoCH) — به‌صورت کاملاً اختیاری و افزودنی به پروژه اضافه شده است.
-# پیش‌فرض تمام سوییچ‌های مربوط به آن در STRATEGY_DEFAULTS خاموش (False) است،
-# یعنی رفتار موتور اصلی PDH/EQ/PDL دقیقاً مثل قبل باقی می‌ماند مگر کاربر
-# صراحتاً یکی از قابلیت‌های زیر را فعال کند.
-try:
-    from swing_detection import (
-        analyze_swings as _sw_analyze_swings,
-        SwingDetectionError as _SwingDetectionError,
-    )
-    _SWING_LIB_AVAILABLE = True
-except Exception:  # ماژول اختیاری است؛ نبودش نباید کل بات را خراب کند
-    _SWING_LIB_AVAILABLE = False
-
 
 # ============================================================================
 # ابزارهای عمومی (بدون تغییر نسبت به نسخه قبلی، مورد استفاده در چند تابع)
@@ -145,91 +131,6 @@ def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candle
 
 
 # ============================================================================
-# compute_swing_stop_v2 / get_swing_confluence
-# لایه اختیاری ادغام کتابخانه swing_detection.py با موتور فعلی.
-# امضا و خروجی compute_swing_stop_v2 عیناً مطابق compute_swing_stop قدیمی
-# است: (sl, swing_level) یا (None, None) — تا بتواند بدون تغییر در محل
-# فراخوانی (bot.py) جایگزین آن شود.
-# ============================================================================
-
-def compute_swing_stop_v2(df, is_long, atr_period=14, atr_buffer_mult=0.25, pct_buffer=0.0015):
-    """
-    نسخه پیشرفته‌ی compute_swing_stop با استفاده از کتابخانه swing_detection:
-    به‌جای کمینه/بیشینه‌ی یک پنجره‌ی ثابت (lookback)، آخرین سوینگ *واقعی و
-    تاییدشده* (رجکشن سه‌کندلی یا فراکتال کلاسیک، هرکدام جدیدتر بود) را پیدا
-    کرده و SL را با بافر max(ATR×ضریب, قیمت×درصد) پشت آن قرار می‌دهد.
-
-    خروجی کاملاً سازگار با compute_swing_stop قدیمی: (sl, swing_level) یا
-    (None, None) در صورت نبود داده کافی/سوینگ معتبر/عدم دسترسی به کتابخانه.
-    این تابع هرگز exception پرتاب نمی‌کند (مناسب حلقه زنده بات).
-    """
-    if not _SWING_LIB_AVAILABLE:
-        return None, None
-    if df is None or df.empty or len(df) < 5:
-        return None, None
-    try:
-        payload = _sw_analyze_swings(
-            df,
-            include_structural=False,
-            atr_period=int(atr_period),
-            atr_buffer_mult=float(atr_buffer_mult),
-            pct_buffer=float(pct_buffer),
-        )
-    except Exception:
-        return None, None
-
-    if not payload.get("ok"):
-        return None, None
-
-    direction = "long" if is_long else "short"
-    for sig in payload.get("signals", []):  # جدیدترین سیگنال‌ها اول هستند
-        if sig.get("valid") and sig.get("direction") == direction:
-            sl = sig.get("stop_loss")
-            swing_price = (sig.get("source") or {}).get("price")
-            if sl is None or swing_price is None:
-                continue
-            if not (np.isfinite(sl) and np.isfinite(swing_price)):
-                continue
-            return float(sl), float(swing_price)
-
-    return None, None
-
-
-def get_swing_confluence(df, is_long, lookback_bars=5):
-    """
-    بررسی صرفاً اطلاعاتی (بدون اثر بر تصمیم‌گیری) اینکه آیا نزدیک‌ترین رویداد
-    ساختاری (BOS یا ChoCH) در N کندل اخیر هم‌جهت با سیگنال فعلی بوده یا نه.
-
-    خروجی: dict {"aligned": bool, "event_type": str|None, "event_direction": str|None}
-    هرگز exception پرتاب نمی‌کند؛ در نبود کتابخانه/داده کافی aligned=False برمی‌گرداند.
-    """
-    out = {"aligned": False, "event_type": None, "event_direction": None}
-    if not _SWING_LIB_AVAILABLE:
-        return out
-    if df is None or df.empty or len(df) < 5:
-        return out
-    try:
-        payload = _sw_analyze_swings(df, include_rejection=False, include_classic=False, include_structural=True)
-    except Exception:
-        return out
-    if not payload.get("ok"):
-        return out
-
-    events = payload.get("structural_events", [])
-    if not events:
-        return out
-
-    wanted_dir = "bullish" if is_long else "bearish"
-    for ev in reversed(events[-max(1, int(lookback_bars)):]):
-        if ev.get("direction") == wanted_dir:
-            out["aligned"] = True
-            out["event_type"] = ev.get("event")
-            out["event_direction"] = ev.get("direction")
-            return out
-    return out
-
-
-# ============================================================================
 # STRATEGY_DEFAULTS / presetهای هر تایم‌فریم
 # کلیدهایی که bot.py مستقیماً (خارج از این فایل) برای مدیریت پوزیشن می‌خواند
 # عیناً حفظ شده‌اند: swing_lookback, swing_confirm_candles, swing_buffer_atr،
@@ -276,25 +177,6 @@ STRATEGY_DEFAULTS = {
     "tp_tier_pct": [0.50, 0.30, 0.20],
 
     "v2_enabled": False,  # موتور قدیمی v2 کاملاً غیرفعال است؛ فقط برای سازگاری با کد قدیمی نگه داشته شده
-
-    # --- کتابخانه جدید تشخیص سوینگ (swing_detection.py) — همه پیش‌فرض خاموش ---
-    # use_advanced_swing_stop: اگر True باشد، تریلینگ‌استاپ پوزیشن باز
-    #   (_check_swing_trailing_stop در bot.py) به‌جای compute_swing_stop قدیمی
-    #   (پنجره ثابت lookback) از compute_swing_stop_v2 استفاده می‌کند که SL را
-    #   بر اساس آخرین سوینگ *واقعی* تاییدشده (رجکشن سه‌کندلی یا فراکتال
-    #   کلاسیک) محاسبه می‌کند، نه صرفاً کمینه/بیشینه یک پنجره ثابت.
-    "use_advanced_swing_stop": False,
-    "advanced_swing_atr_period": 14,
-    "advanced_swing_atr_buffer_mult": 0.25,
-    "advanced_swing_pct_buffer": 0.0015,
-
-    # use_swing_confluence_info: اگر True باشد، build_trade_plan یک فیلد
-    #   اطلاعاتیِ صرف "swing_confluence" به خروجی پلن اضافه می‌کند که نشان
-    #   می‌دهد آخرین رویداد ساختاری (BOS/ChoCH) هم‌جهت با سیگنال بوده یا نه.
-    #   این فیلد صرفاً نمایشی/گزارشی است و روی امتیاز، جهت یا رد/قبول شدن
-    #   معامله هیچ تاثیری ندارد (طبق همان اصل حفظ رفتار موتور اصلی).
-    "use_swing_confluence_info": False,
-    "swing_confluence_lookback_bars": 5,
 }
 
 # presetهای مخصوص هر تایم‌فریم — نگاشت سطح مرجع دقیقاً طبق درخواست کاربر:
@@ -570,20 +452,6 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         "tp1_pct": tier_pcts[0], "tp2_pct": tier_pcts[1], "tp3_pct": tier_pcts[2],
         "breakeven_after_tp1": True,
     }
-
-    # --- لایه اختیاری/اطلاعاتی confluence سوینگ ساختاری (پیش‌فرض خاموش) ---
-    # هیچ تاثیری روی امتیاز/جهت/رد یا قبول شدن معامله بالا ندارد؛ صرفاً یک
-    # فیلد گزارشی برای نمایش در پیام تلگرام/لاگ اضافه می‌کند اگر کاربر
-    # use_swing_confluence_info را در strategy_config فعال کرده باشد.
-    if bool(cfg.get("use_swing_confluence_info", False)):
-        try:
-            plan["swing_confluence"] = get_swing_confluence(
-                df, is_long=(signal == "BUY"),
-                lookback_bars=int(cfg.get("swing_confluence_lookback_bars", 5)),
-            )
-        except Exception:
-            plan["swing_confluence"] = {"aligned": False, "event_type": None, "event_direction": None}
-
     return plan, plan["reason"]
 
 
