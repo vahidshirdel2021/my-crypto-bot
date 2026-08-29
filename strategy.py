@@ -26,6 +26,7 @@ from pdh_eq_pdl_engine import (
     evaluate_scenarios,
     compute_prev_day_levels,
     compute_prev_week_levels,
+    compute_prev_month_levels,
     get_reference_levels,
     structural_htf_trend,
 )
@@ -286,6 +287,10 @@ STRATEGY_DEFAULTS = {
     "htf_trend_exception_score": 80.0,
     "htf_trend_exception_rr": 1.60,
 
+    # --- فال‌بک چندسطحی برای ۵/۱۵ دقیقه (هفتگی/ماهانه، طبق تصمیم مشترک) ---
+    "multi_level_source_fallback_enabled": True,
+    "monthly_level_fallback_enabled": True,
+
     # --- کتابخانه جدید تشخیص سوینگ (swing_detection.py) ---
     # use_advanced_swing_stop: اگر True باشد، تریلینگ‌استاپ پوزیشن باز
     #   (_check_swing_trailing_stop در bot.py) به‌جای compute_swing_stop قدیمی
@@ -463,6 +468,38 @@ def _run_engine(df, timeframe, strategy_config=None):
     return evaluate_scenarios(df, timeframe or "5min", strategy_config)
 
 
+# ============================================================================
+# فال‌بک چندسطحی برای ۵ و ۱۵ دقیقه — طبق تصمیم مشترک با کاربر
+# ============================================================================
+# روزانه همیشه اولویت اول و پیش‌فرض است (تنها منبعی که واقعاً محک خورده). فقط
+# وقتی داده‌ی روزانه هیچ ستاپ معتبری نداشت، هفتگیِ خودِ نماد (از روی همان
+# market_data_dict['1d'] که برای فیلتر روند HTF گرفته می‌شود، بدون فراخوانی
+# اضافه به صرافی) و در صورت نبود آن هم، ماهانه امتحان می‌شود. رقابت هم‌زمان
+# بین منابع در کار نیست — زنجیره‌ی فال‌بک ترتیبی است.
+def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None):
+    """خروجی: (best_dict_or_None, level_source_used_or_None)"""
+    best = evaluate_scenarios(df, timeframe or "5min", cfg)
+    if best:
+        return best, LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
+    if timeframe not in ("5min", "15min") or not bool(cfg.get("multi_level_source_fallback_enabled", True)):
+        return None, None
+    daily = (market_data_dict or {}).get("1d")
+    if daily is None or daily.empty:
+        return None, None
+    _, pwh, pwl, weq = compute_prev_week_levels(daily)
+    if pwh is not None and pwl is not None and pwh > pwl:
+        cand = evaluate_scenarios(df, timeframe, cfg, level_override=("weekly", pwh, pwl, weq))
+        if cand:
+            return cand, "weekly"
+    if bool(cfg.get("monthly_level_fallback_enabled", True)):
+        _, pmh, pml, meq = compute_prev_month_levels(daily)
+        if pmh is not None and pml is not None and pmh > pml:
+            cand = evaluate_scenarios(df, timeframe, cfg, level_override=("monthly", pmh, pml, meq))
+            if cand:
+                return cand, "monthly"
+    return None, None
+
+
 def _format_reason(best):
     if not best:
         return ""
@@ -495,7 +532,10 @@ def _resample_weekly_from_daily(daily_df):
     d = d.dropna(subset=["timestamp"])
     if d.empty:
         return None
-    d["_dt"] = pd.to_datetime(d["timestamp"], unit="s", utc=True)
+    # واحد timestamp همیشه یکسان نیست: bot.py (زنده) ثانیه می‌دهد، اما
+    # backtest.py (ccxt) میلی‌ثانیه. تشخیص خودکار برای سازگاری با هر دو.
+    unit = "ms" if d["timestamp"].median() > 10**12 else "s"
+    d["_dt"] = pd.to_datetime(d["timestamp"], unit=unit, utc=True)
     d = d.set_index("_dt").sort_index()
     w = d.resample("W-MON", label="left", closed="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last"}
@@ -549,9 +589,9 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
     """
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    best = _run_engine(df_primary, timeframe, cfg)
+    best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict)
     if not best:
-        return None, "هیچ‌کدام از ۱۲ سناریوی PDH/EQ/PDL (یا PWH/PWL/EQ) تایید نشد"
+        return None, "هیچ‌کدام از ۱۴ سناریوی PDH/EQ/PDL (یا PWH/PWL/EQ، یا فال‌بک هفتگی/ماهانه) تایید نشد"
     min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
     if best["total_score"] < min_score:
         return None, f"بهترین سناریو {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
@@ -599,7 +639,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         return None, "داده کافی برای طراحی معامله وجود ندارد"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    best = _run_engine(df, strategy_timeframe, cfg)
+    best, level_source_used = _run_engine_multi_source(df, strategy_timeframe, cfg, market_data_dict)
     if not best or best["direction"] != signal:
         return None, "سناریوی برنده با سیگنال هم‌خوانی ندارد؛ معامله رد شد"
 

@@ -131,7 +131,14 @@ CCXT_TO_STRATEGY_TF = {
 
 def run_backtest(df, strategy_type='breakout', side='both', filters=None, strategy_config=None,
                   margin_usdt=50.0, leverage=5, taker_fee_pct=0.05, use_trailing=True,
-                  strategy_timeframe='1hour'):
+                  strategy_timeframe='1hour', htf_frames=None):
+    """
+    htf_frames: دیکشنری اختیاری {'1d': daily_df, '4h': four_h_df, ...} برای فعال‌سازی
+    واقعی فیلتر روند ساختاری HTF در بک‌تست (همان کلیدهایی که get_signal_with_reason
+    در strategy.py انتظار دارد). هر دیتافریم باید ستون 'timestamp' (ثانیه یا میلی‌ثانیه،
+    خودکار تشخیص داده می‌شود) داشته باشد. در هر گام فقط کندل‌های HTF که قبل از زمان
+    کندل جاری primary کامل شده‌اند به مدل داده می‌شود (بدون نگاه به آینده).
+    """
     filters = {**FILTER_DEFAULTS, **(filters or {})}
     strategy_config = {**STRATEGY_DEFAULTS, **(strategy_config or {})}
 
@@ -139,14 +146,37 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
     if ind.empty or len(ind) < 65:
         raise RuntimeError('داده کافی نیست (حداقل ~۶۵ کندل لازم است).')
 
+    ts_col = 'ts' if 'ts' in ind.columns else 'timestamp'
+    htf_frames = htf_frames or {}
+    htf_ts = {}
+    for key, hdf in htf_frames.items():
+        if hdf is None or hdf.empty:
+            continue
+        h = hdf.copy()
+        h['timestamp'] = pd.to_numeric(h['timestamp'], errors='coerce')
+        h = h.dropna(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
+        htf_ts[key] = h
+
+    def _htf_slice_at(current_ts_ms):
+        # واحد زمانی HTF را با واحد زمانی primary (که از ccxt همیشه میلی‌ثانیه است) هم‌سطح می‌کنیم
+        md = {}
+        for key, h in htf_ts.items():
+            unit_div = 1000.0 if h['timestamp'].median() < 10**12 else 1.0
+            h_ts_ms = h['timestamp'] * unit_div if unit_div == 1000.0 else h['timestamp']
+            cutoff = int(h_ts_ms.searchsorted(current_ts_ms, side='left'))
+            if cutoff >= 20:  # حداقل کندل کافی برای سوینگ معنادار
+                md[key] = h.iloc[:cutoff].reset_index(drop=True)
+        return md or None
+
     trades = []
     n = len(ind)
     i = 60
     while i < n - 1:
         # پنجره‌ای که آخرین کندل کامل‌شده روی ایندکس -2 آن قرار دارد (دقیقاً مطابق نحوه فراخوانی در bot.py)
         window = ind.iloc[: i + 2]
+        market_data_dict = _htf_slice_at(float(window.iloc[-1][ts_col])) if htf_ts else None
         sig, reason = get_signal_with_reason(
-            window, timeframe_mode='single', timeframe=strategy_timeframe,
+            window, market_data_dict=market_data_dict, timeframe_mode='single', timeframe=strategy_timeframe,
             strategy_type=strategy_type, filters=filters, strategy_config=strategy_config,
         )
         if sig not in ('BUY', 'SELL'):
@@ -159,7 +189,8 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
             i += 1
             continue
 
-        plan, _ = build_trade_plan(window, sig, strategy_config, strategy_type, strategy_timeframe)
+        plan, _ = build_trade_plan(window, sig, strategy_config, strategy_type, strategy_timeframe,
+                                    market_data_dict=market_data_dict)
         if not plan:
             i += 1
             continue
@@ -327,6 +358,10 @@ def main():
     ap.add_argument('--margin', type=float, default=50.0)
     ap.add_argument('--leverage', type=int, default=5)
     ap.add_argument('--no-trailing', action='store_true', help='تریلینگ‌استاپ را خاموش کن (برای مقایسه)')
+    ap.add_argument('--legacy', action='store_true',
+                     help='برای مقایسه‌ی قبل/بعد: تمام فیلترهای اضافه‌شده‌ی این نسخه را خاموش می‌کند '
+                          '(reclaim-confirm، فیلتر روند HTF، سوینگ فرکتال پیشرفته، قفل‌سود پله‌ای/ATR) '
+                          'تا دقیقاً روی همان داده با کد قدیمی مقایسه شود')
     ap.add_argument('--strategy-timeframe', default=None, choices=list(TIMEFRAME_PARAM_ADJUST.keys()),
                      help='کلید تایم‌فریم برای آستانه‌های ADX/امتیاز/R:R (پیش‌فرض: نگاشت خودکار از --timeframe)')
     ap.add_argument('--csv', default=None, help='مسیر خروجی CSV اختیاری برای لیست کامل معاملات')
@@ -337,11 +372,41 @@ def main():
     df = fetch_ohlcv_coinex(args.symbol, args.timeframe, args.start, args.end)
     print(f'✅ {len(df)} کندل دریافت شد. | آستانه‌های استراتژی بر اساس تایم‌فریم: {strategy_tf}')
 
+    # داده‌ی HTF برای فیلتر روند ساختاری (فقط اگر --legacy نباشد، چون آن‌جا این فیلتر
+    # خاموش است و گرفتن این داده صرفاً وقت تلف می‌کند). با ~۲۰۰ روز عقب‌تر از --start
+    # شروع می‌کنیم تا سوینگ‌های HTF لازم برای همان اولین کندل‌های بازه هم موجود باشند.
+    htf_frames = {}
+    if not args.legacy:
+        htf_start = (pd.Timestamp(args.start) - pd.Timedelta(days=220)).strftime('%Y-%m-%d')
+        try:
+            print('⏳ دریافت داده روزانه (برای فیلتر روند HTF) ...')
+            htf_frames['1d'] = fetch_ohlcv_coinex(args.symbol, '1d', htf_start, args.end)
+            if strategy_tf == '1hour':
+                print('⏳ دریافت داده ۴ساعته (برای فیلتر روند HTF) ...')
+                htf_frames['4h'] = fetch_ohlcv_coinex(args.symbol, '4h', htf_start, args.end)
+        except Exception as exc:
+            print(f'⚠️ دریافت داده HTF ناموفق بود ({exc})؛ فیلتر روند HTF در این اجرا عملاً غیرفعال می‌ماند.')
+            htf_frames = {}
+
+    legacy_cfg_override = None
+    if args.legacy:
+        legacy_cfg_override = {
+            "require_reclaim_confirm": False,   # B1/B3/S1/S3 بدون شرط ری‌کلیم (رفتار قدیم)
+            "htf_trend_filter_enabled": False,  # بدون بلاک خلاف‌جهت HTF
+            "use_advanced_swing_stop": False,   # تریلینگ با رولینگ‌مینیمم قدیمی به‌جای سوینگ فرکتال
+            "profit_lock_r_ladder": [],         # بدون قفل سود پله‌ای
+            "atr_trail_start_r": 999.0,         # عملاً تریلینگ ATR فعال را خاموش می‌کند
+            "multi_level_source_fallback_enabled": False,  # بدون فال‌بک هفتگی/ماهانه
+        }
+        print('⚠️  حالت --legacy فعال است: reclaim-confirm، فیلتر HTF، سوینگ پیشرفته و قفل‌سود پله‌ای/ATR خاموش شدند.')
+
     trades = run_backtest(
         df, strategy_type=args.strategy, side=args.side,
         margin_usdt=args.margin, leverage=args.leverage,
         use_trailing=not args.no_trailing,
         strategy_timeframe=strategy_tf,
+        strategy_config=legacy_cfg_override,
+        htf_frames=htf_frames,
     )
     summarize(trades)
 

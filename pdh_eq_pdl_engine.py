@@ -309,6 +309,48 @@ def compute_prev_week_levels(df: pd.DataFrame):
     return d, pwh, pwl, eq
 
 
+def compute_prev_month_levels(df: pd.DataFrame):
+    """سطوح PMH/PML/EQ ماه قبل (فال‌بک سوم برای ۵ و ۱۵ دقیقه، وقتی نه روزانه و نه
+    هفتگی ستاپ معتبری نداشته باشند). دقیقاً همان منطق compute_prev_week_levels،
+    فقط با گروه‌بندی بر اساس ماه تقویمی (UTC) به‌جای هفته‌ی ISO.
+    """
+    if df is None or len(df) < 50 or "timestamp" not in df.columns:
+        return None, None, None, None
+    d = df.copy()
+    d["_dt"] = _timestamp_to_datetime(d)
+    if d["_dt"].isna().all():
+        return None, None, None, None
+    d = d.sort_values("_dt").reset_index(drop=True)
+    bar_seconds = _infer_bar_seconds(d)
+    d["_period"] = d["_dt"].dt.strftime("%Y-%m")
+    grp = d.groupby("_period", sort=False).agg(_hi=("high", "max"), _lo=("low", "min"), _n=("high", "size"))
+    order = d.groupby("_period", sort=False)["_dt"].min().sort_values().index
+    grp = grp.reindex(order)
+    grp["_pmh"] = grp["_hi"].shift(1)
+    grp["_pml"] = grp["_lo"].shift(1)
+    grp["_prev_n"] = grp["_n"].shift(1)
+    # ماه‌ها طول متغیر دارند (۲۸ تا ۳۱ روز)؛ برای معیار کامل‌بودن، ۲۸ روز
+    # (کمینه‌ی محتاطانه) به‌عنوان مبنای انتظار در نظر گرفته می‌شود.
+    if bar_seconds > 0:
+        expected_bars = max(1.0, (28 * 86400.0) / bar_seconds)
+        grp["_prev_complete"] = grp["_prev_n"] >= expected_bars * MIN_PERIOD_COMPLETENESS_RATIO
+    else:
+        grp["_prev_complete"] = False
+    d = d.merge(grp[["_pmh", "_pml", "_prev_complete"]], left_on="_period", right_index=True, how="left")
+    d = d.reset_index(drop=True)
+    idx_now = len(d) - 2
+    if idx_now < 0:
+        return d, None, None, None
+    pmh, pml = d.at[idx_now, "_pmh"], d.at[idx_now, "_pml"]
+    if pd.isna(pmh) or pd.isna(pml) or not bool(d.at[idx_now, "_prev_complete"]):
+        return d, None, None, None
+    pmh, pml = float(pmh), float(pml)
+    if pmh <= pml:
+        return d, None, None, None
+    eq = (pmh + pml) / 2.0
+    return d, pmh, pml, eq
+
+
 LEVEL_SOURCE_BY_TIMEFRAME = {
     "5min": "daily",
     "15min": "daily",
@@ -335,13 +377,27 @@ def min_klines_for_levels(timeframe: str) -> int:
     return int(MIN_KLINES_FOR_LEVELS.get(timeframe, 300))
 
 
-def get_reference_levels(df: pd.DataFrame, timeframe: str):
+def get_reference_levels(df: pd.DataFrame, timeframe: str, level_override=None):
     """
     سطوح مرجع مناسب تایم‌فریم را برمی‌گرداند.
     خروجی: (d, high_level, low_level, eq, label, level_source)
-    label یکی از 'PDH/PDL' یا 'PWH/PWL' برای نمایش در دلیل سیگنال.
+    label یکی از 'PDH/PDL'، 'PWH/PWL' یا 'PMH/PML' برای نمایش در دلیل سیگنال.
+
+    level_override: اختیاری، (source:'weekly'|'monthly', hi, lo, eq) — برای
+    فال‌بک چندسطحی ۵ و ۱۵ دقیقه (طبق تصمیم مشترک با کاربر): وقتی سطح پیش‌فرض
+    (روزانه) هیچ ستاپ معتبری نداشته، تشخیص سوئینگ/تاچ همچنان روی همین df
+    (پرایمری) انجام می‌شود، فقط مرزهای hi/lo/eq از سطح بزرگ‌تر (هفتگی/ماهانه
+    خودِ نماد، از‌پیش محاسبه‌شده روی دیتای روزانه) جایگزین می‌شوند.
     """
-    source = LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
+    source_default = LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
+    if level_override is not None:
+        src, hi, lo, eq = level_override
+        d, _, _, _ = (
+            compute_prev_week_levels(df) if source_default == "weekly" else compute_prev_day_levels(df)
+        )
+        label = {"daily": "PDH/PDL", "weekly": "PWH/PWL", "monthly": "PMH/PML"}.get(src, "PDH/PDL")
+        return d, hi, lo, eq, label, src
+    source = source_default
     if source == "weekly":
         d, hi, lo, eq = compute_prev_week_levels(df)
         return d, hi, lo, eq, "PWH/PWL", source
@@ -660,18 +716,21 @@ def _is_bearish_confirm(row, min_body_ratio):
     return _safe_float(row.get("close")) < _safe_float(row.get("open")) and _safe_float(row.get("body_ratio")) >= min_body_ratio
 
 
-def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None):
+def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None, level_override=None):
     """
-    ارزیابی هم‌زمان ۱۲ سناریوی B1..B6 / S1..S6 روی df (که باید ستون‌های
+    ارزیابی هم‌زمان ۱۴ سناریوی B1..B7 / S1..S7 روی df (که باید ستون‌های
     open/high/low/close/volume/timestamp داشته باشد؛ اندیکاتورها در صورت نبود
     به‌صورت خودکار ساخته می‌شوند).
+
+    level_override: اختیاری، (source:'weekly'|'monthly', hi, lo, eq) — نگاه کنید
+    get_reference_levels برای توضیح کامل (فال‌بک چندسطحی ۵/۱۵ دقیقه).
 
     خروجی: dict یا None
         {
           'code': 'B1', 'direction': 'BUY'/'SELL', 'total_score': float,
           'base_score': float, 'bonus': float, 'penalty': float,
           'entry': float, 'sl': float, 'tp': float, 'tp_partial': float|None,
-          'level_label': 'PDH/PDL'|'PWH/PWL', 'reasons': [str,...]
+          'level_label': 'PDH/PDL'|'PWH/PWL'|'PMH/PML', 'reasons': [str,...]
         }
     اگر هیچ سناریویی شرایط را کامل نکند: None
     """
@@ -679,7 +738,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     if df is None or len(df) < 50:
         return None
     d = _ensure_atr(df)
-    d, hi_level, lo_level, eq, label, source = get_reference_levels(d, timeframe)
+    d, hi_level, lo_level, eq, label, source = get_reference_levels(d, timeframe, level_override=level_override)
     if d is None or hi_level is None or lo_level is None or hi_level <= lo_level:
         return None
 
