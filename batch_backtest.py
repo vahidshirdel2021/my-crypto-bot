@@ -13,8 +13,8 @@ TOP_SYMBOLS = [
     "FTM/USDT:USDT", "IMX/USDT:USDT"
 ]
 
-# You can easily change timeframe here to "15m" or "30m"
-TIMEFRAME = "15m" 
+# You can change this to "5m" or "15m" whenever needed
+TIMEFRAME = "5m" 
 START_DATE = "2026-06-01"
 END_DATE = "2026-08-29"
 INITIAL_CAPITAL = 500.0
@@ -25,8 +25,9 @@ print(f"--- Starting Batch Backtest | Timeframe: {TIMEFRAME} | Capital: ${INITIA
 
 for symbol in TOP_SYMBOLS:
     print(f"\nProcessing symbol: {symbol}")
+    clean_sym = symbol.replace('/', '_').replace(':', '_')
     
-    # 1. Run Legacy version
+    # 1. Run Legacy version with timeframe in filename
     cmd_legacy = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -37,10 +38,10 @@ for symbol in TOP_SYMBOLS:
         "--side", "both",
         "--capital", str(INITIAL_CAPITAL),
         "--legacy",
-        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_{TIMEFRAME}_legacy.csv"
+        "--csv", f"logs_{clean_sym}_{TIMEFRAME}_legacy.csv"
     ]
     
-    # 2. Run New version with filters and capital
+    # 2. Run New version with timeframe in filename
     cmd_new = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -50,7 +51,7 @@ for symbol in TOP_SYMBOLS:
         "--strategy", "dynamic",
         "--side", "both",
         "--capital", str(INITIAL_CAPITAL),
-        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_{TIMEFRAME}_new.csv"
+        "--csv", f"logs_{clean_sym}_{TIMEFRAME}_new.csv"
     ]
     
     try:
