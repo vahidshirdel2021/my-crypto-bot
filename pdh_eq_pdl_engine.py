@@ -110,6 +110,17 @@ ENGINE_DEFAULTS = {
         "B2": 0.60, "S2": 0.60,
     },
 
+    # --- B7/S7 (ادامه‌ی مومنتوم بدون ری‌تست) — به‌طور پیش‌فرض غیرفعال ---
+    # طبق بررسی مشترک با کاربر روی داده‌ی معاملات واقعی: این دو سناریو
+    # (پایین‌ترین امتیاز پایه‌ی خانواده) قیمت را *بعد* از این‌که از قبل
+    # حداقل ۱.۵×ATR از سطح فاصله گرفته دنبال می‌کنند (late entry)، با SL
+    # پشت کندل پولبک قبلی (نه یک سطح ساختاری واقعی) و TP ثابت ۲×ATR. نتیجه:
+    # اکثر سیگنال‌های این دو سناریو در فیلتر R:R رد می‌شدند (اغلب زیر ۰.۹R
+    # در برابر حداقل ۱.۰۵R لازم)، و همان معدودی که رد می‌شدند و وارد معامله
+    # می‌شدند (DASH/ZEC/ENA) همه با SL بسته شدند. برای فعال‌سازی مجدد، این
+    # مقدار را True کنید — بدون نیاز به تغییر منطق B7/S7 خودش.
+    "b7_s7_enabled": False,
+
     "rsi_oversold": 35.0,
     "rsi_overbought": 65.0,
 
@@ -716,7 +727,7 @@ def _is_bearish_confirm(row, min_body_ratio):
     return _safe_float(row.get("close")) < _safe_float(row.get("open")) and _safe_float(row.get("body_ratio")) >= min_body_ratio
 
 
-def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None, level_override=None):
+def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None, level_override=None, diag: dict = None):
     """
     ارزیابی هم‌زمان ۱۴ سناریوی B1..B7 / S1..S7 روی df (که باید ستون‌های
     open/high/low/close/volume/timestamp داشته باشد؛ اندیکاتورها در صورت نبود
@@ -724,6 +735,12 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
 
     level_override: اختیاری، (source:'weekly'|'monthly', hi, lo, eq) — نگاه کنید
     get_reference_levels برای توضیح کامل (فال‌بک چندسطحی ۵/۱۵ دقیقه).
+
+    diag: اختیاری، دیکشنری خالی که در جا (in-place) با جزئیات تشخیصی پر می‌شود
+    (چرا None برگشت، چند سوینگ high/low در دوره جاری پیدا شد و غیره). امضای
+    بازگشتی تابع (dict یا None) دست‌نخورده می‌ماند تا کدهای موجود که این
+    خروجی را بدون تغییر مصرف می‌کنند نشکنند؛ diag فقط برای مصرف‌کنندگان جدید
+    (لاگ/آدیت) است.
 
     خروجی: dict یا None
         {
@@ -734,12 +751,19 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
         }
     اگر هیچ سناریویی شرایط را کامل نکند: None
     """
+    if diag is not None:
+        diag.clear()
+        diag['level_source'] = (level_override[0] if level_override else 'daily')
     cfg = _merged_cfg(strategy_config)
     if df is None or len(df) < 50:
+        if diag is not None:
+            diag['gate'] = 'insufficient_data'
         return None
     d = _ensure_atr(df)
     d, hi_level, lo_level, eq, label, source = get_reference_levels(d, timeframe, level_override=level_override)
     if d is None or hi_level is None or lo_level is None or hi_level <= lo_level:
+        if diag is not None:
+            diag['gate'] = 'invalid_levels'
         return None
 
     lookback = int(cfg["swing_lookback_fractal"])
@@ -751,6 +775,8 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     )
     idx_now = len(d) - 2  # آخرین کندل بسته‌شده
     if idx_now < lookback * 3:
+        if diag is not None:
+            diag['gate'] = 'insufficient_data'
         return None
 
     tol = float(cfg["touch_tolerance_pct"])
@@ -759,6 +785,8 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     search_back = lookback * int(cfg["swing_search_window_mult"])
     atr_now = _safe_float(d.at[idx_now, "atr"])
     if atr_now <= 0:
+        if diag is not None:
+            diag['gate'] = 'invalid_atr'
         return None
 
     # --- محدوده دوره جاری (روز جاری یا هفته جاری، بسته به تایم‌فریم) ---
@@ -767,6 +795,10 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     period_mask = d[period_col] == period_val
     start_idx = int(d.index[period_mask][0])
     period = d.loc[start_idx:idx_now]
+
+    if diag is not None:
+        diag['swing_high_count'] = int(period['swing_high'].sum()) if 'swing_high' in period.columns else 0
+        diag['swing_low_count'] = int(period['swing_low'].sum()) if 'swing_low' in period.columns else 0
 
     hi_touch_idxs = [i for i in period.index if _safe_float(period.at[i, "high"]) >= hi_level * (1 - tol)]
     lo_touch_idxs = [i for i in period.index if _safe_float(period.at[i, "low"]) <= lo_level * (1 + tol)]
@@ -796,7 +828,12 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
         close_now >= hi_level * (1 - tol) or close_now <= lo_level * (1 + tol)
     )
     if not range_touched_this_period and not touching_boundary_now:
+        if diag is not None:
+            diag['gate'] = 'dead_zone_no_touch'
+            diag['range_touched'] = False
         return None
+    if diag is not None:
+        diag['range_touched'] = True
 
     candidates = []
 
@@ -975,7 +1012,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     prev_row = d.loc[idx_now - 1] if (idx_now - 1) in d.index else None
     ema50_now = _safe_float(curr_row.get("ema50"), close_now)
 
-    if prev_row is not None:
+    if prev_row is not None and bool(cfg.get("b7_s7_enabled", False)):
         dist_above_hi = close_now - hi_level
         min_dist_up = max(atr_now * momentum_dist_atr_mult, hi_level * momentum_dist_pct)
         prev_pullback_down = _safe_float(prev_row.get("close")) < _safe_float(prev_row.get("open"))
@@ -1001,7 +1038,14 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            0)
 
     if not candidates:
+        if diag is not None:
+            diag['gate'] = 'no_scenario_matched'
         return None
 
     best = max(candidates, key=lambda c: c["total_score"])
+    if diag is not None:
+        diag['gate'] = 'candidate_found'
+        diag['best_code'] = best['code']
+        diag['best_score'] = best['total_score']
+        diag['candidate_count'] = len(candidates)
     return best
