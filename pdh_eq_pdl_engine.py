@@ -549,6 +549,47 @@ def _recent_confirmed_swings(d: pd.DataFrame, idx_now: int, lookback: int, col: 
 
 
 # ============================================================================
+# روند ساختاری تایم بالاتر (HTF) — صرفاً از روی سوئینگ فرکتال، نه اندیکاتور
+# ============================================================================
+# طبق تصمیم صریح کاربر: «اندیکاتورها بیشتر تاییدکننده‌اند نه جهت‌دهنده؛ جهت
+# روند باید با همون منطق ساختاری خودِ استراتژی (سوئینگ) مشخص بشه». این تابع
+# مستقل از EMA/ADX/RSI است و فقط از آخرین دو سوئینگ های/لوی تاییدشده روی
+# دیتافریم ورودی (که می‌تواند تایم‌فریم بالاتر خودِ نماد، یا هفتگیِ resample
+# شده از روزانه باشد) استفاده می‌کند.
+def structural_htf_trend(df: pd.DataFrame, lookback: int = 3):
+    """
+    HH + HL (سقف بالاتر از قبلی و کف بالاتر از قبلی) → 'BULLISH'
+    LH + LL (سقف پایین‌تر و کف پایین‌تر)            → 'BEARISH'
+    هر ترکیب دیگر (مثل HH+LL) یا داده/سوئینگ ناکافی  → None (خنثی، بدون بلاک)
+    """
+    if df is None or df.empty:
+        return None
+    d = df.reset_index(drop=True)
+    if len(d) < lookback * 2 + 8:
+        return None
+    required = {"open", "high", "low", "close"}
+    if not required.issubset(d.columns):
+        return None
+    try:
+        d = compute_swings(d, lookback=lookback)
+    except Exception:
+        return None
+    highs_idx = [i for i in d.index if bool(d.at[i, "swing_high"])]
+    lows_idx = [i for i in d.index if bool(d.at[i, "swing_low"])]
+    if len(highs_idx) < 2 or len(lows_idx) < 2:
+        return None
+    h1 = _safe_float(d.at[highs_idx[-2], "high"])
+    h2 = _safe_float(d.at[highs_idx[-1], "high"])
+    l1 = _safe_float(d.at[lows_idx[-2], "low"])
+    l2 = _safe_float(d.at[lows_idx[-1], "low"])
+    if h2 > h1 and l2 > l1:
+        return "BULLISH"
+    if h2 < h1 and l2 < l1:
+        return "BEARISH"
+    return None
+
+
+# ============================================================================
 # ۵) بونوس/جریمه امتیاز پویا (اندیکاتورهای کمکی - فقط امتیازدهی)
 # ============================================================================
 

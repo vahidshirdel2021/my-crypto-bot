@@ -1112,6 +1112,88 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
 
+# ============================================================================
+# قفل‌سود پله‌ای بر اساس R + تریلینگ ATR فعال (بازگرداندن مشروط بند حذف‌شده‌ی
+# PROFIT_LADDERS_R، با طراحی سبک‌تر و مبتنی بر شواهد واقعی معاملات)
+# ============================================================================
+# چرا برگشت: بررسی گزارش‌های واقعی معاملات نشان داد معاملاتی که تا +۱.۵ تا
+# +۲.۵R سود شناور داشتند (mfe_r)، در نبود هیچ قفل سودی پیش از TP1، تقریباً
+# تمام آن سود را پس می‌دادند — گاهی حتی به ضرر کامل تبدیل می‌شد (مثال‌های
+# TAO/S5 و NEAR/S5: از سود قابل توجه به ضرر منفی). تریلینگ ساختاری سوینگ
+# به‌تنهایی برای این حرکت‌های بزرگ به‌موقع واکنش نشان نمی‌دهد، چون به شکل‌گیری
+# یک سوینگ فرکتال کامل نیاز دارد که می‌تواند فاصله‌ی زیادی از قیمت داشته باشد.
+# این تابع دو مکانیزم مستقل را کنار تریلینگ سوینگ موجود اضافه می‌کند (هر سه با
+# هم رقابت می‌کنند؛ سخت‌گیرترین/بهترین برای پوزیشن انتخاب می‌شود):
+#   ۱) پله‌ی قفل سود بر مبنای R واقعی معامله (risk_usdt/amount)
+#   ۲) تریلینگ ATR فعال از همان لحظه‌ای که معامله به‌اندازه‌ی کافی در سود رفت
+#      (نه فقط بعد از برخورد TP1)
+def _check_profit_lock_and_atr_trailing(chat_id, s, p, price, sdf=None):
+    try:
+        cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
+        amount = float(p.get('amount') or 0)
+        risk_usdt = float(p.get('risk_usdt') or 0)
+        if amount <= 0 or risk_usdt <= 0:
+            return
+        risk_per_unit = risk_usdt / amount
+        if risk_per_unit <= 0:
+            return
+        is_long = side_long(p['side'])
+        entry = float(p['entry_price'])
+        cur_r = ((price - entry) / risk_per_unit) if is_long else ((entry - price) / risk_per_unit)
+        cur_sl = float(p['sl'])
+
+        candidates = []  # هر عضو: (سطح پیشنهادی SL, برچسب برای پیام)
+
+        # --- ۱) پله‌ی قفل سود بر مبنای R ---
+        ladder = cfg.get('profit_lock_r_ladder', [(0.5, 0.0), (1.0, 0.30), (1.5, 0.70), (2.0, 1.10)])
+        locked_r = None
+        for trigger_r, lock_r in ladder:
+            if cur_r >= float(trigger_r):
+                locked_r = float(lock_r) if locked_r is None else max(locked_r, float(lock_r))
+        if locked_r is not None:
+            level = entry + locked_r * risk_per_unit if is_long else entry - locked_r * risk_per_unit
+            candidates.append((level, f"قفل سود {locked_r:.2f}R"))
+
+        # --- ۲) تریلینگ ATR فعال (از رسیدن به آستانه‌ی سود کافی) ---
+        atr_trail_start_r = float(cfg.get('atr_trail_start_r', 0.8))
+        if cur_r >= atr_trail_start_r:
+            if sdf is None:
+                sdf = get_klines(p['symbol'], p.get('timeframe', '5min'), 100)
+            if sdf is not None and not sdf.empty:
+                sdf_i = calculate_indicators(sdf)
+                if not sdf_i.empty and 'atr' in sdf_i.columns:
+                    atr_now = _safe_float(sdf_i.iloc[-1].get('atr'))
+                    if atr_now and atr_now > 0:
+                        trail_mult = float(cfg.get('atr_trail_mult', 1.8))
+                        level = price - atr_now * trail_mult if is_long else price + atr_now * trail_mult
+                        candidates.append((level, "تریلینگ ATR فعال"))
+
+        if not candidates:
+            return
+        if is_long:
+            new_sl, label = max(candidates, key=lambda x: x[0])
+            improved = new_sl > cur_sl
+            behind_price = new_sl < price
+        else:
+            new_sl, label = min(candidates, key=lambda x: x[0])
+            improved = new_sl < cur_sl
+            behind_price = new_sl > price
+        if not (improved and behind_price):
+            return
+
+        if p.get('is_real'):
+            ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], new_sl))
+            if not ok:
+                logger.warning('profit-lock SL move failed symbol=%s: %s', p['symbol'], err)
+                return
+        old_sl = cur_sl
+        p['sl'] = new_sl
+        p['trailing_activated'] = True
+        send_message(chat_id, f"🔒 استاپ‌لاس *{p['symbol']}* برای قفل سود تغییر کرد ({label}، سود فعلی {cur_r:.2f}R)\n• قبلی: `{fmt(old_sl)}`\n• جدید: `{fmt(new_sl)}`")
+    except Exception as exc:
+        logger.debug('profit-lock/ATR trailing check failed symbol=%s: %s', p.get('symbol'), exc)
+
+
 def _maybe_close_before_day_end(chat_id, p, price):
     """
     برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
@@ -1886,52 +1968,7 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
     return symbols
 
 
-MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90}
-MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
-# آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
-# انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
-# فعال می‌شود و باعث بلاک‌شدن معاملات خلاف‌جهت (fade/sweep) می‌شود.
-MARKET_REGIME_EXTREME_ADX = float(os.environ.get('MARKET_REGIME_EXTREME_ADX', '30'))
-MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
-
-
-async def refresh_market_regime(http):
-    now = time.time()
-    if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
-        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail'], MARKET_REGIME_CACHE['extreme']
-    tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
-    states = {}
-    for leader in LEADER_SYMBOLS:
-        try:
-            d = await get_klines_async(http, leader, tf, 120)
-            if d is None or d.empty or len(d) < 60:
-                detail = f'داده کافی برای {leader} در دسترس نیست'
-                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
-                return 'NEUTRAL', detail, None
-            x = calculate_indicators(d).iloc[-2]
-            adx = float(x.get('adx') or 0)
-            bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
-            bearish = bool(x['close'] < x['ema20'] < x['ema50'] and x['minus_di'] > x['plus_di'] and adx >= MARKET_REGIME_MIN_ADX)
-            states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
-        except Exception as exc:
-            detail = f'خطا در دریافت داده {leader}: {exc}'
-            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
-            return 'NEUTRAL', detail, None
-    detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
-    unique_dirs = {v[0] for v in states.values()}
-    if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
-        regime = 'BULLISH'
-    elif 'BEARISH' in unique_dirs and 'BULLISH' not in unique_dirs:
-        regime = 'BEARISH'
-    else:
-        regime = 'NEUTRAL'
-    # حالت «شدید»: همه‌ی لیدرها هم‌جهت و با ADX بالای آستانه‌ی سخت‌گیرانه - فقط همین حالت
-    # باعث بلاک شدن معاملات خلاف‌جهت می‌شود، نه regime عادی بالا (که صرفاً برای واچ‌لیست است)
-    extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
-    extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
-    extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
-    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme)
-    return regime, detail, extreme
+MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))  # فقط برای برچسب نمایشی /analyze استفاده می‌شود؛ دیگر در مسیر تصمیم‌گیری ورود اثر ندارد (حذف سیستم Regime/Extreme قدیمی طبق تصمیم مشترک با کاربر - جایگزین: تشخیص روند ساختاری تایم بالاتر خودِ نماد در strategy.py)
 
 
 # --- شبکه سطوح لگاریتمی (بر اساس اسکریپت Pine کاربر) --------------------------------
@@ -2695,6 +2732,7 @@ def update_positions(chat_id):
             # هرگز بدتر (این تضمین از قبل داخل خود تابع وجود دارد).
             if not primary_df.empty:
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
+                _check_profit_lock_and_atr_trailing(chat_id,s,p,price,primary_df)
 
         if reason:
             close_position(chat_id,p,exit_price,reason)
@@ -3020,12 +3058,16 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if d.empty:
         return _entry_diag_result(chat_id, symbol, 'data_error', 'داده بازار خالی دریافت شد', 'data')
     primary=calculate_indicators(d); primary_tf=tf; mode='single'
-    # V2 نیاز به context واقعی HTF دارد: اجرای 5m/15m با 1h/4h،
+    # V2 نیاز به context واقعی HTF دارد: اجرای 5m/15m با 1h/4h/1d،
     # 1h با 4h/1d و 4h با 1d بررسی می‌شود. HTF فقط filter است و execution نیست.
+    # توجه: '1d' (روزانه) از این‌جا به بعد صرفاً برای فیلتر break/entry نیست؛
+    # پایه‌ی محاسبه‌ی روند ساختاری تایم بالاتر خودِ نماد هم هست (روزانه برای
+    # 5m/15m/4h، و از روی همان روزانه، هفتگی هم با resample ساخته می‌شود —
+    # طبق تصمیم مشترک با کاربر: «تشخیص روند از تایم بالاتر باید انجام شود»).
     if strat == 'dynamic':
         htf_specs = {
-            '5min': [('1h', '1hour'), ('4h', '4hour')],
-            '15min': [('1h', '1hour'), ('4h', '4hour')],
+            '5min': [('1h', '1hour'), ('4h', '4hour'), ('1d', '1day')],
+            '15min': [('1h', '1hour'), ('4h', '4hour'), ('1d', '1day')],
             '1hour': [('4h', '4hour'), ('1d', '1day')],
             '4hour': [('1d', '1day')],
         }.get(tf, [])
@@ -3054,8 +3096,10 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
-    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
+    # تشخیص روند خلاف‌جهت دیگر از این تابع (regime) نمی‌آید — سیستم قدیمی
+    # BTC/ETH (که این‌جا فقط پارامتری بی‌اثر بود) حذف شد. جای آن، فیلتر روند
+    # ساختاری تایم بالاتر خودِ همین نماد داخل get_signal_with_reason اعمال
+    # می‌شود (از روی market_data_dict/md که همین‌جا پاس داده می‌شود).
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
@@ -3499,58 +3543,6 @@ def _market_snapshot(symbol, tf):
 
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
-# --- رژیم «اجماع فوری» - همان روش و همان آستانه‌ی گزارش «وضعیت بازار»، ولی وصل به --------
-# تصمیم‌گیری معامله. برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی
-# خیلی سخت‌گیرانه می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را
-# می‌بیند - یعنی دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند، و با همان قانون
-# اکثریت ساده (>=۵۰٪) که آنجا هم استفاده می‌شود. یعنی هر وقت «وضعیت بازار» صعودی/نزولی
-# اعلام شود، دقیقاً همان لحظه ورود خلاف‌جهت روی همه‌ی نمادها بلاک می‌شود؛ فقط وقتی بازار
-# رنج/نامشخص باشد (نه اکثریت صعودی نه نزولی) هر دو جهت آزاد هستند.
-TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
-TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
-TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
-
-
-async def _market_snapshot_async(http, symbol, tf):
-    try:
-        d = await get_klines_async(http, symbol, tf, 160)
-        if d is None or d.empty or len(d) < 60: return None
-        d = calculate_indicators(d); c = d.iloc[-2]
-        close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50)
-        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
-        return score
-    except Exception:
-        return None
-
-
-async def refresh_timeframe_regime(http, timeframe):
-    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده).
-    دقیقاً همان فرمول market_report(): اکثریت ساده (>=۵۰٪) از همان ۱۰ ارز، نه اجماع افراطی."""
-    tf = timeframe
-    now = time.time()
-    c = TIMEFRAME_REGIME_CACHE.get(tf)
-    if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
-        return c['extreme']
-    scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
-    scores = [x for x in scores if x is not None]
-    extreme = None
-    if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
-        bullish = sum(1 for x in scores if x > 0)
-        bearish = sum(1 for x in scores if x < 0)
-        total = len(scores)
-        if bullish > bearish and bullish >= total * 0.5:
-            extreme = 'BULLISH'
-        elif bearish > bullish and bearish >= total * 0.5:
-            extreme = 'BEARISH'
-    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
-    return extreme
-
-
-def combine_extreme_regime(macro, micro):
-    """اگر با هم تناقض داشتند (نادر) به‌جای بلاک‌کردن اشتباه، خنثی در نظر گرفته می‌شود."""
-    if macro and micro and macro != micro:
-        return None
-    return macro or micro
 
 
 def market_report(chat_id):
@@ -4097,36 +4089,15 @@ async def scan_loop():
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
-                need_regime = any(
-                    s.get('is_bot_active') and not s.get('daily_stopped')
-                    for s in USER_SESSIONS.values()
-                )
-                if need_regime:
-                    await refresh_market_regime(http)
-                loose_regime = MARKET_REGIME_CACHE['regime']
-                macro_extreme = MARKET_REGIME_CACHE['extreme']
-                # رژیم اجماع فوری (همان روش «وضعیت بازار») را برای هر تایم‌فریمی که واقعاً
-                # در حال استفاده است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم
-                # متفاوتی داشته باشد و این سیگنال برخلاف رژیم ماکرو، به تایم‌فریم وابسته است.
-                active_timeframes = {
-                    s.get('timeframe', '5min')
-                    for s in USER_SESSIONS.values()
-                    if s.get('is_bot_active') and not s.get('daily_stopped')
-                }
-                micro_extreme_by_tf = {}
-                for tf in active_timeframes:
-                    micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
-                    user_tf = s.get('timeframe', '5min')
-                    combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme_by_tf.get(user_tf))
+                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'))
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,combined_extreme))
+                        tasks.append(scan_symbol(http,cid,sym))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}

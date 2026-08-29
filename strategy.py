@@ -27,6 +27,7 @@ from pdh_eq_pdl_engine import (
     compute_prev_day_levels,
     compute_prev_week_levels,
     get_reference_levels,
+    structural_htf_trend,
 )
 
 # کتابخانه جدید تشخیص سوینگ (رجکشن سه‌کندلی / فراکتال کلاسیک / ساختار بازار
@@ -277,6 +278,14 @@ STRATEGY_DEFAULTS = {
 
     "v2_enabled": False,  # موتور قدیمی v2 کاملاً غیرفعال است؛ فقط برای سازگاری با کد قدیمی نگه داشته شده
 
+    # --- فیلتر روند ساختاری تایم بالاتر (HTF) — طبق تصمیم مشترک با کاربر ---
+    # سخت‌گیر: سیگنال خلاف روند ساختاری HTF (از سوئینگ، نه اندیکاتور) بلاک
+    # می‌شود، مگر ستاپ «استثنایی» باشد (امتیاز و RR بالا، هم‌راستا با همان
+    # آستانه‌های same_direction_guard در bot.py).
+    "htf_trend_filter_enabled": True,
+    "htf_trend_exception_score": 80.0,
+    "htf_trend_exception_rr": 1.60,
+
     # --- کتابخانه جدید تشخیص سوینگ (swing_detection.py) ---
     # use_advanced_swing_stop: اگر True باشد، تریلینگ‌استاپ پوزیشن باز
     #   (_check_swing_trailing_stop در bot.py) به‌جای compute_swing_stop قدیمی
@@ -293,6 +302,15 @@ STRATEGY_DEFAULTS = {
     "advanced_swing_atr_period": 14,
     "advanced_swing_atr_buffer_mult": 0.25,
     "advanced_swing_pct_buffer": 0.0015,
+
+    # --- قفل‌سود پله‌ای بر مبنای R + تریلینگ ATR فعال ---
+    # جایگزین سبک‌تر PROFIT_LADDERS_R قدیمی (که قبلاً به درخواست کاربر حذف
+    # شده بود)، این‌بار بر پایه‌ی شواهد واقعی: معاملاتی با سود شناور تا
+    # +۱.۵/+۲.۵R، در نبود قفل سود پیش از TP1، تقریباً کل سود را پس می‌دادند
+    # (حتی به ضرر کامل تبدیل می‌شدند). فرمت ladder: [(آستانه‌ی R, مقدار قفل‌شده به R), ...]
+    "profit_lock_r_ladder": [(0.5, 0.0), (1.0, 0.30), (1.5, 0.70), (2.0, 1.10)],
+    "atr_trail_start_r": 0.8,   # از این مقدار R به بعد، تریلینگ ATR فعال هم کنار قفل پله‌ای فعال می‌شود
+    "atr_trail_mult": 1.8,      # ضریب ATR برای فاصله‌ی SL از قیمت لحظه‌ای در تریلینگ فعال
 
     # use_swing_confluence_info: اگر True باشد، build_trade_plan یک فیلد
     #   اطلاعاتیِ صرف "swing_confluence" به خروجی پلن اضافه می‌کند که نشان
@@ -464,6 +482,55 @@ def _format_reason(best):
 
 
 # ============================================================================
+# فیلتر روند ساختاری تایم بالاتر (HTF) — طبق تصمیم مشترک با کاربر
+# ============================================================================
+# داده‌ی هفتگی جدا از صرافی گرفته نمی‌شود؛ از همان کندل‌های روزانه‌ای که در
+# htf_specs (bot.py) fetch می‌شوند با resample ساخته می‌شود (سبک‌تر و بدون
+# نیاز به تغییر لایه‌ی دریافت داده).
+def _resample_weekly_from_daily(daily_df):
+    if daily_df is None or daily_df.empty or "timestamp" not in daily_df.columns:
+        return None
+    d = daily_df[["timestamp", "open", "high", "low", "close"]].copy()
+    d["timestamp"] = pd.to_numeric(d["timestamp"], errors="coerce")
+    d = d.dropna(subset=["timestamp"])
+    if d.empty:
+        return None
+    d["_dt"] = pd.to_datetime(d["timestamp"], unit="s", utc=True)
+    d = d.set_index("_dt").sort_index()
+    w = d.resample("W-MON", label="left", closed="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last"}
+    ).dropna()
+    if len(w) < 8:
+        return None
+    return w.reset_index(drop=True)
+
+
+def _resolve_htf_trend(timeframe, market_data_dict):
+    """
+    روند ساختاری تایم بالاتر خودِ همین نماد را برمی‌گرداند ('BULLISH'/'BEARISH'/None).
+    فقط وقتی دو منبع مستقل (نه دو محاسبه‌ی روی یک داده) هم‌رای باشند، جهت
+    قطعی برگردانده می‌شود؛ در غیر این صورت خنثی (None، یعنی بدون بلاک):
+        5min/15min → روزانه + هفتگیِ resample‌شده از روزانه
+        1hour      → ۴ساعته + روزانه
+        4hour      → روزانه + هفتگیِ resample‌شده از روزانه
+    """
+    md = market_data_dict or {}
+    daily = md.get("1d")
+    if timeframe in ("5min", "15min", "4hour"):
+        t1 = structural_htf_trend(daily) if daily is not None else None
+        weekly = _resample_weekly_from_daily(daily) if daily is not None else None
+        t2 = structural_htf_trend(weekly) if weekly is not None else None
+    elif timeframe == "1hour":
+        t1 = structural_htf_trend(daily) if daily is not None else None
+        t2 = structural_htf_trend(md.get("4h"))
+    else:
+        return None
+    if t1 and t2 and t1 == t2:
+        return t1
+    return None
+
+
+# ============================================================================
 # get_signal_with_reason — امضای قدیمی کاملاً حفظ شده؛ محتوا صفر تا صد جدید.
 # ============================================================================
 
@@ -473,9 +540,11 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
                             defer_quality_gate=False):
     """
     سیگنال نهایی بر اساس موتور سناریوهای PDH/EQ/PDL (یا PWH/PWL/EQ برای ۱ و ۴
-    ساعته). هیچ‌کدام از پارامترهای strategy_type/regime/market_data_dict/
-    live_price در تصمیم‌گیری اثر ندارند (طبق درخواست کاربر: صرف‌نظر از
-    استراتژی انتخاب‌شده در منو، همیشه همین موتور واحد اجرا می‌شود).
+    ساعته). پارامترهای strategy_type/regime/live_price در تصمیم‌گیری اثر
+    ندارند (طبق درخواست کاربر: صرف‌نظر از استراتژی انتخاب‌شده در منو، همیشه
+    همین موتور واحد اجرا می‌شود). market_data_dict دیگر بی‌اثر نیست: از آن
+    برای فیلتر روند ساختاری تایم بالاتر خودِ نماد استفاده می‌شود (طبق تصمیم
+    مشترک با کاربر — نه اندیکاتور، بلکه سوئینگ ساختاری HTF).
 
     خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
     """
@@ -486,7 +555,36 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
     if best["total_score"] < min_score:
         return None, f"بهترین سناریو {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
+
+    if bool(cfg.get("htf_trend_filter_enabled", True)):
+        htf_trend = _resolve_htf_trend(timeframe, market_data_dict)
+        is_counter_trend = (
+            (best["direction"] == "SELL" and htf_trend == "BULLISH") or
+            (best["direction"] == "BUY" and htf_trend == "BEARISH")
+        )
+        if is_counter_trend:
+            approx_risk = abs(_safe_float_local(best["entry"]) - _safe_float_local(best["sl"]))
+            approx_reward = abs(_safe_float_local(best["tp"]) - _safe_float_local(best["entry"]))
+            approx_rr = (approx_reward / approx_risk) if approx_risk > 0 else 0.0
+            exceptional = (
+                best["total_score"] >= float(cfg.get("htf_trend_exception_score", 80.0)) and
+                approx_rr >= float(cfg.get("htf_trend_exception_rr", 1.60))
+            )
+            if not exceptional:
+                return None, (
+                    f"سیگنال {best['code']} ({best['direction']}) خلاف روند ساختاری تایم بالاتر "
+                    f"({htf_trend}) بود و بلاک شد — امتیاز/RR کافی برای استثنا نبود"
+                )
+
     return best["direction"], _format_reason(best)
+
+
+def _safe_float_local(v, default=0.0):
+    try:
+        f = float(v)
+        return f if f == f else default  # NaN check
+    except Exception:
+        return default
 
 
 # ============================================================================
