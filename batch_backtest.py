@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-# لیست ۳۰ ارز برتر بازار فیوچرز
+# Top 30 futures market symbols list
 TOP_SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT",
     "XRP/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "DOGE/USDT:USDT",
@@ -18,14 +18,14 @@ TIMEFRAME = "5m"
 START_DATE = "2026-06-01"
 END_DATE = "2026-08-29"
 
-python_executable = sys.executable  # استفاده از پایتونِ محیط مجازی فعال
+python_executable = sys.executable  # Use current virtual environment Python
 
-print(f"--- شروع بک‌تست گروهی روی {len(TOP_SYMBOLS)} نماد بازار ---")
+print(f"--- Starting batch backtest across {len(TOP_SYMBOLS)} symbols ---")
 
 for symbol in TOP_SYMBOLS:
-    print(f"\nدر حال پردازش نماد: {symbol}")
+    print(f"\nProcessing symbol: {symbol}")
     
-    # ۱. اجرای نسخه قدیمی (Legacy)
+    # 1. Run Legacy version (without filters)
     cmd_legacy = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -38,7 +38,7 @@ for symbol in TOP_SYMBOLS:
         "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_legacy.csv"
     ]
     
-    # ۲. اجرای نسخه جدید (با فیلترها)
+    # 2. Run New version (with all filters active)
     cmd_new = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -51,15 +51,15 @@ for symbol in TOP_SYMBOLS:
     ]
     
     try:
-        # اجرای لگیوسی (با تایم‌اوت ۶۰۰ ثانیه برای جلوگیری از خطای قطعی)
+        # Run legacy with 600s timeout
         res_legacy = subprocess.run(cmd_legacy, capture_output=True, text=True, timeout=600)
-        # اجرای جدید
+        # Run new with 600s timeout
         res_new = subprocess.run(cmd_new, capture_output=True, text=True, timeout=600)
         
-        print(f"[{symbol}] با موفقیت تست شد.")
+        print(f"[{symbol}] successfully tested.")
     except subprocess.TimeoutExpired:
-        print(f"[خطا] زمان پردازش نماد {symbol} طولانی شد و متوقف گردید (Timeout).")
+        print(f"[Error] Processing symbol {symbol} timed out.")
     except Exception as e:
-        print(f"خطا در پردازش {symbol}: {e}")
+        print(f"Error processing {symbol}: {e}")
 
-print("\n--- بک‌تست گروهی به پایان رسید! فایل‌های CSV نتایج ذخیره شدند. ---")
+print("\n--- Batch backtest completed! CSV result logs saved. ---")
