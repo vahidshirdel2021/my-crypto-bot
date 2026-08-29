@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 
-# Top 30 futures market symbols list
 TOP_SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT",
     "XRP/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "DOGE/USDT:USDT",
@@ -14,18 +13,20 @@ TOP_SYMBOLS = [
     "FTM/USDT:USDT", "IMX/USDT:USDT"
 ]
 
-TIMEFRAME = "5m"
+# You can easily change timeframe here to "15m" or "30m"
+TIMEFRAME = "15m" 
 START_DATE = "2026-06-01"
 END_DATE = "2026-08-29"
+INITIAL_CAPITAL = 500.0
 
-python_executable = sys.executable  # Use current virtual environment Python
+python_executable = sys.executable
 
-print(f"--- Starting batch backtest across {len(TOP_SYMBOLS)} symbols ---")
+print(f"--- Starting Batch Backtest | Timeframe: {TIMEFRAME} | Capital: ${INITIAL_CAPITAL} ---")
 
 for symbol in TOP_SYMBOLS:
     print(f"\nProcessing symbol: {symbol}")
     
-    # 1. Run Legacy version (without filters)
+    # 1. Run Legacy version
     cmd_legacy = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -34,11 +35,12 @@ for symbol in TOP_SYMBOLS:
         "--end", END_DATE,
         "--strategy", "dynamic",
         "--side", "both",
+        "--capital", str(INITIAL_CAPITAL),
         "--legacy",
-        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_legacy.csv"
+        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_{TIMEFRAME}_legacy.csv"
     ]
     
-    # 2. Run New version (with all filters active)
+    # 2. Run New version with filters and capital
     cmd_new = [
         python_executable, "backtest.py",
         "--symbol", symbol,
@@ -47,19 +49,15 @@ for symbol in TOP_SYMBOLS:
         "--end", END_DATE,
         "--strategy", "dynamic",
         "--side", "both",
-        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_new.csv"
+        "--capital", str(INITIAL_CAPITAL),
+        "--csv", f"logs_{symbol.replace('/', '_').replace(':', '_')}_{TIMEFRAME}_new.csv"
     ]
     
     try:
-        # Run legacy with 600s timeout
-        res_legacy = subprocess.run(cmd_legacy, capture_output=True, text=True, timeout=600)
-        # Run new with 600s timeout
-        res_new = subprocess.run(cmd_new, capture_output=True, text=True, timeout=600)
-        
-        print(f"[{symbol}] successfully tested.")
-    except subprocess.TimeoutExpired:
-        print(f"[Error] Processing symbol {symbol} timed out.")
+        subprocess.run(cmd_legacy, capture_output=True, text=True, timeout=600)
+        subprocess.run(cmd_new, capture_output=True, text=True, timeout=600)
+        print(f"[{symbol}] successfully tested on {TIMEFRAME}.")
     except Exception as e:
         print(f"Error processing {symbol}: {e}")
 
-print("\n--- Batch backtest completed! CSV result logs saved. ---")
+print(f"\n--- Batch backtest for {TIMEFRAME} completed successfully! ---")
