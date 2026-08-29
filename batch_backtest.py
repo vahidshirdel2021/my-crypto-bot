@@ -2,7 +2,7 @@ import os
 import subprocess
 import sys
 
-# لیست ۳۰ ارز برتر بازار فیوچرز (قابل ویرایش)
+# لیست ۳۰ ارز برتر بازار فیوچرز
 TOP_SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT",
     "XRP/USDT:USDT", "ADA/USDT:USDT", "AVAX/USDT:USDT", "DOGE/USDT:USDT",
@@ -18,14 +18,9 @@ TIMEFRAME = "5m"
 START_DATE = "2026-06-01"
 END_DATE = "2026-08-29"
 
-python_executable = sys.executable  # استفاده از پایتونِ فعال فعلی (venv)
+python_executable = sys.executable  # استفاده از پایتونِ محیط مجازی فعال
 
 print(f"--- شروع بک‌تست گروهی روی {len(TOP_SYMBOLS)} نماد بازار ---")
-
-legacy_total_pnl = 0.0
-new_total_pnl = 0.0
-legacy_total_trades = 0
-new_total_trades = 0
 
 for symbol in TOP_SYMBOLS:
     print(f"\nدر حال پردازش نماد: {symbol}")
@@ -56,12 +51,14 @@ for symbol in TOP_SYMBOLS:
     ]
     
     try:
-        # اجرای لگیوسی
-        res_legacy = subprocess.run(cmd_legacy, capture_output=True, text=True, timeout=120)
+        # اجرای لگیوسی (با تایم‌اوت ۶۰۰ ثانیه برای جلوگیری از خطای قطعی)
+        res_legacy = subprocess.run(cmd_legacy, capture_output=True, text=True, timeout=600)
         # اجرای جدید
-        res_new = subprocess.run(cmd_new, capture_output=True, text=True, timeout=120)
+        res_new = subprocess.run(cmd_new, capture_output=True, text=True, timeout=600)
         
         print(f"[{symbol}] با موفقیت تست شد.")
+    except subprocess.TimeoutExpired:
+        print(f"[خطا] زمان پردازش نماد {symbol} طولانی شد و متوقف گردید (Timeout).")
     except Exception as e:
         print(f"خطا در پردازش {symbol}: {e}")
 
