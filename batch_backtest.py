@@ -14,7 +14,7 @@ TOP_SYMBOLS = [
 ]
 
 # You can change this to "5m" or "15m" whenever needed
-TIMEFRAME = "5m" 
+TIMEFRAME = "15m" 
 START_DATE = "2026-06-01"
 END_DATE = "2026-08-29"
 INITIAL_CAPITAL = 500.0
