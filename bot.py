@@ -161,7 +161,25 @@ DEX_CANDIDATE_SYMBOLS = {
     'BLUR','MEME','MANTA','ALT','DYM','ORDI','SATS','1000SATS','MEW','POPCAT','TURBO','FLOKI','BRETT',
     'JUP','APT','SUI','SEI','TIA','INJ','TON','NEAR','ARB','OP','WIF','PEPE','BONK'
 }
-DEX_WATCHLIST_CACHE = {'ts': 0.0, 'symbols': [], 'source': 'fallback', 'tiers': {}}
+DEX_WATCHLIST_CACHE = {
+    'ts': 0.0, 'symbols': [], 'source': 'fallback', 'tiers': {},
+    # below_cutoff_since: {symbol: ts} از چه زمانی نماد پیوسته زیر آستانه‌ی
+    # بافردار رتبه‌بندی بوده (برای منطق چسبندگی/hysteresis پایین).
+    'below_cutoff_since': {},
+    # changes: تاریخچه‌ی افزوده/حذف‌شدن نمادها از واچ‌لیست (برای شفافیت/آدیت).
+    'changes': [],
+}
+# --- چسبندگی واچ‌لیست (Watchlist Hysteresis) ---
+# قبلاً واچ‌لیست هر ۳۰ دقیقه صرفاً «تاپ-N رتبه‌بندی زنده‌ی مارکت‌کپ» را
+# جایگزین می‌کرد؛ یعنی نمادی که مرز رتبه (مثلاً ۴۰) نوسان می‌کرد می‌توانست
+# پشت‌سرهم وارد/خارج شود و باعث ناپایداری مجموعه‌ی معامله‌شونده بین
+# جلسات/روزها شود. حالا: یک نماد که از قبل توی لیست بوده فقط وقتی حذف
+# می‌شود که رتبه‌اش به‌طور *پیوسته* از آستانه‌ی بافردار (cutoff + buffer)
+# پایین‌تر بماند و این افت حداقل DEX_WATCHLIST_MIN_DWELL_SECONDS دوام
+# داشته باشد؛ نمادهای جدید فقط وقتی اضافه می‌شوند که واقعاً داخل رتبه‌ی
+# اصلی (بدون بافر) باشند.
+DEX_WATCHLIST_HYSTERESIS_BUFFER = int(os.environ.get('DEX_WATCHLIST_HYSTERESIS_BUFFER', '10'))
+DEX_WATCHLIST_MIN_DWELL_SECONDS = int(os.environ.get('DEX_WATCHLIST_MIN_DWELL_SECONDS', str(6 * 3600)))
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
@@ -1954,25 +1972,66 @@ def _refresh_dynamic_dex_watchlist(force=False):
     try:
         r = requests.get(
             'https://api.coingecko.com/api/v3/coins/markets',
-            params={'vs_currency':'usd','order':'market_cap_desc','per_page':max(100, DEX_WATCHLIST_SIZE),'page':1,'sparkline':'false'},
+            params={'vs_currency':'usd','order':'market_cap_desc','per_page':max(200, DEX_WATCHLIST_SIZE * 2),'page':1,'sparkline':'false'},
             timeout=8,
         )
         if r.ok:
             rows = r.json() or []
-            ranked = []
+            ranked_full = []
             for row in rows:
                 sym = str(row.get('symbol') or '').upper()
-                if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked:
-                    ranked.append(sym)
-                if len(ranked) >= DEX_WATCHLIST_SIZE:
-                    break
-            if ranked:
-                # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
-                ranked = [x for x in ranked if x not in ('1000SATS',)]
-                DEX_WATCHLIST_CACHE.update({'ts': now, 'symbols': ranked, 'source':'coingecko_ranked', 'tiers': {
-                    'A': ranked[:40], 'B': ranked[40:70], 'C': ranked[70:DEX_WATCHLIST_SIZE]
-                }})
-                return list(ranked)
+                if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked_full:
+                    ranked_full.append(sym)
+            # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
+            ranked_full = [x for x in ranked_full if x not in ('1000SATS',)]
+            if ranked_full:
+                rank_of = {sym: i for i, sym in enumerate(ranked_full)}
+                prev_symbols = list(DEX_WATCHLIST_CACHE.get('symbols') or [])
+                below_since = dict(DEX_WATCHLIST_CACHE.get('below_cutoff_since') or {})
+                changes = list(DEX_WATCHLIST_CACHE.get('changes') or [])
+
+                cutoff = DEX_WATCHLIST_SIZE
+                buffered_cutoff = cutoff + DEX_WATCHLIST_HYSTERESIS_BUFFER
+
+                kept = []
+                for sym in prev_symbols:
+                    r_now = rank_of.get(sym)
+                    if r_now is not None and r_now < buffered_cutoff:
+                        # هنوز داخل آستانه‌ی بافردار — نگه داشته می‌شود و تایمر افت ریست می‌شود.
+                        kept.append(sym)
+                        below_since.pop(sym, None)
+                        continue
+                    # زیر آستانه‌ی بافردار (یا کلاً از رتبه‌بندی خارج شده)
+                    first_seen_below = below_since.setdefault(sym, now)
+                    if now - first_seen_below >= DEX_WATCHLIST_MIN_DWELL_SECONDS:
+                        rank_txt = str(r_now) if r_now is not None else 'خارج از رده‌بندی'
+                        changes.append({
+                            'symbol': sym, 'action': 'removed', 'ts': now,
+                            'reason': f'به مدت طولانی زیر آستانه‌ی بافردار ({buffered_cutoff}) مانده — رتبه فعلی: {rank_txt}',
+                        })
+                        below_since.pop(sym, None)
+                        logger.info('DEX watchlist removed: %s (%s)', sym, changes[-1]['reason'])
+                    else:
+                        kept.append(sym)  # هنوز داخل دوره‌ی مهلت (grace period)
+
+                # افزودن نمادهای جدیدی که واقعاً داخل رتبه‌ی اصلی (بدون بافر) هستند
+                for sym in ranked_full[:cutoff]:
+                    if sym not in kept:
+                        kept.append(sym)
+                        changes.append({
+                            'symbol': sym, 'action': 'added', 'ts': now,
+                            'reason': f'وارد رتبه‌ی برتر {cutoff} مارکت‌کپ شد (رتبه {rank_of[sym]})',
+                        })
+                        logger.info('DEX watchlist added: %s (%s)', sym, changes[-1]['reason'])
+
+                kept = kept[:max(cutoff, DEX_WATCHLIST_SIZE)]
+                DEX_WATCHLIST_CACHE.update({
+                    'ts': now, 'symbols': kept, 'source': 'coingecko_ranked_sticky',
+                    'tiers': {'A': kept[:40], 'B': kept[40:70], 'C': kept[70:DEX_WATCHLIST_SIZE]},
+                    'below_cutoff_since': below_since,
+                    'changes': changes[-100:],
+                })
+                return list(kept)
     except Exception as exc:
         logger.warning('dynamic DEX watchlist refresh failed: %s', exc)
     if DEX_WATCHLIST_CACHE['symbols']:
@@ -3147,8 +3206,16 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # BTC/ETH (که این‌جا فقط پارامتری بی‌اثر بود) حذف شد. جای آن، فیلتر روند
     # ساختاری تایم بالاتر خودِ همین نماد داخل get_signal_with_reason اعمال
     # می‌شود (از روی market_data_dict/md که همین‌جا پاس داده می‌شود).
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
+    signal_diag = {}
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price, diag_out=signal_diag)
+    # قبلاً برای مسیر اسکالپ (۵/۱۵ دقیقه) دیکشنری diagnostics همیشه خالی
+    # ({}) ذخیره می‌شد چون _breakout_filter_diagnostics فقط برای مسیر
+    # غیراسکالپ صدا زده می‌شد. حالا جزئیات موتور PDH/EQ/PDL (گیت رد شدن،
+    # تعداد سوینگ‌های شناسایی‌شده) هم برای اسکالپ در فیلد data آدیت ذخیره
+    # می‌شود تا در گزارش خروجی قابل بررسی باشد.
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
+    if signal_diag:
+        diagnostics = {**diagnostics, **signal_diag}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
@@ -3389,6 +3456,12 @@ def export_trade_pipeline(chat_id):
             'size': len(_refresh_dynamic_dex_watchlist()),
             'symbols': _refresh_dynamic_dex_watchlist(),
             'tiers': DEX_WATCHLIST_CACHE.get('tiers',{}),
+            # تاریخچه‌ی افزوده/حذف‌شدن نمادها از واچ‌لیست (منطق چسبندگی جدید) —
+            # برای این‌که بشه دید آیا و کِی مجموعه‌ی نمادهای معامله‌شونده
+            # واقعاً تغییر کرده، نه فقط اسنپ‌شات لحظه‌ای.
+            'changes': DEX_WATCHLIST_CACHE.get('changes', []),
+            'hysteresis_buffer': DEX_WATCHLIST_HYSTERESIS_BUFFER,
+            'min_dwell_seconds': DEX_WATCHLIST_MIN_DWELL_SECONDS,
         },
         'pipeline_events': pipeline,
         'open_positions': opens,
