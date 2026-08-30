@@ -31,7 +31,6 @@ from strategy import (
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
-    _resolve_htf_trend,
 )
 from pdh_eq_pdl_engine import min_klines_for_levels, get_reference_levels
 from ui import (
@@ -1827,7 +1826,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             if any(side_long(p.get('side')) == side_long(side) for p in same_symbol_positions):
                 _set_execute_block_reason(chat_id, f'{symbol} در بازار رنج از قبل یک پوزیشن هم‌جهت باز دارد (محدودیت پوزیشن همزمان مخصوص رنج)')
                 return False
-    same_ok, same_reason = _same_direction_guard_allows(s, side, quality_score, planned_rr)
+    same_ok, same_reason = _same_direction_guard_allows(s, side, quality_score, planned_rr, regime=htf_trend)
     if not same_ok:
         audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': False, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
         _set_execute_block_reason(chat_id, f'same_direction_guard: {same_reason}')
@@ -2205,13 +2204,21 @@ def _leader_correlation_decision(side, both_bearish, both_bullish, any_crash, an
     return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
 
 
-def _same_direction_guard_allows(session, side, score, rr, now=None):
-    """Soft cap + cooldown for same-direction entries; one exceptional setup may bypass it."""
+def _same_direction_guard_allows(session, side, score, rr, regime=None, now=None):
+    """Soft cap + cooldown for same-direction entries; one exceptional setup may bypass it.
+    طبق تصمیم صریح کاربر: سقف تعداد پوزیشن‌های هم‌جهت (max_same_direction_positions)
+    فقط در بازار رنج معنا دارد (پیش‌فرض ۲ در هر جهت = حداکثر ۴ پوزیشن هم‌زمان:
+    ۲ خرید + ۲ فروش). در روند قطعی (صعودی/نزولی)، هیچ سقفی روی تعداد
+    پوزیشن‌های هم‌جهت نیست — فقط max_open_positions کلی (که جدا و قبل از
+    این تابع چک می‌شود) محدودکننده است."""
     now = time.time() if now is None else float(now)
     positions = list(session.get('paper_positions') or [])
     target_long = side_long(side)
     same = [p for p in positions if side_long(p.get('side')) == target_long]
-    max_same = int(session.get('max_same_direction_positions', 2) or 0)
+    if regime in ('BULLISH', 'BEARISH'):
+        max_same = 0  # 0 یعنی بدون سقف (طبق قرارداد max_same>0 در شرط پایین)
+    else:
+        max_same = int(session.get('max_same_direction_positions', 2) or 0)
     cooldown = float(session.get('same_direction_entry_cooldown_seconds', 900) or 0)
     exceptional = float(score or 0) >= 80.0 and float(rr or 0) >= 1.60
     if max_same > 0 and len(same) >= max_same and not exceptional:
@@ -3317,11 +3324,14 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    # تشخیص روند خلاف‌جهت دیگر از این تابع (regime) نمی‌آید — سیستم قدیمی
-    # BTC/ETH (که این‌جا فقط پارامتری بی‌اثر بود) حذف شد. جای آن، فیلتر روند
-    # ساختاری تایم بالاتر خودِ همین نماد داخل get_signal_with_reason اعمال
-    # می‌شود (از روی market_data_dict/md که همین‌جا پاس داده می‌شود).
+    # مهم: تشخیص «روند قطعی» که تعیین می‌کند خرید/فروش خلاف‌جهت مجاز است یا
+    # نه، بر اساس روند خودِ این نماد (GRT/... ) نیست — بر اساس وضعیت کلی
+    # بازار (همان «داشبورد بازار»، سبد ۱۰ ارز شاخص) است. طبق تصمیم صریح
+    # کاربر: «در صورت قطعی بودن بازار صعودی حق باز کردن معامله فروش نداریم
+    # و برعکس؛ فقط در بازار رنج با احتیاط هر دو جهت بررسی می‌شود» — این یک
+    # قانون سراسری روی کل بازار است، نه یک فیلتر جداگانه به‌ازای هر نماد.
     signal_diag = {}
+    global_regime = await get_global_market_regime(tf)
     # مدیریت روند معاملات: سوئیچ‌های دستی کاربر (منوی «مدیریت روند معاملات»)،
     # مستقل به‌ازای همین تایم‌فریم (tf)، روی همین یک درخواست، بدون دست‌کاری
     # strategy_config ذخیره‌شده در session، به تنظیمات مؤثر تزریق می‌شوند —
@@ -3336,6 +3346,9 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         'allow_buy_in_range': tm['allow_buy_in_range'],
         'allow_sell_in_range': tm['allow_sell_in_range'],
         'b7_s7_enabled': tm['b7_s7_enabled'],
+        # وضعیت کلی بازار (BULLISH/BEARISH/RANGE/None) — به get_signal_with_reason
+        # می‌گوید گیت روند قطعی را روی همین مقدار (نه روند خودِ نماد) بسنجد.
+        'global_market_regime': global_regime,
     }
     # «کیفیت معاملات»: override روی امتیاز/RR/ADX پریست همین تایم‌فریم.
     # 'balanced' یعنی هیچ تغییری اعمال نشود (مقادیر خودِ پریست دست‌نخورده بماند).
@@ -3803,10 +3816,18 @@ def _market_snapshot(symbol, tf):
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
 
+# --- وضعیت کلی بازار: منبع واحد، هم برای «داشبورد بازار» (دستی) و هم برای
+# گیت واقعی روند قطعی در scan_symbol. طبق تصمیم کاربر این دو باید همیشه
+# دقیقاً یک عدد را نشان بدهند/استفاده کنند، نه دو منطق جدا (وگرنه دوباره
+# می‌شود همون تناقض «داشبورد رنج ولی معامله‌ی خلاف‌جهت باز شد»).
+MARKET_REGIME_CACHE: Dict[str, dict] = {}
+MARKET_REGIME_CACHE_TTL_SECONDS = 120.0
 
-def market_report(chat_id):
-    s = get_session(chat_id)
-    tf = s['timeframe']
+
+def _classify_market_regime(tf):
+    """طبقه‌بندی وضعیت کلی بازار بر مبنای سبد MARKET_REPORT_SYMBOLS.
+    خروجی: (regime, bullish, bearish, ranged, total) — regime یکی از
+    'BULLISH'|'BEARISH'|'RANGE' است، یا None اگر هیچ داده‌ای در دسترس نبود."""
     symbols = MARKET_REPORT_SYMBOLS
     results = []
     with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as ex:
@@ -3815,19 +3836,53 @@ def market_report(chat_id):
             item = f.result()
             if item: results.append(item)
     if not results:
-        return '❌ داده کافی برای ساخت داشبورد بازار دریافت نشد.'
+        return None, 0, 0, 0, 0
     total = len(results)
     bullish = sum(1 for x in results if x['score'] > 0)
     bearish = sum(1 for x in results if x['score'] < 0)
     ranged = total - bullish - bearish
-
     if bullish > bearish and bullish >= total * 0.5:
-        overall = '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.'
+        regime = 'BULLISH'
     elif bearish > bullish and bearish >= total * 0.5:
-        overall = '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.'
+        regime = 'BEARISH'
     else:
-        overall = '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.'
+        regime = 'RANGE'
+    return regime, bullish, bearish, ranged, total
 
+
+async def get_global_market_regime(tf):
+    """نسخه‌ی کش‌شده و async-safe از _classify_market_regime، برای صدا زدن
+    از داخل scan_symbol بدون بلاک کردن event loop. اگر تازه‌سازی fail شود،
+    آخرین مقدار معتبر کش برگردانده می‌شود (fail-safe، نه fail-open کامل)."""
+    now = time.time()
+    c = MARKET_REGIME_CACHE.get(tf)
+    if c and now - c['ts'] < MARKET_REGIME_CACHE_TTL_SECONDS:
+        return c['regime']
+    try:
+        regime, bullish, bearish, ranged, total = await asyncio.to_thread(_classify_market_regime, tf)
+    except Exception as exc:
+        logger.warning('global market regime classify failed tf=%s: %s', tf, exc)
+        return c['regime'] if c else None
+    if total == 0:
+        return c['regime'] if c else None
+    MARKET_REGIME_CACHE[tf] = {'ts': now, 'regime': regime, 'bullish': bullish, 'bearish': bearish, 'ranged': ranged, 'total': total}
+    return regime
+
+
+def market_report(chat_id):
+    s = get_session(chat_id)
+    tf = s['timeframe']
+    regime, bullish, bearish, ranged, total = _classify_market_regime(tf)
+    if not regime:
+        return '❌ داده کافی برای ساخت داشبورد بازار دریافت نشد.'
+    overall = {
+        'BULLISH': '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.',
+        'BEARISH': '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.',
+        'RANGE': '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.',
+    }[regime]
+    # همان مقدار تازه‌محاسبه‌شده را در کش هم می‌گذاریم تا اسکن زنده و پیام
+    # دوره‌ای هم بلافاصله همین عدد تازه را ببینند، نه نسخه‌ی قدیمی‌تر کش.
+    MARKET_REGIME_CACHE[tf] = {'ts': time.time(), 'regime': regime, 'bullish': bullish, 'bearish': bearish, 'ranged': ranged, 'total': total}
     return (
         '🌐 *داشبورد بازار*\n'
         f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`\n\n"
@@ -4383,51 +4438,19 @@ def telegram_listener():
             logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
 
-# --- وضعیت کلی بازار (BTC) برای پیام دوره‌ای ---
-# روند BTC با همان مکانیزم ساختاری‌ای محاسبه می‌شود که خودِ فیلتر HTF ربات
-# برای تصمیم‌گیری معاملات استفاده می‌کند (سوینگ HH/HL روی روزانه + هفتگیِ
-# resample‌شده از روزانه، نه اندیکاتور) — تا پیامی که کاربر می‌بیند دقیقاً
-# منعکس‌کننده‌ی همان تشخیصی باشد که ربات خودش برایش عمل می‌کند.
-BTC_STATUS_CACHE = {'ts': 0.0, 'trend': None, 'price': None}
-BTC_STATUS_CACHE_TTL_SECONDS = 300.0  # کمتر از فاصله‌ی ۱۰ دقیقه‌ای پیام، برای تازه ماندن بدون فشار زیاد به صرافی
-
-BTC_TREND_LABELS = {
+# --- پیام دوره‌ای: وضعیت کلی بازار باید دقیقاً همون منبعی باشد که خودِ
+# scan_symbol برای گیت «روند قطعی» چک می‌کند (get_global_market_regime،
+# همان منطق «داشبورد بازار»)، نه یک محاسبه‌ی جداگانه — تا هیچ‌وقت پیامی که
+# کاربر می‌بیند با تصمیم واقعی معامله در تناقض نباشد.
+MARKET_REGIME_LABELS = {
     'BULLISH': '📈 صعودی',
     'BEARISH': '📉 نزولی',
+    'RANGE': '➡️ رنج (خنثی)',
     None: '➡️ رنج (خنثی)',
 }
 
 
-async def _refresh_btc_status(http):
-    now = time.time()
-    if now - BTC_STATUS_CACHE['ts'] < BTC_STATUS_CACHE_TTL_SECONDS and BTC_STATUS_CACHE['price'] is not None:
-        return
-    try:
-        daily = await get_klines_async(http, 'BTC', '1day', 400)
-        trend = None
-        if daily is not None and not daily.empty:
-            daily_ind = calculate_indicators(daily)
-            # timeframe='4hour' مسیر «روزانه + هفتگیِ resample‌شده از روزانه» را
-            # در _resolve_htf_trend فعال می‌کند — همان مسیری که برای اکثر
-            # تایم‌فریم‌ها به‌عنوان تشخیص روند ساختاری HTF استفاده می‌شود.
-            trend = _resolve_htf_trend('4hour', {'1d': daily_ind})
-        price = latest_price('BTC')
-        BTC_STATUS_CACHE.update(ts=now, trend=trend, price=price if price else BTC_STATUS_CACHE['price'])
-    except Exception as exc:
-        logger.warning('BTC market status refresh failed: %s', exc)
-
-
-def _btc_status_lines():
-    trend_label = BTC_TREND_LABELS.get(BTC_STATUS_CACHE['trend'], BTC_TREND_LABELS[None])
-    price = BTC_STATUS_CACHE['price']
-    price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
-    return (
-        f"📊 وضعیت کلی بازار (بر مبنای BTC): {trend_label}\n"
-        f"💰 قیمت لحظه‌ای BTC: {price_txt}"
-    )
-
-
-async def _send_periodic_heartbeat(http):
+async def _send_periodic_heartbeat():
     now = time.time()
     due = []
     for cid, sess in list(USER_SESSIONS.items()):
@@ -4438,14 +4461,26 @@ async def _send_periodic_heartbeat(http):
             due.append(cid)
     if not due:
         return
-    await _refresh_btc_status(http)
-    message = HEARTBEAT_TEXT + "\n\n" + _btc_status_lines()
+    price = latest_price('BTC')
+    price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
+    regime_by_tf = {}
     for cid in due:
+        sess = USER_SESSIONS.get(cid) or {}
+        tf = sess.get('timeframe', '5min')
+        if tf not in regime_by_tf:
+            regime_by_tf[tf] = await get_global_market_regime(tf)
+        regime_label = MARKET_REGIME_LABELS.get(regime_by_tf[tf], MARKET_REGIME_LABELS[None])
+        message = (
+            HEARTBEAT_TEXT + "\n\n"
+            f"📊 وضعیت کلی بازار ( براساس داشبورد بازار ): {regime_label}\n"
+            f"💰 قیمت لحظه‌ای BTC: {price_txt}"
+        )
         try:
             send_message(cid, message)
             HEARTBEAT_LAST_SENT[cid] = now
         except Exception as exc:
             logger.warning('heartbeat send failed chat=%s: %s', cid, exc)
+
 
 
 async def scan_loop():
@@ -4478,7 +4513,7 @@ async def scan_loop():
                             by_chat.setdefault(item['chat_id'], []).append(item)
                     for cid, results in by_chat.items():
                         _entry_diag_batch_update(cid, results)
-                await _send_periodic_heartbeat(http)
+                await _send_periodic_heartbeat()
         except Exception as exc: logger.exception('scan loop: %s',exc)
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 

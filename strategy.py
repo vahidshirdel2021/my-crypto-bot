@@ -643,7 +643,19 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return None, f"بهترین سناریو {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
 
     if bool(cfg.get("htf_trend_filter_enabled", True)):
-        htf_trend = _resolve_htf_trend(timeframe, market_data_dict)
+        # وضعیت کلی بازار (طبق تصمیم صریح کاربر: قانون روند قطعی باید روی
+        # کل بازار سنجیده شود، نه روند خودِ همین نماد). اگر کالر (bot.py)
+        # این مقدار را از «داشبورد بازار» تزریق کرده باشد همان مبنا قرار
+        # می‌گیرد؛ در غیر این صورت (مثلاً بک‌تست یا فراخوانی مستقیم بدون این
+        # تزریق) به‌صورت fallback به روند ساختاری خودِ نماد برمی‌گردیم تا
+        # فیلتر کاملاً از کار نیفتد.
+        override_regime = cfg.get("global_market_regime")
+        if override_regime in ("BULLISH", "BEARISH"):
+            htf_trend = override_regime
+        elif override_regime == "RANGE":
+            htf_trend = None
+        else:
+            htf_trend = _resolve_htf_trend(timeframe, market_data_dict)
         regime_label = htf_trend if htf_trend in ("BULLISH", "BEARISH") else "RANGE"
         if diag_out is not None:
             diag_out["htf_trend"] = regime_label
@@ -669,8 +681,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
                 )
                 if not manual_override:
                     return None, (
-                        f"سیگنال {best['code']} ({best['direction']}) خلاف روند ساختاری قطعی تایم بالاتر "
-                        f"({htf_trend}) بود — در روند قطعی هیچ پوزیشن خلاف‌جهت باز نمی‌شود (بدون استثنا)"
+                        f"سیگنال {best['code']} ({best['direction']}) خلاف روند قطعی کلی بازار "
+                        f"({htf_trend}) بود — در بازار قطعاً روندی هیچ پوزیشن خلاف‌جهت باز نمی‌شود (بدون استثنا)"
                     )
         else:
             # بازار رنج است (دو منبع مستقل هم‌رای نبودند). طبق تصمیم پیش‌فرض
