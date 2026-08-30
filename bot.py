@@ -31,6 +31,7 @@ from strategy import (
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
+    _resolve_htf_trend,
 )
 from pdh_eq_pdl_engine import min_klines_for_levels, get_reference_levels
 from ui import (
@@ -43,6 +44,7 @@ from ui import (
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
+    get_trend_management_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -129,6 +131,50 @@ TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'ر
 LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ']
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
+
+# --- مدیریت روند معاملات: تنظیمات مستقل به‌ازای هر تایم‌فریم ---
+# هر تایم‌فریم (5min/15min/1hour/4hour) یک نسخه‌ی جداگانه از این ۶ سوییچ دارد.
+# این دیکشنری هرگز مستقیماً در strategy_config نوشته نمی‌شود، چون
+# normalize_session و reload_and_restart_scan هر بار strategy_config را از
+# روی پریست تایم‌فریم بازسازی می‌کنند و هر مقداری که آنجا نوشته شود از بین
+# می‌رود. این تنظیمات جدا نگه داشته می‌شوند و در لحظه‌ی محاسبه‌ی سیگنال
+# (effective_strategy_config) روی مقادیر پریست تزریق می‌شوند.
+TREND_MGMT_DEFAULTS = {
+    'allow_buy_in_bearish': False,
+    'allow_sell_in_bullish': False,
+    'allow_buy_in_range': True,
+    'allow_sell_in_range': True,
+    'b7_s7_enabled': True,
+    'quality_profile': 'balanced',
+}
+
+# کیفیت معاملات: override روی min_trade_score/min_rr/min_adx پریست تایم‌فریم.
+# 'balanced' یعنی هیچ overrideـی اعمال نشود و مقادیر خودِ پریست تایم‌فریم
+# دست‌نخورده باقی بماند (چون هر تایم‌فریم پریست خودش را دارد و 'متعادل'
+# باید یعنی «همون پیش‌فرض همین تایم‌فریم»، نه یک عدد ثابت مشترک بین همه).
+QUALITY_PROFILE_OVERRIDES = {
+    'conservative': {'min_trade_score': 78.0, 'min_rr': 1.60, 'min_adx': 24.0},
+    'balanced': None,
+    'opportunity': {'min_trade_score': 60.0, 'min_rr': 1.25, 'min_adx': 18.0},
+}
+
+
+def get_trend_mgmt(s, tf=None):
+    """تنظیمات «مدیریت روند معاملات» مخصوص یک تایم‌فریم مشخص را برمی‌گرداند
+    (پیش‌فرض: تایم‌فریم فعال همین سشن). دیکشنری برگشتی همان آبجکت داخل
+    سشن است — تغییر مستقیم روی آن با save_session ذخیره می‌شود."""
+    tf = tf if tf in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
+    if tf not in SUPPORTED_TRADING_TIMEFRAMES:
+        tf = '5min'
+    tm = s.setdefault('trend_mgmt', {})
+    entry = tm.get(tf)
+    if not isinstance(entry, dict):
+        entry = dict(TREND_MGMT_DEFAULTS)
+        tm[tf] = entry
+    else:
+        for k, v in TREND_MGMT_DEFAULTS.items():
+            entry.setdefault(k, v)
+    return entry
 
 # لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
 # لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
@@ -621,6 +667,14 @@ def default_session():
         'platform_fee_trade_count': 0,
         'positions_message_id': None,
         'positions_message_last_edit': 0.0,
+        # --- مدیریت روند معاملات (منوی جدید) ---
+        # پیش‌فرض‌ها دقیقاً منطبق با تصمیم پیش‌فرض استراتژی: در روند قطعی
+        # خلاف‌جهت خاموش، در رنج هر دو جهت روشن، B7/S7 روشن، کیفیت متعادل.
+        # این تنظیمات مستقل به‌ازای هر تایم‌فریم نگه‌داری می‌شوند (به get_trend_mgmt نگاه کنید).
+        'trend_mgmt': {tf: dict(TREND_MGMT_DEFAULTS) for tf in SUPPORTED_TRADING_TIMEFRAMES},
+        # کدام تایم‌فریم داخل منوی «مدیریت روند معاملات» در حال نمایش/ویرایش است
+        # (مستقل از تایم‌فریم فعال اسکن ربات، صرفاً برای مرور/تنظیم بقیه‌ی تایم‌فریم‌ها).
+        'trend_mgmt_view_tf': '5min',
     }
 
 
@@ -658,6 +712,44 @@ def normalize_session(data):
     s['platform_fee_rate_pct'] = min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
     s['platform_fee_total_usdt'] = max(0.0, float(s.get('platform_fee_total_usdt', 0.0)))
     s['platform_fee_trade_count'] = max(0, int(s.get('platform_fee_trade_count', 0) or 0))
+    # --- مهاجرت داده‌ی قدیمی: نسخه‌ی قبلی این ۶ سوییچ را به‌صورت مشترک بین
+    # همه‌ی تایم‌فریم‌ها (کلیدهای تخت trend_mgmt_*) نگه می‌داشت. اگر سشنِ
+    # ذخیره‌شده هنوز به آن شکل قدیمی است، مقادیرش را به همه‌ی تایم‌فریم‌ها
+    # کپی می‌کنیم تا کاربر رفتار قبلی را از دست ندهد؛ از این پس هرکدام
+    # مستقل و جدا خواهند بود.
+    legacy_flat_keys = ('trend_mgmt_allow_buy_in_bearish', 'trend_mgmt_allow_sell_in_bullish',
+                         'trend_mgmt_allow_buy_in_range', 'trend_mgmt_allow_sell_in_range',
+                         'b7_s7_enabled', 'quality_profile')
+    raw = data or {}
+    if not isinstance(raw.get('trend_mgmt'), dict) and any(k in raw for k in legacy_flat_keys):
+        legacy_entry = {
+            'allow_buy_in_bearish': bool(raw.get('trend_mgmt_allow_buy_in_bearish', False)),
+            'allow_sell_in_bullish': bool(raw.get('trend_mgmt_allow_sell_in_bullish', False)),
+            'allow_buy_in_range': bool(raw.get('trend_mgmt_allow_buy_in_range', True)),
+            'allow_sell_in_range': bool(raw.get('trend_mgmt_allow_sell_in_range', True)),
+            'b7_s7_enabled': bool(raw.get('b7_s7_enabled', True)),
+            'quality_profile': raw.get('quality_profile') if raw.get('quality_profile') in ('conservative', 'balanced', 'opportunity') else 'balanced',
+        }
+        s['trend_mgmt'] = {tf: dict(legacy_entry) for tf in SUPPORTED_TRADING_TIMEFRAMES}
+    else:
+        raw_tm = raw.get('trend_mgmt') if isinstance(raw.get('trend_mgmt'), dict) else {}
+        normalized_tm = {}
+        for tf in SUPPORTED_TRADING_TIMEFRAMES:
+            entry_raw = raw_tm.get(tf) if isinstance(raw_tm.get(tf), dict) else {}
+            entry = dict(TREND_MGMT_DEFAULTS)
+            entry.update({k: entry_raw[k] for k in TREND_MGMT_DEFAULTS if k in entry_raw})
+            entry['allow_buy_in_bearish'] = bool(entry['allow_buy_in_bearish'])
+            entry['allow_sell_in_bullish'] = bool(entry['allow_sell_in_bullish'])
+            entry['allow_buy_in_range'] = bool(entry['allow_buy_in_range'])
+            entry['allow_sell_in_range'] = bool(entry['allow_sell_in_range'])
+            entry['b7_s7_enabled'] = bool(entry['b7_s7_enabled'])
+            entry['quality_profile'] = entry['quality_profile'] if entry['quality_profile'] in ('conservative', 'balanced', 'opportunity') else 'balanced'
+            normalized_tm[tf] = entry
+        s['trend_mgmt'] = normalized_tm
+    # کلیدهای قدیمیِ تخت را پاک می‌کنیم تا در سشن باقی نمانند و کسی سهواً به آن‌ها رجوع نکند.
+    for k in legacy_flat_keys:
+        s.pop(k, None)
+    s['trend_mgmt_view_tf'] = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
     return s
 
 
@@ -1671,7 +1763,7 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1717,9 +1809,24 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
         _set_execute_block_reason(chat_id, f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})")
         return False
-    if any(p['symbol']==symbol for p in s['paper_positions']):
-        _set_execute_block_reason(chat_id, f'{symbol} از قبل یک پوزیشن باز دارد')
-        return False
+    same_symbol_positions = [p for p in s['paper_positions'] if p['symbol']==symbol]
+    if same_symbol_positions:
+        # طبق تصمیم کاربر: محدودیت «پوزیشن همزمان روی یک نماد» فقط در بازار
+        # رنج اعمال می‌شود، نه در روند قطعی (صعودی/نزولی).
+        #   - htf_trend نامشخص (None، مثلاً معامله دستی): رفتار قدیمی/محافظه‌کارانه
+        #     حفظ می‌شود — هر پوزیشن باز روی این نماد مانع پوزیشن جدید می‌شود.
+        #   - htf_trend == 'RANGE': هر دو جهت مجازند اما نه بیش از یک پوزیشن
+        #     در هر جهت (یعنی حداکثر یک Long و یک Short هم‌زمان).
+        #   - htf_trend در ('BULLISH','BEARISH'): هیچ محدودیتی اعمال نمی‌شود
+        #     (سقف واقعی تعداد پوزیشن‌های هم‌جهت را same_direction_guard و
+        #     max_open_positions کنترل می‌کنند، نه این قانون).
+        if htf_trend is None:
+            _set_execute_block_reason(chat_id, f'{symbol} از قبل یک پوزیشن باز دارد')
+            return False
+        if htf_trend == 'RANGE':
+            if any(side_long(p.get('side')) == side_long(side) for p in same_symbol_positions):
+                _set_execute_block_reason(chat_id, f'{symbol} در بازار رنج از قبل یک پوزیشن هم‌جهت باز دارد (محدودیت پوزیشن همزمان مخصوص رنج)')
+                return False
     same_ok, same_reason = _same_direction_guard_allows(s, side, quality_score, planned_rr)
     if not same_ok:
         audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': False, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
@@ -2187,7 +2294,7 @@ def pop_execute_block_reason(chat_id):
         return None
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -2199,7 +2306,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             _set_execute_block_reason(chat_id, 'ربات غیرفعال شد یا نسل اسکن در حین قفل عوض شد (رقابت زمانی)')
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder=tp_ladder)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder=tp_ladder,htf_trend=htf_trend)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -3157,7 +3264,15 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     tf=s['timeframe']; strat=s['active_strategy']; md={}
     try:
-        klimit = 650 if tf in ('5min', '15min') else (1500 if tf == '1hour' else 400)
+        # قبلاً این مقدار hardcode بود (650 برای 5m/15m، 1500 برای 1h، 400 برای
+        # 4h) و برای تایم‌فریم ۵ دقیقه از حداقلی که خودِ موتور
+        # (min_klines_for_levels) برای محاسبه‌ی معتبر PDH/PDL اعلام می‌کند
+        # (۸۸۴ کندل) کمتر بود؛ همین کمبود می‌توانست باعث None شدن سطوح و رد
+        # بی‌دلیل نماد شود، حتی وقتی همان نماد با /analyze (که درست از همین
+        # تابع استفاده می‌کرد) ستاپ معتبر نشان می‌داد. حالا هر ۴ تایم‌فریم از
+        # همان منبع واحد (min_klines_for_levels) با کمی حاشیه‌ی اطمینان اضافه
+        # می‌خوانند تا مسیر اسکن زنده هم دقیقاً همان تضمین چارت/تحلیل دستی را داشته باشد.
+        klimit = min_klines_for_levels(tf) + 50
         d=await get_klines_async(http,symbol,tf,klimit)
     except Exception as exc:
         return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده: {exc}', 'data')
@@ -3207,7 +3322,27 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # ساختاری تایم بالاتر خودِ همین نماد داخل get_signal_with_reason اعمال
     # می‌شود (از روی market_data_dict/md که همین‌جا پاس داده می‌شود).
     signal_diag = {}
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price, diag_out=signal_diag)
+    # مدیریت روند معاملات: سوئیچ‌های دستی کاربر (منوی «مدیریت روند معاملات»)،
+    # مستقل به‌ازای همین تایم‌فریم (tf)، روی همین یک درخواست، بدون دست‌کاری
+    # strategy_config ذخیره‌شده در session، به تنظیمات مؤثر تزریق می‌شوند —
+    # چون normalize_session در ری‌استارت‌ها strategy_config را از روی
+    # پیش‌فرض تایم‌فریم بازسازی می‌کند و این سوئیچ‌ها جدا نگه داشته شده‌اند
+    # تا آن ری‌ست را دور بزنند.
+    tm = get_trend_mgmt(s, tf)
+    effective_strategy_config = {
+        **s['strategy_config'],
+        'allow_buy_in_bearish_trend': tm['allow_buy_in_bearish'],
+        'allow_sell_in_bullish_trend': tm['allow_sell_in_bullish'],
+        'allow_buy_in_range': tm['allow_buy_in_range'],
+        'allow_sell_in_range': tm['allow_sell_in_range'],
+        'b7_s7_enabled': tm['b7_s7_enabled'],
+    }
+    # «کیفیت معاملات»: override روی امتیاز/RR/ADX پریست همین تایم‌فریم.
+    # 'balanced' یعنی هیچ تغییری اعمال نشود (مقادیر خودِ پریست دست‌نخورده بماند).
+    q_override = QUALITY_PROFILE_OVERRIDES.get(tm['quality_profile'])
+    if q_override:
+        effective_strategy_config.update(q_override)
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], effective_strategy_config, regime, live_price=live_entry_price, diag_out=signal_diag)
     # قبلاً برای مسیر اسکالپ (۵/۱۵ دقیقه) دیکشنری diagnostics همیشه خالی
     # ({}) ذخیره می‌شد چون _breakout_filter_diagnostics فقط برای مسیر
     # غیراسکالپ صدا زده می‌شد. حالا جزئیات موتور PDH/EQ/PDL (گیت رد شدن،
@@ -3230,7 +3365,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         if m_active:
             active_setup_index = int(m_active.group(1))
     plan, plan_reason = build_trade_plan(
-        primary, sig, s['strategy_config'], plan_strategy_type,
+        primary, sig, effective_strategy_config, plan_strategy_type,
         strategy_timeframe=primary_tf, grid_levels=grid_levels,
         setup_index=active_setup_index, live_price=live_entry_price,
         market_data_dict=md, filters=s['filters'], regime=regime
@@ -3259,7 +3394,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     if primary_tf == '5min' and plan.get('setup_family') == 'swing_break' and plan.get('swing_level') is not None:
         swing_level = float(plan['swing_level'])
         swing_sl_buffer = abs(float(plan['swing_level']) - sl)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder={
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,htf_trend=signal_diag.get('htf_trend'),tp_ladder={
         'tp1': plan.get('tp1'), 'tp2': plan.get('tp2'), 'tp3': plan.get('tp3', tp),
         'tp1_pct': plan.get('tp1_pct'), 'tp2_pct': plan.get('tp2_pct'), 'tp3_pct': plan.get('tp3_pct'),
     } if plan.get('tp1') is not None else None)
@@ -3794,6 +3929,68 @@ def process_command(cmd,chat_id,message_id=None):
         label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
         edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*',get_params_menu_keyboard(s),message_id); return
 
+    TF_LABELS = {'5min': '۵ دقیقه', '15min': '۱۵ دقیقه', '1hour': '۱ ساعته', '4hour': '۴ ساعته'}
+    if cl in ('/trend_management','🧭 مدیریت روند معاملات'):
+        view_tf = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
+        s['trend_mgmt_view_tf'] = view_tf
+        save_session(chat_id)
+        edit_page(chat_id,
+            f'🧭 *مدیریت روند معاملات — تایم‌فریم {TF_LABELS.get(view_tf, view_tf)}*\n\n'
+            'این تنظیمات مستقل برای هر تایم‌فریم است. با دکمه‌های زیر می‌توانید '
+            'تایم‌فریمی که می‌خواهید تنظیماتش را ببینید/تغییر دهید انتخاب کنید '
+            '(بدون این‌که تایم‌فریم فعلی اسکن ربات عوض شود).\n\n'
+            'پیش‌فرض طبق تشخیص خودکار استراتژی است:\n'
+            '📉 روند نزولی قطعی → خرید بسته\n'
+            '📈 روند صعودی قطعی → فروش بسته\n'
+            '➡️ رنج → هر دو جهت با حساسیت بالا باز\n\n'
+            'هرکدام را می‌توانید دستی تغییر دهید:',
+            get_trend_management_keyboard(s), message_id)
+        return
+    if cl.startswith('/tm_tf_'):
+        tf_key = cl.replace('/tm_tf_', '')
+        if tf_key in SUPPORTED_TRADING_TIMEFRAMES:
+            s['trend_mgmt_view_tf'] = tf_key
+            save_session(chat_id)
+            edit_page(chat_id, f'🧭 *مدیریت روند معاملات — تایم‌فریم {TF_LABELS.get(tf_key, tf_key)}*', get_trend_management_keyboard(s), message_id)
+        return
+    if cl == '/toggle_trend_buy_bearish':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['allow_buy_in_bearish'] = not bool(tm['allow_buy_in_bearish'])
+        save_session(chat_id)
+        edit_page(chat_id, f"🛒 خرید در روند نزولی قطعی ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن شد' if tm['allow_buy_in_bearish'] else '🔴 خاموش شد (پیش‌فرض استراتژی)'}", get_trend_management_keyboard(s), message_id); return
+    if cl == '/toggle_trend_sell_bullish':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['allow_sell_in_bullish'] = not bool(tm['allow_sell_in_bullish'])
+        save_session(chat_id)
+        edit_page(chat_id, f"📤 فروش در روند صعودی قطعی ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن شد' if tm['allow_sell_in_bullish'] else '🔴 خاموش شد (پیش‌فرض استراتژی)'}", get_trend_management_keyboard(s), message_id); return
+    if cl == '/toggle_trend_buy_range':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['allow_buy_in_range'] = not bool(tm['allow_buy_in_range'])
+        save_session(chat_id)
+        edit_page(chat_id, f"🛒 خرید در بازار رنج ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن' if tm['allow_buy_in_range'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
+    if cl == '/toggle_trend_sell_range':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['allow_sell_in_range'] = not bool(tm['allow_sell_in_range'])
+        save_session(chat_id)
+        edit_page(chat_id, f"📤 فروش در بازار رنج ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن' if tm['allow_sell_in_range'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
+    if cl == '/toggle_b7s7':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['b7_s7_enabled'] = not bool(tm['b7_s7_enabled'])
+        save_session(chat_id)
+        edit_page(chat_id, f"⚙️ حالت B7/S7 ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 فعال شد' if tm['b7_s7_enabled'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
+    if cl in ('/qp_conservative','/qp_balanced','/qp_opportunity'):
+        profile={'/qp_conservative':'conservative','/qp_balanced':'balanced','/qp_opportunity':'opportunity'}[cl]
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['quality_profile'] = profile
+        save_session(chat_id)
+        label = {'conservative':'کیفیت بالاتر (سیگنال کمتر)','balanced':'حالت پیش‌فرض (متعادل)','opportunity':'کیفیت پایین‌تر (سیگنال بیشتر)'}[profile]
+        edit_page(chat_id,f"🟢 *کیفیت معاملات ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}) روی «{label}» تنظیم شد.*",get_trend_management_keyboard(s),message_id); return
+    if cl == '/trend_mgmt_reset':
+        view_tf = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
+        s.setdefault('trend_mgmt', {})[view_tf] = dict(TREND_MGMT_DEFAULTS)
+        save_session(chat_id)
+        edit_page(chat_id,f'♻️ *تنظیمات «مدیریت روند معاملات» برای تایم‌فریم {TF_LABELS.get(view_tf, view_tf)} به پیش‌فرض استراتژی بازگشت.*',get_trend_management_keyboard(s),message_id); return
+
     if cl.startswith('/view_chart_'):
         sym = cl.replace('/view_chart_', '').upper()
         pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
@@ -4186,18 +4383,69 @@ def telegram_listener():
             logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
 
-def _send_periodic_heartbeat():
+# --- وضعیت کلی بازار (BTC) برای پیام دوره‌ای ---
+# روند BTC با همان مکانیزم ساختاری‌ای محاسبه می‌شود که خودِ فیلتر HTF ربات
+# برای تصمیم‌گیری معاملات استفاده می‌کند (سوینگ HH/HL روی روزانه + هفتگیِ
+# resample‌شده از روزانه، نه اندیکاتور) — تا پیامی که کاربر می‌بیند دقیقاً
+# منعکس‌کننده‌ی همان تشخیصی باشد که ربات خودش برایش عمل می‌کند.
+BTC_STATUS_CACHE = {'ts': 0.0, 'trend': None, 'price': None}
+BTC_STATUS_CACHE_TTL_SECONDS = 300.0  # کمتر از فاصله‌ی ۱۰ دقیقه‌ای پیام، برای تازه ماندن بدون فشار زیاد به صرافی
+
+BTC_TREND_LABELS = {
+    'BULLISH': '📈 صعودی',
+    'BEARISH': '📉 نزولی',
+    None: '➡️ رنج (خنثی)',
+}
+
+
+async def _refresh_btc_status(http):
     now = time.time()
+    if now - BTC_STATUS_CACHE['ts'] < BTC_STATUS_CACHE_TTL_SECONDS and BTC_STATUS_CACHE['price'] is not None:
+        return
+    try:
+        daily = await get_klines_async(http, 'BTC', '1day', 400)
+        trend = None
+        if daily is not None and not daily.empty:
+            daily_ind = calculate_indicators(daily)
+            # timeframe='4hour' مسیر «روزانه + هفتگیِ resample‌شده از روزانه» را
+            # در _resolve_htf_trend فعال می‌کند — همان مسیری که برای اکثر
+            # تایم‌فریم‌ها به‌عنوان تشخیص روند ساختاری HTF استفاده می‌شود.
+            trend = _resolve_htf_trend('4hour', {'1d': daily_ind})
+        price = latest_price('BTC')
+        BTC_STATUS_CACHE.update(ts=now, trend=trend, price=price if price else BTC_STATUS_CACHE['price'])
+    except Exception as exc:
+        logger.warning('BTC market status refresh failed: %s', exc)
+
+
+def _btc_status_lines():
+    trend_label = BTC_TREND_LABELS.get(BTC_STATUS_CACHE['trend'], BTC_TREND_LABELS[None])
+    price = BTC_STATUS_CACHE['price']
+    price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
+    return (
+        f"📊 وضعیت کلی بازار (بر مبنای BTC): {trend_label}\n"
+        f"💰 قیمت لحظه‌ای BTC: {price_txt}"
+    )
+
+
+async def _send_periodic_heartbeat(http):
+    now = time.time()
+    due = []
     for cid, sess in list(USER_SESSIONS.items()):
         if not sess.get('is_bot_active') or sess.get('daily_stopped'):
             continue
         last = float(HEARTBEAT_LAST_SENT.get(cid, 0.0) or 0.0)
         if not last or now - last >= HEARTBEAT_INTERVAL_SECONDS:
-            try:
-                send_message(cid, HEARTBEAT_TEXT)
-                HEARTBEAT_LAST_SENT[cid] = now
-            except Exception as exc:
-                logger.warning('heartbeat send failed chat=%s: %s', cid, exc)
+            due.append(cid)
+    if not due:
+        return
+    await _refresh_btc_status(http)
+    message = HEARTBEAT_TEXT + "\n\n" + _btc_status_lines()
+    for cid in due:
+        try:
+            send_message(cid, message)
+            HEARTBEAT_LAST_SENT[cid] = now
+        except Exception as exc:
+            logger.warning('heartbeat send failed chat=%s: %s', cid, exc)
 
 
 async def scan_loop():
@@ -4230,8 +4478,8 @@ async def scan_loop():
                             by_chat.setdefault(item['chat_id'], []).append(item)
                     for cid, results in by_chat.items():
                         _entry_diag_batch_update(cid, results)
+                await _send_periodic_heartbeat(http)
         except Exception as exc: logger.exception('scan loop: %s',exc)
-        _send_periodic_heartbeat()
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
 
 

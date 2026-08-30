@@ -284,8 +284,22 @@ STRATEGY_DEFAULTS = {
     # می‌شود، مگر ستاپ «استثنایی» باشد (امتیاز و RR بالا، هم‌راستا با همان
     # آستانه‌های same_direction_guard در bot.py).
     "htf_trend_filter_enabled": True,
+    # در روند قطعی (صعودی/نزولی) دیگر استثنا وجود ندارد — فیلد‌های
+    # htf_trend_exception_* دیگر استفاده نمی‌شوند و صرفاً برای سازگاری با
+    # کدهای قدیمی/تنظیمات ذخیره‌شده نگه داشته شده‌اند.
     "htf_trend_exception_score": 80.0,
     "htf_trend_exception_rr": 1.60,
+    # --- سوئیچ‌های دستی «مدیریت روند معاملات» (منوی bot.py) ---
+    # پیش‌فرض طبق استراتژی: در روند قطعی خلاف‌جهت خاموش، در رنج هر دو جهت
+    # روشن. کاربر می‌تواند این‌ها را از منوی مربوطه دستی تغییر دهد؛ مقدار
+    # واقعی هنگام اجرا از session (نه این پیش‌فرض‌ها) خوانده می‌شود.
+    "allow_buy_in_bearish_trend": False,
+    "allow_sell_in_bullish_trend": False,
+    "allow_buy_in_range": True,
+    "allow_sell_in_range": True,
+    # --- آستانه‌ی «حساسیت بالا» برای معاملات دوطرفه در بازار رنج ---
+    "range_min_trade_score": 78.0,
+    "range_min_rr": 1.50,
 
     # --- فال‌بک چندسطحی برای ۵/۱۵ دقیقه (هفتگی/ماهانه، طبق تصمیم مشترک) ---
     "multi_level_source_fallback_enabled": True,
@@ -630,22 +644,56 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
 
     if bool(cfg.get("htf_trend_filter_enabled", True)):
         htf_trend = _resolve_htf_trend(timeframe, market_data_dict)
-        is_counter_trend = (
-            (best["direction"] == "SELL" and htf_trend == "BULLISH") or
-            (best["direction"] == "BUY" and htf_trend == "BEARISH")
-        )
-        if is_counter_trend:
+        regime_label = htf_trend if htf_trend in ("BULLISH", "BEARISH") else "RANGE"
+        if diag_out is not None:
+            diag_out["htf_trend"] = regime_label
+
+        if htf_trend in ("BULLISH", "BEARISH"):
+            # روند ساختاری تایم بالاتر قطعی است (طبق _resolve_htf_trend: دو
+            # منبع مستقل هم‌رای بودند). طبق تصمیم پیش‌فرض کاربر: در روند قطعی
+            # هیچ پوزیشن خلاف‌جهت باز نمی‌شود — بدون هیچ استثنای امتیازی/RR.
+            # یعنی در روند صعودی قطعی هیچ Short و در روند نزولی قطعی هیچ Buy
+            # گرفته نمی‌شود؛ مگر این‌که کاربر از منوی «مدیریت روند معاملات»
+            # این حالت را دستی برای همان جهت خاص روشن کرده باشد
+            # (allow_buy_in_bearish_trend / allow_sell_in_bullish_trend).
+            is_counter_trend = (
+                (best["direction"] == "SELL" and htf_trend == "BULLISH") or
+                (best["direction"] == "BUY" and htf_trend == "BEARISH")
+            )
+            if is_counter_trend:
+                manual_override = (
+                    (htf_trend == "BEARISH" and best["direction"] == "BUY" and
+                     bool(cfg.get("allow_buy_in_bearish_trend", False))) or
+                    (htf_trend == "BULLISH" and best["direction"] == "SELL" and
+                     bool(cfg.get("allow_sell_in_bullish_trend", False)))
+                )
+                if not manual_override:
+                    return None, (
+                        f"سیگنال {best['code']} ({best['direction']}) خلاف روند ساختاری قطعی تایم بالاتر "
+                        f"({htf_trend}) بود — در روند قطعی هیچ پوزیشن خلاف‌جهت باز نمی‌شود (بدون استثنا)"
+                    )
+        else:
+            # بازار رنج است (دو منبع مستقل هم‌رای نبودند). طبق تصمیم پیش‌فرض
+            # کاربر: هر دو جهت (BUY و SELL) مجاز به هم‌زمان باز شدن‌اند، اما
+            # با «حساسیت خیلی بالا» — یعنی سقف امتیاز/RR به‌مراتب
+            # سخت‌گیرانه‌تر از آستانه‌ی عادی min_trade_score/min_rr. کاربر
+            # همچنین می‌تواند هرکدام از دو جهت را در بازار رنج به‌طور کامل از
+            # منوی «مدیریت روند معاملات» خاموش کند
+            # (allow_buy_in_range / allow_sell_in_range).
+            if best["direction"] == "BUY" and not bool(cfg.get("allow_buy_in_range", True)):
+                return None, "بازار رنج است — کاربر معاملات خرید در بازار رنج را به‌طور دستی خاموش کرده است"
+            if best["direction"] == "SELL" and not bool(cfg.get("allow_sell_in_range", True)):
+                return None, "بازار رنج است — کاربر معاملات فروش در بازار رنج را به‌طور دستی خاموش کرده است"
+            range_min_score = float(cfg.get("range_min_trade_score", 78.0))
+            range_min_rr = float(cfg.get("range_min_rr", 1.50))
             approx_risk = abs(_safe_float_local(best["entry"]) - _safe_float_local(best["sl"]))
             approx_reward = abs(_safe_float_local(best["tp"]) - _safe_float_local(best["entry"]))
             approx_rr = (approx_reward / approx_risk) if approx_risk > 0 else 0.0
-            exceptional = (
-                best["total_score"] >= float(cfg.get("htf_trend_exception_score", 80.0)) and
-                approx_rr >= float(cfg.get("htf_trend_exception_rr", 1.60))
-            )
-            if not exceptional:
+            if best["total_score"] < range_min_score or approx_rr < range_min_rr:
                 return None, (
-                    f"سیگنال {best['code']} ({best['direction']}) خلاف روند ساختاری تایم بالاتر "
-                    f"({htf_trend}) بود و بلاک شد — امتیاز/RR کافی برای استثنا نبود"
+                    f"بازار رنج است — طبق حساسیت بالای تعریف‌شده برای معاملات دوطرفه در رنج، سیگنال "
+                    f"{best['code']} ({best['direction']}) رد شد (امتیاز {best['total_score']}/100، "
+                    f"RR≈{approx_rr:.2f} — حداقل لازم: امتیاز {range_min_score:.0f} و RR {range_min_rr:.2f})"
                 )
 
     return best["direction"], _format_reason(best)
