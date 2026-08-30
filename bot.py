@@ -161,25 +161,7 @@ DEX_CANDIDATE_SYMBOLS = {
     'BLUR','MEME','MANTA','ALT','DYM','ORDI','SATS','1000SATS','MEW','POPCAT','TURBO','FLOKI','BRETT',
     'JUP','APT','SUI','SEI','TIA','INJ','TON','NEAR','ARB','OP','WIF','PEPE','BONK'
 }
-DEX_WATCHLIST_CACHE = {
-    'ts': 0.0, 'symbols': [], 'source': 'fallback', 'tiers': {},
-    # below_cutoff_since: {symbol: ts} از چه زمانی نماد پیوسته زیر آستانه‌ی
-    # بافردار رتبه‌بندی بوده (برای منطق چسبندگی/hysteresis پایین).
-    'below_cutoff_since': {},
-    # changes: تاریخچه‌ی افزوده/حذف‌شدن نمادها از واچ‌لیست (برای شفافیت/آدیت).
-    'changes': [],
-}
-# --- چسبندگی واچ‌لیست (Watchlist Hysteresis) ---
-# قبلاً واچ‌لیست هر ۳۰ دقیقه صرفاً «تاپ-N رتبه‌بندی زنده‌ی مارکت‌کپ» را
-# جایگزین می‌کرد؛ یعنی نمادی که مرز رتبه (مثلاً ۴۰) نوسان می‌کرد می‌توانست
-# پشت‌سرهم وارد/خارج شود و باعث ناپایداری مجموعه‌ی معامله‌شونده بین
-# جلسات/روزها شود. حالا: یک نماد که از قبل توی لیست بوده فقط وقتی حذف
-# می‌شود که رتبه‌اش به‌طور *پیوسته* از آستانه‌ی بافردار (cutoff + buffer)
-# پایین‌تر بماند و این افت حداقل DEX_WATCHLIST_MIN_DWELL_SECONDS دوام
-# داشته باشد؛ نمادهای جدید فقط وقتی اضافه می‌شوند که واقعاً داخل رتبه‌ی
-# اصلی (بدون بافر) باشند.
-DEX_WATCHLIST_HYSTERESIS_BUFFER = int(os.environ.get('DEX_WATCHLIST_HYSTERESIS_BUFFER', '10'))
-DEX_WATCHLIST_MIN_DWELL_SECONDS = int(os.environ.get('DEX_WATCHLIST_MIN_DWELL_SECONDS', str(6 * 3600)))
+DEX_WATCHLIST_CACHE = {'ts': 0.0, 'symbols': [], 'source': 'fallback', 'tiers': {}}
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
@@ -1691,29 +1673,39 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
     setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
     if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
+        _set_execute_block_reason(chat_id, 'همین ستاپ دقیقاً قبلاً به‌عنوان پوزیشن باز ثبت شده (تکراری)')
         return False
     if setup_id in set(s.get('consumed_setups') or []):
+        _set_execute_block_reason(chat_id, 'این ستاپ قبلاً یک‌بار مصرف شده (consumed_setups) و دوباره معامله نمی‌شود')
         return False
     if (require_active and not s['is_bot_active']) or s['daily_stopped'] or not risk_guard(chat_id):
+        _set_execute_block_reason(chat_id, 'ربات غیرفعال است، محدودیت ضرر روزانه فعال است، یا risk_guard رد کرد')
         return False
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
     if now<cd:
+        _set_execute_block_reason(chat_id, f'نماد {symbol} هنوز در کول‌داون است')
         return False
     s['cooldowns'].pop(symbol,None)
     if level_key and level_key in s.get('traded_levels', {}):
+        _set_execute_block_reason(chat_id, 'همین سطح (PDH/PDL) قبلاً روی این نماد معامله شده')
         return False
     is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
     if not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
+        _set_execute_block_reason(chat_id, 'فیلتر «بدون Short» فعال است')
         return False
     if not is_dynamic_strategy and s['filters'].get('no_buy_filter') and 'BUY' in side:
+        _set_execute_block_reason(chat_id, 'فیلتر «بدون Long» فعال است')
         return False
     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+        _set_execute_block_reason(chat_id, f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})")
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
+        _set_execute_block_reason(chat_id, f'{symbol} از قبل یک پوزیشن باز دارد')
         return False
     same_ok, same_reason = _same_direction_guard_allows(s, side, quality_score, planned_rr)
     if not same_ok:
         audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': False, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
+        _set_execute_block_reason(chat_id, f'same_direction_guard: {same_reason}')
         return False
     audit_event(chat_id, trade_id, 'same_direction_guard', {'allowed': True, 'reason': same_reason, 'score': quality_score, 'rr': planned_rr})
     audit_event(chat_id, trade_id, 'signal_and_plan', {
@@ -1741,11 +1733,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         if side_long(side):
             structural_sl = float(swing_level) - float(swing_sl_buffer)
             if structural_sl >= price:
+                _set_execute_block_reason(chat_id, 'قیمت زنده از SL ساختاری عبور کرده (ستاپ منقضی شده)')
                 return False
             sl = structural_sl
         else:
             structural_sl = float(swing_level) + float(swing_sl_buffer)
             if structural_sl <= price:
+                _set_execute_block_reason(chat_id, 'قیمت زنده از SL ساختاری عبور کرده (ستاپ منقضی شده)')
                 return False
             sl = structural_sl
     elif side_long(side):
@@ -1776,12 +1770,14 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     margin, amount_or_reason=safe_size(chat_id,s,price,sl)
     s.pop('_symbol_tmp',None)
     if margin<=0:
+        _set_execute_block_reason(chat_id, f'حجم/مارجین معتبر محاسبه نشد: {amount_or_reason}')
         return False
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+        _set_execute_block_reason(chat_id, f'نسبت ریسک به کارمزد کافی نیست ({risk_usdt:.2f} < {fee_estimate*MIN_RISK_TO_FEE_RATIO:.2f})')
         return False
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None,
         # initial_sl: مقدار اولیه‌ی SL در لحظه‌ی باز شدن معامله — برخلاف 'sl' که با
@@ -1804,6 +1800,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
         if not ex:
+            _set_execute_block_reason(chat_id, 'حساب CoinEx پیکربندی نشده یا اتصال برقرار نیست')
             send_message(chat_id,'❌ حساب CoinEx این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
         sym=ccxt_symbol(symbol)
         try:
@@ -1817,11 +1814,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             try:
                 ex.set_leverage(leverage,sym,{'marginMode':MARGIN_MODE})
             except Exception as exc:
+                _set_execute_block_reason(chat_id, f'تنظیم اهرم {symbol} شکست خورد: {exc}')
                 send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`'); return False
         amount=(margin*leverage)/price
         amount=normalize_amount(chat_id,symbol,amount)
         min_amt=float(((market.get('limits') or {}).get('amount') or {}).get('min') or 0)
         if amount<=0 or (min_amt and amount<min_amt):
+            _set_execute_block_reason(chat_id, f'حجم محاسبه‌شده {symbol} از حداقل مجاز بازار کمتر است')
             send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
         try:
             norm_price = normalize_price(chat_id, symbol, price)
@@ -1857,6 +1856,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                     exec_price = float(live.get('entry_price') or norm_price)
                 else:
                     send_message(chat_id, f'⏱ سفارش Limit نماد `{symbol}` در قیمت `{fmt(norm_price)}` پر نشد و لغو شد.')
+                    _set_execute_block_reason(chat_id, f'سفارش Limit {symbol} در مهلت مقرر پر نشد و لغو شد')
                     return False
             else:
                 exec_price = float(confirmed.get('average') or confirmed.get('price') or norm_price)
@@ -1893,6 +1893,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
                 except Exception as close_exc: send_message(chat_id, f'🚨 *حفاظت شکست و بستن خودکار هم شکست.* `{symbol}`\nSL/TP: `{err}`\nخطای بستن: `{close_exc}`')
                 else: send_message(chat_id, f'⚠️ معامله `{symbol}` به‌دلیل عدم ثبت SL/TP فوراً بسته شد.')
+                _set_execute_block_reason(chat_id, f'ثبت SL/TP برای {symbol} ناموفق بود و پوزیشن فوراً بسته شد: {err}')
                 return False
 
             current = get_session(chat_id)
@@ -1900,13 +1901,16 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
                 except Exception as close_exc:
                     _halt_real_trading(chat_id, f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
+                _set_execute_block_reason(chat_id, f'ربات هنگام ورود {symbol} متوقف/ری‌استارت شد؛ پوزیشن بسته شد')
                 return False
         except Exception as exc:
             _halt_real_trading(chat_id, f'وضعیت سفارش REAL {symbol} قابل تأیید نیست: {exc}')
             send_message(chat_id, f'❌ سفارش REAL `{symbol}` به‌طور قطعی تأیید نشد؛ ربات متوقف شد.', parse_mode=None)
+            _set_execute_block_reason(chat_id, f'وضعیت سفارش REAL {symbol} قابل تأیید نشد: {exc}')
             return False
     else:
         if float(s['paper_balance']) - reserved_margin(s) < margin:
+            _set_execute_block_reason(chat_id, 'موجودی PAPER کافی نیست (با احتساب مارجین رزروشده‌ی پوزیشن‌های باز)')
             return False
         trade['amount'] = (margin * leverage) / price
         trade['original_amount'] = trade['amount']
@@ -1950,66 +1954,25 @@ def _refresh_dynamic_dex_watchlist(force=False):
     try:
         r = requests.get(
             'https://api.coingecko.com/api/v3/coins/markets',
-            params={'vs_currency':'usd','order':'market_cap_desc','per_page':max(200, DEX_WATCHLIST_SIZE * 2),'page':1,'sparkline':'false'},
+            params={'vs_currency':'usd','order':'market_cap_desc','per_page':max(100, DEX_WATCHLIST_SIZE),'page':1,'sparkline':'false'},
             timeout=8,
         )
         if r.ok:
             rows = r.json() or []
-            ranked_full = []
+            ranked = []
             for row in rows:
                 sym = str(row.get('symbol') or '').upper()
-                if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked_full:
-                    ranked_full.append(sym)
-            # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
-            ranked_full = [x for x in ranked_full if x not in ('1000SATS',)]
-            if ranked_full:
-                rank_of = {sym: i for i, sym in enumerate(ranked_full)}
-                prev_symbols = list(DEX_WATCHLIST_CACHE.get('symbols') or [])
-                below_since = dict(DEX_WATCHLIST_CACHE.get('below_cutoff_since') or {})
-                changes = list(DEX_WATCHLIST_CACHE.get('changes') or [])
-
-                cutoff = DEX_WATCHLIST_SIZE
-                buffered_cutoff = cutoff + DEX_WATCHLIST_HYSTERESIS_BUFFER
-
-                kept = []
-                for sym in prev_symbols:
-                    r_now = rank_of.get(sym)
-                    if r_now is not None and r_now < buffered_cutoff:
-                        # هنوز داخل آستانه‌ی بافردار — نگه داشته می‌شود و تایمر افت ریست می‌شود.
-                        kept.append(sym)
-                        below_since.pop(sym, None)
-                        continue
-                    # زیر آستانه‌ی بافردار (یا کلاً از رتبه‌بندی خارج شده)
-                    first_seen_below = below_since.setdefault(sym, now)
-                    if now - first_seen_below >= DEX_WATCHLIST_MIN_DWELL_SECONDS:
-                        rank_txt = str(r_now) if r_now is not None else 'خارج از رده‌بندی'
-                        changes.append({
-                            'symbol': sym, 'action': 'removed', 'ts': now,
-                            'reason': f'به مدت طولانی زیر آستانه‌ی بافردار ({buffered_cutoff}) مانده — رتبه فعلی: {rank_txt}',
-                        })
-                        below_since.pop(sym, None)
-                        logger.info('DEX watchlist removed: %s (%s)', sym, changes[-1]['reason'])
-                    else:
-                        kept.append(sym)  # هنوز داخل دوره‌ی مهلت (grace period)
-
-                # افزودن نمادهای جدیدی که واقعاً داخل رتبه‌ی اصلی (بدون بافر) هستند
-                for sym in ranked_full[:cutoff]:
-                    if sym not in kept:
-                        kept.append(sym)
-                        changes.append({
-                            'symbol': sym, 'action': 'added', 'ts': now,
-                            'reason': f'وارد رتبه‌ی برتر {cutoff} مارکت‌کپ شد (رتبه {rank_of[sym]})',
-                        })
-                        logger.info('DEX watchlist added: %s (%s)', sym, changes[-1]['reason'])
-
-                kept = kept[:max(cutoff, DEX_WATCHLIST_SIZE)]
-                DEX_WATCHLIST_CACHE.update({
-                    'ts': now, 'symbols': kept, 'source': 'coingecko_ranked_sticky',
-                    'tiers': {'A': kept[:40], 'B': kept[40:70], 'C': kept[70:DEX_WATCHLIST_SIZE]},
-                    'below_cutoff_since': below_since,
-                    'changes': changes[-100:],
-                })
-                return list(kept)
+                if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked:
+                    ranked.append(sym)
+                if len(ranked) >= DEX_WATCHLIST_SIZE:
+                    break
+            if ranked:
+                # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
+                ranked = [x for x in ranked if x not in ('1000SATS',)]
+                DEX_WATCHLIST_CACHE.update({'ts': now, 'symbols': ranked, 'source':'coingecko_ranked', 'tiers': {
+                    'A': ranked[:40], 'B': ranked[40:70], 'C': ranked[70:DEX_WATCHLIST_SIZE]
+                }})
+                return list(ranked)
     except Exception as exc:
         logger.warning('dynamic DEX watchlist refresh failed: %s', exc)
     if DEX_WATCHLIST_CACHE['symbols']:
@@ -2142,15 +2105,40 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
+# دلیل دقیق آخرین رد شدن اجرای معامله برای هر chat_id — صرفاً برای گزارش
+# ردیابی معاملات (pipeline audit)؛ هیچ اثری روی منطق/کنترل جریان معامله ندارد
+# (به همین دلیل عمداً امضای execute_trade/_execute_trade_unlocked دست‌نخورده
+# ماند تا ریسک تغییر در مسیر بحرانی اجرای معامله‌ی واقعی صفر باشد). یافته‌شده
+# از بررسی گزارش pipeline_events: ۵ سیگنال معتبر با پیام خالی رد شده بودند و
+# دلیل واقعی (ظرفیت پر؟ کول‌داون؟ same_direction_guard؟) قابل مشاهده نبود.
+_EXECUTE_BLOCK_REASON: Dict[int, str] = {}
+
+
+def _set_execute_block_reason(chat_id, reason):
+    try:
+        _EXECUTE_BLOCK_REASON[int(chat_id)] = reason
+    except Exception:
+        pass
+
+
+def pop_execute_block_reason(chat_id):
+    try:
+        return _EXECUTE_BLOCK_REASON.pop(int(chat_id), None)
+    except Exception:
+        return None
+
+
 def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
+        _set_execute_block_reason(chat_id, 'ربات غیرفعال است یا محدودیت ضرر روزانه فعال شده')
         return False
     lock=get_entry_lock(chat_id)
     with lock:
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
+            _set_execute_block_reason(chat_id, 'ربات غیرفعال شد یا نسل اسکن در حین قفل عوض شد (رقابت زمانی)')
             return False
         return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder=tp_ladder)
 
@@ -3159,16 +3147,8 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # BTC/ETH (که این‌جا فقط پارامتری بی‌اثر بود) حذف شد. جای آن، فیلتر روند
     # ساختاری تایم بالاتر خودِ همین نماد داخل get_signal_with_reason اعمال
     # می‌شود (از روی market_data_dict/md که همین‌جا پاس داده می‌شود).
-    signal_diag = {}
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price, diag_out=signal_diag)
-    # قبلاً برای مسیر اسکالپ (۵/۱۵ دقیقه) دیکشنری diagnostics همیشه خالی
-    # ({}) ذخیره می‌شد چون _breakout_filter_diagnostics فقط برای مسیر
-    # غیراسکالپ صدا زده می‌شد. حالا جزئیات موتور PDH/EQ/PDL (گیت رد شدن،
-    # تعداد سوینگ‌های شناسایی‌شده) هم برای اسکالپ در فیلد data آدیت ذخیره
-    # می‌شود تا در گزارش خروجی قابل بررسی باشد.
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
-    if signal_diag:
-        diagnostics = {**diagnostics, **signal_diag}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
@@ -3218,7 +3198,11 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     } if plan.get('tp1') is not None else None)
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
-    return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
+    block_reason = pop_execute_block_reason(chat_id)
+    return _entry_diag_result(chat_id, symbol, 'execute_blocked',
+                               f'سیگنال ایجاد شد اما اجرای ورود موفق نشد: {block_reason}' if block_reason
+                               else 'سیگنال ایجاد شد اما اجرای ورود موفق نشد (دلیل دقیق ثبت نشد)',
+                               'execute', sig)
 
 
 def performance_period_report(chat_id, period='all'):
@@ -3405,12 +3389,6 @@ def export_trade_pipeline(chat_id):
             'size': len(_refresh_dynamic_dex_watchlist()),
             'symbols': _refresh_dynamic_dex_watchlist(),
             'tiers': DEX_WATCHLIST_CACHE.get('tiers',{}),
-            # تاریخچه‌ی افزوده/حذف‌شدن نمادها از واچ‌لیست (منطق چسبندگی جدید) —
-            # برای این‌که بشه دید آیا و کِی مجموعه‌ی نمادهای معامله‌شونده
-            # واقعاً تغییر کرده، نه فقط اسنپ‌شات لحظه‌ای.
-            'changes': DEX_WATCHLIST_CACHE.get('changes', []),
-            'hysteresis_buffer': DEX_WATCHLIST_HYSTERESIS_BUFFER,
-            'min_dwell_seconds': DEX_WATCHLIST_MIN_DWELL_SECONDS,
         },
         'pipeline_events': pipeline,
         'open_positions': opens,

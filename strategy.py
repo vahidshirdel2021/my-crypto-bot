@@ -476,14 +476,9 @@ def _run_engine(df, timeframe, strategy_config=None):
 # market_data_dict['1d'] که برای فیلتر روند HTF گرفته می‌شود، بدون فراخوانی
 # اضافه به صرافی) و در صورت نبود آن هم، ماهانه امتحان می‌شود. رقابت هم‌زمان
 # بین منابع در کار نیست — زنجیره‌ی فال‌بک ترتیبی است.
-def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=None):
-    """خروجی: (best_dict_or_None, level_source_used_or_None)
-
-    diag (اختیاری): در جا با تشخیص آخرین منبع سطح که واقعاً امتحان شد پر
-    می‌شود (روزانه، یا در صورت فال‌بک، هفتگی/ماهانه) — برای لاگ/آدیت دقیق‌تر
-    دلیل «no_signal» به‌جای پیام کلی قبلی.
-    """
-    best = evaluate_scenarios(df, timeframe or "5min", cfg, diag=diag)
+def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None):
+    """خروجی: (best_dict_or_None, level_source_used_or_None)"""
+    best = evaluate_scenarios(df, timeframe or "5min", cfg)
     if best:
         return best, LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
     if timeframe not in ("5min", "15min") or not bool(cfg.get("multi_level_source_fallback_enabled", True)):
@@ -493,13 +488,13 @@ def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=Non
         return None, None
     _, pwh, pwl, weq = compute_prev_week_levels(daily)
     if pwh is not None and pwl is not None and pwh > pwl:
-        cand = evaluate_scenarios(df, timeframe, cfg, level_override=("weekly", pwh, pwl, weq), diag=diag)
+        cand = evaluate_scenarios(df, timeframe, cfg, level_override=("weekly", pwh, pwl, weq))
         if cand:
             return cand, "weekly"
     if bool(cfg.get("monthly_level_fallback_enabled", True)):
         _, pmh, pml, meq = compute_prev_month_levels(daily)
         if pmh is not None and pml is not None and pmh > pml:
-            cand = evaluate_scenarios(df, timeframe, cfg, level_override=("monthly", pmh, pml, meq), diag=diag)
+            cand = evaluate_scenarios(df, timeframe, cfg, level_override=("monthly", pmh, pml, meq))
             if cand:
                 return cand, "monthly"
     return None, None
@@ -582,7 +577,7 @@ def _resolve_htf_trend(timeframe, market_data_dict):
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single",
                             timeframe="5min", strategy_type="dynamic", filters=None,
                             strategy_config=None, regime=None, live_price=None,
-                            defer_quality_gate=False, diag_out=None):
+                            defer_quality_gate=False):
     """
     سیگنال نهایی بر اساس موتور سناریوهای PDH/EQ/PDL (یا PWH/PWL/EQ برای ۱ و ۴
     ساعته). پارامترهای strategy_type/regime/live_price در تصمیم‌گیری اثر
@@ -591,38 +586,11 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     برای فیلتر روند ساختاری تایم بالاتر خودِ نماد استفاده می‌شود (طبق تصمیم
     مشترک با کاربر — نه اندیکاتور، بلکه سوئینگ ساختاری HTF).
 
-    diag_out: اختیاری، دیکشنری خالی که کالر پاس می‌دهد و در جا با جزئیات
-    تشخیصی موتور (گیت رد شدن، تعداد سوینگ high/low شناسایی‌شده در دوره جاری،
-    منبع سطح امتحان‌شده) پر می‌شود — برای لاگ/آدیت دقیق‌تر، بدون تغییر
-    امضای بازگشتی قدیمی (signal, reason) که سایر کدها (bot.py/backtest.py)
-    به آن وابسته‌اند.
-
     خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
     """
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    diag = {}
-    best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict, diag=diag)
-    if diag_out is not None:
-        diag_out.update(diag)
+    best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict)
     if not best:
-        gate = diag.get('gate', 'unknown')
-        swing_hc = diag.get('swing_high_count')
-        swing_lc = diag.get('swing_low_count')
-        swings_txt = ""
-        if swing_hc is not None or swing_lc is not None:
-            swings_txt = f" (سوینگ‌های شناسایی‌شده در دوره جاری: {swing_hc or 0} سقف، {swing_lc or 0} کف)"
-        if gate == 'dead_zone_no_touch':
-            return None, (
-                "قیمت هنوز وسط رنج است و به PDH/PDL (یا معادل هفتگی/ماهانه) برخورد یا شکستی نداشته — "
-                f"dead-zone{swings_txt}"
-            )
-        if gate == 'no_scenario_matched':
-            return None, (
-                "قیمت به سطح برخورد کرده اما هیچ‌کدام از ۱۴ سناریوی PDH/EQ/PDL با سوینگ‌های موجود تطبیق نداد"
-                f"{swings_txt}"
-            )
-        if gate in ('insufficient_data', 'invalid_levels', 'invalid_atr'):
-            return None, f"داده/سطوح کافی برای ارزیابی سناریوها در دسترس نبود ({gate})"
         return None, "هیچ‌کدام از ۱۴ سناریوی PDH/EQ/PDL (یا PWH/PWL/EQ، یا فال‌بک هفتگی/ماهانه) تایید نشد"
     min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
     if best["total_score"] < min_score:
