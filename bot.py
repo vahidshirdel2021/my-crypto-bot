@@ -143,7 +143,7 @@ TREND_MGMT_DEFAULTS = {
     'allow_sell_in_bullish': False,
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
-    'b7_s7_enabled': True,  # دستور کاربر (۳۱ اوت ۲۰۲۶): پیش‌فرض روشن؛ از منو قابل خاموش‌کردنه
+    'b7_s7_enabled': True,
     'quality_profile': 'balanced',
 }
 
@@ -726,7 +726,7 @@ def normalize_session(data):
             'allow_sell_in_bullish': bool(raw.get('trend_mgmt_allow_sell_in_bullish', False)),
             'allow_buy_in_range': bool(raw.get('trend_mgmt_allow_buy_in_range', True)),
             'allow_sell_in_range': bool(raw.get('trend_mgmt_allow_sell_in_range', True)),
-            'b7_s7_enabled': bool(raw.get('b7_s7_enabled', False)),
+            'b7_s7_enabled': bool(raw.get('b7_s7_enabled', True)),
             'quality_profile': raw.get('quality_profile') if raw.get('quality_profile') in ('conservative', 'balanced', 'opportunity') else 'balanced',
         }
         s['trend_mgmt'] = {tf: dict(legacy_entry) for tf in SUPPORTED_TRADING_TIMEFRAMES}
@@ -3165,6 +3165,37 @@ def _entry_diag_next_step(results):
     return '🛡️ فعلاً ستاپ تمیزی نیست؛ ربات صبر می‌کند تا فرصت ارزشمندتری شکل بگیرد.'
 
 
+def _why_no_entry_line(item):
+    """یک خط خلاصه برای یک نماد: نماد + جهت مرتبط + دلیل انسانی کوتاه.
+    از همان _entry_diag_label استفاده می‌کند (تبدیل دلیل خام داخلی به جمله‌ی
+    کوتاه قابل‌فهم برای کاربر) تا هیچ منطق تکراری/جدیدی برای تفسیر دلیل ساخته نشود.
+    """
+    sym = item.get('symbol', '?')
+    direction = _entry_diag_direction(item)
+    label = _entry_diag_label(item.get('reason', ''))
+    return f'`{sym}` ({direction}): {label}'
+
+
+def _why_no_entry_report(chat_id):
+    """گزارش یک‌خطی-به‌ازای-هر-نماد از آخرین وضعیت ثبت‌شده در ردیابی تشخیصی
+    (ENTRY_DIAG_STATE) — برای پاسخ سریع به «چرا الان وارد معامله نمی‌شویم؟»
+    بدون نیاز به خوندن گزارش کامل/طولانی داشبورد فرصت‌ها.
+    """
+    state = ENTRY_DIAG_STATE.get(chat_id) or {}
+    symbol_states = state.get('symbol_states') or {}
+    if not symbol_states:
+        return '📋 هنوز داده‌ی تشخیصی ثبت نشده است (اسکن هنوز اجرا نشده یا لاگ تشخیصی خاموش است).'
+    # بازشده‌ها (entry_opened) از این گزارش کنار گذاشته می‌شوند چون سوال
+    # صرفاً درباره‌ی «چرا وارد نمی‌شویم» است.
+    pending = [x for x in symbol_states.values() if x.get('status') != 'entry_opened']
+    if not pending:
+        return '🟢 در آخرین اسکن، همه‌ی نمادهای بررسی‌شده وارد معامله شدند یا موردی برای گزارش نیست.'
+    pending.sort(key=lambda x: float(x.get('last_update_at') or 0), reverse=True)
+    lines = ['🔎 *چرا الان وارد معامله نمی‌شویم — یک خط به‌ازای هر نماد*', '━━━━━━━━━━━━━━━━━━━━']
+    lines.extend(f'• {_why_no_entry_line(item)}' for item in pending[:30])
+    return '\n'.join(lines)
+
+
 def _entry_diag_direction(item):
     """Return the relevant LONG/SHORT context for a diagnostic row."""
     sig = str(item.get('signal') or '').upper()
@@ -4157,6 +4188,8 @@ def process_command(cmd,chat_id,message_id=None):
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
         edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled']), message_id); return
+    if cl == '/why_no_entry':
+        edit_page(chat_id, _why_no_entry_report(chat_id), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
     if cl == '/entry_diag_log':
         window = list((ENTRY_DIAG_STATE.get(chat_id) or {}).get('window_results') or [])
         if not window:

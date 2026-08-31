@@ -199,6 +199,7 @@ def get_entry_diag_keyboard(enabled=True):
     return {"inline_keyboard": [
         [{"text": "🟢 فعال است — خاموش کردن" if enabled else "🔴 خاموش است — فعال کردن",
           "callback_data": "/toggle_entry_diag"}],
+        [{"text": "🔎 چرا الان وارد نمی‌شویم؟ (یک‌خطی)", "callback_data": "/why_no_entry"}],
         [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
