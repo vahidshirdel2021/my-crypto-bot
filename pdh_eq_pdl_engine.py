@@ -2,9 +2,20 @@
 """
 pdh_eq_pdl_engine.py
 ---------------------
-پیاده‌سازی کامل و مستقل استراتژی «PDH / EQ / PDL» (۶ سناریوی خرید B1..B6 و
-۶ سناریوی فروش S1..S6) طبق فایل استراتژی کاربر، به‌صورتی که این ماژول
-جایگزین کامل منطق قدیمی ربات می‌شود.
+پیاده‌سازی کامل و مستقل استراتژی «PDH / EQ / PDL» طبق فایل استراتژی کاربر،
+به‌صورتی که این ماژول جایگزین کامل منطق قدیمی ربات می‌شود.
+
+وضعیت فعلی سناریوها (پس از تکامل تدریجی طبق بررسی مشترک با کاربر روی
+داده‌ی معاملات واقعی):
+  - B1..B5 / S1..S5: فعال، طبق فایل استراتژی اصلی.
+  - B6/S6: حذف شدند (ورود میان‌رنج بدون لمس واقعی سطح — ناقض قانون هسته).
+  - B7/S7 (ادامه‌ی مومنتوم بدون ری‌تست): فعال، با سقف ATR روی SL
+    (momentum_sl_max_atr_mult) برای فیکس مشکل RR بد؛ از طریق کلید session
+    سطح‌بالا b7_s7_enabled در bot.py قابل خاموش/روشن کردن دستی است.
+  - B8/S8 (شکار لیکوییدیتی و رد فوری / Sweep & Reject): جدید — فتیله‌ی
+    نفوذی واقعی به PDL/PDH که در همان کندل یا ۱-۲ کندل بعد رد می‌شود.
+  - B4/S4 (ری‌کلیم EQ): تقویت‌شده با شرط margin (فاصله‌ی کافی از EQ) و hold
+    (عدم بازگشت پس از کراس)، مشابه منطق B5/S5، به‌خاطر عملکرد ضعیف زنده.
 
 نکات کلیدی طبق درخواست کاربر:
   - تایم‌فریم‌های ۵ و ۱۵ دقیقه: سطوح مرجع از PDH/PDL/EQ *روزانه* گرفته می‌شود.
@@ -84,6 +95,12 @@ ENGINE_DEFAULTS = {
         # پایه‌ی خانواده، چون بر خلاف B1..B5 هیچ لمس/ری‌تست واقعی به سطح
         # ندارد و صرفاً بر پایه فاصله + مومنتوم + یک پولبک کوتاه بنا شده.
         "B7": 55, "S7": 55,
+        # B8/S8: شکار لیکوییدیتی و رد فوری (Sweep & Reject) — فتیله‌ی نفوذی
+        # واقعی به PDL/PDH که همان کندل یا حداکثر ۱-۲ کندل بعد رد می‌شود.
+        # بین B2 (۹۰) و B3 (۸۰) امتیازدهی شده: رد فوری نشانه‌ی قوی‌تری از
+        # حضور نقدینگی نهادی نسبت به یک سوییپ ساده است، اما به قدرت ساختاری
+        # سوییپ دوطرفه‌ی B1 نمی‌رسد.
+        "B8": 85, "S8": 85,
     },
 
     # --- وزن بونوس‌ها (جمع حداکثر = ۱۰+۵+۵+۵+۵ = ۳۰) ---
@@ -105,10 +122,17 @@ ENGINE_DEFAULTS = {
     # سطح هستند (رفتار طبیعی و مثبت ستاپ، نه ریسک فیک‌اوت). جریمه‌ی ثابت -15
     # این ستاپ‌های معتبر را به‌ناحق زیر آستانه‌ی ورود (min_score_to_trade)
     # می‌انداخت. این ضرایب جریمه‌ی نهایی هر کد را کم می‌کنند (1.0 = بدون تغییر).
+    # B4/S4 هم به همین خانواده اضافه شدند (تقویت طبق عملکرد ضعیف زنده‌ی این
+    # دو سناریو نسبت به B5/S5): ری‌کلیم EQ هم طبیعتاً می‌تواند قبل از قطعی
+    # شدن چند بار به EQ برخورد کند، و جریمه‌ی ثابت این ستاپ‌های معتبر را
+    # به‌ناحق رد می‌کرد. B8/S8 (شکار لیکوییدیتی) هم مشابه B2 نیاز به چند
+    # برخورد اولیه دارد، پس با همان منطق جریمه‌اش کاهش یافته.
     "penalty_scale_by_code": {
         "B5": 0.35, "S5": 0.35,
+        "B4": 0.40, "S4": 0.40,
         "B3": 0.65, "S3": 0.65,
         "B2": 0.60, "S2": 0.60,
+        "B8": 0.50, "S8": 0.50,
     },
 
     "rsi_oversold": 35.0,
@@ -120,9 +144,29 @@ ENGINE_DEFAULTS = {
     # --- مدیریت ریسک پیش‌فرض (در نبود سوئینگ قابل‌اتکا) ---
     "atr_period": 14,
     "sl_atr_buffer": 0.35,       # بافر پشت سوئینگ/سطح بر حسب ATR
-    "sl_atr_buffer_tight": 0.20,  # بافر کوچک‌تر برای B5/S5 (بریک‌اند‌ریتست)
+    "sl_atr_buffer_tight": 0.20,  # بافر کوچک‌تر برای B5/S5 (بریک‌اند‌ریتست) و B4/S4/B8/S8
     "extension_atr_mult": 0.50,  # ضریب اکستنشن برای اهداف فراتر از رنج (B5/S5)
     "min_rr": 1.10,               # حداقل نسبت ریسک به ریوارد قابل قبول
+
+    # --- B4/S4: تقویت ری‌کلیم EQ (طبق عملکرد ضعیف زنده نسبت به B5/S5) ---
+    # قبلاً B4/S4 فقط با یک عبور خام از EQ در ۱-۲ کندل آخر تایید می‌شدند و
+    # بافر SL معمولی (نه تنگ) داشتند. حالا مثل منطق B5/S5 دو شرط اضافه شده:
+    #   ۱) margin: کلوز فعلی باید به‌اندازه‌ی این‌ضریب×ATR از EQ فاصله گرفته
+    #      باشد (نه فقط چند تیک رد شده باشد) تا کراس ضعیف/نویزی رد شود.
+    #   ۲) hold: از لحظه‌ی کراس تا کندل جاری، هیچ کلوزی نباید دوباره برگردد
+    #      آن‌طرف EQ (دقیقاً معادل چک min_close_after در B5/S5) — یعنی
+    #      ری‌کلیم باید "بمونه"، نه فقط یک بار لمس/رد شود.
+    "eq_reclaim_margin_atr_mult": 0.10,
+    "eq_reclaim_hold_check": True,
+
+    # --- B8/S8: شکار لیکوییدیتی و رد فوری (Sweep & Reject) ---
+    # فتیله‌ای که با نفوذ واقعی (نه فقط لمس) از PDL/PDH رد می‌شود و همان
+    # کندل یا حداکثر تا این‌تعداد کندل بعد، با کلوز، دوباره داخل رنج
+    # برمی‌گردد. برخلاف B1/B3 نیازی به سوینگ چندکندلی معتبر قبلش نیست —
+    # چون خودِ فتیله‌ی رد‌شونده، ساختار تاییدیه است.
+    "sweep_reject_max_bars": 2,          # حداکثر فاصله‌ی کندلی بین فتیله‌ی نفوذی و کلوز ری‌کلیم
+    "sweep_reject_penetration_atr_mult": 0.10,  # حداقل عمق نفوذ فتیله فراتر از سطح (بر حسب ATR)
+    "sweep_reject_wick_body_ratio": 2.0,  # حداقل نسبت طول فتیله به بدنه‌ی همان کندل
 
     # --- B7/S7: ادامه مومنتوم پامپ/دامپ بدون ری‌تست ---
     "momentum_dist_atr_mult": 1.5,   # حداقل فاصله از سطح = این‌ضریب × ATR ...
@@ -894,17 +938,26 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"سوییپ مستقیم {label.split('/')[1]} بدون عبور قبلی از {label.split('/')[0]} (ری‌کلیم تاییدشده)",
                            len(lo_touch_idxs))
 
-    # B4: ری‌کلیم EQ پس از سوییپ PDL/PWL
+    # B4: ری‌کلیم EQ پس از سوییپ PDL/PWL (تقویت‌شده: margin + hold، مشابه B5)
     if first_lo is not None:
         eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_lo
                           and _safe_float(d.at[i - 1, "close"]) < eq <= _safe_float(d.at[i, "close"])]
         if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bullish_confirm_now:
-            swing_idx = recent_swing_lows[-1] if recent_swing_lows else None
-            swing_price = _safe_float(d.at[swing_idx, "low"]) if swing_idx is not None else eq
-            sl = min(swing_price, eq) - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B4", "BUY", sl, hi_level, None,
-                           "ری‌کلیم تاییدشده EQ به سمت بالا پس از سوییپ کف رنج",
-                           len(lo_touch_idxs))
+            cross_idx = eq_cross_idxs[-1]
+            reclaim_margin = float(cfg.get("eq_reclaim_margin_atr_mult", 0.10))
+            margin_ok = (close_now - eq) >= atr_now * reclaim_margin
+            hold_ok = True
+            if bool(cfg.get("eq_reclaim_hold_check", True)) and cross_idx < idx_now:
+                after_cross = period.loc[cross_idx:idx_now]
+                min_close_after = _safe_float(after_cross["close"].min()) if len(after_cross) else close_now
+                hold_ok = min_close_after >= eq * (1 - tol)
+            if margin_ok and hold_ok:
+                swing_idx = recent_swing_lows[-1] if recent_swing_lows else None
+                swing_price = _safe_float(d.at[swing_idx, "low"]) if swing_idx is not None else eq
+                sl = min(swing_price, eq) - atr_now * cfg["sl_atr_buffer_tight"]
+                add_candidate("B4", "BUY", sl, hi_level, None,
+                               "ری‌کلیم تاییدشده EQ به سمت بالا پس از سوییپ کف رنج (با فاصله‌ی کافی و بدون بازگشت)",
+                               len(lo_touch_idxs))
 
     # B2: سوییپ PDH/PWH، پولبک مضاعف، سوئینگ (کف بالاتر) نزدیک مقاومت
     if first_hi is not None and bullish_confirm_now:
@@ -929,6 +982,36 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
             add_candidate("B5", "BUY", sl, tp_ext, None,
                            f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
                            len(hi_touch_idxs))
+
+    # B8: شکار لیکوییدیتی PDL/PWL و رد فوری (Sweep & Reject)
+    # برخلاف B1/B3 نیازی به سوینگ چندکندلی قبلش نیست؛ فتیله‌ی نفوذی خودش
+    # ساختار تاییدیه است. شرط: فتیله‌ای در ۱-۲ کندل اخیر با نفوذ واقعی
+    # (فراتر از تلورانس لمس) زیر PDL/PWL رفته، نسبت فتیله به بدنه‌اش کافی
+    # بوده (رد قدرتمند، نه یک کندل خنثی)، و کلوز کندل جاری دوباره داخل رنج
+    # برگشته (ری‌کلیم فوری، بدون نیاز به چند کندل صبر کردن).
+    sweep_max_bars = int(cfg.get("sweep_reject_max_bars", 2))
+    sweep_penetration = float(cfg.get("sweep_reject_penetration_atr_mult", 0.10))
+    sweep_wick_ratio = float(cfg.get("sweep_reject_wick_body_ratio", 2.0))
+    sweep_window_start_b8 = max(start_idx, idx_now - sweep_max_bars)
+    best_sweep_low_idx = None
+    for i in [j for j in period.index if sweep_window_start_b8 <= j <= idx_now]:
+        low_i = _safe_float(d.at[i, "low"])
+        if low_i > lo_level - atr_now * sweep_penetration:
+            continue
+        open_i = _safe_float(d.at[i, "open"])
+        close_i = _safe_float(d.at[i, "close"])
+        body_i = abs(close_i - open_i)
+        lower_wick_i = min(open_i, close_i) - low_i
+        if lower_wick_i < sweep_wick_ratio * max(body_i, atr_now * 0.05):
+            continue
+        if best_sweep_low_idx is None or low_i < _safe_float(d.at[best_sweep_low_idx, "low"]):
+            best_sweep_low_idx = i
+    if best_sweep_low_idx is not None and close_now >= lo_level * (1 + tol):
+        sweep_low = _safe_float(d.at[best_sweep_low_idx, "low"])
+        sl = sweep_low - atr_now * cfg["sl_atr_buffer_tight"]
+        add_candidate("B8", "BUY", sl, hi_level, eq,
+                       f"شکار لیکوییدیتی زیر {label.split('/')[1]} و رد فوری با فتیله بلند",
+                       len(lo_touch_idxs))
 
     # B6 حذف شد: این سناریو ذاتاً یک ورود میان‌رنج بدون لمس/سوییپ واقعی PDL بود
     # («بدون لمس دقیق کف رنج») و مستقیماً ناقض قانون ممنوعیت ورود میان‌رنج است
@@ -963,17 +1046,26 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"سوییپ مستقیم {label.split('/')[0]} بدون عبور قبلی از {label.split('/')[1]} (ری‌کلیم تاییدشده)",
                            len(hi_touch_idxs))
 
-    # S4: ری‌کلیم EQ پس از سوییپ PDH/PWH
+    # S4: ری‌کلیم EQ پس از سوییپ PDH/PWH (تقویت‌شده: margin + hold، مشابه S5)
     if first_hi is not None:
         eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_hi
                           and _safe_float(d.at[i - 1, "close"]) > eq >= _safe_float(d.at[i, "close"])]
         if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bearish_confirm_now:
-            swing_idx = recent_swing_highs[-1] if recent_swing_highs else None
-            swing_price = _safe_float(d.at[swing_idx, "high"]) if swing_idx is not None else eq
-            sl = max(swing_price, eq) + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S4", "SELL", sl, lo_level, None,
-                           "ری‌کلیم تاییدشده EQ به سمت پایین پس از سوییپ سقف رنج",
-                           len(hi_touch_idxs))
+            cross_idx = eq_cross_idxs[-1]
+            reclaim_margin = float(cfg.get("eq_reclaim_margin_atr_mult", 0.10))
+            margin_ok = (eq - close_now) >= atr_now * reclaim_margin
+            hold_ok = True
+            if bool(cfg.get("eq_reclaim_hold_check", True)) and cross_idx < idx_now:
+                after_cross = period.loc[cross_idx:idx_now]
+                max_close_after = _safe_float(after_cross["close"].max()) if len(after_cross) else close_now
+                hold_ok = max_close_after <= eq * (1 + tol)
+            if margin_ok and hold_ok:
+                swing_idx = recent_swing_highs[-1] if recent_swing_highs else None
+                swing_price = _safe_float(d.at[swing_idx, "high"]) if swing_idx is not None else eq
+                sl = max(swing_price, eq) + atr_now * cfg["sl_atr_buffer_tight"]
+                add_candidate("S4", "SELL", sl, lo_level, None,
+                               "ری‌کلیم تاییدشده EQ به سمت پایین پس از سوییپ سقف رنج (با فاصله‌ی کافی و بدون بازگشت)",
+                               len(hi_touch_idxs))
 
     # S2: سوییپ PDL/PWL، پولبک مضاعف، سوئینگ (سقف پایین‌تر) نزدیک حمایت
     if first_lo is not None and bearish_confirm_now:
@@ -998,6 +1090,28 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
             add_candidate("S5", "SELL", sl, tp_ext, None,
                            f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
                            len(lo_touch_idxs))
+
+    # S8: شکار لیکوییدیتی PDH/PWH و رد فوری (Sweep & Reject) — معکوس B8
+    sweep_window_start_s8 = max(start_idx, idx_now - sweep_max_bars)
+    best_sweep_high_idx = None
+    for i in [j for j in period.index if sweep_window_start_s8 <= j <= idx_now]:
+        high_i = _safe_float(d.at[i, "high"])
+        if high_i < hi_level + atr_now * sweep_penetration:
+            continue
+        open_i = _safe_float(d.at[i, "open"])
+        close_i = _safe_float(d.at[i, "close"])
+        body_i = abs(close_i - open_i)
+        upper_wick_i = high_i - max(open_i, close_i)
+        if upper_wick_i < sweep_wick_ratio * max(body_i, atr_now * 0.05):
+            continue
+        if best_sweep_high_idx is None or high_i > _safe_float(d.at[best_sweep_high_idx, "high"]):
+            best_sweep_high_idx = i
+    if best_sweep_high_idx is not None and close_now <= hi_level * (1 - tol):
+        sweep_high = _safe_float(d.at[best_sweep_high_idx, "high"])
+        sl = sweep_high + atr_now * cfg["sl_atr_buffer_tight"]
+        add_candidate("S8", "SELL", sl, lo_level, eq,
+                       f"شکار لیکوییدیتی بالای {label.split('/')[0]} و رد فوری با فتیله بلند",
+                       len(hi_touch_idxs))
 
     # S6 حذف شد: معکوس B6، همان دلیل بالا (ورود میان‌رنج بدون لمس/سوییپ واقعی PDH).
 
