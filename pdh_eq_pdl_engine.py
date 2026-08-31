@@ -53,6 +53,7 @@ ENGINE_DEFAULTS = {
     "touch_tolerance_pct": 0.0006,    # ۰.۰۶٪ تلورانس «برخورد به سطح»
     "break_confirm_pct": 0.0003,      # حداقل فاصله close از سطح برای «شکست واقعی»
     "min_confirm_body_ratio": 0.20,   # حداقل کیفیت بدنه برای «کندل تاییدی»
+    "min_confirm_volume_ratio": 0.35,  # حداقل نسبت حجم کندل تاییدی به میانگین۲۰ (گیت ملایم/غیرسخت‌گیرانه؛ قبلاً فقط بونوس بود)
     "swing_search_window_mult": 4,    # پنجره جست‌وجوی سوئینگ = lookback * این عدد
     "swing_min_wick_atr_ratio": 0.15,  # حداقل دم کندل سوئینگ نسبت به ATR (فیلتر فیک‌اوت)
     "swing_min_volume_ratio": 0.60,    # حداقل نسبت حجم کندل سوئینگ به میانگین ۲۰ کندل
@@ -138,13 +139,12 @@ ENGINE_DEFAULTS = {
     "momentum_sl_max_atr_mult": 1.2, # سقف فاصله‌ی ریسک B7/S7 بر حسب ATR (جلوگیری از RR بد وقتی کندل پولبک بزرگ است)
 
     # --- B7/S7 روشن/خاموش ---
-    # طبق دستور فوری کاربر: معامله روی سطح اکستنشن (که این دو سناریو انجام
-    # می‌دهند) باید به‌صورت پیش‌فرض خاموش باشد و فقط با روشن‌کردن دستیِ کاربر
-    # از منوی «مدیریت روند معاملات» در bot.py (کلید session سطح‌بالا
-    # b7_s7_enabled) فعال شود. پیش‌تر (بعد از فیکس momentum_sl_max_atr_mult
-    # که مشکل RR ناکافی این دو سناریو را حل کرد) پیش‌فرض موقتاً روشن شده بود؛
-    # این تصمیم اکنون توسط کاربر بازنگری و به خاموش برگردانده شده است.
-    "b7_s7_enabled": False,
+    # این مقدار صرفاً یک fallback داخل پریست موتور است؛ در عمل همیشه توسط
+    # session['trend_mgmt'][tf]['b7_s7_enabled'] در bot.py (خط effective_strategy_config)
+    # بازنویسی می‌شود، پس منبع حقیقت واقعی TREND_MGMT_DEFAULTS در bot.py است.
+    # طبق دستور کاربر (۳۱ اوت ۲۰۲۶): B7/S7 اکنون به‌صورت پیش‌فرض روشن است و
+    # از منوی «مدیریت روند معاملات» قابل خاموش‌کردن است.
+    "b7_s7_enabled": True,
 }
 
 
@@ -726,12 +726,20 @@ def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: d
 # ۶) موتور اصلی سناریوها
 # ============================================================================
 
-def _is_bullish_confirm(row, min_body_ratio):
-    return _safe_float(row.get("close")) > _safe_float(row.get("open")) and _safe_float(row.get("body_ratio")) >= min_body_ratio
+def _is_bullish_confirm(row, min_body_ratio, min_volume_ratio=0.0):
+    vr = _safe_float(row.get("volume_ratio"), 1.0)
+    volume_ok = vr >= min_volume_ratio
+    return (_safe_float(row.get("close")) > _safe_float(row.get("open"))
+            and _safe_float(row.get("body_ratio")) >= min_body_ratio
+            and volume_ok)
 
 
-def _is_bearish_confirm(row, min_body_ratio):
-    return _safe_float(row.get("close")) < _safe_float(row.get("open")) and _safe_float(row.get("body_ratio")) >= min_body_ratio
+def _is_bearish_confirm(row, min_body_ratio, min_volume_ratio=0.0):
+    vr = _safe_float(row.get("volume_ratio"), 1.0)
+    volume_ok = vr >= min_volume_ratio
+    return (_safe_float(row.get("close")) < _safe_float(row.get("open"))
+            and _safe_float(row.get("body_ratio")) >= min_body_ratio
+            and volume_ok)
 
 
 def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict = None, level_override=None, diag: dict = None):
@@ -789,6 +797,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     tol = float(cfg["touch_tolerance_pct"])
     brk = float(cfg["break_confirm_pct"])
     min_body = float(cfg["min_confirm_body_ratio"])
+    min_confirm_vol = float(cfg.get("min_confirm_volume_ratio", 0.35))
     search_back = lookback * int(cfg["swing_search_window_mult"])
     atr_now = _safe_float(d.at[idx_now, "atr"])
     if atr_now <= 0:
@@ -865,7 +874,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # سناریوهای خرید (BUY)
     # ------------------------------------------------------------------
     recent_swing_lows = _recent_confirmed_swings(d, idx_now, lookback, "swing_low", search_back)
-    bullish_confirm_now = _is_bullish_confirm(curr_row, min_body)
+    bullish_confirm_now = _is_bullish_confirm(curr_row, min_body, min_confirm_vol)
     # ری‌کلیم واقعی: کلوز کندل تاییدی باید دوباره بالای PDL/PWL برگشته باشد
     # (نه صرفاً یک کندل سبز جایی که قیمت هنوز عمیقاً زیر سطح است).
     require_reclaim = bool(cfg.get("require_reclaim_confirm", True))
@@ -946,7 +955,7 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # سناریوهای فروش (SELL) — دقیقاً معکوس سناریوهای خرید
     # ------------------------------------------------------------------
     recent_swing_highs = _recent_confirmed_swings(d, idx_now, lookback, "swing_high", search_back)
-    bearish_confirm_now = _is_bearish_confirm(curr_row, min_body)
+    bearish_confirm_now = _is_bearish_confirm(curr_row, min_body, min_confirm_vol)
     # ری‌کلیم واقعی: کلوز کندل تاییدی باید دوباره پایین PDH/PWH برگشته باشد.
     short_reclaimed = (not require_reclaim) or (close_now <= hi_level * (1 + tol))
 
@@ -1024,9 +1033,9 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # اکستنشن می‌شوند (entry داخل اکستنشن، نه فقط TP از آن) — اما بر خلاف
     # B2/B5/S2/S5 (که به‌طور دائمی حذف شدند)، این دو کاملاً حذف نشدند؛ به
     # جای آن با سوییچ `b7_s7_enabled` کنترل می‌شوند که **پیش‌فرض آن اکنون
-    # False (خاموش) است** — یعنی به‌صورت پیش‌فرض هیچ معامله‌ای روی سطح
-    # اکستنشن انجام نمی‌شود، مگر اینکه کاربر از همان دکمه‌ی موجود در منوی
-    # «مدیریت روند معاملات» (bot.py) صراحتاً و دستی آن را روشن کند.
+    # True (روشن) است** (دستور کاربر، ۳۱ اوت ۲۰۲۶) — یعنی به‌صورت پیش‌فرض
+    # معامله روی سطح اکستنشن انجام می‌شود، مگر اینکه کاربر از همان دکمه‌ی
+    # موجود در منوی «مدیریت روند معاملات» (bot.py) دستی آن را خاموش کند.
     #   ۱) فاصله: قیمت حداقل max(momentum_dist_atr_mult×ATR, momentum_dist_pct×سطح)
     #      از PDH (برای B7) یا PDL (برای S7) دورتر رفته باشد.
     #   ۲) پولبک کوتاه: کندل قبلی خلاف جهت مومنتوم بوده.

@@ -143,7 +143,7 @@ TREND_MGMT_DEFAULTS = {
     'allow_sell_in_bullish': False,
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
-    'b7_s7_enabled': False,  # دستور فوری کاربر: پیش‌فرض خاموش؛ فقط با روشن‌کردن دستی از منو فعال می‌شود
+    'b7_s7_enabled': True,  # دستور کاربر (۳۱ اوت ۲۰۲۶): پیش‌فرض روشن؛ از منو قابل خاموش‌کردنه
     'quality_profile': 'balanced',
 }
 
