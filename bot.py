@@ -1216,7 +1216,8 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         p['sl'] = new_sl
         p['swing_sl_level'] = swing_level
         p['trailing_activated'] = True
-        send_message(chat_id, f"🔄 استاپ‌لاس *{p['symbol']}* به‌دلیل تشکیل سوینگ جدید تغییر کرد\n• قبلی: `{fmt(old_sl)}`\n• جدید: `{fmt(new_sl)}`")
+        # نوتیفیکیشن این رویداد به درخواست کاربر غیرفعال شد؛ خود جابه‌جایی SL
+        # و تریلینگ (از جمله رفع باگ Giveback) دست‌نخورده باقی می‌ماند.
     except Exception as exc:
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
@@ -2240,7 +2241,15 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         for leader in LEADER_SYMBOLS:
             d = await get_klines_async(http, leader, timeframe if timeframe in TIMEFRAME_MAP else '5min', 100)
             if d is None or d.empty or len(d) < 65:
-                return False, f'داده کافی برای {leader} جهت محافظت بازار دریافت نشد'
+                # قبلاً یک نقص لحظه‌ای/گذرا در دریافت دیتای لیدر (مثلاً یک
+                # تایم‌اوت کوتاه شبکه) بلافاصله کل معامله را بلاک می‌کرد، حتی
+                # اگر چند ثانیه بعد داده در دسترس بود (۴ مورد در گزارش pipeline
+                # audit). یک بار تلاش مجدد کوتاه قبل از بلاک کردن، تفاوتی بین
+                # نبود واقعی داده و یک گلیچ لحظه‌ای می‌گذارد.
+                await asyncio.sleep(2)
+                d = await get_klines_async(http, leader, timeframe if timeframe in TIMEFRAME_MAP else '5min', 100)
+                if d is None or d.empty or len(d) < 65:
+                    return False, f'داده کافی برای {leader} جهت محافظت بازار دریافت نشد'
             leader_frames[leader] = calculate_indicators(d)
 
         alt = primary_df.copy()
@@ -2934,6 +2943,24 @@ def update_positions(chat_id):
         # Tier 3 (باقی‌مانده - اکستنشن رنج) و SL نهایی
         exit_price=None; reason=None
         if s['trading_mode']=='PAPER' and not primary_df.empty:
+            # --- رفع باگ Giveback (بررسی مشترک با کاربر، گزارش pipeline audit) ---
+            # قبلاً تریلینگ/قفل‌سود فقط *بعد* از این چک اجرا می‌شد (پایین‌تر، در
+            # شرط `if reason is None`). یعنی اگر قیمت در همین یک کندل ابتدا
+            # به‌اندازه‌ی کافی سود می‌کرد (مثلاً تا ۱.۳R) و سپس در همان کندل
+            # برمی‌گشت و به SL *قدیمی* می‌خورد، تریلینگ اصلاً فرصت اجرا شدن پیدا
+            # نمی‌کرد و معامله با SL آپدیت‌نشده بسته می‌شد — نمونه‌های واقعی:
+            # ADA/OP/COMP در گزارش pipeline audit، هرکدام با mfe_r بین ۰.۷ تا
+            # ۱.۳ که در نهایت با ضرر بسته شدند.
+            # اصلاح: قبل از تشخیص برخورد نهایی، تریلینگ/قفل‌سود را بر اساس
+            # حداکثر نوسان *مطلوب* همین کندل (high برای Long / low برای Short)
+            # اعمال می‌کنیم؛ اگر آستانه‌ی قفل‌سود در همین کندل رد شده باشد، SL
+            # واقعاً جلوتر می‌رود و برخورد به SL نهایی روی سطح *جدید* سنجیده
+            # می‌شود، نه سطح قدیمی. دیتای OHLC هنوز توالی دقیق حرکت داخل کندل
+            # را نشان نمی‌دهد، ولی این حداقلِ صادقانه‌ی قابل‌استخراج از آن است.
+            favorable_extreme = high if is_long else low
+            _check_swing_trailing_stop(chat_id, s, p, favorable_extreme, primary_df)
+            _check_profit_lock_and_atr_trailing(chat_id, s, p, favorable_extreme, primary_df)
+
             hit_tp = (high>=float(p['tp'])) if is_long else (low<=float(p['tp']))
             hit_sl = (low<=float(p['sl'])) if is_long else (high>=float(p['sl']))
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
@@ -2950,7 +2977,10 @@ def update_positions(chat_id):
             # استاپ‌لاس ساختاری بر اساس سوینگ (بند ۵)، همچنان روی تایم‌فریم اصلی معامله.
             # پس از Break-even (تیر ۱) هم ادامه پیدا می‌کند و فقط SL را بهتر می‌کند،
             # هرگز بدتر (این تضمین از قبل داخل خود تابع وجود دارد).
-            if not primary_df.empty:
+            # توجه: برای PAPER این تابع بالاتر با favorable_extreme همین کندل
+            # از قبل صدا زده شده؛ اینجا فقط برای REAL (که از price لحظه‌ای
+            # زنده استفاده می‌کند، نه کندل) لازم است دوباره اجرا شود.
+            if not primary_df.empty and s['trading_mode'] != 'PAPER':
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
                 _check_profit_lock_and_atr_trailing(chat_id,s,p,price,primary_df)
 
