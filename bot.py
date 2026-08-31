@@ -143,7 +143,7 @@ TREND_MGMT_DEFAULTS = {
     'allow_sell_in_bullish': False,
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
-    'b7_s7_enabled': True,
+    'b7_s7_enabled': False,  # دستور فوری کاربر: پیش‌فرض خاموش؛ فقط با روشن‌کردن دستی از منو فعال می‌شود
     'quality_profile': 'balanced',
 }
 
@@ -726,7 +726,7 @@ def normalize_session(data):
             'allow_sell_in_bullish': bool(raw.get('trend_mgmt_allow_sell_in_bullish', False)),
             'allow_buy_in_range': bool(raw.get('trend_mgmt_allow_buy_in_range', True)),
             'allow_sell_in_range': bool(raw.get('trend_mgmt_allow_sell_in_range', True)),
-            'b7_s7_enabled': bool(raw.get('b7_s7_enabled', True)),
+            'b7_s7_enabled': bool(raw.get('b7_s7_enabled', False)),
             'quality_profile': raw.get('quality_profile') if raw.get('quality_profile') in ('conservative', 'balanced', 'opportunity') else 'balanced',
         }
         s['trend_mgmt'] = {tf: dict(legacy_entry) for tf in SUPPORTED_TRADING_TIMEFRAMES}

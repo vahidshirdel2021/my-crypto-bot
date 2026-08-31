@@ -76,6 +76,11 @@ ENGINE_DEFAULTS = {
     "swing_detection_mode": "advanced",
 
     # --- امتیاز پایه سناریوها (دقیقاً از فایل استراتژی) ---
+    # نکته: B2/B5/S2/S5/B7/S7 دیگر توسط موتور تولید نمی‌شوند (طبق دستور فوری
+    # کاربر: PDH/PWH/PMH فقط SELL، PDL/PWL/PML فقط BUY، و اکستنشن فقط TP —
+    # نگاه کنید به کامنت‌های «حذف شد» در evaluate_scenarios). این کلیدها فقط
+    # برای سازگاری با سوابق/لاگ‌های قدیمی نگه داشته شده‌اند و اثری روی
+    # تصمیم‌گیری فعلی ندارند.
     "base_scores": {
         "B1": 95, "B2": 90, "B3": 80, "B4": 75, "B5": 70, "B6": 60,
         "S1": 95, "S2": 90, "S3": 80, "S4": 75, "S5": 70, "S6": 60,
@@ -104,11 +109,14 @@ ENGINE_DEFAULTS = {
     # سطح هستند (رفتار طبیعی و مثبت ستاپ، نه ریسک فیک‌اوت). جریمه‌ی ثابت -15
     # این ستاپ‌های معتبر را به‌ناحق زیر آستانه‌ی ورود (min_score_to_trade)
     # می‌انداخت. این ضرایب جریمه‌ی نهایی هر کد را کم می‌کنند (1.0 = بدون تغییر).
+    # نکته: B5/S5 و B2/S2 دیگر تولید نمی‌شوند (بالا را ببینید)؛ فقط B3/S3
+    # هنوز فعال و از این جدول استفاده می‌کنند.
     "penalty_scale_by_code": {
         "B5": 0.35, "S5": 0.35,
         "B3": 0.65, "S3": 0.65,
         "B2": 0.60, "S2": 0.60,
     },
+
 
     "rsi_oversold": 35.0,
     "rsi_overbought": 65.0,
@@ -130,14 +138,13 @@ ENGINE_DEFAULTS = {
     "momentum_sl_max_atr_mult": 1.2, # سقف فاصله‌ی ریسک B7/S7 بر حسب ATR (جلوگیری از RR بد وقتی کندل پولبک بزرگ است)
 
     # --- B7/S7 روشن/خاموش ---
-    # طبق بررسی مشترک قبلی با کاربر روی داده‌ی معاملات واقعی، این دو سناریو
-    # (پایین‌ترین امتیاز پایه‌ی خانواده) بیشترین سهم رد شدن به‌خاطر RR
-    # ناکافی و بیشترین نرخ باخت (DASH/ZEC/ENA همه با SL) را داشتند؛ به همین
-    # دلیل قبلاً موقتاً خاموش نگه داشته شده بود. منطق momentum_sl_max_atr_mult
-    # بالا این نقص را ریشه‌ای فیکس کرده است، و طبق تصمیم بعدی کاربر پیش‌فرض
-    # این حالت اکنون روشن است — کاربر می‌تواند از منوی «مدیریت روند معاملات»
-    # در bot.py (کلید session سطح‌بالا b7_s7_enabled) آن را دستی خاموش کند.
-    "b7_s7_enabled": True,
+    # طبق دستور فوری کاربر: معامله روی سطح اکستنشن (که این دو سناریو انجام
+    # می‌دهند) باید به‌صورت پیش‌فرض خاموش باشد و فقط با روشن‌کردن دستیِ کاربر
+    # از منوی «مدیریت روند معاملات» در bot.py (کلید session سطح‌بالا
+    # b7_s7_enabled) فعال شود. پیش‌تر (بعد از فیکس momentum_sl_max_atr_mult
+    # که مشکل RR ناکافی این دو سناریو را حل کرد) پیش‌فرض موقتاً روشن شده بود؛
+    # این تصمیم اکنون توسط کاربر بازنگری و به خاموش برگردانده شده است.
+    "b7_s7_enabled": False,
 }
 
 
@@ -896,29 +903,39 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            "ری‌کلیم تاییدشده EQ به سمت بالا پس از سوییپ کف رنج",
                            len(lo_touch_idxs))
 
-    # B2: سوییپ PDH/PWH، پولبک مضاعف، سوئینگ (کف بالاتر) نزدیک مقاومت
-    if first_hi is not None and bullish_confirm_now:
-        swings_after = [i for i in recent_swing_lows if i > first_hi]
-        if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "low"]) > _safe_float(d.at[swings_after[-2], "low"]):
-            if idx_now - swings_after[-1] <= lookback + 3:
-                swing_price = _safe_float(d.at[swings_after[-1], "low"])
-                sl = swing_price - atr_now * cfg["sl_atr_buffer"]
-                add_candidate("B2", "BUY", sl, hi_level, None,
-                               "سوییپ مقاومت + پولبک مضاعف با کف بالاتر (سوئینگ نزدیک مقاومت)",
-                               len(hi_touch_idxs))
+    # B2 حذف شد (دستور فوری کاربر): این سناریو یک ورود BUY درست کنار
+    # PDH/PWH بود (سوییپ مقاومت + پولبک مضاعف با سوئینگ نزدیک همان مقاومت).
+    # طبق تصمیم صریح و فوری کاربر، روی سطوح PDH/PWH/PMH فقط و فقط فرصت‌های
+    # SELL بررسی می‌شوند و هرگونه BUY روی این سطوح ممنوع است — حتی اگر ستاپ از
+    # نظر ساختاری (سوییپ+پولبک) معتبر باشد. کد اصلی این بلوک عمداً کامنت شده
+    # نگه داشته شده تا سابقه‌ی تصمیم و نحوه‌ی قبلی محاسبه مشخص بماند:
+    #
+    # if first_hi is not None and bullish_confirm_now:
+    #     swings_after = [i for i in recent_swing_lows if i > first_hi]
+    #     if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "low"]) > _safe_float(d.at[swings_after[-2], "low"]):
+    #         if idx_now - swings_after[-1] <= lookback + 3:
+    #             swing_price = _safe_float(d.at[swings_after[-1], "low"])
+    #             sl = swing_price - atr_now * cfg["sl_atr_buffer"]
+    #             add_candidate("B2", "BUY", sl, hi_level, None,
+    #                            "سوییپ مقاومت + پولبک مضاعف با کف بالاتر (سوئینگ نزدیک مقاومت)",
+    #                            len(hi_touch_idxs))
 
-    # B5: بریک‌اند‌ریتست PDH/PWH (شکسته‌شدن مقاومت و تبدیل آن به حمایت)
-    if hi_break_idxs and bullish_confirm_now:
-        first_break = hi_break_idxs[0]
-        after_break = period.loc[first_break:idx_now]
-        min_close_after = _safe_float(after_break["close"].min()) if len(after_break) else None
-        retested = any(_safe_float(after_break.at[i, "low"]) <= hi_level * (1 + tol) for i in after_break.index)
-        if retested and min_close_after is not None and min_close_after >= hi_level * (1 - tol):
-            sl = hi_level - atr_now * cfg["sl_atr_buffer_tight"]
-            tp_ext = hi_level + (hi_level - lo_level) * cfg["extension_atr_mult"]
-            add_candidate("B5", "BUY", sl, tp_ext, None,
-                           f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
-                           len(hi_touch_idxs))
+    # B5 حذف شد (دستور فوری کاربر): این سناریو یک ورود BUY درست روی
+    # PDH/PWH بود (بریک‌اند‌ریتست — شکستن مقاومت و خرید در ری‌تست آن به‌عنوان
+    # حمایت جدید). طبق تصمیم صریح و فوری کاربر، روی سطوح PDH/PWH/PMH فقط و
+    # فقط SELL مجاز است. کد اصلی برای سابقه کامنت نگه داشته شده:
+    #
+    # if hi_break_idxs and bullish_confirm_now:
+    #     first_break = hi_break_idxs[0]
+    #     after_break = period.loc[first_break:idx_now]
+    #     min_close_after = _safe_float(after_break["close"].min()) if len(after_break) else None
+    #     retested = any(_safe_float(after_break.at[i, "low"]) <= hi_level * (1 + tol) for i in after_break.index)
+    #     if retested and min_close_after is not None and min_close_after >= hi_level * (1 - tol):
+    #         sl = hi_level - atr_now * cfg["sl_atr_buffer_tight"]
+    #         tp_ext = hi_level + (hi_level - lo_level) * cfg["extension_atr_mult"]
+    #         add_candidate("B5", "BUY", sl, tp_ext, None,
+    #                        f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
+    #                        len(hi_touch_idxs))
 
     # B6 حذف شد: این سناریو ذاتاً یک ورود میان‌رنج بدون لمس/سوییپ واقعی PDL بود
     # («بدون لمس دقیق کف رنج») و مستقیماً ناقض قانون ممنوعیت ورود میان‌رنج است
@@ -965,54 +982,57 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            "ری‌کلیم تاییدشده EQ به سمت پایین پس از سوییپ سقف رنج",
                            len(hi_touch_idxs))
 
-    # S2: سوییپ PDL/PWL، پولبک مضاعف، سوئینگ (سقف پایین‌تر) نزدیک حمایت
-    if first_lo is not None and bearish_confirm_now:
-        swings_after = [i for i in recent_swing_highs if i > first_lo]
-        if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "high"]) < _safe_float(d.at[swings_after[-2], "high"]):
-            if idx_now - swings_after[-1] <= lookback + 3:
-                swing_price = _safe_float(d.at[swings_after[-1], "high"])
-                sl = swing_price + atr_now * cfg["sl_atr_buffer"]
-                add_candidate("S2", "SELL", sl, lo_level, None,
-                               "سوییپ حمایت + پولبک مضاعف با سقف پایین‌تر (سوئینگ نزدیک حمایت)",
-                               len(lo_touch_idxs))
+    # S2 حذف شد (دستور فوری کاربر): این سناریو یک ورود SELL درست کنار
+    # PDL/PWL بود (سوییپ حمایت + پولبک مضاعف با سوئینگ نزدیک همان حمایت).
+    # طبق تصمیم صریح و فوری کاربر، روی سطوح PDL/PWL/PML فقط و فقط فرصت‌های
+    # BUY بررسی می‌شوند و هرگونه SELL روی این سطوح ممنوع است. کد اصلی برای
+    # سابقه کامنت نگه داشته شده:
+    #
+    # if first_lo is not None and bearish_confirm_now:
+    #     swings_after = [i for i in recent_swing_highs if i > first_lo]
+    #     if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "high"]) < _safe_float(d.at[swings_after[-2], "high"]):
+    #         if idx_now - swings_after[-1] <= lookback + 3:
+    #             swing_price = _safe_float(d.at[swings_after[-1], "high"])
+    #             sl = swing_price + atr_now * cfg["sl_atr_buffer"]
+    #             add_candidate("S2", "SELL", sl, lo_level, None,
+    #                            "سوییپ حمایت + پولبک مضاعف با سقف پایین‌تر (سوئینگ نزدیک حمایت)",
+    #                            len(lo_touch_idxs))
 
-    # S5: بریک‌اند‌ریتست PDL/PWL (شکسته‌شدن حمایت و تبدیل آن به مقاومت)
-    if lo_break_idxs and bearish_confirm_now:
-        first_break = lo_break_idxs[0]
-        after_break = period.loc[first_break:idx_now]
-        max_close_after = _safe_float(after_break["close"].max()) if len(after_break) else None
-        retested = any(_safe_float(after_break.at[i, "high"]) >= lo_level * (1 - tol) for i in after_break.index)
-        if retested and max_close_after is not None and max_close_after <= lo_level * (1 + tol):
-            sl = lo_level + atr_now * cfg["sl_atr_buffer_tight"]
-            tp_ext = lo_level - (hi_level - lo_level) * cfg["extension_atr_mult"]
-            add_candidate("S5", "SELL", sl, tp_ext, None,
-                           f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
-                           len(lo_touch_idxs))
+    # S5 حذف شد (دستور فوری کاربر): این سناریو یک ورود SELL درست روی
+    # PDL/PWL بود (بریک‌اند‌ریتست — شکستن حمایت و فروش در ری‌تست آن به‌عنوان
+    # مقاومت جدید). طبق تصمیم صریح و فوری کاربر، روی سطوح PDL/PWL/PML فقط و
+    # فقط BUY مجاز است. کد اصلی برای سابقه کامنت نگه داشته شده:
+    #
+    # if lo_break_idxs and bearish_confirm_now:
+    #     first_break = lo_break_idxs[0]
+    #     after_break = period.loc[first_break:idx_now]
+    #     max_close_after = _safe_float(after_break["close"].max()) if len(after_break) else None
+    #     retested = any(_safe_float(after_break.at[i, "high"]) >= lo_level * (1 - tol) for i in after_break.index)
+    #     if retested and max_close_after is not None and max_close_after <= lo_level * (1 + tol):
+    #         sl = lo_level + atr_now * cfg["sl_atr_buffer_tight"]
+    #         tp_ext = lo_level - (hi_level - lo_level) * cfg["extension_atr_mult"]
+    #         add_candidate("S5", "SELL", sl, tp_ext, None,
+    #                        f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
+    #                        len(lo_touch_idxs))
 
     # S6 حذف شد: معکوس B6، همان دلیل بالا (ورود میان‌رنج بدون لمس/سوییپ واقعی PDH).
 
     # ------------------------------------------------------------------
     # B7/S7: ادامه‌ی مومنتوم پامپ/دامپ — بدون نیاز به ری‌تست سطح شکسته
     # ------------------------------------------------------------------
-    # پوشش حالتی که در بررسی مشترک با کاربر مشخص شد: وقتی قیمت با یک پامپ/
-    # دامپ شدید از PDH/PDL فاصله می‌گیرد و هرگز برای ری‌تست برنمی‌گردد، هیچ‌کدام
-    # از B1..B5/S1..S5 سیگنالی نمی‌دهند (B5/S5 صریحاً منتظر ری‌تست‌اند). این
-    # دو سناریو، با سه معیار مستقل، مومنتوم رو به‌جای ری‌تست معتبر می‌دانند:
+    # طبق تصمیم نهایی کاربر: این دو سناریو تنها موردی هستند که وارد ناحیه‌ی
+    # اکستنشن می‌شوند (entry داخل اکستنشن، نه فقط TP از آن) — اما بر خلاف
+    # B2/B5/S2/S5 (که به‌طور دائمی حذف شدند)، این دو کاملاً حذف نشدند؛ به
+    # جای آن با سوییچ `b7_s7_enabled` کنترل می‌شوند که **پیش‌فرض آن اکنون
+    # False (خاموش) است** — یعنی به‌صورت پیش‌فرض هیچ معامله‌ای روی سطح
+    # اکستنشن انجام نمی‌شود، مگر اینکه کاربر از همان دکمه‌ی موجود در منوی
+    # «مدیریت روند معاملات» (bot.py) صراحتاً و دستی آن را روشن کند.
     #   ۱) فاصله: قیمت حداقل max(momentum_dist_atr_mult×ATR, momentum_dist_pct×سطح)
     #      از PDH (برای B7) یا PDL (برای S7) دورتر رفته باشد.
-    #   ۲) پولبک کوتاه: کندل قبلی خلاف جهت مومنتوم بوده (نه یک کندل تصادفی
-    #      وسط روند، بلکه حداقل یک وقفه/نفس کوتاه) — طبق تصمیم کاربر، به‌جای
-    #      ورود آنی یا صبر برای ری‌تست کامل به سطح.
+    #   ۲) پولبک کوتاه: کندل قبلی خلاف جهت مومنتوم بوده.
     #   ۳) هم‌جهتی با EMA50 (فیلتر مومنتوم واقعی، نه فقط نویز).
-    # SL پشت همان کندل پولبک (با بافر ATR استاندارد) + TP بر اساس اکستنشن ATR
-    # (چون دیگر مرز مقابل رنج به‌عنوان هدف معتبر جلوتر از قیمت وجود ندارد).
-    # SL پشت همان کندل پولبک (با بافر ATR استاندارد)، اما با یک سقف ATR روی
-    # فاصله‌ی ریسک (momentum_sl_max_atr_mult) — طبق شواهد واقعی معاملات (بررسی
-    # مشترک با کاربر): وقتی کندل پولبک بدنه/دم بزرگی داشت، فاصله‌ی SL می‌توانست
-    # چند برابر ATR شود در حالی که TP ثابت (بر مبنای ATR) بود، و همین باعث رد
-    # شدن ~۹۰٪ کاندیدهای B7 به‌خاطر RR ناکافی (میانه‌ی RR رد‌شده تنها ۰.۶R) شده
-    # بود. اکنون ریسک هرگز از این سقف بیشتر نمی‌شود (نزدیک‌ترین/تنگ‌ترین سطح
-    # انتخاب می‌شود)، و TP هم کمی افزایش یافته تا فضای پاداش واقعی‌تر باشد.
+    # SL پشت همان کندل پولبک با سقف momentum_sl_max_atr_mult×ATR روی فاصله‌ی
+    # ریسک (طبق بررسی قبلی، جلوگیری از RR بد وقتی کندل پولبک بزرگ است).
     momentum_dist_atr_mult = float(cfg.get("momentum_dist_atr_mult", 1.5))
     momentum_dist_pct = float(cfg.get("momentum_dist_pct", 0.012))
     momentum_tp_atr_mult = float(cfg.get("momentum_tp_atr_mult", 2.5))
