@@ -128,7 +128,11 @@ TIMEFRAME_MAP = {'1min':'1min','5min':'5min','15min':'15min','1hour':'1hour','4h
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
 LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ']
-WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
+# طبق تصمیم کاربر: تایم ۱ و ۴ ساعته موقتاً غیرفعال شدند تا تمرکز تست کامل
+# روی ۴ حالت ۵/۱۵ دقیقه (موتور اصلی) و اکسترا-۵/اکسترا-۱۵ (موتور جدید
+# Killzone+Judas+MSS) باشد. برای فعال‌سازی دوباره، فقط تاپل زیر را به حالت
+# قبلی برگردانید: ('5min', '15min', '1hour', '4hour')
+WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
 
 # --- مدیریت روند معاملات: تنظیمات مستقل به‌ازای هر تایم‌فریم ---
@@ -143,7 +147,12 @@ TREND_MGMT_DEFAULTS = {
     'allow_sell_in_bullish': False,
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
-    'b7_s7_enabled': True,
+    # طبق آدیت واقعی شهریور ۱۴۰۵ (۷۹ معامله پیپر، ۵ و ۱۵ دقیقه): B7/S7 حتی
+    # بعد از فیکس قبلی (سقف ریسک ATR) روی هر دو تایم‌فریم مستقلاً ضررده بود.
+    # دو فیلتر جدید (پولبک کم‌بدنه + رد اشباع RSI) در pdh_eq_pdl_engine.py
+    # اضافه شدند، ولی پیش‌فرض محافظه‌کارانه فعلاً خاموش است تا داده‌ی تازه
+    # (با منطق اصلاح‌شده) قبل از روشن‌کردن دوباره جمع‌آوری شود.
+    'b7_s7_enabled': False,
     'quality_profile': 'balanced',
 }
 
@@ -3802,7 +3811,7 @@ def menu(chat_id,message_id=None):
     bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
     maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else ('اکسترا (ORB/Judas/MSS)' if s['active_strategy']=='extra' else s['active_strategy'])}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s),message_id)
 
 
@@ -4176,8 +4185,13 @@ def process_command(cmd,chat_id,message_id=None):
         edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
     if cl.startswith('/set_tf_'):
         tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
+        extra_tf_map={'/set_tf_extra5m':'5min','/set_tf_extra15m':'15min'}
+        if cl in extra_tf_map:
+            s['timeframe']=extra_tf_map[cl]; s['active_strategy']='extra'
+            s['strategy_config']=get_timeframe_preset(s['timeframe']); save_session(chat_id); menu(chat_id, message_id); return
         if cl in tf_map:
-            s['timeframe']=tf_map[cl]; s['strategy_config']=get_timeframe_preset(s['timeframe']); save_session(chat_id); menu(chat_id, message_id); return
+            s['timeframe']=tf_map[cl]; s['active_strategy']='dynamic'
+            s['strategy_config']=get_timeframe_preset(s['timeframe']); save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
         send_message(chat_id, market_report(chat_id)); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return

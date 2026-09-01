@@ -31,6 +31,15 @@ from pdh_eq_pdl_engine import (
     structural_htf_trend,
 )
 
+# موتور «اکسترا» (Killzone Opening-Range + Judas Swing + MSS) — کاملاً مستقل
+# از موتور PDH/EQ/PDL بالا. فقط وقتی strategy_type=='extra' فراخوانی می‌شود؛
+# رفتار پیش‌فرض ('dynamic') دست‌نخورده باقی می‌ماند.
+try:
+    from extra_orb_engine import evaluate_extra_scenarios, EXTRA_ENGINE_DEFAULTS
+    _EXTRA_ENGINE_AVAILABLE = True
+except Exception:
+    _EXTRA_ENGINE_AVAILABLE = False
+
 # کتابخانه جدید تشخیص سوینگ (رجکشن سه‌کندلی / فراکتال کلاسیک / ساختار بازار
 # BOS-ChoCH) — به‌صورت کاملاً اختیاری و افزودنی به پروژه اضافه شده است.
 # پیش‌فرض تمام سوییچ‌های مربوط به آن در STRATEGY_DEFAULTS خاموش (False) است،
@@ -519,6 +528,21 @@ def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=Non
     return None, None
 
 
+def _format_reason_extra(best):
+    if not best:
+        return ""
+    parts = [
+        best["code"],
+        f"امتیاز {best['total_score']}/100 (پایه {best['base_score']} + بونوس {best['bonus']} − جریمه {best['penalty']})",
+        best["level_label"],
+    ]
+    if best.get("reasons"):
+        parts.append(" | ".join(best["reasons"]))
+    if best.get("tp_partial"):
+        parts.append(f"TP پله‌ای: {best['tp_partial']:.10g} سپس {best['tp']:.10g}")
+    return " | ".join([p for p in parts if p])
+
+
 def _format_reason(best):
     if not best:
         return ""
@@ -615,6 +639,31 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     """
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     diag = {}
+
+    if strategy_type == "extra":
+        if not _EXTRA_ENGINE_AVAILABLE:
+            return None, "موتور اکسترا (extra_orb_engine.py) در دسترس نیست"
+        if timeframe not in ("5min", "15min"):
+            return None, "استراتژی اکسترا فقط برای تایم‌فریم ۵ و ۱۵ دقیقه تعریف شده است"
+        best = evaluate_extra_scenarios(df_primary, timeframe, cfg, diag=diag)
+        if diag_out is not None:
+            diag_out.update(diag)
+        if not best:
+            gate = diag.get("gate", "unknown")
+            gate_msgs = {
+                "outside_killzone": "خارج از بازه Killzone (لندن/نیویورک) هستیم — سناریوی اکسترا فقط داخل این بازه‌ها ارزیابی می‌شود",
+                "orb_not_formed_yet": "Opening Range سشن جاری هنوز کامل نشده",
+                "no_post_orb_bars_yet": "هنوز کندلی بعد از Opening Range شکل نگرفته",
+                "no_scenario_matched": "نه Judas Swing معتبری شناسایی شد و نه MSS تاییدی روی آن",
+                "insufficient_data": "داده کافی برای موتور اکسترا در دسترس نبود",
+                "invalid_atr": "ATR معتبر برای این نماد/تایم‌فریم در دسترس نبود",
+            }
+            return None, gate_msgs.get(gate, f"موتور اکسترا سیگنالی تایید نکرد ({gate})")
+        min_score = float(cfg.get("min_trade_score", EXTRA_ENGINE_DEFAULTS["min_score_to_trade"]))
+        if best["total_score"] < min_score:
+            return None, f"بهترین سناریوی اکسترا {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
+        return best["direction"], _format_reason_extra(best)
+
     best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict, diag=diag)
     if diag_out is not None:
         diag_out.update(diag)
@@ -731,7 +780,14 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         return None, "داده کافی برای طراحی معامله وجود ندارد"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    best, level_source_used = _run_engine_multi_source(df, strategy_timeframe, cfg, market_data_dict)
+
+    if strategy_type == "extra":
+        if not _EXTRA_ENGINE_AVAILABLE:
+            return None, "موتور اکسترا (extra_orb_engine.py) در دسترس نیست"
+        best = evaluate_extra_scenarios(df, strategy_timeframe, cfg)
+    else:
+        best, level_source_used = _run_engine_multi_source(df, strategy_timeframe, cfg, market_data_dict)
+
     if not best or best["direction"] != signal:
         return None, "سناریوی برنده با سیگنال هم‌خوانی ندارد؛ معامله رد شد"
 
@@ -769,11 +825,13 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         return None, f"هدف سناریو {best['code']} جلوتر از قیمت ورود نیست (احتمالاً کندل تایید خیلی بزرگ بوده)؛ معامله رد شد"
 
     rr = abs(tp - entry) / risk_dist
-    min_rr = float(cfg.get("min_rr", ENGINE_DEFAULTS["min_rr"]))
+    _fallback_defaults = EXTRA_ENGINE_DEFAULTS if (strategy_type == "extra" and _EXTRA_ENGINE_AVAILABLE) else ENGINE_DEFAULTS
+    _fallback_min_rr_key = "min_rr"
+    min_rr = float(cfg.get("min_rr", _fallback_defaults[_fallback_min_rr_key]))
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R) برای سناریوی {best['code']}"
 
-    min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
+    min_score = float(cfg.get("min_trade_score", _fallback_defaults["min_score_to_trade"]))
     if best["total_score"] < min_score:
         return None, f"امتیاز سناریو {best['code']} کافی نیست ({best['total_score']}/100 < {min_score:.0f})"
 
@@ -792,11 +850,11 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         "risk_atr": float(risk_dist / atr) if atr > 0 else None,
         "atr": atr,
         "scenario_code": best["code"],
-        "level_source": "weekly" if LEVEL_SOURCE_BY_TIMEFRAME.get(strategy_timeframe) == "weekly" else "daily",
+        "level_source": "orb_killzone" if strategy_type == "extra" else ("weekly" if LEVEL_SOURCE_BY_TIMEFRAME.get(strategy_timeframe) == "weekly" else "daily"),
         "swing_level": None,
         "structural_target": True,  # هدف، سطح ساختاری (PDH/PDL یا PWH/PWL) است نه RR ثابت
-        "setup_family": f"pdh_eq_pdl_{best['code']}",
-        "reason": _format_reason(best),
+        "setup_family": f"extra_orb_{best['code']}" if strategy_type == "extra" else f"pdh_eq_pdl_{best['code']}",
+        "reason": _format_reason_extra(best) if strategy_type == "extra" else _format_reason(best),
         # --- پلکان سه‌مرحله‌ای TP (طبق درخواست کاربر، بند ۴) ---
         # tp1: ۵۰٪ حجم دقیقاً روی EQ (یا نقطه‌ی میانی معادل وقتی EQ پشت سر
         #      گذاشته شده - مثل B5/S5)، سپس SL کل باقی‌مانده روی Break-even.
