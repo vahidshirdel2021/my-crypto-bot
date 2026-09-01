@@ -1,8 +1,7 @@
 import hashlib
-from dotenv import load_dotenv
-load_dotenv()
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
+from dotenv import load_dotenv load_dotenv()
 from threading import Thread, RLock
 from typing import Dict, Any
 
