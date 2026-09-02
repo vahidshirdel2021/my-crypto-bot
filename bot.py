@@ -1,8 +1,6 @@
 import hashlib
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
-from dotenv import load_dotenv 
-load_dotenv()
 from threading import Thread, RLock
 from typing import Dict, Any
 
@@ -25,6 +23,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
+
+from backtest import run_backtest, fetch_ohlcv_coinex
 
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
@@ -65,6 +65,8 @@ DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 # تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
 # این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
+    # مدیریت پوزیشن با تایم‌فریم پایین‌تر انجام می‌شود تا ضعف روند زودتر دیده شود.
+    # این بخش فقط برای مدیریت معامله است و روی منطق ورود تأثیری ندارد.
     '5min': '1min',
     '15min': '5min',
     '1hour': '15min',
@@ -72,7 +74,6 @@ POSITION_MANAGEMENT_TIMEFRAME_MAP = {
 }
 POSITION_MANAGEMENT_MIN_LOSS_R = -0.10
 POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
-POSITION_MANAGEMENT_EARLY_LOSS_R = -0.10
 
 
 def _seconds_to_local_day_end():
@@ -121,7 +122,7 @@ PAPER_DEFAULT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','LINK','AVAX
 PAPER_SYMBOLS = [x.strip().upper() for x in os.environ.get('PAPER_SYMBOLS', ','.join(PAPER_DEFAULT_SYMBOLS)).split(',') if x.strip()]
 DEFAULT_ACTIVE_SYMBOLS = ALL_SYMBOLS[:]
 LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC','LINK','DOT','AVAX','ATOM','NEAR','TRX','ETC','FIL','UNI','AAVE','MATIC','XTZ']
-TIMEFRAME_MAP = {'1min':'1min','5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
+TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
 LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ']
@@ -546,6 +547,9 @@ def default_session():
         'trade_amount_usdt': 50.0,
         'leverage': 5,
         'max_open_positions': 3,
+        'max_same_direction_positions': 2,
+        'same_direction_entry_cooldown_seconds': 120,
+        'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
         'paper_positions': [],
@@ -588,6 +592,9 @@ def normalize_session(data):
     s['scan_stats'].setdefault('reason_counts', {})
     s['cooldowns'] = dict(data.get('cooldowns') or {})
     s['traded_levels'] = dict(data.get('traded_levels') or {})
+    s['last_direction_entry_ts'] = dict(data.get('last_direction_entry_ts') or {})
+    s['max_same_direction_positions'] = int(s.get('max_same_direction_positions', default_session()['max_same_direction_positions']) or 0)
+    s['same_direction_entry_cooldown_seconds'] = float(s.get('same_direction_entry_cooldown_seconds', default_session()['same_direction_entry_cooldown_seconds']) or 0)
     stored_symbols = list(data.get('active_symbols') or [])
     if PAPER_ONLY:
         # Paper validation should use a stable, liquid universe by default.
@@ -1523,6 +1530,22 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return False
     if any(p['symbol']==symbol for p in s['paper_positions']):
         return False
+    # Correlated-exposure guard: cap how many positions can be open in the SAME
+    # direction at once (e.g. all Long on different alts), and throttle back-to-back
+    # same-direction entries opened seconds apart in one scan burst. This prevents a
+    # single market-wide move from hitting many correlated positions simultaneously,
+    # which independent per-trade risk sizing does not account for.
+    dir_key = 'BUY' if side_long(side) else 'SELL'
+    max_same_dir = int(s.get('max_same_direction_positions', 0) or 0)
+    if max_same_dir > 0:
+        same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
+        if same_dir_open >= max_same_dir:
+            return False
+    same_dir_cooldown = float(s.get('same_direction_entry_cooldown_seconds', 0) or 0)
+    if same_dir_cooldown > 0:
+        last_dir_ts = float((s.get('last_direction_entry_ts') or {}).get(dir_key, 0))
+        if time.time() - last_dir_ts < same_dir_cooldown:
+            return False
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -1658,6 +1681,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
+    last_dir_ts_map = s.setdefault('last_direction_entry_ts', {})
+    last_dir_ts_map[dir_key] = time.time()
     consumed = s.setdefault('consumed_setups', [])
     if setup_id not in consumed:
         consumed.append(setup_id)
@@ -2118,9 +2143,14 @@ def reconcile_real(chat_id):
 
 
 def _position_management_timeframe(p):
-    """Use a genuinely faster timeframe to detect weakness earlier."""
+    """Use the position's execution timeframe for weakness confirmation.
+
+    Profit-protection/trailing may react to live price, but indicator-based weakness
+    must not be evaluated on a noisier, lower timeframe than the setup that created
+    the trade. This keeps entries and discretionary exits on the same market context.
+    """
     primary = str(p.get('timeframe') or '5min')
-    return POSITION_MANAGEMENT_TIMEFRAME_MAP.get(primary, primary)
+    return primary
 
 
 def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None):
@@ -2140,10 +2170,9 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
             return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
 
-        early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',True))
-        early_loss_r=float(cfg.get('early_loss_weakness_exit_min_r', POSITION_MANAGEMENT_EARLY_LOSS_R))
-        loss_score=float(cfg.get('early_loss_weakness_exit_score', POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE))
-        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=early_loss_r)
+        early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',False))
+        loss_score = 55.0 if early_loss_enabled and current_r <= -0.50 else 999.0
+        need_weakness = current_r>=min_profit_r or (early_loss_enabled and current_r<=-0.50)
         if not need_weakness:
             return False,[]
         if wdf is None:
@@ -2155,11 +2184,11 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
             return False,[]
         is_weak,wscore,wreasons=evaluate_trend_weakness(wdf,p['side'],cfg)
 
-        # Profitable trades use confirmed weakness; the evolved early-loss path is also
-        # enabled by default and activates at the configured small adverse R threshold.
+        # Profitable trades can use confirmed weakness; the optional early-loss path
+        # is explicitly disabled by default because the hard SL already defines risk.
         if current_r>=min_profit_r and is_weak:
             return True,[f"تایم‌فریم مدیریت: {management_tf}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
-        if early_loss_enabled and current_r<=early_loss_r and wscore>=loss_score:
+        if early_loss_enabled and current_r<=-0.50 and wscore>=loss_score:
             return True,[f"کاهش ریسک قبل از SL | تایم‌فریم مدیریت: {management_tf}",f"زیان فعلی: {current_r:.2f}R",f"آستانه ضعف متناسب با ضرر: {loss_score:.0f}",f"امتیاز ضعف: {wscore}/100"]+list(wreasons)
         return False,[]
     except Exception as exc:
@@ -2671,7 +2700,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     tf=s['timeframe']; strat=s['active_strategy']; md={}
     try:
-        klimit = 650 if tf in ('5min', '15min') else (1500 if tf == '1hour' else 400)
+        klimit = 650 if tf in ('5min', '15min') else 160
         d=await get_klines_async(http,symbol,tf,klimit)
     except Exception as exc:
         return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده: {exc}', 'data')
@@ -2877,8 +2906,11 @@ def menu(chat_id,message_id=None):
     s=get_session(chat_id)
     bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
     maxp=s['max_open_positions'] if s['max_open_positions']>0 else '∞'
+    max_same=s.get('max_same_direction_positions',0)
+    max_same_disp = max_same if max_same>0 else '∞'
+    dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
 
 
@@ -3067,7 +3099,56 @@ def apply_user_profile(s, profile):
     return label,score,rr,risk
 
 
+
+def manual_signal_scan(chat_id, symbol=None):
+    """بررسی دستی یک نماد انتخابی کاربر با منطق سیگنال فعلی."""
+    s = get_session(chat_id)
+    tf = s.get('timeframe', '5min')
+    symbols = [symbol.upper()] if symbol else scan_watchlist_for_timeframe(tf)
+    results = []
+    send_message(chat_id, f"⏳ لطفاً منتظر بمانید...\nدر حال بررسی {len(symbols)} نماد با تایم‌فریم {TF_DISPLAY.get(tf, tf)}")
+    async def _run():
+        async with aiohttp.ClientSession() as http:
+            for sym in symbols:
+                try:
+                    df = await get_klines_async(http, sym, tf, 180)
+                    if df is None or df.empty or len(df) < 80:
+                        continue
+                    ind = calculate_indicators(df)
+                    sig, reason = get_signal_with_reason(ind, s.get('strategy_config', STRATEGY_DEFAULTS))
+                    if sig not in ('BUY','SELL'):
+                        continue
+                    plan = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_timeframe=tf)
+                    if plan:
+                        results.append((sym, sig, plan, reason))
+                except Exception:
+                    continue
+    try:
+        asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop(); loop.run_until_complete(_run()); loop.close()
+    if not results:
+        send_message(chat_id, '❌ در بررسی فعلی، نمادی مطابق شرایط استراتژی آماده ورود پیدا نشد.')
+        return
+    lines = ['🚀 *سیگنال‌های آماده ورود دستی*']
+    for sym, sig, plan, reason in results[:5]:
+        lines.append(
+            f"\n{'🟢 LONG' if sig=='BUY' else '🔴 SHORT'} `{sym}`"
+            f"\nورود: `{plan.get('entry')}`"
+            f"\nحد ضرر: `{plan.get('sl')}`"
+            f"\nحد سود: `{plan.get('tp')}`"
+            f"\nدلیل: {reason}"
+        )
+    send_message(chat_id, '\n'.join(lines))
+
+
 def process_command(cmd,chat_id,message_id=None):
+    if cmd == '/backtest_start':
+        start_backtest_flow(chat_id); return
+    if cmd == '/scan_signal_start':
+        s=get_session(chat_id); s['user_state']='WAIT_SCAN_SYMBOL'; save_session(chat_id)
+        send_message(chat_id,'🔍 لطفاً نماد مورد نظر برای بررسی با استراتژی فعال را وارد کنید.\nمثال: BTC یا ETH')
+        return
     # Admin revenue / fee management commands.
     if str(cmd).startswith('/set_fee '):
         admin_set_fee_command(chat_id, cmd)
@@ -3195,6 +3276,12 @@ def process_command(cmd,chat_id,message_id=None):
         v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl.startswith('/set_max_same_'):
+        s['max_same_direction_positions']=max(0,int(cl.replace('/set_max_same_',''))); save_session(chat_id)
+        send_message(chat_id, f"✅ حداکثر پوزیشن هم‌جهت هم‌زمان: `{s['max_same_direction_positions'] or '∞'}`"); menu(chat_id); return
+    if cl.startswith('/set_dir_cooldown_'):
+        s['same_direction_entry_cooldown_seconds']=max(0.0,float(cl.replace('/set_dir_cooldown_',''))); save_session(chat_id)
+        send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
@@ -3238,9 +3325,14 @@ def process_command(cmd,chat_id,message_id=None):
         s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
         live=latest_price(tmp['symbol'])
         send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
-    if cl=='/open_positions' or 'پوزیشن‌های باز' in c:
+    if cl in ('/open_positions','/positions','positions') or any(x in c.replace('‌','') for x in ('پوزیشن‌ها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
+    if cl in ('/add_long_symbol','/remove_long_symbol','/add_short_symbol','/remove_short_symbol'):
+        s['user_state']=cl.upper(); save_session(chat_id)
+        send_message(chat_id,'📝 نام نماد را ارسال کنید (مثال BTC)')
+        return
+
     if cl in ('/manage_watchlist','/watchlist_list'):
         long_list='، '.join(SHARED_LONG_WATCHLIST)
         short_list='، '.join(SHARED_SHORT_WATCHLIST)
@@ -3314,6 +3406,28 @@ def process_command(cmd,chat_id,message_id=None):
         return
 
 
+def start_backtest_flow(chat_id):
+    s=get_session(chat_id)
+    s['user_state']='WAIT_BACKTEST_SYMBOL'
+    save_session(chat_id)
+    send_message(chat_id,'🧪 تست استراتژی\n\nنماد را وارد کنید (مثال: BTC/USDT:USDT):')
+
+
+def run_user_backtest(chat_id):
+    s=get_session(chat_id)
+    try:
+        send_message(chat_id,'⏳ لطفاً منتظر بمانید...\nدر حال دریافت داده‌های تاریخی از سرور و آماده‌سازی تست.')
+        df=fetch_ohlcv_coinex(s['backtest_symbol'], s['backtest_tf'], s['backtest_start'], s['backtest_end'])
+        send_message(chat_id,'✅ داده‌ها دریافت شد.\nدر حال اجرای تست استراتژی...')
+        result=run_backtest(df, strategy_type=s.get('active_strategy','dynamic'), side='both', strategy_timeframe=s.get('timeframe','1hour'))
+        send_message(chat_id, f'🧪 نتیجه تست\n\nنماد: {s["backtest_symbol"]}\nتعداد معاملات: {len(result.get("trades",[])) if isinstance(result,dict) else "انجام شد"}')
+    except Exception as e:
+        send_message(chat_id,f'❌ خطا در تست: {e}')
+    finally:
+        s['user_state']=None
+        save_session(chat_id)
+
+
 def handle_text(chat_id,text):
     raw=(text or '').strip()
     fixed_buttons={
@@ -3326,13 +3440,53 @@ def handle_text(chat_id,text):
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
-        '🖐 معامله دستی':'/manual_trade', 'معامله دستی':'/manual_trade',
+        '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')
+
+    if current_state in ('/ADD_LONG_SYMBOL','/REMOVE_LONG_SYMBOL','/ADD_SHORT_SYMBOL','/REMOVE_SHORT_SYMBOL'):
+        sym=raw.upper().replace('USDT','')
+        if current_state=='/ADD_LONG_SYMBOL' and sym not in SHARED_LONG_WATCHLIST: SHARED_LONG_WATCHLIST.append(sym)
+        elif current_state=='/REMOVE_LONG_SYMBOL' and sym in SHARED_LONG_WATCHLIST: SHARED_LONG_WATCHLIST.remove(sym)
+        elif current_state=='/ADD_SHORT_SYMBOL' and sym not in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.append(sym)
+        elif current_state=='/REMOVE_SHORT_SYMBOL' and sym in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.remove(sym)
+        s['user_state']=None; save_session(chat_id)
+        send_message(chat_id,'✅ واچ‌لیست اصلاح شد.')
+        return
+
+    if current_state == 'WAIT_SCAN_SYMBOL':
+        s['user_state']=None; save_session(chat_id)
+        sym=raw.upper().replace('USDT','')+'USDT' if '/' not in raw else raw.upper()
+        manual_signal_scan(chat_id, sym)
+        return
+
+    if current_state == 'WAIT_BACKTEST_SYMBOL':
+        s['backtest_symbol']=raw.upper()
+        s['user_state']='WAIT_BACKTEST_TF'
+        save_session(chat_id)
+        send_message(chat_id,'⏱ تایم‌فریم را وارد کنید (5m / 15m / 1h / 4h):')
+        return
+    if current_state == 'WAIT_BACKTEST_TF':
+        s['backtest_tf']=raw
+        s['user_state']='WAIT_BACKTEST_START'
+        save_session(chat_id)
+        send_message(chat_id,'📅 تاریخ شروع را وارد کنید (YYYY-MM-DD):')
+        return
+    if current_state == 'WAIT_BACKTEST_START':
+        s['backtest_start']=raw
+        s['user_state']='WAIT_BACKTEST_END'
+        save_session(chat_id)
+        send_message(chat_id,'📅 تاریخ پایان را وارد کنید (YYYY-MM-DD):')
+        return
+    if current_state == 'WAIT_BACKTEST_END':
+        s['backtest_end']=raw
+        save_session(chat_id)
+        run_user_backtest(chat_id)
+        return
 
     if current_state == 'WAIT_ADMIN_SET_FEE':
         s['user_state'] = None
@@ -3734,7 +3888,7 @@ def _notify_boot_status():
             closed_n = len(s.get('closed_positions') or []) if s else 0
             msg = f"🔄 *ربات بالا آمد.*\nپوزیشن‌های باز شما: `{open_n}` | تاریخچه بسته‌شده: `{closed_n}`"
             if s is None or (open_n == 0 and closed_n == 0):
-                msg += "\n\n⚠️ اگر انتظار داشتید اینجا داده‌ای باشد، ممکن است دیتابیس ری‌ست شده باشد (مشکل ماندگاری دیسک هاست)."
+                msg += "\n\n🏠 برای شروع کار به منوی اصلی بروید و روی دکمه 🔄 بارگذاری مجدد و شروع اسکن بزنید."
             try:
                 send_message(cid, msg)
             except Exception:
