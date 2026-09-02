@@ -1465,6 +1465,9 @@ def trade_action_keyboard(symbol, chart_url=None, timeframe='5min'):
     if chart_url:
         rows.append([{'text':'🌐 چارت تعاملی (MiniApp)','web_app':{'url':chart_url}}])
     rows.append([
+        {'text':'📊 نمایش چارت (ورود/SL/TP)','callback_data':f'/view_chart_{symbol}'}
+    ])
+    rows.append([
         {'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, timeframe)}
     ])
     rows.append([
@@ -1669,10 +1672,17 @@ def chart(chat_id, symbol, df, trade):
 
         mode = 'REAL' if trade.get('is_real') else 'PAPER'
         direction = 'LONG' if is_long else 'SHORT'
-        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}', loc='left',
+        scenario_code = trade.get('scenario_code')
+        title_suffix = f'  •  {scenario_code}' if scenario_code else ''
+        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}{title_suffix}', loc='left',
                      color='white', fontsize=15, fontweight='bold', pad=14)
 
         summary = f"TF: {tf_label} | Entry: {fmt(entry)} | TP: {fmt(tp)} | SL: {fmt(sl)}"
+        q_score = trade.get('quality_score')
+        if scenario_code:
+            summary += f" | ستاپ: {scenario_code}"
+        if q_score is not None:
+            summary += f" | امتیاز: {q_score:.1f}/100"
         ax.text(0.01, 0.015, summary, transform=ax.transAxes, color='#cbd5e1',
                 fontsize=9.5, va='bottom', ha='left',
                 bbox=dict(boxstyle='round,pad=0.35', facecolor='#1e293b', edgecolor='#334155', alpha=0.95))
@@ -1723,15 +1733,22 @@ def chart(chat_id, symbol, df, trade):
         b.seek(0)
 
         metrics = expected_trade_metrics(trade)
-        send_photo(
-            chat_id, b.getvalue(),
+        caption = (
             f"📊 *پوزیشن معامله [{mode}]*\n"
             f"• نماد: `{symbol}` ({trade['side']})\n"
             f"• تایم‌فریم: `{tf_label}`\n"
             f"• ورود: `{fmt(entry)}`\n"
             f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
-            f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`",
+            f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`"
+        )
+        if scenario_code:
+            caption += f"\n• ستاپ: `{scenario_code}`"
+        if q_score is not None:
+            caption += f"\n• امتیاز کیفیت: `{q_score:.1f}/100`"
+        send_photo(
+            chat_id, b.getvalue(),
+            caption,
             trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf)
         )
     except Exception:
@@ -1776,9 +1793,15 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
-    m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
+    scenario_code = (reason or '').split('|')[0].strip() or None
+    # نکته: فرمت واقعی reason «امتیاز XX.X/100 (...)» است، نه «کیفیت XX/100» —
+    # الگوی قبلی هرگز مچ نمی‌شد (کلمه‌ی اشتباه + فرض عدد صحیح به‌جای اعشاری) و
+    # quality_score/quality_label همیشه None ذخیره می‌شدند. اینجا فقط استخراج
+    # درست می‌شود؛ planned_rr عمداً دست‌نخورده می‌ماند چون به رفتار
+    # same_direction_guard وصل است و نیاز به تصمیم جداگانه دارد.
+    m_score=re.search(r'امتیاز\s+([0-9]+(?:\.[0-9]+)?)/100\s*\(([^)]*)\)', reason or '')
     if m_score:
-        quality_score=int(m_score.group(1)); quality_label=m_score.group(2)
+        quality_score=float(m_score.group(1)); quality_label=m_score.group(2)
     m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
     if m_rr:
         planned_rr=float(m_rr.group(1))
@@ -1913,7 +1936,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         _set_execute_block_reason(chat_id, f'نسبت ریسک به کارمزد کافی نیست ({risk_usdt:.2f} < {fee_estimate*MIN_RISK_TO_FEE_RATIO:.2f})')
         return False
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None,
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'scenario_code':scenario_code,'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':risk_dist,'trailing_locked_r':0.0,'swing_sl_level':None,
         # initial_sl: مقدار اولیه‌ی SL در لحظه‌ی باز شدن معامله — برخلاف 'sl' که با
         # breakeven/تریل ساختاری تغییر می‌کند، این مقدار ثابت می‌ماند تا در چارت
         # پوزیشن به‌عنوان SL1 (مرجع تاریخی) در کنار SL3 (استاپ فعال کنونی) نمایش
