@@ -165,6 +165,12 @@ ENGINE_DEFAULTS = {
     # (نه بقیه‌ی خانواده) الزامی می‌کنند:
     "direct_sweep_min_reclaim_margin_pct": 0.0015,  # کلوز باید حداقل این‌درصد *فراتر* از سطح باشد (نه فقط داخل تلورانس لمس)
     "direct_sweep_min_confirm_body_ratio": 0.35,    # کندل تاییدی B3/S3 باید بدنه‌ی محکم‌تری از حداقل عمومی (۰.۲۰) داشته باشد
+
+    # --- خاموش/روشن کردن دستی هر ستاپ (منوی «ستاپ‌های معاملاتی» در bot.py) ---
+    # لیستی از کدهای ستاپ (مثلاً ["B1","S3"]) که کاربر صریحاً خاموش کرده؛ هر
+    # کاندیدی با این کد قبل از انتخاب «بهترین» کاندید حذف می‌شود. پیش‌فرض
+    # خالی یعنی همه‌ی ۱۴ ستاپ مثل قبل فعال هستند (بدون تغییر رفتار).
+    "disabled_setups": [],
 }
 
 
@@ -1122,9 +1128,17 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
                            f"بدون ری‌تست + پولبک کم‌بدنه (RSI={rsi_now:.0f}، هنوز ته‌کشیده نیست)",
                            0)
 
+    # --- فیلتر ستاپ‌های خاموش‌شده‌ی دستی (منوی «ستاپ‌های معاملاتی») ---
+    # این فیلتر بعد از تولید همه‌ی کاندیدها و قبل از انتخاب بهترین اعمال
+    # می‌شود؛ یعنی هر منطق تشخیص/امتیازدهی بالا دست‌نخورده می‌ماند، فقط
+    # کدهای خاموش‌شده اجازه‌ی رقابت برای «بهترین کاندید» را ندارند.
+    disabled_setups = set(cfg.get("disabled_setups") or [])
+    if disabled_setups and candidates:
+        candidates = [c for c in candidates if c["code"] not in disabled_setups]
+
     if not candidates:
         if diag is not None:
-            diag['gate'] = 'no_scenario_matched'
+            diag['gate'] = 'no_scenario_matched' if not disabled_setups else 'all_candidates_disabled'
         return None
 
     best = max(candidates, key=lambda c: c["total_score"])

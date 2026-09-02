@@ -44,6 +44,7 @@ from ui import (
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
     get_trend_management_keyboard,
+    get_setups_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -165,6 +166,13 @@ QUALITY_PROFILE_OVERRIDES = {
     'balanced': None,
     'opportunity': {'min_trade_score': 60.0, 'min_rr': 1.25, 'min_adx': 18.0},
 }
+
+# --- منوی «ستاپ‌های معاملاتی»: خاموش/روشن دستی هر یک از ۱۴ ستاپ ---
+# لیست کامل کدهای ستاپ که در موتور pdh_eq_pdl_engine.py تعریف شده‌اند
+# (B1..B7 برای خرید، S1..S7 برای فروش). این تنظیم سراسری و مستقل از
+# تایم‌فریم است — دقیقاً طبق درخواست کاربر یک دکمه‌ی مجزا در منوی اصلی.
+ALL_SETUP_CODES = ('B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7',
+                    'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7')
 
 
 def get_trend_mgmt(s, tf=None):
@@ -683,6 +691,10 @@ def default_session():
         # کدام تایم‌فریم داخل منوی «مدیریت روند معاملات» در حال نمایش/ویرایش است
         # (مستقل از تایم‌فریم فعال اسکن ربات، صرفاً برای مرور/تنظیم بقیه‌ی تایم‌فریم‌ها).
         'trend_mgmt_view_tf': '5min',
+        # --- منوی «ستاپ‌های معاملاتی» (دکمه‌ی مستقل در منوی اصلی) ---
+        # لیست کدهای ستاپ (از ALL_SETUP_CODES) که کاربر صریحاً خاموش کرده.
+        # خالی = همه‌ی ۱۴ ستاپ (B1..B7 / S1..S7) فعال‌اند (پیش‌فرض قبلی).
+        'disabled_setups': [],
     }
 
 
@@ -758,6 +770,8 @@ def normalize_session(data):
     for k in legacy_flat_keys:
         s.pop(k, None)
     s['trend_mgmt_view_tf'] = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
+    # فقط کدهای معتبر و بدون تکرار نگه داشته می‌شوند (در برابر داده‌ی خراب/قدیمی سشن).
+    s['disabled_setups'] = sorted({c for c in (data.get('disabled_setups') or []) if c in ALL_SETUP_CODES})
     return s
 
 
@@ -3442,6 +3456,8 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         # وضعیت کلی بازار (BULLISH/BEARISH/RANGE/None) — به get_signal_with_reason
         # می‌گوید گیت روند قطعی را روی همین مقدار (نه روند خودِ نماد) بسنجد.
         'global_market_regime': global_regime,
+        # منوی «ستاپ‌های معاملاتی»: کدهای B1..B7/S1..S7 که کاربر دستی خاموش کرده.
+        'disabled_setups': list(s.get('disabled_setups') or []),
     }
     # «کیفیت معاملات»: override روی امتیاز/RR/ADX پریست همین تایم‌فریم.
     # 'balanced' یعنی هیچ تغییری اعمال نشود (مقادیر خودِ پریست دست‌نخورده بماند).
@@ -4138,6 +4154,34 @@ def process_command(cmd,chat_id,message_id=None):
         s.setdefault('trend_mgmt', {})[view_tf] = dict(TREND_MGMT_DEFAULTS)
         save_session(chat_id)
         edit_page(chat_id,f'♻️ *تنظیمات «مدیریت روند معاملات» برای تایم‌فریم {TF_LABELS.get(view_tf, view_tf)} به پیش‌فرض استراتژی بازگشت.*',get_trend_management_keyboard(s),message_id); return
+
+    SETUPS_MENU_TEXT = (
+        '🎯 *ستاپ‌های معاملاتی*\n\n'
+        'هر ستاپ (B1..B7 خرید، S1..S7 فروش) را جدا می‌توانید روشن یا خاموش کنید. '
+        'ستاپ خاموش‌شده دیگر هرگز به‌عنوان سیگنال ورود انتخاب نمی‌شود — این تنظیم '
+        'مستقل از تایم‌فریم و مستقل از «مدیریت روند معاملات» است.'
+    )
+    if cl in ('/setups_menu', '🎯 ستاپ\u200cهای معاملاتی'):
+        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
+    if cl.startswith('/toggle_setup_'):
+        code = cl.replace('/toggle_setup_', '').upper()
+        if code in ALL_SETUP_CODES:
+            disabled = set(s.get('disabled_setups') or [])
+            if code in disabled:
+                disabled.discard(code)
+            else:
+                disabled.add(code)
+            s['disabled_setups'] = sorted(disabled)
+            save_session(chat_id)
+        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
+    if cl == '/setups_enable_all':
+        s['disabled_setups'] = []
+        save_session(chat_id)
+        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
+    if cl == '/setups_disable_all':
+        s['disabled_setups'] = list(ALL_SETUP_CODES)
+        save_session(chat_id)
+        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
 
     if cl.startswith('/view_chart_'):
         sym = cl.replace('/view_chart_', '').upper()

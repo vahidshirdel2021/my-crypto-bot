@@ -153,6 +153,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🧭 مدیریت روند معاملات", "callback_data": "/trend_management"}],
+        [{"text": "🎯 ستاپ‌های معاملاتی", "callback_data": "/setups_menu"}],
         [{"text": "🔄 پیگیری پوزیشن‌ها", "callback_data": "/open_positions"},
          {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
         [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
@@ -166,6 +167,29 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         state = "روشن" if enabled else "خاموش"
         rows.append([{"text": "🧭 ردیابی معاملات", "callback_data": "/trade_tracking"}])
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
+    return {"inline_keyboard": rows}
+
+
+SETUP_NUMBERS = (1, 2, 3, 4, 5, 6, 7)
+
+
+def get_setups_keyboard(session=None):
+    s = session or {}
+    disabled = set(s.get('disabled_setups') or [])
+    rows = []
+    for n in SETUP_NUMBERS:
+        b_code, s_code = f"B{n}", f"S{n}"
+        b_on = b_code not in disabled
+        s_on = s_code not in disabled
+        rows.append([
+            {"text": f"{'🟢' if b_on else '🔴'} {b_code}", "callback_data": f"/toggle_setup_{b_code}"},
+            {"text": f"{'🟢' if s_on else '🔴'} {s_code}", "callback_data": f"/toggle_setup_{s_code}"},
+        ])
+    rows.append([
+        {"text": "✅ روشن کردن همه", "callback_data": "/setups_enable_all"},
+        {"text": "⛔ خاموش کردن همه", "callback_data": "/setups_disable_all"},
+    ])
+    rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
     return {"inline_keyboard": rows}
 
 
