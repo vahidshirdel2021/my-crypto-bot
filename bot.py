@@ -4608,19 +4608,24 @@ async def _send_periodic_heartbeat():
     price = latest_price('BTC')
     price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
     regime_by_tf = {}
+    heartbeat_keyboard = {"inline_keyboard": [[{"text": "🔄 نمایش پوزیشن‌ها", "callback_data": "/open_positions"}]]}
     for cid in due:
         sess = USER_SESSIONS.get(cid) or {}
         tf = sess.get('timeframe', '5min')
         if tf not in regime_by_tf:
             regime_by_tf[tf] = await get_global_market_regime(tf)
         regime_label = MARKET_REGIME_LABELS.get(regime_by_tf[tf], MARKET_REGIME_LABELS[None])
+        bal = exchange_balance(cid) if sess.get('trading_mode') == 'REAL' else sess.get('paper_balance', 0.0)
+        open_positions_count = len(sess.get('paper_positions', []) or [])
         message = (
             HEARTBEAT_TEXT + "\n\n"
             f"📊 وضعیت کلی بازار ( براساس داشبورد بازار ): {regime_label}\n"
-            f"💰 قیمت لحظه‌ای BTC: {price_txt}"
+            f"💰 قیمت لحظه‌ای BTC: {price_txt}\n\n"
+            f"💳 موجودی اکانت: `{bal:.2f} USDT`\n"
+            f"📌 تعداد پوزیشن‌های باز: `{open_positions_count}`"
         )
         try:
-            send_message(cid, message)
+            send_message(cid, message, heartbeat_keyboard)
             HEARTBEAT_LAST_SENT[cid] = now
         except Exception as exc:
             logger.warning('heartbeat send failed chat=%s: %s', cid, exc)
