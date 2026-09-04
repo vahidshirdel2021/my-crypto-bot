@@ -906,15 +906,37 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     require_reclaim = bool(cfg.get("require_reclaim_confirm", True))
     long_reclaimed = (not require_reclaim) or (close_now >= lo_level * (1 - tol))
 
-    # B1: سوییپ PDH/PWH سپس سوییپ PDL/PWL و بازگشت
+    # ------------------------------------------------------------------
+    # B1 (نسخه ارتقایافته): سوییپ PDH/PWH سپس سوییپ PDL/PWL، تشکیل سوئینگ حمایتی و بازگشت
+    # ------------------------------------------------------------------
     if first_hi is not None and first_lo is not None and first_hi < first_lo and bullish_confirm_now and long_reclaimed and recent_swing_lows:
+        # ۱. محاسبه عمیق‌ترین نفوذ زیر کف مرجع در طول سوییپ (شکار نقدینگی واقعی)
+        sweep_bars = period.loc[first_lo:idx_now]
+        deepest_low = _safe_float(sweep_bars["low"].min())
+        sweep_depth = (lo_level - deepest_low) if deepest_low < lo_level else 0.0
+        min_sweep_depth = atr_now * float(cfg.get("sweep_min_atr_ratio", 0.10))
+
+        # ۲. ارزیابی آخرین سوئینگ کف شکل‌گرفته
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
-        if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
-            sl = min(swing_price, lo_level) - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B1", "BUY", sl, hi_level, eq,
-                           f"سوییپ {label.split('/')[0]} سپس سوییپ {label.split('/')[1]} و بازگشت صعودی (ری‌کلیم تاییدشده)",
-                           len(lo_touch_idxs))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 4)
+
+        # سوئینگ کف باید یا بالای PDL تثبیت شده باشد یا با تلورانس بسیار جزئی در محدوده PDL باشد
+        swing_holds_support = swing_price >= lo_level * (1 - tol * 2)
+
+        # ۳. اطمینان از اینکه هنوز تا تارگت اول (EQ) فضای کافی R:R وجود دارد (عدم تعقیب قیمت در اوج)
+        has_room_to_eq = close_now < eq - (atr_now * 0.20)
+
+        if sweep_depth >= min_sweep_depth and is_fresh_swing and swing_holds_support and has_room_to_eq:
+            # حد ضرر ایمن: زیر سوئینگ تاییدشده یا عمیق‌ترین نقطه سوییپ
+            structural_base = min(swing_price, deepest_low, lo_level)
+            sl = structural_base - atr_now * cfg["sl_atr_buffer"]
+
+            add_candidate(
+                "B1", "BUY", sl, hi_level, eq,
+                f"سوییپ سقف سپس سوییپ کف ({sweep_depth:.5g} نفوذ) + تشکیل سوئینگ تثبیتی بالای {label.split('/')[1]} و تایید صعودی",
+                len(lo_touch_idxs)
+            )
 
     # B3: سوییپ مستقیم PDL/PWL بدون عبور قبلی از PDH/PWH
     # فیکس (آدیت شهریور ۱۴۰۵): علاوه بر ری‌کلیم عمومی، این کد مشخصاً به یک
@@ -925,57 +947,202 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     direct_confirm_body = float(cfg.get("direct_sweep_min_confirm_body_ratio", 0.35))
     b3_decisive_reclaim = close_now >= lo_level * (1 + direct_reclaim_margin)
     b3_strong_confirm = _safe_float(curr_row.get("body_ratio")) >= direct_confirm_body
-    if (first_lo is not None and (first_hi is None or first_hi > first_lo) and bullish_confirm_now
-            and b3_decisive_reclaim and b3_strong_confirm and recent_swing_lows):
+    if (first_lo is not None and (first_hi is None or first_hi > first_lo)
+            and bullish_confirm_now and b3_decisive_reclaim and b3_strong_confirm and recent_swing_lows):
+
+        # ۱. محاسبه عمق نفوذ زیر کف (حداقل شکار نقدینگی معتبر)
+        sweep_bars = period.loc[first_lo:idx_now]
+        deepest_low = _safe_float(sweep_bars["low"].min())
+        sweep_depth = (lo_level - deepest_low) if deepest_low < lo_level else 0.0
+        min_sweep_depth = atr_now * float(cfg.get("sweep_min_atr_ratio", 0.10))
+
+        # ۲. سرعت بازگشت (عدم ماندگاری طولانی زیر سطح - شرط کلیدی BOF)
+        bars_closed_below = sum(1 for i in sweep_bars.index if _safe_float(sweep_bars.at[i, "close"]) < lo_level)
+        fast_reversal = bars_closed_below <= int(cfg.get("max_bars_below_pdl", 3))
+
+        # ۳. ارزیابی سوئینگ کف و تازگی آن
         swing_idx = recent_swing_lows[-1]
         swing_price = _safe_float(d.at[swing_idx, "low"])
-        if swing_price <= lo_level * (1 + tol * 5) and idx_now - swing_idx <= lookback + 3:
-            sl = min(swing_price, lo_level) - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B3", "BUY", sl, hi_level, eq,
-                           f"سوییپ مستقیم {label.split('/')[1]} بدون عبور قبلی از {label.split('/')[0]} "
-                           f"(ری‌کلیم قاطع {direct_reclaim_margin*100:.2f}%+ و کندل تاییدی محکم)",
-                           len(lo_touch_idxs))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 3)
 
-    # B4: ری‌کلیم EQ پس از سوییپ PDL/PWL
-    if first_lo is not None:
-        eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_lo
-                          and _safe_float(d.at[i - 1, "close"]) < eq <= _safe_float(d.at[i, "close"])]
-        if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bullish_confirm_now:
-            swing_idx = recent_swing_lows[-1] if recent_swing_lows else None
-            swing_price = _safe_float(d.at[swing_idx, "low"]) if swing_idx is not None else eq
-            sl = min(swing_price, eq) - atr_now * cfg["sl_atr_buffer"]
-            add_candidate("B4", "BUY", sl, hi_level, None,
-                           "ری‌کلیم تاییدشده EQ به سمت بالا پس از سوییپ کف رنج",
-                           len(lo_touch_idxs))
+        # ۴. حفظ تناسب R:R تا خط میانی (ورود نباید بالای خط EQ باشد)
+        has_room_to_eq = close_now < eq - (atr_now * 0.20)
 
-    # B2: سوییپ PDH/PWH، پولبک مضاعف، سوئینگ (کف بالاتر) نزدیک مقاومت
+        if sweep_depth >= min_sweep_depth and fast_reversal and is_fresh_swing and has_room_to_eq:
+            # حد ضرر: پشت کمترین قیمت سوییپ‌شده (نوک ویک هانت) با بافر ATR
+            sl_anchor = min(swing_price, deepest_low)
+            sl = sl_anchor - atr_now * cfg["sl_atr_buffer"]
+
+            add_candidate(
+                "B3", "BUY", sl, hi_level, eq,
+                f"ستاپ BOF مستقیم: سوییپ کف {label.split('/')[1]} ({sweep_depth:.5g} نفوذ) + ری‌کلیم سریع ({bars_closed_below} کندل) با تاییدیه بدنه قوی",
+                len(lo_touch_idxs)
+            )
+
+    # ------------------------------------------------------------------
+    # B4 (نسخه ارتقایافته - ستاپ BPB روی EQ): شکست EQ به بالا + پولبک و تثبیت حمایتی روی EQ
+    # ------------------------------------------------------------------
+    if first_lo is not None and bullish_confirm_now:
+        # ۱. پیدا کردن اولین شکست پرقدرت EQ به سمت بالا بعد از سوییپ کف
+        eq_break_idxs = [
+            i for i in period.index
+            if i > first_lo and _safe_float(d.at[i - 1, "close"]) < eq and _safe_float(d.at[i, "close"]) > eq * (1 + tol)
+        ]
+
+        if eq_break_idxs:
+            first_eq_break = eq_break_idxs[0]
+            # بررسی رفتار قیمت پس از شکست EQ
+            post_break_bars = period.loc[first_eq_break:idx_now]
+
+            # سوئینگ‌های کفی که بعد از شکست EQ و روی/بالای EQ شکل گرفته‌اند
+            swings_on_eq = [
+                i for i in recent_swing_lows
+                if i >= first_eq_break and _safe_float(d.at[i, "low"]) >= eq * (1 - tol * 3)
+            ]
+
+            # آیا پولبک یا تستی به محدوده EQ خورده است؟ (Low در محدوده EQ اما Close بالای EQ)
+            retested_eq = any(
+                _safe_float(post_break_bars.at[i, "low"]) <= eq * (1 + tol * 2) and
+                _safe_float(post_break_bars.at[i, "close"]) >= eq * (1 - tol)
+                for i in post_break_bars.index
+            )
+
+            # بررسی تازگی و کلوز معتبر فعلی
+            is_above_eq = close_now > eq
+            # اطمینان از وجود فضای سود حداقل ۰.۴ ATR تا سقف PDH
+            has_room_to_hi = (hi_level - close_now) >= (atr_now * 0.40)
+
+            if (swings_on_eq or retested_eq) and is_above_eq and has_room_to_hi:
+                # محاسبه سطح سوئینگ حمایتی روی EQ
+                if swings_on_eq:
+                    swing_idx = swings_on_eq[-1]
+                    eq_swing_low = _safe_float(d.at[swing_idx, "low"])
+                else:
+                    eq_swing_low = _safe_float(post_break_bars["low"].min())
+
+                # حد ضرر طبق تصویر: دقیقاً پشت سوئینگ پولبک زیر EQ (نه زیر کف کل رنج!)
+                sl = min(eq_swing_low, eq) - atr_now * cfg["sl_atr_buffer_tight"]
+
+                # بررسی اینکه R:R حداقل معتبر باشد
+                if (close_now - sl) > 0:
+                    add_candidate(
+                        "B4", "BUY", sl, hi_level, None,
+                        f"ستاپ BPB روی EQ: ری‌کلیم و تثبیت حمایتی بالای EQ ({eq_swing_low:.5g}) پس از سوییپ کف و حرکت به سمت {label.split('/')[0]}",
+                        len(lo_touch_idxs)
+                    )
+
+    # ------------------------------------------------------------------
+    # B2 (نسخه ارتقایافته - ستاپ CPB): سوییپ سقف، پولبک مضاعف با Higher Low و حمله مجدد به PDH
+    # ------------------------------------------------------------------
     if first_hi is not None and bullish_confirm_now:
+        # سوئینگ‌های کفی که پس از سوییپ سقف تشکیل شده‌اند
         swings_after = [i for i in recent_swing_lows if i > first_hi]
-        if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "low"]) > _safe_float(d.at[swings_after[-2], "low"]):
-            if idx_now - swings_after[-1] <= lookback + 3:
-                swing_price = _safe_float(d.at[swings_after[-1], "low"])
-                sl = swing_price - atr_now * cfg["sl_atr_buffer"]
-                add_candidate("B2", "BUY", sl, hi_level, None,
-                               "سوییپ مقاومت + پولبک مضاعف با کف بالاتر (سوئینگ نزدیک مقاومت)",
-                               len(hi_touch_idxs))
+        if len(swings_after) >= 2:
+            pb1_idx = swings_after[-2]
+            pb2_idx = swings_after[-1]
+            pb1_low = _safe_float(d.at[pb1_idx, "low"])
+            pb2_low = _safe_float(d.at[pb2_idx, "low"])
 
-    # B5: بریک‌اند‌ریتست PDH/PWH (شکسته‌شدن مقاومت و تبدیل آن به حمایت)
+            # شرط CPB: کف دوم باید بالاتر از کف اول باشد (Higher Low)
+            is_higher_low = pb2_low > pb1_low
+            # کف دوم باید معتبر و تازه باشد
+            is_fresh_pb2 = (idx_now - pb2_idx <= lookback + 4)
+            # فاصله زمانی معنادار بین دو پولبک (جلوگیری از نویز دو کندل مجاور)
+            meaningful_spacing = (pb2_idx - pb1_idx) >= max(3, lookback)
+
+            # کف دوم باید در محدوده مناسب رنج باشد (بالای EQ یا با فاصله امن از PDL)
+            pb2_in_upper_half = pb2_low >= eq * (1 - tol)
+
+            # فضای سود تا سقف PDH (حداقل ۰.۴ ATR فضا تا سقف PDH برای توجیه ورود)
+            has_room_to_hi = (hi_level - close_now) >= (atr_now * 0.40)
+
+            if is_higher_low and is_fresh_pb2 and meaningful_spacing and pb2_in_upper_half and has_room_to_hi:
+                # حد ضرر ایمن: پشت سوئینگ کف دوم (Pullback 2)
+                sl = pb2_low - atr_now * cfg["sl_atr_buffer"]
+
+                # تارگت اول سقف PDH، تارگت اکستنشن به عنوان TP3 در build_trade_plan
+                add_candidate(
+                    "B2", "BUY", sl, hi_level, None,
+                    f"ستاپ CPB صعودی: سوییپ مقاومت + پولبک مضاعف با کف بالاتر ({pb2_low:.5g} > {pb1_low:.5g}) بالای EQ",
+                    len(hi_touch_idxs)
+                )
+
+    # ------------------------------------------------------------------
+    # B5 (نسخه ارتقایافته - ستاپ BPB روی مقاومت): شکست معتبر سقف + ریتست و حمایت روی PDH
+    # ------------------------------------------------------------------
     if hi_break_idxs and bullish_confirm_now:
         first_break = hi_break_idxs[0]
         after_break = period.loc[first_break:idx_now]
-        min_close_after = _safe_float(after_break["close"].min()) if len(after_break) else None
-        retested = any(_safe_float(after_break.at[i, "low"]) <= hi_level * (1 + tol) for i in after_break.index)
-        if retested and min_close_after is not None and min_close_after >= hi_level * (1 - tol):
-            sl = hi_level - atr_now * cfg["sl_atr_buffer_tight"]
-            tp_ext = hi_level + (hi_level - lo_level) * cfg["extension_atr_mult"]
-            add_candidate("B5", "BUY", sl, tp_ext, None,
-                           f"بریک‌اند‌ریتست {label.split('/')[0]} (تبدیل مقاومت شکسته به حمایت)",
-                           len(hi_touch_idxs))
 
-    # B6 حذف شد: این سناریو ذاتاً یک ورود میان‌رنج بدون لمس/سوییپ واقعی PDL بود
-    # («بدون لمس دقیق کف رنج») و مستقیماً ناقض قانون ممنوعیت ورود میان‌رنج است
-    # (درخواست کاربر، بند ۲). دروازه‌ی dead-zone بالا هم به‌صورت عمومی از تکرار
-    # این نوع ورود در سناریوهای آینده جلوگیری می‌کند.
+        # ۱. تایید اینکه شکست فرسایشی نشده و هیچ کلوزی دوباره به عمق رنج بازنگشته است
+        min_close_after = _safe_float(after_break["close"].min()) if len(after_break) else None
+        no_deep_reentry = min_close_after is not None and min_close_after >= hi_level * (1 - tol)
+
+        # ۲. تایید لمس یا تست محدوده سطح شکسته شده از بالا (Pullback to S/R Flip)
+        retested = any(
+            _safe_float(after_break.at[i, "low"]) <= hi_level * (1 + tol * 1.5) and
+            _safe_float(after_break.at[i, "close"]) >= hi_level * (1 - tol)
+            for i in after_break.index
+        )
+
+        # ۳. عدم ورود در قیمت‌های پرت و پرتاب‌شده (فاصله ورود تا سطح PDH نباید بیش از ۰.۸ ATR باشد)
+        dist_from_break = close_now - hi_level
+        not_chasing = 0 < dist_from_break <= (atr_now * float(cfg.get("max_retest_entry_dist_atr", 0.85)))
+
+        # ۴. پیدا کردن پایین‌ترین سوئینگ یا شدو در بازگشت به PDH برای لنگر کردن استاپ
+        swings_on_retest = [
+            i for i in recent_swing_lows
+            if i >= first_break and _safe_float(d.at[i, "low"]) >= hi_level * (1 - tol * 3)
+        ]
+
+        if retested and no_deep_reentry and not_chasing:
+            if swings_on_retest:
+                retest_low = _safe_float(d.at[swings_on_retest[-1], "low"])
+            else:
+                retest_low = _safe_float(after_break["low"].min())
+
+            # حد ضرر فشرده: زیر سوئینگ ریتست و پشت سطح PDH
+            sl_anchor = min(retest_low, hi_level)
+            sl = sl_anchor - atr_now * cfg["sl_atr_buffer_tight"]
+
+            # تارگت بر اساس اکستنشن رنج (حرکت پرقدرت ترند به سمت سطوح اکستنشن ۱، ۲ و ۳)
+            range_width = (hi_level - lo_level)
+            tp_ext = hi_level + range_width * cfg["extension_atr_mult"]
+
+            if (close_now - sl) > 0:
+                add_candidate(
+                    "B5", "BUY", sl, tp_ext, None,
+                    f"ستاپ BPB خارجی: شکست سقف {label.split('/')[0]} + ریتست موفق و تبدیل به حمایت (ورود در فاصله {dist_from_break:.5g})",
+                    len(hi_touch_idxs)
+                )
+
+    # ------------------------------------------------------------------
+    # B6 (نسخه بازنویسی‌شده و ارتقایافته): چرخش در ناحیه دیسکانت (زیر EQ) بدون لمس PDL
+    # ------------------------------------------------------------------
+    if bullish_confirm_now and recent_swing_lows:
+        # ۱. آخرین سوئینگ کف باید در نیمه پایینی (Discount) و بالاتر از PDL باشد
+        swing_idx = recent_swing_lows[-1]
+        swing_price = _safe_float(d.at[swing_idx, "low"])
+
+        range_height = (hi_level - lo_level)
+        # سوئینگ باید در ناحیه دیسکانت (بین ۲۵٪ تا ۴۵٪ از کف رنج) تشکیل شده باشد
+        is_in_discount = (swing_price > lo_level * (1 + tol * 2)) and (swing_price < eq - (range_height * 0.05))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 3)
+
+        # ۲. قیمت فعلی ورود باید هنوز زیر EQ باشد تا فضای سود تا TP1 حفظ شود
+        has_room_to_eq = (eq - close_now) >= (atr_now * 0.35)
+
+        # ۳. عدم شکست قبلی PDL در این لگ نزولی (هنوز کفی شکسته نشده)
+        if is_in_discount and is_fresh_swing and has_room_to_eq:
+            # حد ضرر ایمن: پشت سوئینگ کف دیسکانت
+            sl = swing_price - atr_now * cfg["sl_atr_buffer"]
+
+            # تارگت اول خط میانی EQ و تارگت دوم سقف رنج PDH
+            add_candidate(
+                "B6", "BUY", sl, hi_level, eq,
+                f"ستاپ دیسکانت: چرخش صعودی از عمق رنج ({swing_price:.5g}) بدون لمس {label.split('/')[1]} به سمت EQ و {label.split('/')[0]}",
+                len(lo_touch_idxs)
+            )
 
     # ------------------------------------------------------------------
     # سناریوهای فروش (SELL) — دقیقاً معکوس سناریوهای خرید
@@ -985,15 +1152,37 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # ری‌کلیم واقعی: کلوز کندل تاییدی باید دوباره پایین PDH/PWH برگشته باشد.
     short_reclaimed = (not require_reclaim) or (close_now <= hi_level * (1 + tol))
 
-    # S1: سوییپ PDL/PWL سپس سوییپ PDH/PWH و بازگشت
+    # ------------------------------------------------------------------
+    # S1 (نسخه ارتقایافته): سوییپ PDL/PWL سپس سوییپ PDH/PWH، تشکیل سوئینگ مقاومتی و بازگشت
+    # ------------------------------------------------------------------
     if first_lo is not None and first_hi is not None and first_lo < first_hi and bearish_confirm_now and short_reclaimed and recent_swing_highs:
+        # ۱. محاسبه بالاترین نفوذ بالای سقف مرجع در طول سوییپ
+        sweep_bars = period.loc[first_hi:idx_now]
+        highest_high = _safe_float(sweep_bars["high"].max())
+        sweep_depth = (highest_high - hi_level) if highest_high > hi_level else 0.0
+        min_sweep_depth = atr_now * float(cfg.get("sweep_min_atr_ratio", 0.10))
+
+        # ۲. ارزیابی آخرین سوئینگ سقف شکل‌گرفته
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
-        if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
-            sl = max(swing_price, hi_level) + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S1", "SELL", sl, lo_level, eq,
-                           f"سوییپ {label.split('/')[1]} سپس سوییپ {label.split('/')[0]} و بازگشت نزولی (ری‌کلیم تاییدشده)",
-                           len(hi_touch_idxs))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 4)
+
+        # سوئینگ سقف باید زیر PDH تثبیت شده باشد یا با تلورانس جزئی در محدوده PDH باشد
+        swing_holds_resistance = swing_price <= hi_level * (1 + tol * 2)
+
+        # ۳. اطمینان از اینکه هنوز تا تارگت اول (EQ) فضای کافی وجود دارد
+        has_room_to_eq = close_now > eq + (atr_now * 0.20)
+
+        if sweep_depth >= min_sweep_depth and is_fresh_swing and swing_holds_resistance and has_room_to_eq:
+            # حد ضرر ایمن: بالای سوئینگ تاییدشده یا بالاترین نقطه سوییپ
+            structural_base = max(swing_price, highest_high, hi_level)
+            sl = structural_base + atr_now * cfg["sl_atr_buffer"]
+
+            add_candidate(
+                "S1", "SELL", sl, lo_level, eq,
+                f"سوییپ کف سپس سوییپ سقف ({sweep_depth:.5g} نفوذ) + تشکیل سوئینگ تثبیتی زیر {label.split('/')[0]} و تایید نزولی",
+                len(hi_touch_idxs)
+            )
 
     # S3: سوییپ مستقیم PDH/PWH بدون عبور قبلی از PDL/PWL
     # همان فیکس B3 (بالا)، آینه‌ای برای سمت فروش. آدیت نشان داد S3 حتی
@@ -1005,54 +1194,200 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # واقعی داده (نه یک عدد PnL خاص) قضاوت شود.
     s3_decisive_reclaim = close_now <= hi_level * (1 - direct_reclaim_margin)
     s3_strong_confirm = _safe_float(curr_row.get("body_ratio")) >= direct_confirm_body
-    if (first_hi is not None and (first_lo is None or first_lo > first_hi) and bearish_confirm_now
-            and s3_decisive_reclaim and s3_strong_confirm and recent_swing_highs):
+    if (first_hi is not None and (first_lo is None or first_lo > first_hi)
+            and bearish_confirm_now and s3_decisive_reclaim and s3_strong_confirm and recent_swing_highs):
+
+        # ۱. محاسبه عمق نفوذ بالای سقف (شکار نقدینگی معتبر)
+        sweep_bars = period.loc[first_hi:idx_now]
+        highest_high = _safe_float(sweep_bars["high"].max())
+        sweep_depth = (highest_high - hi_level) if highest_high > hi_level else 0.0
+        min_sweep_depth = atr_now * float(cfg.get("sweep_min_atr_ratio", 0.10))
+
+        # ۲. سرعت بازگشت (عدم ماندگاری و تثبیت در بالای PDH)
+        bars_closed_above = sum(1 for i in sweep_bars.index if _safe_float(sweep_bars.at[i, "close"]) > hi_level)
+        fast_reversal = bars_closed_above <= int(cfg.get("max_bars_above_pdh", 3))
+
+        # ۳. ارزیابی سوئینگ سقف و تازگی آن
         swing_idx = recent_swing_highs[-1]
         swing_price = _safe_float(d.at[swing_idx, "high"])
-        if swing_price >= hi_level * (1 - tol * 5) and idx_now - swing_idx <= lookback + 3:
-            sl = max(swing_price, hi_level) + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S3", "SELL", sl, lo_level, eq,
-                           f"سوییپ مستقیم {label.split('/')[0]} بدون عبور قبلی از {label.split('/')[1]} "
-                           f"(ری‌کلیم قاطع {direct_reclaim_margin*100:.2f}%+ و کندل تاییدی محکم)",
-                           len(hi_touch_idxs))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 3)
 
-    # S4: ری‌کلیم EQ پس از سوییپ PDH/PWH
-    if first_hi is not None:
-        eq_cross_idxs = [i for i in period.index if i > start_idx and i > first_hi
-                          and _safe_float(d.at[i - 1, "close"]) > eq >= _safe_float(d.at[i, "close"])]
-        if eq_cross_idxs and eq_cross_idxs[-1] >= idx_now - 1 and bearish_confirm_now:
-            swing_idx = recent_swing_highs[-1] if recent_swing_highs else None
-            swing_price = _safe_float(d.at[swing_idx, "high"]) if swing_idx is not None else eq
-            sl = max(swing_price, eq) + atr_now * cfg["sl_atr_buffer"]
-            add_candidate("S4", "SELL", sl, lo_level, None,
-                           "ری‌کلیم تاییدشده EQ به سمت پایین پس از سوییپ سقف رنج",
-                           len(hi_touch_idxs))
+        # ۴. حفظ تناسب R:R تا خط میانی (ورود نباید زیر خط EQ باشد)
+        has_room_to_eq = close_now > eq + (atr_now * 0.20)
 
-    # S2: سوییپ PDL/PWL، پولبک مضاعف، سوئینگ (سقف پایین‌تر) نزدیک حمایت
+        if sweep_depth >= min_sweep_depth and fast_reversal and is_fresh_swing and has_room_to_eq:
+            # حد ضرر: بالای بیشترین قیمت سوییپ‌شده (نوک ویک هانت) با بافر ATR
+            sl_anchor = max(swing_price, highest_high)
+            sl = sl_anchor + atr_now * cfg["sl_atr_buffer"]
+
+            add_candidate(
+                "S3", "SELL", sl, lo_level, eq,
+                f"ستاپ BOF مستقیم: سوییپ سقف {label.split('/')[0]} ({sweep_depth:.5g} نفوذ) + ری‌کلیم سریع ({bars_closed_above} کندل) با تاییدیه بدنه قوی",
+                len(hi_touch_idxs)
+            )
+
+    # ------------------------------------------------------------------
+    # S4 (نسخه ارتقایافته - ستاپ BPB زیر EQ): شکست EQ به پایین + پولبک و تثبیت مقاومتی زیر EQ
+    # ------------------------------------------------------------------
+    if first_hi is not None and bearish_confirm_now:
+        # ۱. پیدا کردن اولین شکست پرقدرت EQ به سمت پایین بعد از سوییپ سقف
+        eq_break_idxs = [
+            i for i in period.index
+            if i > first_hi and _safe_float(d.at[i - 1, "close"]) > eq and _safe_float(d.at[i, "close"]) < eq * (1 - tol)
+        ]
+
+        if eq_break_idxs:
+            first_eq_break = eq_break_idxs[0]
+            # بررسی رفتار قیمت پس از شکست EQ
+            post_break_bars = period.loc[first_eq_break:idx_now]
+
+            # سوئینگ‌های سقفی که بعد از شکست EQ و زیر/روی EQ شکل گرفته‌اند
+            swings_on_eq = [
+                i for i in recent_swing_highs
+                if i >= first_eq_break and _safe_float(d.at[i, "high"]) <= eq * (1 + tol * 3)
+            ]
+
+            # آیا پولبک یا تستی به محدوده EQ خورده است؟ (High در محدوده EQ اما Close زیر EQ)
+            retested_eq = any(
+                _safe_float(post_break_bars.at[i, "high"]) >= eq * (1 - tol * 2) and
+                _safe_float(post_break_bars.at[i, "close"]) <= eq * (1 + tol)
+                for i in post_break_bars.index
+            )
+
+            # بررسی تثبیت زیر EQ
+            is_below_eq = close_now < eq
+            # اطمینان از وجود فضای سود حداقل ۰.۴ ATR تا کف PDL
+            has_room_to_lo = (close_now - lo_level) >= (atr_now * 0.40)
+
+            if (swings_on_eq or retested_eq) and is_below_eq and has_room_to_lo:
+                # محاسبه سطح سوئینگ مقاومتی روی EQ
+                if swings_on_eq:
+                    swing_idx = swings_on_eq[-1]
+                    eq_swing_high = _safe_float(d.at[swing_idx, "high"])
+                else:
+                    eq_swing_high = _safe_float(post_break_bars["high"].max())
+
+                # حد ضرر طبق تصویر: دقیقاً پشت سوئینگ پولبک بالای EQ (نه بالای سقف کل رنج!)
+                sl = max(eq_swing_high, eq) + atr_now * cfg["sl_atr_buffer_tight"]
+
+                # بررسی اینکه R:R حداقل معتبر باشد
+                if (sl - close_now) > 0:
+                    add_candidate(
+                        "S4", "SELL", sl, lo_level, None,
+                        f"ستاپ BPB زیر EQ: ری‌کلیم و تثبیت مقاومتی زیر EQ ({eq_swing_high:.5g}) پس از سوییپ سقف و حرکت به سمت {label.split('/')[1]}",
+                        len(hi_touch_idxs)
+                    )
+
+    # ------------------------------------------------------------------
+    # S2 (نسخه ارتقایافته - ستاپ CPB): سوییپ کف، پولبک مضاعف با Lower High و حمله مجدد به PDL
+    # ------------------------------------------------------------------
     if first_lo is not None and bearish_confirm_now:
+        # سوئینگ‌های سقفی که پس از سوییپ کف تشکیل شده‌اند
         swings_after = [i for i in recent_swing_highs if i > first_lo]
-        if len(swings_after) >= 2 and _safe_float(d.at[swings_after[-1], "high"]) < _safe_float(d.at[swings_after[-2], "high"]):
-            if idx_now - swings_after[-1] <= lookback + 3:
-                swing_price = _safe_float(d.at[swings_after[-1], "high"])
-                sl = swing_price + atr_now * cfg["sl_atr_buffer"]
-                add_candidate("S2", "SELL", sl, lo_level, None,
-                               "سوییپ حمایت + پولبک مضاعف با سقف پایین‌تر (سوئینگ نزدیک حمایت)",
-                               len(lo_touch_idxs))
+        if len(swings_after) >= 2:
+            pb1_idx = swings_after[-2]
+            pb2_idx = swings_after[-1]
+            pb1_high = _safe_float(d.at[pb1_idx, "high"])
+            pb2_high = _safe_float(d.at[pb2_idx, "high"])
 
-    # S5: بریک‌اند‌ریتست PDL/PWL (شکسته‌شدن حمایت و تبدیل آن به مقاومت)
+            # شرط CPB: سقف دوم باید پایین‌تر از سقف اول باشد (Lower High)
+            is_lower_high = pb2_high < pb1_high
+            # سقف دوم باید معتبر و تازه باشد
+            is_fresh_pb2 = (idx_now - pb2_idx <= lookback + 4)
+            # فاصله زمانی معنادار بین دو پولبک (جلوگیری از نویز)
+            meaningful_spacing = (pb2_idx - pb1_idx) >= max(3, lookback)
+
+            # سقف دوم باید در محدوده مناسب رنج باشد (پایین‌تر از EQ یا متمایل به PDL)
+            pb2_in_lower_half = pb2_high <= eq * (1 + tol)
+
+            # فضای سود تا کف PDL (حداقل ۰.۴ ATR فضا تا کف PDL)
+            has_room_to_lo = (close_now - lo_level) >= (atr_now * 0.40)
+
+            if is_lower_high and is_fresh_pb2 and meaningful_spacing and pb2_in_lower_half and has_room_to_lo:
+                # حد ضرر ایمن: پشت سوئینگ سقف دوم (Pullback 2)
+                sl = pb2_high + atr_now * cfg["sl_atr_buffer"]
+
+                add_candidate(
+                    "S2", "SELL", sl, lo_level, None,
+                    f"ستاپ CPB نزولی: سوییپ حمایت + پولبک مضاعف با سقف پایین‌تر ({pb2_high:.5g} < {pb1_high:.5g}) زیر EQ",
+                    len(lo_touch_idxs)
+                )
+
+    # ------------------------------------------------------------------
+    # S5 (نسخه ارتقایافته - ستاپ BPB روی حمایت): شکست معتبر کف + ریتست و مقاومت زیر PDL
+    # ------------------------------------------------------------------
     if lo_break_idxs and bearish_confirm_now:
         first_break = lo_break_idxs[0]
         after_break = period.loc[first_break:idx_now]
-        max_close_after = _safe_float(after_break["close"].max()) if len(after_break) else None
-        retested = any(_safe_float(after_break.at[i, "high"]) >= lo_level * (1 - tol) for i in after_break.index)
-        if retested and max_close_after is not None and max_close_after <= lo_level * (1 + tol):
-            sl = lo_level + atr_now * cfg["sl_atr_buffer_tight"]
-            tp_ext = lo_level - (hi_level - lo_level) * cfg["extension_atr_mult"]
-            add_candidate("S5", "SELL", sl, tp_ext, None,
-                           f"بریک‌اند‌ریتست {label.split('/')[1]} (تبدیل حمایت شکسته به مقاومت)",
-                           len(lo_touch_idxs))
 
-    # S6 حذف شد: معکوس B6، همان دلیل بالا (ورود میان‌رنج بدون لمس/سوییپ واقعی PDH).
+        # ۱. تایید اینکه هیچ کلوزی دوباره به عمق رنج بازنگشته است
+        max_close_after = _safe_float(after_break["close"].max()) if len(after_break) else None
+        no_deep_reentry = max_close_after is not None and max_close_after <= lo_level * (1 + tol)
+
+        # ۲. تایید لمس یا تست محدوده سطح شکسته شده از پایین (Pullback to S/R Flip)
+        retested = any(
+            _safe_float(after_break.at[i, "high"]) >= lo_level * (1 - tol * 1.5) and
+            _safe_float(after_break.at[i, "close"]) <= lo_level * (1 + tol)
+            for i in after_break.index
+        )
+
+        # ۳. عدم ورود در قیمت‌های پرت و پرتاب‌شده به پایین
+        dist_from_break = lo_level - close_now
+        not_chasing = 0 < dist_from_break <= (atr_now * float(cfg.get("max_retest_entry_dist_atr", 0.85)))
+
+        # ۴. پیدا کردن بالاترین سوئینگ یا شدو در بازگشت به PDL برای لنگر کردن استاپ
+        swings_on_retest = [
+            i for i in recent_swing_highs
+            if i >= first_break and _safe_float(d.at[i, "high"]) <= lo_level * (1 + tol * 3)
+        ]
+
+        if retested and no_deep_reentry and not_chasing:
+            if swings_on_retest:
+                retest_high = _safe_float(d.at[swings_on_retest[-1], "high"])
+            else:
+                retest_high = _safe_float(after_break["high"].max())
+
+            # حد ضرر فشرده: بالای سوئینگ ریتست و پشت سطح PDL
+            sl_anchor = max(retest_high, lo_level)
+            sl = sl_anchor + atr_now * cfg["sl_atr_buffer_tight"]
+
+            # تارگت اکستنشن به سمت پایین
+            range_width = (hi_level - lo_level)
+            tp_ext = lo_level - range_width * cfg["extension_atr_mult"]
+
+            if (sl - close_now) > 0:
+                add_candidate(
+                    "S5", "SELL", sl, tp_ext, None,
+                    f"ستاپ BPB خارجی: شکست کف {label.split('/')[1]} + ریتست موفق و تبدیل به مقاومت (ورود در فاصله {dist_from_break:.5g})",
+                    len(lo_touch_idxs)
+                )
+
+    # ------------------------------------------------------------------
+    # S6 (نسخه بازنویسی‌شده و ارتقایافته): چرخش در ناحیه پریمیوم (بالای EQ) بدون لمس PDH
+    # ------------------------------------------------------------------
+    if bearish_confirm_now and recent_swing_highs:
+        # ۱. آخرین سوئینگ سقف باید در نیمه بالایی (Premium) و پایین‌تر از PDH باشد
+        swing_idx = recent_swing_highs[-1]
+        swing_price = _safe_float(d.at[swing_idx, "high"])
+
+        range_height = (hi_level - lo_level)
+        # سوئینگ باید در ناحیه پریمیوم (بین ۵۵٪ تا ۷۵٪ از کف رنج) تشکیل شده باشد
+        is_in_premium = (swing_price < hi_level * (1 - tol * 2)) and (swing_price > eq + (range_height * 0.05))
+        is_fresh_swing = (idx_now - swing_idx <= lookback + 3)
+
+        # ۲. قیمت فعلی ورود باید هنوز بالای EQ باشد
+        has_room_to_eq = (close_now - eq) >= (atr_now * 0.35)
+
+        if is_in_premium and is_fresh_swing and has_room_to_eq:
+            # حد ضرر ایمن: بالای سوئینگ سقف پریمیوم
+            sl = swing_price + atr_now * cfg["sl_atr_buffer"]
+
+            # تارگت اول خط میانی EQ و تارگت دوم کف رنج PDL
+            add_candidate(
+                "S6", "SELL", sl, lo_level, eq,
+                f"ستاپ پریمیوم: چرخش نزولی از اوج رنج ({swing_price:.5g}) بدون لمس {label.split('/')[0]} به سمت EQ و {label.split('/')[1]}",
+                len(hi_touch_idxs)
+            )
 
     # ------------------------------------------------------------------
     # B7/S7: ادامه‌ی مومنتوم پامپ/دامپ — بدون نیاز به ری‌تست سطح شکسته
@@ -1076,57 +1411,92 @@ def evaluate_scenarios(df: pd.DataFrame, timeframe: str, strategy_config: dict =
     # شدن ~۹۰٪ کاندیدهای B7 به‌خاطر RR ناکافی (میانه‌ی RR رد‌شده تنها ۰.۶R) شده
     # بود. اکنون ریسک هرگز از این سقف بیشتر نمی‌شود (نزدیک‌ترین/تنگ‌ترین سطح
     # انتخاب می‌شود)، و TP هم کمی افزایش یافته تا فضای پاداش واقعی‌تر باشد.
-    momentum_dist_atr_mult = float(cfg.get("momentum_dist_atr_mult", 1.5))
-    momentum_dist_pct = float(cfg.get("momentum_dist_pct", 0.012))
-    momentum_tp_atr_mult = float(cfg.get("momentum_tp_atr_mult", 2.5))
-    momentum_sl_max_atr_mult = float(cfg.get("momentum_sl_max_atr_mult", 1.2))
-    momentum_pullback_max_body = float(cfg.get("momentum_pullback_max_body_ratio", 0.35))
-    momentum_rsi_high = float(cfg.get("momentum_rsi_exhaustion_high", 78.0))
-    momentum_rsi_low = float(cfg.get("momentum_rsi_exhaustion_low", 22.0))
     prev_row = d.loc[idx_now - 1] if (idx_now - 1) in d.index else None
     ema50_now = _safe_float(curr_row.get("ema50"), close_now)
     rsi_now = _safe_float(curr_row.get("rsi"), 50.0)
 
-    if prev_row is not None and bool(cfg.get("b7_s7_enabled", False)):
-        dist_above_hi = close_now - hi_level
-        min_dist_up = max(atr_now * momentum_dist_atr_mult, hi_level * momentum_dist_pct)
-        # فیکس (آدیت شهریور ۱۴۰۵): «پولبک کوتاه» قبلاً فقط یعنی کندل قبلی
-        # قرمز بود — یک کندل بازگشتی قوی و پرحجم هم این شرط را رد می‌کرد و
-        # دقیقاً همان لحظه‌ای بود که مومنتوم واقعاً داشت برمی‌گشت، نه مکث
-        # می‌کرد. حالا پولبک باید هم قرمز باشد هم کم‌بدنه (مکث واقعی).
-        prev_pullback_down = (
-            _safe_float(prev_row.get("close")) < _safe_float(prev_row.get("open"))
-            and _safe_float(prev_row.get("body_ratio")) <= momentum_pullback_max_body
-        )
-        not_exhausted_up = rsi_now <= momentum_rsi_high
-        if (dist_above_hi >= min_dist_up and bullish_confirm_now
-                and prev_pullback_down and close_now > ema50_now and not_exhausted_up):
-            swing_sl = _safe_float(prev_row.get("low")) - atr_now * cfg["sl_atr_buffer"]
-            atr_capped_sl = close_now - atr_now * momentum_sl_max_atr_mult
-            sl = max(swing_sl, atr_capped_sl)  # تنگ‌ترین (کم‌ریسک‌ترین) دو گزینه
-            tp = close_now + atr_now * momentum_tp_atr_mult
-            add_candidate("B7", "BUY", sl, tp, None,
-                           f"ادامه‌ی مومنتوم صعودی؛ فاصله {dist_above_hi:.6g} از {label.split('/')[0]} "
-                           f"بدون ری‌تست + پولبک کم‌بدنه (RSI={rsi_now:.0f}، هنوز ته‌کشیده نیست)",
-                           0)
+    # ------------------------------------------------------------------
+    # B7 (نسخه ارتقایافته - ستاپ BP در روند بر مبنای اکستنشن ساختاری)
+    # ------------------------------------------------------------------
+    range_width = (hi_level - lo_level)
+    ext_level_1_up = hi_level + (range_width * cfg.get("extension_atr_mult", 0.50))
+    ext_level_2_up = hi_level + range_width
 
-        dist_below_lo = lo_level - close_now
-        min_dist_down = max(atr_now * momentum_dist_atr_mult, lo_level * momentum_dist_pct)
-        prev_pullback_up = (
-            _safe_float(prev_row.get("close")) > _safe_float(prev_row.get("open"))
-            and _safe_float(prev_row.get("body_ratio")) <= momentum_pullback_max_body
+    if prev_row is not None:
+        # ۱. قیمت از PDH فاصله گرفته ولی هنوز به سقف اکستنشن اول یا دوم نرسیده و فضا دارد
+        dist_above_hi = close_now - hi_level
+        min_break_dist = max(atr_now * 1.0, hi_level * 0.008)
+        has_extension_room = (ext_level_1_up - close_now) >= (atr_now * 0.50)
+
+        # ۲. بررسی پولبک کم‌عمق در روند (کندل قبلی قرمز و کم‌بدنه / مکث واقعی)
+        prev_is_pullback = (
+            _safe_float(prev_row.get("close")) < _safe_float(prev_row.get("open")) and
+            _safe_float(prev_row.get("body_ratio")) <= float(cfg.get("momentum_pullback_max_body_ratio", 0.35))
         )
-        not_exhausted_down = rsi_now >= momentum_rsi_low
-        if (dist_below_lo >= min_dist_down and bearish_confirm_now
-                and prev_pullback_up and close_now < ema50_now and not_exhausted_down):
-            swing_sl = _safe_float(prev_row.get("high")) + atr_now * cfg["sl_atr_buffer"]
-            atr_capped_sl = close_now + atr_now * momentum_sl_max_atr_mult
-            sl = min(swing_sl, atr_capped_sl)  # تنگ‌ترین (کم‌ریسک‌ترین) دو گزینه
-            tp = close_now - atr_now * momentum_tp_atr_mult
-            add_candidate("S7", "SELL", sl, tp, None,
-                           f"ادامه‌ی مومنتوم نزولی؛ فاصله {dist_below_lo:.6g} از {label.split('/')[1]} "
-                           f"بدون ری‌تست + پولبک کم‌بدنه (RSI={rsi_now:.0f}، هنوز ته‌کشیده نیست)",
-                           0)
+
+        # ۳. عدم اشباع شدید خرید و هم‌جهتی کامل با EMA50
+        not_exhausted_up = rsi_now <= float(cfg.get("momentum_rsi_exhaustion_high", 78.0))
+        trend_aligned = close_now > ema50_now
+
+        if (dist_above_hi >= min_break_dist and bullish_confirm_now and
+                prev_is_pullback and trend_aligned and not_exhausted_up and has_extension_room):
+
+            # حد ضرر: پشت کف کندل پولبک با سقف ایمنی ATR
+            pullback_low = _safe_float(prev_row.get("low"))
+            sl_by_pullback = pullback_low - (atr_now * cfg["sl_atr_buffer_tight"])
+            sl_by_cap = close_now - (atr_now * float(cfg.get("momentum_sl_max_atr_mult", 1.2)))
+            sl = max(sl_by_pullback, sl_by_cap)
+
+            # تارگت ساختاری: سطح اول اکستنشن رنج (TP1) و سطح دوم اکستنشن (TP2)
+            tp = ext_level_1_up
+
+            if (close_now - sl) > 0 and (tp - close_now) / (close_now - sl) >= float(cfg.get("min_rr", 1.10)):
+                add_candidate(
+                    "B7", "BUY", sl, tp, None,
+                    f"ستاپ BP مومنتوم: پولبک کم‌بدنه پس از شکست {label.split('/')[0]} و هدف‌گیری اکستنشن رنج ({tp:.5g})",
+                    0
+                )
+
+    # ------------------------------------------------------------------
+    # S7 (نسخه ارتقایافته - ستاپ BP در روند نزولی بر مبنای اکستنشن ساختاری)
+    # ------------------------------------------------------------------
+    ext_level_1_down = lo_level - (range_width * cfg.get("extension_atr_mult", 0.50))
+    ext_level_2_down = lo_level - range_width
+
+    if prev_row is not None:
+        # ۱. قیمت از PDL فاصله گرفته ولی هنوز به کف اکستنشن اول نرسیده است
+        dist_below_lo = lo_level - close_now
+        min_break_dist = max(atr_now * 1.0, lo_level * 0.008)
+        has_extension_room = (close_now - ext_level_1_down) >= (atr_now * 0.50)
+
+        # ۲. بررسی پولبک کم‌عمق در روند نزولی (کندل قبلی سبز و کم‌بدنه / مکث روند)
+        prev_is_pullback = (
+            _safe_float(prev_row.get("close")) > _safe_float(prev_row.get("open")) and
+            _safe_float(prev_row.get("body_ratio")) <= float(cfg.get("momentum_pullback_max_body_ratio", 0.35))
+        )
+
+        # ۳. عدم اشباع شدید فروش و هم‌جهتی کامل با روند نزولی EMA50
+        not_exhausted_down = rsi_now >= float(cfg.get("momentum_rsi_exhaustion_low", 22.0))
+        trend_aligned = close_now < ema50_now
+
+        if (dist_below_lo >= min_break_dist and bearish_confirm_now and
+                prev_is_pullback and trend_aligned and not_exhausted_down and has_extension_room):
+
+            # حد ضرر: پشت سقف کندل پولبک با سقف ایمنی ATR
+            pullback_high = _safe_float(prev_row.get("high"))
+            sl_by_pullback = pullback_high + (atr_now * cfg["sl_atr_buffer_tight"])
+            sl_by_cap = close_now + (atr_now * float(cfg.get("momentum_sl_max_atr_mult", 1.2)))
+            sl = min(sl_by_pullback, sl_by_cap)
+
+            # تارگت ساختاری: سطح اول اکستنشن پایین رنج (TP1)
+            tp = ext_level_1_down
+
+            if (sl - close_now) > 0 and (close_now - tp) / (sl - close_now) >= float(cfg.get("min_rr", 1.10)):
+                add_candidate(
+                    "S7", "SELL", sl, tp, None,
+                    f"ستاپ BP مومنتوم: پولبک کم‌بدنه پس از شکست {label.split('/')[1]} و هدف‌گیری اکستنشن رنج ({tp:.5g})",
+                    0
+                )
 
     # --- فیلتر ستاپ‌های خاموش‌شده‌ی دستی (منوی «ستاپ‌های معاملاتی») ---
     # این فیلتر بعد از تولید همه‌ی کاندیدها و قبل از انتخاب بهترین اعمال
