@@ -43,8 +43,6 @@ from ui import (
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
-    get_trend_management_keyboard,
-    get_setups_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -2615,7 +2613,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         parts = ', '.join(f"{pc['tier']}: {pc['pnl_net_usdt']:+.2f} USDT" for pc in pos['partial_closes'])
         partials_line = f'\n• پله‌های قبلی: `{parts}`'
     total_pnl = float(pos['pnl_usdt'])
-    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کل معامله{est}: `{total_pnl:+.2f} USDT`{partials_line}{fee_line}{platform_line}\n• علت: `{reason}`")
+    setup_line = f"\n• ستاپ: `{pos.get('scenario_code')}`" if pos.get('scenario_code') else ''
+    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`{setup_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کل معامله{est}: `{total_pnl:+.2f} USDT`{partials_line}{fee_line}{platform_line}\n• علت: `{reason}`")
     return True
 
 
@@ -2748,7 +2747,8 @@ def reconcile_real(chat_id):
             cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
             s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+cooldown_len
             audit_event(chat_id, p.get('trade_id') or new_trade_id(chat_id, sym), 'position_closed', {'close_price': p.get('close_price'), 'pnl_usdt': p.get('pnl_usdt'), 'reason': p.get('close_reason'), 'duration_seconds': p.get('duration_seconds'), 'realized_r': p.get('realized_r'), 'mfe_usdt': p.get('mfe_usdt',0.0), 'mae_usdt': p.get('mae_usdt',0.0), 'external': True})
-            send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
+            setup_line = f"\n• ستاپ: `{p.get('scenario_code')}`" if p.get('scenario_code') else ''
+            send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.{setup_line}\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
     s['last_reconcile']=time.time(); save_session(chat_id); return True
 
 
@@ -4093,96 +4093,6 @@ def process_command(cmd,chat_id,message_id=None):
         label,score,rr,risk=apply_user_profile(s,profile); save_session(chat_id)
         edit_page(chat_id,f'🟢 *پروفایل {label} فعال شد.*',get_params_menu_keyboard(s),message_id); return
 
-    TF_LABELS = {'5min': '۵ دقیقه', '15min': '۱۵ دقیقه', '1hour': '۱ ساعته', '4hour': '۴ ساعته'}
-    if cl in ('/trend_management','🧭 مدیریت روند معاملات'):
-        view_tf = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
-        s['trend_mgmt_view_tf'] = view_tf
-        save_session(chat_id)
-        edit_page(chat_id,
-            f'🧭 *مدیریت روند معاملات — تایم‌فریم {TF_LABELS.get(view_tf, view_tf)}*\n\n'
-            'این تنظیمات مستقل برای هر تایم‌فریم است. با دکمه‌های زیر می‌توانید '
-            'تایم‌فریمی که می‌خواهید تنظیماتش را ببینید/تغییر دهید انتخاب کنید '
-            '(بدون این‌که تایم‌فریم فعلی اسکن ربات عوض شود).\n\n'
-            'پیش‌فرض طبق تشخیص خودکار استراتژی است:\n'
-            '📉 روند نزولی قطعی → خرید بسته\n'
-            '📈 روند صعودی قطعی → فروش بسته\n'
-            '➡️ رنج → هر دو جهت با حساسیت بالا باز\n\n'
-            'هرکدام را می‌توانید دستی تغییر دهید:',
-            get_trend_management_keyboard(s), message_id)
-        return
-    if cl.startswith('/tm_tf_'):
-        tf_key = cl.replace('/tm_tf_', '')
-        if tf_key in SUPPORTED_TRADING_TIMEFRAMES:
-            s['trend_mgmt_view_tf'] = tf_key
-            save_session(chat_id)
-            edit_page(chat_id, f'🧭 *مدیریت روند معاملات — تایم‌فریم {TF_LABELS.get(tf_key, tf_key)}*', get_trend_management_keyboard(s), message_id)
-        return
-    if cl == '/toggle_trend_buy_bearish':
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['allow_buy_in_bearish'] = not bool(tm['allow_buy_in_bearish'])
-        save_session(chat_id)
-        edit_page(chat_id, f"🛒 خرید در روند نزولی قطعی ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن شد' if tm['allow_buy_in_bearish'] else '🔴 خاموش شد (پیش‌فرض استراتژی)'}", get_trend_management_keyboard(s), message_id); return
-    if cl == '/toggle_trend_sell_bullish':
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['allow_sell_in_bullish'] = not bool(tm['allow_sell_in_bullish'])
-        save_session(chat_id)
-        edit_page(chat_id, f"📤 فروش در روند صعودی قطعی ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن شد' if tm['allow_sell_in_bullish'] else '🔴 خاموش شد (پیش‌فرض استراتژی)'}", get_trend_management_keyboard(s), message_id); return
-    if cl == '/toggle_trend_buy_range':
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['allow_buy_in_range'] = not bool(tm['allow_buy_in_range'])
-        save_session(chat_id)
-        edit_page(chat_id, f"🛒 خرید در بازار رنج ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن' if tm['allow_buy_in_range'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
-    if cl == '/toggle_trend_sell_range':
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['allow_sell_in_range'] = not bool(tm['allow_sell_in_range'])
-        save_session(chat_id)
-        edit_page(chat_id, f"📤 فروش در بازار رنج ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن' if tm['allow_sell_in_range'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
-    if cl == '/toggle_b7s7':
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['b7_s7_enabled'] = not bool(tm['b7_s7_enabled'])
-        save_session(chat_id)
-        edit_page(chat_id, f"⚙️ حالت B7/S7 ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 فعال شد' if tm['b7_s7_enabled'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
-    if cl in ('/qp_conservative','/qp_balanced','/qp_opportunity'):
-        profile={'/qp_conservative':'conservative','/qp_balanced':'balanced','/qp_opportunity':'opportunity'}[cl]
-        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
-        tm['quality_profile'] = profile
-        save_session(chat_id)
-        label = {'conservative':'کیفیت بالاتر (سیگنال کمتر)','balanced':'حالت پیش‌فرض (متعادل)','opportunity':'کیفیت پایین‌تر (سیگنال بیشتر)'}[profile]
-        edit_page(chat_id,f"🟢 *کیفیت معاملات ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}) روی «{label}» تنظیم شد.*",get_trend_management_keyboard(s),message_id); return
-    if cl == '/trend_mgmt_reset':
-        view_tf = s.get('trend_mgmt_view_tf') if s.get('trend_mgmt_view_tf') in SUPPORTED_TRADING_TIMEFRAMES else s.get('timeframe', '5min')
-        s.setdefault('trend_mgmt', {})[view_tf] = dict(TREND_MGMT_DEFAULTS)
-        save_session(chat_id)
-        edit_page(chat_id,f'♻️ *تنظیمات «مدیریت روند معاملات» برای تایم‌فریم {TF_LABELS.get(view_tf, view_tf)} به پیش‌فرض استراتژی بازگشت.*',get_trend_management_keyboard(s),message_id); return
-
-    SETUPS_MENU_TEXT = (
-        '🎯 *ستاپ‌های معاملاتی*\n\n'
-        'هر ستاپ (B1..B7 خرید، S1..S7 فروش) را جدا می‌توانید روشن یا خاموش کنید. '
-        'ستاپ خاموش‌شده دیگر هرگز به‌عنوان سیگنال ورود انتخاب نمی‌شود — این تنظیم '
-        'مستقل از تایم‌فریم و مستقل از «مدیریت روند معاملات» است.'
-    )
-    if cl in ('/setups_menu', '🎯 ستاپ\u200cهای معاملاتی'):
-        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
-    if cl.startswith('/toggle_setup_'):
-        code = cl.replace('/toggle_setup_', '').upper()
-        if code in ALL_SETUP_CODES:
-            disabled = set(s.get('disabled_setups') or [])
-            if code in disabled:
-                disabled.discard(code)
-            else:
-                disabled.add(code)
-            s['disabled_setups'] = sorted(disabled)
-            save_session(chat_id)
-        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
-    if cl == '/setups_enable_all':
-        s['disabled_setups'] = []
-        save_session(chat_id)
-        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
-    if cl == '/setups_disable_all':
-        s['disabled_setups'] = list(ALL_SETUP_CODES)
-        save_session(chat_id)
-        edit_page(chat_id, SETUPS_MENU_TEXT, get_setups_keyboard(s), message_id); return
-
     if cl.startswith('/view_chart_'):
         sym = cl.replace('/view_chart_', '').upper()
         pos = next((p for p in s.get('paper_positions', []) if p['symbol'] == sym), None)
@@ -4416,6 +4326,7 @@ def handle_text(chat_id,text):
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', 'معامله دستی':'/manual_trade',
+        '🟢 اسکن بازار فعال':'/stop_scan', '🔴 اسکن بازار خاموش':'/start_scan',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
@@ -4594,6 +4505,23 @@ MARKET_REGIME_LABELS = {
 }
 
 
+def _live_open_positions_pnl(chat_id, sess):
+    """مجموع سود/زیان لحظه‌ای (شناور) تمام پوزیشن‌های باز یک کاربر."""
+    total = 0.0
+    for p in (sess.get('paper_positions') or []):
+        try:
+            symbol = p['symbol']
+            live = exchange_latest_price(chat_id, symbol) if p.get('is_real') else latest_price(symbol)
+            live = float(live or p.get('last_price') or p.get('entry_price') or 0)
+            entry = float(p.get('entry_price') or live or 0)
+            amount = abs(float(p.get('amount') or 0))
+            pnl = (live - entry) * amount if side_long(p['side']) else (entry - live) * amount
+            total += pnl
+        except Exception as exc:
+            logger.debug('heartbeat pnl calc failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
+    return total
+
+
 async def _send_periodic_heartbeat():
     now = time.time()
     due = []
@@ -4617,12 +4545,16 @@ async def _send_periodic_heartbeat():
         regime_label = MARKET_REGIME_LABELS.get(regime_by_tf[tf], MARKET_REGIME_LABELS[None])
         bal = exchange_balance(cid) if sess.get('trading_mode') == 'REAL' else sess.get('paper_balance', 0.0)
         open_positions_count = len(sess.get('paper_positions', []) or [])
+        pnl_line = ''
+        if open_positions_count:
+            live_pnl = _live_open_positions_pnl(cid, sess)
+            pnl_line = f"\n📈 سود/زیان لحظه‌ای پوزیشن‌های باز: `{live_pnl:+.2f} USDT`"
         message = (
             HEARTBEAT_TEXT + "\n\n"
             f"📊 وضعیت کلی بازار ( براساس داشبورد بازار ): {regime_label}\n"
             f"💰 قیمت لحظه‌ای BTC: {price_txt}\n\n"
             f"💳 موجودی اکانت: `{bal:.2f} USDT`\n"
-            f"📌 تعداد پوزیشن‌های باز: `{open_positions_count}`"
+            f"📌 تعداد پوزیشن‌های باز: `{open_positions_count}`{pnl_line}"
         )
         try:
             send_message(cid, message, heartbeat_keyboard)
