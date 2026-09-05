@@ -86,13 +86,17 @@ ENGINE_DEFAULTS = {
         "B7": 55, "S7": 55,
     },
 
-    # --- وزن بونوس‌ها (جمع حداکثر = ۱۰+۵+۵+۵+۵ = ۳۰) ---
+    # --- وزن بونوس‌ها (جمع حداکثر = ۱۰+۵+۵+۵+۵+۸ = ۳۸) ---
     "bonus_weights": {
         "volume": 10.0,
         "candle_body": 5.0,
         "swing_clarity": 5.0,
         "rsi_alignment": 5.0,
         "trend_alignment": 5.0,
+        # نسخه سبک CPDE (موتور تشخیص الگوی کندلی) — فقط ۲ الگوی پرکاربرد
+        # (پوشا/Engulfing و پین‌بار/Pin Bar) روی کندل تاییدی فعلی، صرفاً
+        # به‌عنوان بونوس امتیازدهی سناریوهای موجود، نه یک موتور سیگنال مستقل.
+        "candlestick_pattern": 8.0,
     },
     # --- جریمه سابقه فیک‌اوت (پروکسی: تعداد برخوردهای تکراری به همان سطح در همین دوره) ---
     "penalty_weights": {
@@ -113,6 +117,10 @@ ENGINE_DEFAULTS = {
 
     "rsi_oversold": 35.0,
     "rsi_overbought": 65.0,
+
+    # --- نسخه سبک CPDE: آستانه‌های تشخیص پین‌بار (Hammer/Shooting Star) ---
+    "candlestick_pin_bar_min_wick_ratio": 2.0,   # شدو غالب باید حداقل این‌ضریب × بدنه باشد
+    "candlestick_pin_bar_max_body_ratio": 0.35,  # بدنه پین‌بار باید نسبت به کل رنج کندل کوچک باشد
 
     "max_score": 100.0,
     "min_score_to_trade": 65.0,
@@ -690,6 +698,64 @@ def structural_htf_trend(df: pd.DataFrame, lookback: int = 3):
 
 
 # ============================================================================
+# ۴.۵) نسخه سبک CPDE (موتور تشخیص الگوی کندلی) — فقط برای بونوس امتیازدهی
+# ============================================================================
+
+CANDLESTICK_PATTERN_LABELS_FA = {
+    "bullish_pin_bar": "پین‌بار صعودی (رد شدن از پایین)",
+    "bearish_pin_bar": "پین‌بار نزولی (رد شدن از بالا)",
+    "bullish_engulfing": "پوشای صعودی (Bullish Engulfing)",
+    "bearish_engulfing": "پوشای نزولی (Bearish Engulfing)",
+}
+
+
+def _detect_candlestick_pattern(d: pd.DataFrame, idx_now: int, direction: int, cfg: dict):
+    """
+    نسخه سبک CPDE: فقط پین‌بار (Hammer/Shooting Star) و پوشا (Engulfing) را
+    روی کندل تاییدی فعلی (و کندل قبلی برای Engulfing) تشخیص می‌دهد. این تابع
+    خودش سیگنال/ورود تولید نمی‌کند — فقط یک کیفیت [0,1] برای بونوس امتیازدهی
+    سناریوهای موجود برمی‌گرداند (طبق تصمیم کاربر: نسخه سبک، نه موتور مستقل).
+    direction: +1 برای سناریوهای خرید (باید الگوی صعودی پیدا شود)، -1 برای فروش
+    خروجی: (pattern_key یا None, quality در [0,1])
+    """
+    if idx_now not in d.index:
+        return None, 0.0
+    cur = d.loc[idx_now]
+    o = _safe_float(cur.get("open")); c = _safe_float(cur.get("close"))
+    h = _safe_float(cur.get("high")); l = _safe_float(cur.get("low"))
+    rng = max(h - l, 1e-12)
+    body = abs(c - o)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+
+    min_wick_ratio = float(cfg.get("candlestick_pin_bar_min_wick_ratio", 2.0))
+    max_body_ratio = float(cfg.get("candlestick_pin_bar_max_body_ratio", 0.35))
+
+    # پین‌بار (اولویت با پین‌بار چون فقط به یک کندل نیاز دارد و زودتر تایید می‌شود)
+    if direction > 0 and (body / rng) <= max_body_ratio and lower_wick >= min_wick_ratio * max(body, 1e-9) and upper_wick <= body * 1.2:
+        quality = max(0.4, min(1.0, lower_wick / (min_wick_ratio * max(body, 1e-9) * 1.5)))
+        return "bullish_pin_bar", quality
+    if direction < 0 and (body / rng) <= max_body_ratio and upper_wick >= min_wick_ratio * max(body, 1e-9) and lower_wick <= body * 1.2:
+        quality = max(0.4, min(1.0, upper_wick / (min_wick_ratio * max(body, 1e-9) * 1.5)))
+        return "bearish_pin_bar", quality
+
+    # پوشا (Engulfing) — نیازمند کندل قبلی
+    if idx_now - 1 in d.index:
+        prev = d.loc[idx_now - 1]
+        po = _safe_float(prev.get("open")); pc = _safe_float(prev.get("close"))
+        prev_body = abs(pc - po)
+        if prev_body > 1e-9:
+            if direction > 0 and pc < po and c > o and o <= pc and c >= po:
+                quality = max(0.5, min(1.0, body / (prev_body * 1.5)))
+                return "bullish_engulfing", quality
+            if direction < 0 and pc > po and c < o and o >= pc and c <= po:
+                quality = max(0.5, min(1.0, body / (prev_body * 1.5)))
+                return "bearish_engulfing", quality
+
+    return None, 0.0
+
+
+# ============================================================================
 # ۵) بونوس/جریمه امتیاز پویا (اندیکاتورهای کمکی - فقط امتیازدهی)
 # ============================================================================
 
@@ -731,7 +797,12 @@ def _dynamic_bonus_penalty(d: pd.DataFrame, idx_now: int, direction: int, cfg: d
     if trend_bonus > 0:
         notes.append("هم‌جهت با روند EMA50")
 
-    bonus_total = volume_bonus + candle_bonus + rsi_bonus + trend_bonus
+    pattern_key, pattern_quality = _detect_candlestick_pattern(d, idx_now, direction, cfg)
+    candlestick_bonus = bw.get("candlestick_pattern", 0.0) * pattern_quality if pattern_key else 0.0
+    if candlestick_bonus > 0.5:
+        notes.append(f"الگوی کندلی تاییدکننده: {CANDLESTICK_PATTERN_LABELS_FA.get(pattern_key, pattern_key)}")
+
+    bonus_total = volume_bonus + candle_bonus + rsi_bonus + trend_bonus + candlestick_bonus
 
     # جریمه سابقه فیک‌اوت: پروکسی = تعداد برخوردهای تکراری به همان سطح در همین دوره
     # (هرچه یک سطح بیشتر لمس شده باشد بدون شکست قطعی، احتمال فیک‌اوت بعدی بیشتر است)
