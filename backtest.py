@@ -51,8 +51,6 @@ import argparse
 
 import pandas as pd
 
-from signal_engine.common.htf import closed_htf_slice, primary_decision_close_ms
-
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan, compute_swing_stop,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
@@ -159,23 +157,16 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
         h = h.dropna(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
         htf_ts[key] = h
 
-    def _htf_slice_at(decision_close_ms):
-        # IMPORTANT: HTF timestamps are candle OPEN times. A candle is usable
-        # only after its actual CLOSE time has passed. This mirrors live behavior.
+    def _htf_slice_at(current_ts_ms):
+        # واحد زمانی HTF را با واحد زمانی primary (که از ccxt همیشه میلی‌ثانیه است) هم‌سطح می‌کنیم
         md = {}
-        key_to_tf = {
-            '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1w',
-        }
         for key, h in htf_ts.items():
-            tf = key_to_tf.get(key, key)
-            try:
-                closed = closed_htf_slice(h, decision_close_ms, tf)
-            except ValueError:
-                continue
-            if len(closed) >= 20:
-                md[key] = closed
+            unit_div = 1000.0 if h['timestamp'].median() < 10**12 else 1.0
+            h_ts_ms = h['timestamp'] * unit_div if unit_div == 1000.0 else h['timestamp']
+            cutoff = int(h_ts_ms.searchsorted(current_ts_ms, side='left'))
+            if cutoff >= 20:  # حداقل کندل کافی برای سوینگ معنادار
+                md[key] = h.iloc[:cutoff].reset_index(drop=True)
         return md or None
-
 
     trades = []
     n = len(ind)
@@ -183,8 +174,7 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
     while i < n - 1:
         # پنجره‌ای که آخرین کندل کامل‌شده روی ایندکس -2 آن قرار دارد (دقیقاً مطابق نحوه فراخوانی در bot.py)
         window = ind.iloc[: i + 2]
-        decision_close_ms = primary_decision_close_ms(window, strategy_timeframe)
-        market_data_dict = _htf_slice_at(decision_close_ms) if htf_ts and decision_close_ms is not None else None
+        market_data_dict = _htf_slice_at(float(window.iloc[-1][ts_col])) if htf_ts else None
         sig, reason = get_signal_with_reason(
             window, market_data_dict=market_data_dict, timeframe_mode='single', timeframe=strategy_timeframe,
             strategy_type=strategy_type, filters=filters, strategy_config=strategy_config,

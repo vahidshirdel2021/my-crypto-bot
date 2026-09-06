@@ -19,11 +19,11 @@ liquidity sweep، structure flip، trend/breakout/mean-reversion قدیمی و�
 
 import numpy as np
 import pandas as pd
-from signal_engine.common.htf import closed_htf_slice, primary_decision_close_ms
 
 from pdh_eq_pdl_engine import (
     ENGINE_DEFAULTS,
     LEVEL_SOURCE_BY_TIMEFRAME,
+    evaluate_scenarios,
     compute_prev_day_levels,
     compute_prev_week_levels,
     compute_prev_month_levels,
@@ -31,8 +31,14 @@ from pdh_eq_pdl_engine import (
     structural_htf_trend,
 )
 
-# موتور Extra عمداً از مسیر Live Entry خارج شده است. فایل extra_orb_engine.py
-# برای پژوهش/بک‌تست نگه داشته می‌شود، اما در Live هرگز سیگنال تولید نمی‌کند.
+# موتور «اکسترا» (Killzone Opening-Range + Judas Swing + MSS) — کاملاً مستقل
+# از موتور PDH/EQ/PDL بالا. فقط وقتی strategy_type=='extra' فراخوانی می‌شود؛
+# رفتار پیش‌فرض ('dynamic') دست‌نخورده باقی می‌ماند.
+try:
+    from extra_orb_engine import evaluate_extra_scenarios, EXTRA_ENGINE_DEFAULTS
+    _EXTRA_ENGINE_AVAILABLE = True
+except Exception:
+    _EXTRA_ENGINE_AVAILABLE = False
 
 # کتابخانه جدید تشخیص سوینگ (رجکشن سه‌کندلی / فراکتال کلاسیک / ساختار بازار
 # BOS-ChoCH) — حذف شده است (بخشی از پاک‌سازی موتورهای قدیمی). این قابلیت
@@ -244,7 +250,14 @@ def get_swing_confluence(df, is_long, lookback_bars=5):
 # ============================================================================
 
 STRATEGY_DEFAULTS = {
-    # Live is intentionally locked to the new KLSDE/Confluence path.
+    # --- فلگ مهاجرت به معماری جدید (signal_engine: ۵ موتور مستقل + لایه‌ی
+    # تجمیع سیگنال) — طبق تصمیم صریح: پیش‌فرض خاموش تا وقتی که با بک‌تست/
+    # پیپر روی داده‌ی واقعی تأیید نشده، هیچ رفتاری در ربات زنده تغییر نکند.
+    # وقتی True شود، _run_engine_multi_source به‌جای evaluate_scenarios قدیمی
+    # از signal_engine.bridge.run_new_engine_as_best استفاده می‌کند — بدون
+    # هیچ تغییری در فیوزهای ایمنی build_trade_plan (سقف SL/ATR، حداقل R:R،
+    # حداقل امتیاز) که همچنان دقیقاً همان‌طور که هستند روی خروجی موتور
+    # جدید هم اجرا می‌شوند.
     "use_new_signal_engine": True,
     # --- آستانه‌های موتور سناریو PDH/EQ/PDL ---
     "min_trade_score": ENGINE_DEFAULTS["min_score_to_trade"],
@@ -263,14 +276,7 @@ STRATEGY_DEFAULTS = {
     "swing_min_wick_atr_ratio": ENGINE_DEFAULTS["swing_min_wick_atr_ratio"],
     "swing_min_volume_ratio": ENGINE_DEFAULTS["swing_min_volume_ratio"],
 
-    "max_sl_atr": 4.0,           # سقف ریسک واقعی بر حسب ATR
-    # اگر استاپ ساختاری کمی دورتر از سقف ریسک باشد، برای ستاپ باکیفیت
-    # می‌توان استاپ اجرایی را به سقف ATR برگرداند؛ این «باز کردن» سقف نیست.
-    # Overage بزرگ‌تر از این مقدار همچنان رد می‌شود تا ستاپ‌های واقعاً دور
-    # (مثل 8-12 ATR) وارد معامله نشوند.
-    "adaptive_sl_enabled": True,
-    "adaptive_sl_min_score": 78.0,
-    "adaptive_sl_max_overage_atr": 1.25,
+    "max_sl_atr": 4.0,           # سقف مطلق فاصله SL بر حسب ATR (فیوز ایمنی، نه بخشی از سناریوها)
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -486,10 +492,7 @@ def _compute_prev_day_levels(df):
 # ============================================================================
 
 def _run_engine(df, timeframe, strategy_config=None):
-    """Compatibility wrapper: Live decision-making is KLSDE/Confluence only."""
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {}), "use_new_signal_engine": True}
-    from signal_engine.bridge import run_new_engine_as_best
-    return run_new_engine_as_best(df, timeframe or "5min", config=cfg)
+    return evaluate_scenarios(df, timeframe or "5min", strategy_config)
 
 
 # ============================================================================
@@ -500,46 +503,71 @@ def _run_engine(df, timeframe, strategy_config=None):
 # market_data_dict['1d'] که برای فیلتر روند HTF گرفته می‌شود، بدون فراخوانی
 # اضافه به صرافی) و در صورت نبود آن هم، ماهانه امتحان می‌شود. رقابت هم‌زمان
 # بین منابع در کار نیست — زنجیره‌ی فال‌بک ترتیبی است.
-def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=None, live_price=None, defer_quality_gate=False):
-    """Single Live decision path.
+def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=None):
+    """خروجی: (best_dict_or_None, level_source_used_or_None)
 
-    Key levels are calculated by KLSDE and the five KLSDE setups are the only
-    events allowed to become the trade anchor. Other engines (SDE/PRE/CPDE/MCDE)
-    may only contribute supporting evidence through Confluence. Legacy B/S and
-    Extra are never used for Live entries.
+    diag (اختیاری): در جا با تشخیص آخرین منبع سطح که واقعاً امتحان شد پر
+    می‌شود (روزانه، یا در صورت فال‌بک، هفتگی/ماهانه) — برای لاگ/آدیت دقیق‌تر
+    دلیل «no_signal» به‌جای پیام کلی قبلی.
+
+    اگر cfg['use_new_signal_engine'] روشن باشد، به‌جای زنجیره‌ی قدیمی
+    (evaluate_scenarios + فال‌بک دستی هفتگی/ماهانه)، از
+    signal_engine.bridge.run_new_engine_as_best استفاده می‌شود — که خودش
+    هر ۹ سطح (روزانه/هفتگی/ماهانه) را در یک پاس با KLSDE ارزیابی می‌کند،
+    پس نیازی به زنجیره‌ی فال‌بک دستی زیر نیست.
     """
-    cfg = {**(cfg or {}), "use_new_signal_engine": True}
-    from signal_engine.bridge import run_new_engine_as_best
-    try:
-        best = run_new_engine_as_best(
-            df, timeframe or "5min", config=cfg,
-            btc_context=cfg.get("btc_context"),
-            asset_taxonomy=cfg.get("asset_taxonomy"),
-            live_price=live_price,
-            defer_quality_gate=defer_quality_gate,
-        )
-        if diag is not None:
-            diag["engine"] = "KLSDE_V2_CONFLUENCE_ONLY"
-            diag["live_entry_anchor"] = "KLSDE"
-            diag["legacy_BS_enabled"] = False
-            diag["extra_enabled"] = False
-        # Watchlist feedback remains observational and cannot create a trade.
+    if bool(cfg.get("use_new_signal_engine", False)):
         try:
-            from signal_engine.watchlist_bridge import record_deep_analysis, record_engine_event
-            sym_for_wl = (cfg.get("watchlist_symbol") or "").upper() or None
-            if sym_for_wl:
-                time_idx = int(len(df)) if df is not None else 0
-                record_deep_analysis(sym_for_wl, time_idx)
-                if best and best.get("code") and ":" in best["code"]:
-                    src_engine, event_type = best["code"].split(":", 1)
-                    record_engine_event(sym_for_wl, src_engine, event_type, best.get("signal_id"), time_idx)
-        except Exception:
-            pass
-        return (best, "KLSDE") if best else (None, None)
-    except Exception as exc:
-        if diag is not None:
-            diag["engine_error"] = str(exc)
+            from signal_engine.bridge import run_new_engine_as_best
+            best = run_new_engine_as_best(
+                df, timeframe or "5min", config=cfg,
+                btc_context=cfg.get("btc_context"), asset_taxonomy=cfg.get("asset_taxonomy"),
+            )
+            if diag is not None:
+                diag["engine"] = "signal_engine_v2"
+            # طبق پیوست watchlist_bridge: بازخورد رویداد واقعی به واچ‌لیست
+            # هوشمند — این دقیقاً همان چیزی است که محدودیت MVP قبلی
+            # (فقط حجم دلاری، fail-open همیشگی) را با گذر زمان به داده‌ی
+            # غنی واقعی ارتقا می‌دهد. خطای این بخش هرگز نباید مسیر اصلی
+            # سیگنال را مختل کند.
+            try:
+                from signal_engine.watchlist_bridge import record_deep_analysis, record_engine_event
+                sym_for_wl = (cfg.get("watchlist_symbol") or "").upper() or None
+                if sym_for_wl:
+                    time_idx = int(len(df)) if df is not None else 0
+                    record_deep_analysis(sym_for_wl, time_idx)
+                    if best and best.get("code") and ":" in best["code"]:
+                        src_engine, event_type = best["code"].split(":", 1)
+                        record_engine_event(sym_for_wl, src_engine, event_type, best.get("signal_id"), time_idx)
+            except Exception:
+                pass
+            return (best, "signal_engine_v2") if best else (None, None)
+        except Exception as _e:
+            if diag is not None:
+                diag["engine_error"] = str(_e)
+            return None, None
+
+    best = evaluate_scenarios(df, timeframe or "5min", cfg, diag=diag)
+    if best:
+        return best, LEVEL_SOURCE_BY_TIMEFRAME.get(timeframe, "daily")
+    if timeframe not in ("5min", "15min") or not bool(cfg.get("multi_level_source_fallback_enabled", True)):
         return None, None
+    daily = (market_data_dict or {}).get("1d")
+    if daily is None or daily.empty:
+        return None, None
+    _, pwh, pwl, weq = compute_prev_week_levels(daily)
+    if pwh is not None and pwl is not None and pwh > pwl:
+        cand = evaluate_scenarios(df, timeframe, cfg, level_override=("weekly", pwh, pwl, weq), diag=diag)
+        if cand:
+            return cand, "weekly"
+    if bool(cfg.get("monthly_level_fallback_enabled", True)):
+        _, pmh, pml, meq = compute_prev_month_levels(daily)
+        if pmh is not None and pml is not None and pmh > pml:
+            cand = evaluate_scenarios(df, timeframe, cfg, level_override=("monthly", pmh, pml, meq), diag=diag)
+            if cand:
+                return cand, "monthly"
+    return None, None
+
 
 def _format_reason_extra(best):
     if not best:
@@ -650,15 +678,34 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
 
     خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
     """
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {}), "use_new_signal_engine": True}
-    # Preserve the exact caller context for both detection and plan construction.
-    cfg["filters_context"] = dict(filters or {})
-    cfg["regime_context"] = regime
-    cfg["defer_quality_gate"] = bool(defer_quality_gate)
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     diag = {}
 
-    best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict, diag=diag,
-                                                       live_price=live_price, defer_quality_gate=defer_quality_gate)
+    if strategy_type == "extra":
+        if not _EXTRA_ENGINE_AVAILABLE:
+            return None, "موتور اکسترا (extra_orb_engine.py) در دسترس نیست"
+        if timeframe not in ("5min", "15min"):
+            return None, "استراتژی اکسترا فقط برای تایم‌فریم ۵ و ۱۵ دقیقه تعریف شده است"
+        best = evaluate_extra_scenarios(df_primary, timeframe, cfg, diag=diag)
+        if diag_out is not None:
+            diag_out.update(diag)
+        if not best:
+            gate = diag.get("gate", "unknown")
+            gate_msgs = {
+                "outside_killzone": "خارج از بازه Killzone (لندن/نیویورک) هستیم — سناریوی اکسترا فقط داخل این بازه‌ها ارزیابی می‌شود",
+                "orb_not_formed_yet": "Opening Range سشن جاری هنوز کامل نشده",
+                "no_post_orb_bars_yet": "هنوز کندلی بعد از Opening Range شکل نگرفته",
+                "no_scenario_matched": "نه Judas Swing معتبری شناسایی شد و نه MSS تاییدی روی آن",
+                "insufficient_data": "داده کافی برای موتور اکسترا در دسترس نبود",
+                "invalid_atr": "ATR معتبر برای این نماد/تایم‌فریم در دسترس نبود",
+            }
+            return None, gate_msgs.get(gate, f"موتور اکسترا سیگنالی تایید نکرد ({gate})")
+        min_score = float(cfg.get("min_trade_score", EXTRA_ENGINE_DEFAULTS["min_score_to_trade"]))
+        if best["total_score"] < min_score:
+            return None, f"بهترین سناریوی اکسترا {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
+        return best["direction"], _format_reason_extra(best)
+
+    best, level_source_used = _run_engine_multi_source(df_primary, timeframe, cfg, market_data_dict, diag=diag)
     if diag_out is not None:
         diag_out.update(diag)
     if not best:
@@ -675,17 +722,15 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
             )
         if gate == 'no_scenario_matched':
             return None, (
-                "قیمت با یکی از Key Levelها تعامل داشت اما هیچ‌کدام از پنج ستاپ KLSDE (BOF/TST/BPB/BP/CPB) حل نشد"
+                "قیمت به سطح برخورد کرده اما هیچ‌کدام از ۱۴ سناریوی PDH/EQ/PDL با سوینگ‌های موجود تطبیق نداد"
                 f"{swings_txt}"
             )
         if gate in ('insufficient_data', 'invalid_levels', 'invalid_atr'):
             return None, f"داده/سطوح کافی برای ارزیابی سناریوها در دسترس نبود ({gate})"
-        return None, "هیچ‌کدام از پنج ستاپ KLSDE (BOF/TST/BPB/BP/CPB) روی تعامل معتبر با Key Level تایید نشد"
+        return None, "هیچ‌کدام از ۱۴ سناریوی PDH/EQ/PDL (یا PWH/PWL/EQ، یا فال‌بک هفتگی/ماهانه) تایید نشد"
     min_score = float(cfg.get("min_trade_score", ENGINE_DEFAULTS["min_score_to_trade"]))
-    if best["total_score"] < min_score and not defer_quality_gate:
+    if best["total_score"] < min_score:
         return None, f"بهترین سناریو {best['code']} بود اما امتیاز کافی نبود ({best['total_score']}/100 < {min_score:.0f})"
-    if best["total_score"] < min_score and defer_quality_gate:
-        diag["quality_gate"] = "deferred"
 
     if bool(cfg.get("htf_trend_filter_enabled", True)):
         # وضعیت کلی بازار (طبق تصمیم صریح کاربر: قانون روند قطعی باید روی
@@ -775,13 +820,14 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
     if df is None or len(df) < 50 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
 
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {}), "use_new_signal_engine": True}
-    cfg["filters_context"] = dict(filters or {})
-    cfg["regime_context"] = regime
-    cfg["defer_quality_gate"] = bool(defer_quality_gate)
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
 
-    # Live planner is always fed by the KLSDE/Confluence result.
-    best, level_source_used = _run_engine_multi_source(df, strategy_timeframe, cfg, market_data_dict, live_price=live_price, defer_quality_gate=defer_quality_gate)
+    if strategy_type == "extra":
+        if not _EXTRA_ENGINE_AVAILABLE:
+            return None, "موتور اکسترا (extra_orb_engine.py) در دسترس نیست"
+        best = evaluate_extra_scenarios(df, strategy_timeframe, cfg)
+    else:
+        best, level_source_used = _run_engine_multi_source(df, strategy_timeframe, cfg, market_data_dict)
 
     if not best or best["direction"] != signal:
         return None, "سناریوی برنده با سیگنال هم‌خوانی ندارد؛ معامله رد شد"
@@ -796,31 +842,11 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست (SL در سمت اشتباه قیمت ورود قرار دارد)"
 
-    # فیوز ریسک: سقف واقعی فاصله SL بر حسب ATR.
-    # اگر استاپ ساختاری فقط کمی دورتر باشد، به‌جای حذف کل ستاپ، استاپ اجرایی
-    # روی سقف ریسک clamp می‌شود؛ اما فقط برای ستاپ‌های باکیفیت و فقط تا یک
-    # overage محدود. بدین‌ترتیب 4 ATR همچنان سقف ریسک باقی می‌ماند و مقادیر
-    # بسیار دور (مثلاً 8-12 ATR) هرگز با این مکانیزم وارد نمی‌شوند.
+    # فیوز ایمنی: سقف مطلق فاصله SL بر حسب ATR (مستقل از منطق سناریوها)
     atr = _safe_float(df.iloc[-2].get("atr")) if "atr" in df.columns else 0.0
     max_sl_atr = float(cfg.get("max_sl_atr", 4.0))
-    sl_mode = "structural"
-    structural_sl = float(sl)
     if atr > 0 and risk_dist > atr * max_sl_atr:
-        risk_atr = risk_dist / atr
-        adaptive_enabled = bool(cfg.get("adaptive_sl_enabled", True))
-        adaptive_min_score = float(cfg.get("adaptive_sl_min_score", 78.0))
-        adaptive_max_overage = float(cfg.get("adaptive_sl_max_overage_atr", 1.25))
-        if adaptive_enabled and best["total_score"] >= adaptive_min_score and risk_atr <= max_sl_atr + adaptive_max_overage:
-            capped_risk = atr * max_sl_atr
-            sl = entry - capped_risk if signal == "BUY" else entry + capped_risk
-            risk_dist = capped_risk
-            sl_mode = "adaptive_atr_capped"
-        else:
-            return None, (
-                f"PLAN_BLOCK|reason=ATR_CAP|scenario={best.get('code','?')}|"
-                f"risk_atr={risk_atr:.4f}|max_sl_atr={max_sl_atr:.4f}|"
-                f"entry={entry:.12g}|sl={sl:.12g}|tp={tp:.12g}"
-            )
+        return None, f"فاصله حد ضرر بیش از سقف مجاز است ({risk_dist / atr:.2f}× ATR > {max_sl_atr:.2f}× ATR)"
 
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     if risk_dist / entry < min_sl_pct:
@@ -835,25 +861,19 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
     # در B5/S5 با یک کندل تاییدِ خیلی بزرگ) هدف محاسبه‌شده عملاً پشت سر قیمت
     # ورود بیفتد، معامله‌ای با هدف نامعتبر (بدون پاداش واقعی) رد نمی‌شد. این
     # دقیقاً همان پیش‌نیازی است که ساخت پلکان سه‌مرحله‌ای TP هم به آن متکی است.
-    # اگر چند سطح ساختاری معتبر در مسیر وجود داشته باشد، TP3 را روی دورترین
-    # سطح معتبر می‌گذاریم و RR را بر مبنای همان هدف نهایی حساب می‌کنیم.
-    early_tp1, early_tp2, early_tp3, early_tier_pcts = _build_tp_ladder(entry, tp, signal, best, cfg)
-    if best.get("target_level_candidates"):
-        tp = float(early_tp3)
-
     target_ahead = (tp > entry) if signal == "BUY" else (tp < entry)
     if not target_ahead:
         return None, f"هدف سناریو {best['code']} جلوتر از قیمت ورود نیست (احتمالاً کندل تایید خیلی بزرگ بوده)؛ معامله رد شد"
 
     rr = abs(tp - entry) / risk_dist
-    _fallback_defaults = ENGINE_DEFAULTS
+    _fallback_defaults = EXTRA_ENGINE_DEFAULTS if (strategy_type == "extra" and _EXTRA_ENGINE_AVAILABLE) else ENGINE_DEFAULTS
     _fallback_min_rr_key = "min_rr"
     min_rr = float(cfg.get("min_rr", _fallback_defaults[_fallback_min_rr_key]))
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R) برای سناریوی {best['code']}"
 
     min_score = float(cfg.get("min_trade_score", _fallback_defaults["min_score_to_trade"]))
-    if best["total_score"] < min_score and not defer_quality_gate:
+    if best["total_score"] < min_score:
         return None, f"امتیاز سناریو {best['code']} کافی نیست ({best['total_score']}/100 < {min_score:.0f})"
 
     quality_label = ("عالی" if best["total_score"] >= 90 else
@@ -871,14 +891,11 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         "risk_atr": float(risk_dist / atr) if atr > 0 else None,
         "atr": atr,
         "scenario_code": best["code"],
-        "level_source": level_source_used or "KLSDE",
-        "swing_level": best.get("swing_level"),
-        "swing_sl_buffer": best.get("swing_sl_buffer"),
-        "sl_mode": best.get("sl_mode", "structural"),
-        "b5_variant": bool((best.get("klsde_setup_evidence") or {}).get("b5_variant", False)),
+        "level_source": "orb_killzone" if strategy_type == "extra" else ("weekly" if LEVEL_SOURCE_BY_TIMEFRAME.get(strategy_timeframe) == "weekly" else "daily"),
+        "swing_level": None,
         "structural_target": True,  # هدف، سطح ساختاری (PDH/PDL یا PWH/PWL) است نه RR ثابت
-        "setup_family": f"KLSDE_{best['code']}",
-        "reason": _format_reason(best),
+        "setup_family": f"extra_orb_{best['code']}" if strategy_type == "extra" else f"pdh_eq_pdl_{best['code']}",
+        "reason": _format_reason_extra(best) if strategy_type == "extra" else _format_reason(best),
         # --- پلکان سه‌مرحله‌ای TP (طبق درخواست کاربر، بند ۴) ---
         # tp1: ۵۰٪ حجم دقیقاً روی EQ (یا نقطه‌ی میانی معادل وقتی EQ پشت سر
         #      گذاشته شده - مثل B5/S5)، سپس SL کل باقی‌مانده روی Break-even.
@@ -955,30 +972,7 @@ def _build_tp_ladder(entry, boundary_tp, signal, best, cfg):
         (is_long and float(range_eq) > entry) or ((not is_long) and float(range_eq) < entry)
     )
 
-    execution_candidates = []
-    for item in (best.get("target_level_candidates") or []):
-        try:
-            name, price = item
-            price = float(price)
-        except Exception:
-            continue
-        if np.isfinite(price) and ((is_long and price > entry) or ((not is_long) and price < entry)):
-            execution_candidates.append((str(name), price))
-
-    if execution_candidates:
-        prices = [p for _, p in execution_candidates]
-        prices = sorted(prices, reverse=not is_long)
-        if len(prices) == 1:
-            leg = prices[0] - entry
-            tp1 = entry + leg * 0.40
-            tp2 = entry + leg * 0.70
-            tp3 = prices[0]
-        elif len(prices) == 2:
-            tp1, tp3 = prices[0], prices[1]
-            tp2 = tp1 + (tp3 - tp1) * 0.50
-        else:
-            tp1, tp2, tp3 = prices[0], prices[1], prices[-1]
-    elif boundary_ahead and eq_ahead:
+    if boundary_ahead and eq_ahead:
         # حالت ۱: پلکان دقیقاً طبق تعریف کاربر (EQ → مرز مقابل → اکستنشن)
         tp2 = raw_boundary
         tp1 = float(range_eq)
@@ -1049,7 +1043,7 @@ def strategy_mean_reversion(df, filters=None, strategy_config=None):
 # ============================================================================
 
 def get_v2_config(strategy_config=None):
-    return {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {}), "v2_enabled": False, "use_new_signal_engine": True}
+    return {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {}), "v2_enabled": False}
 
 
 def detect_market_regime(df, strategy_config=None):

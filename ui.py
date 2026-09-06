@@ -139,8 +139,8 @@ def get_max_positions_keyboard():
 
 def get_timeframe_keyboard():
     return {"inline_keyboard": [
+        [{"text": "⚡ اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "⏱ ۱ ساعت", "callback_data": "/set_tf_1h"}, {"text": "⏱ ۴ ساعت", "callback_data": "/set_tf_4h"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 
