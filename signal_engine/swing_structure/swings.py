@@ -2,20 +2,18 @@
 """
 signal_engine.swing_structure.swings
 ======================================
-پیاده‌سازی خط‌به‌خط سند «Swing Detection & Market Structure Engine»،
-بخش‌های ۴ (چرا ۵m/۱۵m مسئله‌ی جدایی است) و ۵ (الگوریتم اصلی تشخیص
-سوئینگ). این ماژول فقط مسئولیت اول (Swing Point Detection) را پیاده
-می‌کند؛ مسئولیت دوم (Market Structure Classification: BOS/CHoCH) در
-`structure.py` است.
+Swing detection with a strict no-lookahead confirmation boundary and a
+second, explicit swing-quality layer.
 
-پایپ‌لاین ۴مرحله‌ای (دقیقاً طبق سند):
-    Stage 1: کاندیدهای خام اکسترمم محلی (فراکتال)
-    Stage 2: فیلتر نویز نرمال‌شده با ATR + حداقل ریتریسمنت + فیلتر حجم
-    Stage 3: تأیید (بدون look-ahead — سوئینگ تا k کندل بعد «pending» است)
-    Stage 4: ابطال (Invalidation) — نگه‌داشته می‌شود، هرگز حذف نمی‌شود
+Important distinction:
+- ``confirmed`` means the fractal has completed its k-bar confirmation.
+- ``significant`` means the confirmed swing also has enough structural
+  prominence/reversal evidence to be treated as a meaningful swing rather
+  than ordinary market noise.
 
-هیچ داده‌ی آینده در هیچ مرحله‌ای استفاده نمی‌شود؛ `confirmed_at_index`
-همیشه ≥ `candle_index + k` است.
+Quality is calculated only from information available no later than
+``confirmed_at_index``. No future candles after the confirmation boundary
+are used.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ from signal_engine.common.atr import compute_atr
 
 SwingType = Literal["swing_high", "swing_low"]
 SwingStatus = Literal["pending", "confirmed", "invalidated"]
+SwingQuality = Literal["weak", "confirmed", "significant"]
 
 
 @dataclass
@@ -45,6 +44,8 @@ class SwingPoint:
     magnitude_atr: Optional[float] = None
     status: SwingStatus = "pending"
     invalidated_at_index: Optional[int] = None
+    quality_score: Optional[float] = None
+    quality_label: SwingQuality = "weak"
     evidence: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -60,11 +61,12 @@ class SwingPoint:
             "magnitude_atr": self.magnitude_atr,
             "status": self.status,
             "invalidated": self.status == "invalidated",
+            "quality_score": self.quality_score,
+            "quality_label": self.quality_label,
             "evidence": self.evidence,
         }
 
 
-# پارامترهای پیش‌فرض دقیقاً طبق سند، بخش ۵.۵ (per-timeframe defaults)
 DEFAULT_SWING_CONFIG = {
     "5m": dict(fractal_k=3, atr_period=14, min_swing_atr_multiple=1.2,
                min_retrace_pct=0.20, volume_percentile_floor=30),
@@ -74,23 +76,30 @@ DEFAULT_SWING_CONFIG = {
 _GENERIC_FALLBACK_CONFIG = dict(fractal_k=2, atr_period=14, min_swing_atr_multiple=1.0,
                                  min_retrace_pct=0.20, volume_percentile_floor=30)
 
+# Quality layer. These are intentionally configurable rather than hard-coded
+# into the KLSDE strategy, so the swing engine can be tuned independently.
+QUALITY_DEFAULTS = {
+    "quality_significant_threshold": 70.0,
+    "quality_confirmed_threshold": 45.0,
+    "quality_min_spacing_bars": 2,
+    "quality_prominence_atr": 0.60,
+    "quality_strong_prominence_atr": 1.50,
+    "quality_reversal_atr": 0.50,
+    "quality_strong_reversal_atr": 1.20,
+    "quality_volume_bonus_threshold": 60.0,
+}
+
 
 def _cfg_for(timeframe: str, overrides: Optional[dict] = None) -> dict:
     base = dict(DEFAULT_SWING_CONFIG.get(timeframe, _GENERIC_FALLBACK_CONFIG))
+    base.update(QUALITY_DEFAULTS)
     if overrides:
         base.update(overrides)
     return base
 
 
-# ---------------------------------------------------------------------------
-# Stage 1 — کاندیدهای خام فراکتال
-# ---------------------------------------------------------------------------
-
 def _raw_fractal_candidates(df: pd.DataFrame, k: int) -> List[dict]:
-    """کندلی که high آن بزرگ‌تر یا مساوی high تمام k کندل هر طرف است →
-    کاندید swing_high (و متقارن برای swing_low). این مرحله عمداً
-    بیش‌تولید می‌کند؛ فیلتر نویز در Stage 2 است.
-    """
+    """Raw local extrema. The right-hand k bars are the confirmation horizon."""
     n = len(df)
     candidates: List[dict] = []
     if n < (2 * k + 1):
@@ -98,7 +107,6 @@ def _raw_fractal_candidates(df: pd.DataFrame, k: int) -> List[dict]:
 
     highs = df["high"].to_numpy()
     lows = df["low"].to_numpy()
-
     for i in range(k, n - k):
         window_h = highs[i - k: i + k + 1]
         window_l = lows[i - k: i + k + 1]
@@ -106,22 +114,13 @@ def _raw_fractal_candidates(df: pd.DataFrame, k: int) -> List[dict]:
             candidates.append({"type": "swing_high", "index": i, "price": float(highs[i])})
         if lows[i] == window_l.min():
             candidates.append({"type": "swing_low", "index": i, "price": float(lows[i])})
-
     return candidates
 
 
-# ---------------------------------------------------------------------------
-# Stage 2 — فیلتر نویز نرمال‌شده با ATR + حداقل ریتریسمنت + فیلتر حجم
-# ---------------------------------------------------------------------------
-
 def _volume_ok(df: pd.DataFrame, idx: int, floor_percentile: float, magnitude_atr: float,
-                strong_move_atr_threshold: float = 2.0) -> bool:
-    """رد کردن کاندیدهایی که حجمِ دورشان به‌طرز غیرعادی پایین است — مگر
-    اینکه اندازه‌ی حرکت (بر حسب ATR) به‌قدری بزرگ باشد که فیلتر حجم دیگر
-    لازم نباشد (طبق سند، بخش ۵.۲.۴).
-    """
+               strong_move_atr_threshold: float = 2.0) -> bool:
     if "volume" not in df.columns:
-        return True  # داده‌ی حجم در دسترس نیست → این فیلتر را نادیده بگیر
+        return True
     if magnitude_atr >= strong_move_atr_threshold:
         return True
     window = df["volume"].iloc[max(0, idx - 20): idx + 1]
@@ -131,17 +130,100 @@ def _volume_ok(df: pd.DataFrame, idx: int, floor_percentile: float, magnitude_at
     return bool(df["volume"].iloc[idx] >= threshold)
 
 
-def _filter_and_confirm(
+def _safe_float(x: float, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        return default if not np.isfinite(v) else v
+    except Exception:
+        return default
+
+
+def _swing_quality(
     df: pd.DataFrame,
-    candidates: List[dict],
+    idx: int,
+    confirm_index: int,
+    cand_type: SwingType,
+    price: float,
+    atr_series: pd.Series,
     cfg: dict,
-    timeframe: str,
-    symbol: str,
-) -> List[SwingPoint]:
-    """Stage 2 (فیلتر نویز) + Stage 3 (تأیید) با هم اجرا می‌شوند چون
-    شرط ریتریسمنت خودش نیازمند نگاه به کندل‌های بعد از کاندید است — دقیقاً
-    همان تأخیر تأییدی که Stage 3 رسماً مدل می‌کند.
+    prior_opposite_price: Optional[float],
+) -> tuple[float, SwingQuality, dict]:
+    """Score a swing using only candles <= confirm_index.
+
+    Components:
+      - local prominence versus the k-bar neighborhood
+      - reversal excursion visible by confirmation time
+      - volume confirmation
+      - minimum spacing from the previous opposite swing
+      - optional prior-leg magnitude
+
+    No post-confirmation candle participates in this calculation.
     """
+    k = int(cfg["fractal_k"])
+    atr = _safe_float(atr_series.iloc[idx], 0.0)
+    if atr <= 0:
+        return 0.0, "weak", {"quality_reason": "invalid_atr"}
+
+    left = max(0, idx - k)
+    right = min(confirm_index, len(df) - 1)
+    local_high = _safe_float(df["high"].iloc[left:right + 1].max())
+    local_low = _safe_float(df["low"].iloc[left:right + 1].min())
+
+    if cand_type == "swing_high":
+        prominence_price = max(0.0, price - local_low)
+        reversal_price = max(0.0, price - _safe_float(df["low"].iloc[idx:right + 1].min()))
+    else:
+        prominence_price = max(0.0, local_high - price)
+        reversal_price = max(0.0, _safe_float(df["high"].iloc[idx:right + 1].max()) - price)
+
+    prominence_atr = prominence_price / atr
+    reversal_atr = reversal_price / atr
+
+    p_score = min(35.0, 35.0 * prominence_atr / max(float(cfg["quality_strong_prominence_atr"]), 1e-9))
+    r_score = min(35.0, 35.0 * reversal_atr / max(float(cfg["quality_strong_reversal_atr"]), 1e-9))
+
+    volume_score = 0.0
+    volume_pct = None
+    if "volume" in df.columns:
+        window = df["volume"].iloc[max(0, idx - 20): idx + 1].to_numpy(dtype=float)
+        if len(window) >= 5:
+            volume_pct = float((window <= _safe_float(df["volume"].iloc[idx])).mean() * 100.0)
+            volume_score = 10.0 if volume_pct >= float(cfg["quality_volume_bonus_threshold"]) else 0.0
+    else:
+        # Missing volume should be neutral, not punitive.
+        volume_score = 5.0
+
+    spacing_score = 5.0
+    if prior_opposite_price is not None:
+        leg_atr = abs(price - prior_opposite_price) / atr
+        spacing_score = 10.0 if leg_atr >= float(cfg["min_swing_atr_multiple"]) else 2.0
+    else:
+        leg_atr = None
+
+    raw_score = p_score + r_score + volume_score + spacing_score
+    score = round(min(100.0, raw_score), 1)
+    if score >= float(cfg["quality_significant_threshold"]):
+        label: SwingQuality = "significant"
+    elif score >= float(cfg["quality_confirmed_threshold"]):
+        label = "confirmed"
+    else:
+        label = "weak"
+
+    evidence = {
+        "quality_score": score,
+        "quality_label": label,
+        "prominence_atr": round(prominence_atr, 3),
+        "reversal_excursion_atr": round(reversal_atr, 3),
+        "volume_percentile": None if volume_pct is None else round(volume_pct, 1),
+        "prior_leg_atr": None if leg_atr is None else round(leg_atr, 3),
+        "quality_calculated_through_index": int(confirm_index),
+        "quality_lookahead_safe": True,
+    }
+    return score, label, evidence
+
+
+def _filter_and_confirm(df: pd.DataFrame, candidates: List[dict], cfg: dict,
+                        timeframe: str, symbol: str) -> List[SwingPoint]:
     atr_period = cfg["atr_period"]
     k = cfg["fractal_k"]
     min_atr_mult = cfg["min_swing_atr_multiple"]
@@ -150,41 +232,43 @@ def _filter_and_confirm(
 
     d = compute_atr(df, period=atr_period)
     atr_series = d["atr"]
-
     swings: List[SwingPoint] = []
-    last_confirmed_opposite: Optional[dict] = None  # آخرین سوئینگ تأییدشده‌ی جهت مخالف
-
+    last_confirmed_opposite: Optional[dict] = None
     candidates_sorted = sorted(candidates, key=lambda c: c["index"])
 
     for cand in candidates_sorted:
         idx = cand["index"]
+        confirm_index = idx + k
+        # A candidate is not a confirmed swing until the full k-bar horizon exists.
+        if confirm_index >= len(df):
+            continue
         atr_val = atr_series.iloc[idx]
         if pd.isna(atr_val) or atr_val <= 0:
             continue
 
-        # اندازه‌ی حرکت نسبت به آخرین سوئینگ تأییدشده‌ی مخالف
         if last_confirmed_opposite is not None:
             move = abs(cand["price"] - last_confirmed_opposite["price"])
             magnitude_atr = move / atr_val
         else:
-            magnitude_atr = float("inf")  # اولین سوئینگ در سری داده — بدون مرجع قبلی، رد نمی‌شود
+            magnitude_atr = float("inf")
 
         if magnitude_atr < min_atr_mult:
-            continue  # نویز — اندازه‌ی حرکت کافی نیست
-
-        if not _volume_ok(df, idx, vol_floor, magnitude_atr if np.isfinite(magnitude_atr) else 999.0):
+            continue
+        if not _volume_ok(df, idx, vol_floor,
+                          magnitude_atr if np.isfinite(magnitude_atr) else 999.0):
             continue
 
-        # حداقل ریتریسمنت: بعد از این سوئینگ باید حداقل min_retrace از لگ
-        # منتهی به آن برگردد، قبل از این‌که سوئینگ *بعدی* (مخالف) تأیید شود.
-        # این شرط با بررسی این‌که آیا در بازه‌ی بین این کاندید و کاندید
-        # مخالفِ بعدی، حداقل درصد ریتریسمنت رخ داده، پیاده می‌شود.
-        confirm_index = min(idx + k, len(df) - 1)
-        # تأیید بدون look-ahead: سوئینگ تا k کندل بعد از خودش pending است.
-        if confirm_index >= len(df):
-            continue
+        score, label, quality_evidence = _swing_quality(
+            df, idx, confirm_index, cand["type"], cand["price"], atr_series, cfg,
+            None if last_confirmed_opposite is None else last_confirmed_opposite["price"],
+        )
 
         sw_id = f"swing_{timeframe}_{idx:06d}"
+        evidence = {
+            "fractal_k": k,
+            "atr_at_swing": float(atr_val),
+            **quality_evidence,
+        }
         sw = SwingPoint(
             id=sw_id, timeframe=timeframe, symbol=symbol,
             type=cand["type"], price=cand["price"], candle_index=idx,
@@ -192,7 +276,9 @@ def _filter_and_confirm(
             confirmation_lag_bars=confirm_index - idx,
             magnitude_atr=None if not np.isfinite(magnitude_atr) else round(float(magnitude_atr), 3),
             status="confirmed",
-            evidence={"fractal_k": k, "atr_at_swing": float(atr_val)},
+            quality_score=score,
+            quality_label=label,
+            evidence=evidence,
         )
         swings.append(sw)
         last_confirmed_opposite = cand
@@ -201,69 +287,53 @@ def _filter_and_confirm(
 
 
 def _apply_retrace_filter(df: pd.DataFrame, swings: List[SwingPoint], min_retrace_pct: float) -> List[SwingPoint]:
-    """حذف «سوئینگ‌اسپم» — بین دو سوئینگ هم‌جهت متوالی که سوئینگ مخالفی
-    بینشان با حداقل ریتریسمنت لازم شکل نگرفته، فقط سوئینگ قوی‌تر (برای
-    swing_high: بالاتر؛ برای swing_low: پایین‌تر) نگه داشته می‌شود.
-    """
+    """Suppress same-direction swing spam while preserving quality metadata."""
     if not swings:
         return swings
-
     swings_sorted = sorted(swings, key=lambda s: s.candle_index)
     kept: List[SwingPoint] = []
     for sw in swings_sorted:
         if kept and kept[-1].type == sw.type:
-            # دو سوئینگ هم‌جهت پشت‌سرهم بدون سوئینگ مخالف بینشان → فقط
-            # قوی‌تر را نگه دار (این خودش پیاده‌سازی عملیِ شرط «۲۰٪
-            # ریتریسمنت لازم قبل از سوئینگ بعدی» است، چون اگر ریتریسمنت
-            # کافی رخ داده بود، یک کاندید مخالف بین این دو تأیید می‌شد).
             prev = kept[-1]
             if sw.type == "swing_high":
                 if sw.price >= prev.price:
                     kept[-1] = sw
-                # وگرنه prev را نگه دار، sw را دور بینداز
-            else:  # swing_low
+            else:
                 if sw.price <= prev.price:
                     kept[-1] = sw
             continue
         kept.append(sw)
-
     return kept
 
 
-# ---------------------------------------------------------------------------
-# نقطه‌ی ورود عمومی
-# ---------------------------------------------------------------------------
+def detect_swings(df: pd.DataFrame, timeframe: str, symbol: str = "",
+                  config_overrides: Optional[dict] = None) -> List[SwingPoint]:
+    """Detect confirmed swings and attach a lookahead-safe quality score.
 
-def detect_swings(
-    df: pd.DataFrame,
-    timeframe: str,
-    symbol: str = "",
-    config_overrides: Optional[dict] = None,
-) -> List[SwingPoint]:
-    """نقطه‌ی ورود اصلی Stage 1-4. df باید ستون‌های open/high/low/close
-    (و اختیاراً volume) داشته باشد و بر حسب زمان صعودی مرتب باشد.
-
-    خروجی: لیست SwingPoint های «confirmed» (طبق سند، سوئینگ تا زمانی که
-    شرایط تأیید برقرار نشود اصلاً در خروجی ظاهر نمی‌شود — یعنی status
-    همیشه «confirmed» است در این نسخه‌ی batch؛ حالت incremental که سوئینگ
-    را به‌صورت «pending» نگه می‌دارد تا کندل تأییدکننده برسد، در
-    signal_engine.swing_structure.streaming پیاده خواهد شد).
+    ``status=confirmed`` only means the fractal confirmation completed.
+    Consumers that need structurally important swings should select
+    ``quality_label == 'significant'`` (or a configured score threshold).
     """
     if df is None or df.empty:
         return []
-
     cfg = _cfg_for(timeframe, config_overrides)
     df_reset = df.reset_index(drop=True)
     candidates = _raw_fractal_candidates(df_reset, cfg["fractal_k"])
-    swings = _filter_and_confirm(df_reset, candidates, cfg, timeframe, symbol)
-    return swings
+    return _filter_and_confirm(df_reset, candidates, cfg, timeframe, symbol)
+
+
+def select_significant_swings(swings: List[SwingPoint], min_score: float = 70.0) -> List[SwingPoint]:
+    """Return only confirmed, meaningful swings; never returns pending/invalidated points."""
+    return [
+        s for s in swings
+        if s.status == "confirmed"
+        and s.quality_score is not None
+        and float(s.quality_score) >= float(min_score)
+    ]
 
 
 def swings_as_arrays(swings: List[SwingPoint]):
-    """کمکی برای signal_engine.common.trend_context.trend_from_swings —
-    لیست SwingPoint را به دو آرایه‌ی موازی (prices, types) بر حسب ترتیب
-    زمانی تبدیل می‌کند.
-    """
+    """Convert SwingPoint objects to parallel price/type arrays."""
     ordered = sorted(swings, key=lambda s: s.candle_index)
     prices = [s.price for s in ordered]
     types = ["high" if s.type == "swing_high" else "low" for s in ordered]

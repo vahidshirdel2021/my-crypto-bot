@@ -263,14 +263,7 @@ STRATEGY_DEFAULTS = {
     "swing_min_wick_atr_ratio": ENGINE_DEFAULTS["swing_min_wick_atr_ratio"],
     "swing_min_volume_ratio": ENGINE_DEFAULTS["swing_min_volume_ratio"],
 
-    "max_sl_atr": 4.0,           # سقف ریسک واقعی بر حسب ATR
-    # اگر استاپ ساختاری کمی دورتر از سقف ریسک باشد، برای ستاپ باکیفیت
-    # می‌توان استاپ اجرایی را به سقف ATR برگرداند؛ این «باز کردن» سقف نیست.
-    # Overage بزرگ‌تر از این مقدار همچنان رد می‌شود تا ستاپ‌های واقعاً دور
-    # (مثل 8-12 ATR) وارد معامله نشوند.
-    "adaptive_sl_enabled": True,
-    "adaptive_sl_min_score": 78.0,
-    "adaptive_sl_max_overage_atr": 1.25,
+    "max_sl_atr": 4.0,           # سقف مطلق فاصله SL بر حسب ATR (فیوز ایمنی، نه بخشی از سناریوها)
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
@@ -796,31 +789,18 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست (SL در سمت اشتباه قیمت ورود قرار دارد)"
 
-    # فیوز ریسک: سقف واقعی فاصله SL بر حسب ATR.
-    # اگر استاپ ساختاری فقط کمی دورتر باشد، به‌جای حذف کل ستاپ، استاپ اجرایی
-    # روی سقف ریسک clamp می‌شود؛ اما فقط برای ستاپ‌های باکیفیت و فقط تا یک
-    # overage محدود. بدین‌ترتیب 4 ATR همچنان سقف ریسک باقی می‌ماند و مقادیر
-    # بسیار دور (مثلاً 8-12 ATR) هرگز با این مکانیزم وارد نمی‌شوند.
+    # فیوز ایمنی: سقف مطلق فاصله SL بر حسب ATR (مستقل از منطق سناریوها)
     atr = _safe_float(df.iloc[-2].get("atr")) if "atr" in df.columns else 0.0
     max_sl_atr = float(cfg.get("max_sl_atr", 4.0))
-    sl_mode = "structural"
-    structural_sl = float(sl)
     if atr > 0 and risk_dist > atr * max_sl_atr:
-        risk_atr = risk_dist / atr
-        adaptive_enabled = bool(cfg.get("adaptive_sl_enabled", True))
-        adaptive_min_score = float(cfg.get("adaptive_sl_min_score", 78.0))
-        adaptive_max_overage = float(cfg.get("adaptive_sl_max_overage_atr", 1.25))
-        if adaptive_enabled and best["total_score"] >= adaptive_min_score and risk_atr <= max_sl_atr + adaptive_max_overage:
-            capped_risk = atr * max_sl_atr
-            sl = entry - capped_risk if signal == "BUY" else entry + capped_risk
-            risk_dist = capped_risk
-            sl_mode = "adaptive_atr_capped"
-        else:
-            return None, (
-                f"PLAN_BLOCK|reason=ATR_CAP|scenario={best.get('code','?')}|"
-                f"risk_atr={risk_atr:.4f}|max_sl_atr={max_sl_atr:.4f}|"
-                f"entry={entry:.12g}|sl={sl:.12g}|tp={tp:.12g}"
-            )
+        # Keep the rejection explicit and machine-readable.  The audit layer
+        # can now distinguish a hard risk-fuse rejection from a generic
+        # planner failure without scraping localized prose.
+        return None, (
+            f"PLAN_BLOCK|reason=ATR_CAP|scenario={best.get('code','?')}|"
+            f"risk_atr={risk_dist / atr:.4f}|max_sl_atr={max_sl_atr:.4f}|"
+            f"entry={entry:.12g}|sl={sl:.12g}|tp={tp:.12g}"
+        )
 
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     if risk_dist / entry < min_sl_pct:
@@ -835,12 +815,6 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
     # در B5/S5 با یک کندل تاییدِ خیلی بزرگ) هدف محاسبه‌شده عملاً پشت سر قیمت
     # ورود بیفتد، معامله‌ای با هدف نامعتبر (بدون پاداش واقعی) رد نمی‌شد. این
     # دقیقاً همان پیش‌نیازی است که ساخت پلکان سه‌مرحله‌ای TP هم به آن متکی است.
-    # اگر چند سطح ساختاری معتبر در مسیر وجود داشته باشد، TP3 را روی دورترین
-    # سطح معتبر می‌گذاریم و RR را بر مبنای همان هدف نهایی حساب می‌کنیم.
-    early_tp1, early_tp2, early_tp3, early_tier_pcts = _build_tp_ladder(entry, tp, signal, best, cfg)
-    if best.get("target_level_candidates"):
-        tp = float(early_tp3)
-
     target_ahead = (tp > entry) if signal == "BUY" else (tp < entry)
     if not target_ahead:
         return None, f"هدف سناریو {best['code']} جلوتر از قیمت ورود نیست (احتمالاً کندل تایید خیلی بزرگ بوده)؛ معامله رد شد"
@@ -872,10 +846,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         "atr": atr,
         "scenario_code": best["code"],
         "level_source": level_source_used or "KLSDE",
-        "swing_level": best.get("swing_level"),
-        "swing_sl_buffer": best.get("swing_sl_buffer"),
-        "sl_mode": best.get("sl_mode", "structural"),
-        "b5_variant": bool((best.get("klsde_setup_evidence") or {}).get("b5_variant", False)),
+        "swing_level": None,
         "structural_target": True,  # هدف، سطح ساختاری (PDH/PDL یا PWH/PWL) است نه RR ثابت
         "setup_family": f"KLSDE_{best['code']}",
         "reason": _format_reason(best),
@@ -955,30 +926,7 @@ def _build_tp_ladder(entry, boundary_tp, signal, best, cfg):
         (is_long and float(range_eq) > entry) or ((not is_long) and float(range_eq) < entry)
     )
 
-    execution_candidates = []
-    for item in (best.get("target_level_candidates") or []):
-        try:
-            name, price = item
-            price = float(price)
-        except Exception:
-            continue
-        if np.isfinite(price) and ((is_long and price > entry) or ((not is_long) and price < entry)):
-            execution_candidates.append((str(name), price))
-
-    if execution_candidates:
-        prices = [p for _, p in execution_candidates]
-        prices = sorted(prices, reverse=not is_long)
-        if len(prices) == 1:
-            leg = prices[0] - entry
-            tp1 = entry + leg * 0.40
-            tp2 = entry + leg * 0.70
-            tp3 = prices[0]
-        elif len(prices) == 2:
-            tp1, tp3 = prices[0], prices[1]
-            tp2 = tp1 + (tp3 - tp1) * 0.50
-        else:
-            tp1, tp2, tp3 = prices[0], prices[1], prices[-1]
-    elif boundary_ahead and eq_ahead:
+    if boundary_ahead and eq_ahead:
         # حالت ۱: پلکان دقیقاً طبق تعریف کاربر (EQ → مرز مقابل → اکستنشن)
         tp2 = raw_boundary
         tp1 = float(range_eq)

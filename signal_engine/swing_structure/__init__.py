@@ -11,12 +11,12 @@ signal_engine.swing_structure
 فقط رویداد ساختاری تولید می‌کنند (طبق بخش ۸ سند).
 """
 
-from .swings import SwingPoint, detect_swings, swings_as_arrays, DEFAULT_SWING_CONFIG
+from .swings import SwingPoint, detect_swings, swings_as_arrays, select_significant_swings, DEFAULT_SWING_CONFIG
 from .structure import StructureEvent, detect_structure_events, trend_state_from_swings
 from .mtf_alignment import AlignedContext, align_timeframes
 
 __all__ = [
-    "SwingPoint", "detect_swings", "swings_as_arrays", "DEFAULT_SWING_CONFIG",
+    "SwingPoint", "detect_swings", "swings_as_arrays", "select_significant_swings", "DEFAULT_SWING_CONFIG",
     "StructureEvent", "detect_structure_events", "trend_state_from_swings",
     "AlignedContext", "align_timeframes",
 ]

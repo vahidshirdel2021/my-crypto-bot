@@ -39,6 +39,8 @@ from signal_engine.common.atr import compute_atr, latest_atr
 from signal_engine.confluence.layer import generate_trade_signals
 from signal_engine.confluence.selector import TradeSignal
 from signal_engine.confluence.invalidation import check_structural_invalidation
+from signal_engine.swing_structure.swings import detect_swings
+from signal_engine.key_level_setup.levels import compute_key_levels
 
 # طبق بخش ۲ سند اصلاحی (Architectural Addendum): برای این‌که بتوان در
 # طول زمان (نه فقط در لحظه‌ی تولید سیگنال) قیمت را با سطح ابطال ساختاری
@@ -58,23 +60,126 @@ def _best_reference_price(signal: TradeSignal, key_candidates) -> Optional[float
 
 
 
-def _nearest_ahead_level(signal: TradeSignal, entry: float, is_buy: bool) -> Optional[float]:
-    levels = getattr(signal, "reference_levels", {}) or {}
-    candidates = []
-    for name, value in levels.items():
-        if name == "klsde_level_price" or name in {"structural_stop_reference", "structural_target_reference"}:
-            continue
+def _execution_target_levels(timeframe: str, is_buy: bool, level_set):
+    """سطوح هدف اجرایی را از سطوح مناسب تایم‌فریم انتخاب می‌کند.
+
+    5m/15m: PDH/PDL سپس PWH/PWL سپس PMH/PML.
+    1h/4h: PWH/PWL سپس PMH/PML.
+    سطوح P1H/P4H برای confluence مفیدند اما نباید صرفاً به‌عنوان نزدیک‌ترین
+    TP باعث فشرده‌شدن RR معامله‌ی تایم‌فریم پایین شوند.
+    """
+    if level_set is None:
+        return []
+    levels = getattr(level_set, "levels", {}) or {}
+    if timeframe in ("5min", "15min"):
+        names = ["PDH", "PWH", "PMH"] if is_buy else ["PDL", "PWL", "PML"]
+    else:
+        names = ["PWH", "PMH"] if is_buy else ["PWL", "PML"]
+    out = []
+    for name in names:
+        info = levels.get(name)
+        price = getattr(info, "price", None) if info is not None else None
         try:
-            price = float(value)
+            price = float(price) if price is not None else None
         except (TypeError, ValueError):
-            continue
-        if not np.isfinite(price):
-            continue
-        if (is_buy and price > entry) or ((not is_buy) and price < entry):
-            candidates.append((abs(price - entry), price))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda x: x[0])[1]
+            price = None
+        if price is not None and np.isfinite(price):
+            out.append((name, price))
+    return out
+
+
+
+def _b5_retest_swing_stop(signal: TradeSignal, df: pd.DataFrame, entry: float, is_buy: bool, atr: float, timeframe: str = "5min"):
+    """Return (stop, swing_price) for the B5/S5 breakout-retest variant.
+
+    The swing is restricted to candles between the confirmed breakout and the
+    confirmed resumption, so an old HTF swing cannot silently become the SL.
+    Falls back to the recorded retest candle when the swing detector has no
+    usable point.
+    """
+    try:
+        evidence = dict(signal.reference_levels.get("klsde_setup_evidence") or {})
+        if not evidence.get("b5_variant"):
+            return None, None
+        start = int(evidence.get("breakout_confirm_index"))
+        end = int(evidence.get("resumption_index"))
+        retest_idx = int(evidence.get("retest_swing_index"))
+        if start < 0 or end < start or end >= len(df):
+            return None, None
+        # The retest swing must be before the confirmation candle.
+        retest_end = min(max(retest_idx, start), end - 1) if end > start else start
+        if retest_end < start:
+            return None, None
+        segment = df.iloc[start:retest_end + 1]
+        if segment.empty:
+            return None, None
+
+        # V16: the B5/S5 stop must use the project's confirmed swing engine,
+        # not simply the absolute low/high of the whole retest segment.
+        # This prevents one noisy wick from silently becoming the structural
+        # stop.  A swing is eligible only if it was confirmed no later than
+        # the B5/S5 resumption candle (strict no-lookahead boundary).
+        swing_cfg = dict((signal.reference_levels.get("swing_structure_config") or evidence.get("swing_structure_config") or {}))
+        try:
+            all_swings = detect_swings(
+                df.reset_index(drop=True),
+                timeframe=timeframe,
+                symbol=getattr(signal, "symbol", ""),
+                config_overrides=swing_cfg,
+            )
+        except Exception:
+            all_swings = []
+
+        wanted_type = "swing_low" if is_buy else "swing_high"
+        eligible = [
+            s for s in all_swings
+            if s.type == wanted_type
+            and s.status == "confirmed"
+            and s.confirmed_at_index is not None
+            and int(s.confirmed_at_index) <= end
+            and start <= int(s.candle_index) <= retest_end
+            and s.quality_score is not None
+            and float(s.quality_score) >= float(swing_cfg.get("b5_min_swing_quality", 45.0))
+        ]
+
+        # Prefer a significant swing. Confirmed-but-not-significant is a
+        # controlled fallback; weak swings are never used for B5/S5 SL.
+        significant = [s for s in eligible if s.quality_label == "significant"]
+        pool = significant or eligible
+        if pool:
+            chosen = min(pool, key=lambda s: abs(int(s.candle_index) - retest_idx))
+            swing_price = float(chosen.price)
+            swing_quality = float(chosen.quality_score)
+            swing_label = chosen.quality_label
+            swing_index = int(chosen.candle_index)
+        else:
+            # Strict V16 rule: a B5/S5 structural SL is never allowed to be
+            # created from an unclassified wick/extreme. If no confirmed
+            # quality swing exists by the resumption boundary, let the caller
+            # fall back to its normal structural/ATR stop logic instead.
+            evidence["b5_sl_swing_source"] = "no_eligible_confirmed_swing"
+            evidence["b5_sl_lookahead_safe"] = True
+            signal.reference_levels["klsde_setup_evidence"] = evidence
+            return None, None
+
+        if not np.isfinite(swing_price):
+            return None, None
+        buffer = max(float(atr) * 0.25, abs(swing_price) * 0.001)
+        stop = swing_price - buffer if is_buy else swing_price + buffer
+        if (is_buy and stop >= entry) or ((not is_buy) and stop <= entry):
+            return None, None
+
+        # Attach auditable selection metadata to the signal evidence.
+        evidence["b5_sl_swing_source"] = swing_label
+        evidence["b5_sl_swing_index"] = swing_index
+        evidence["b5_sl_swing_quality_score"] = swing_quality
+        evidence["b5_sl_swing_quality_label"] = swing_label
+        evidence["b5_sl_lookahead_safe"] = True
+        signal.reference_levels["klsde_setup_evidence"] = evidence
+        return float(stop), float(swing_price)
+    except Exception:
+        return None, None
+
 
 def _construct_entry_sl_tp(
     signal: TradeSignal,
@@ -82,6 +187,7 @@ def _construct_entry_sl_tp(
     live_price: Optional[float] = None,
     sl_atr_multiple: float = 1.5,
     tp_atr_multiple: float = 3.0,
+    timeframe: str = "5min",
 ) -> Optional[dict]:
     """طبق مرز مسئولیت سند USCL (بخش ۷): این تابع entry/sl/tp را از روی
     reference_levels خامِ همان موتوری که anchor بوده می‌سازد؛ اگر سطح
@@ -103,16 +209,35 @@ def _construct_entry_sl_tp(
     structural_stop_ref = _best_reference_price(
         signal, ["klsde_level_price", "horizontal_level", "breakout_level", "rim_level"]
     )
+    b5_stop, b5_swing = _b5_retest_swing_stop(signal, df, entry, is_buy, atr, timeframe=timeframe)
     # KLSDE carries the complete Key-Level map. Prefer the nearest valid
     # structural target in the trade direction (1H/4H/DAY/WEEK/MONTH), then
     # fall back to an explicit measured target if one exists. This keeps TP
     # tied to the same levels that triggered the setup instead of defaulting
     # to a blind ATR target whenever measured_move_target is absent.
-    structural_target_ref = _nearest_ahead_level(signal, entry, is_buy)
-    if structural_target_ref is None:
+    # روی 5m/15m، نزدیک‌ترین P1H/P4H نباید به‌صورت خودکار TP شود.
+    # این سطوح می‌توانند confluence/شاهد باشند، اما هدف اجرایی باید از
+    # ساختار مناسب تایم‌فریم گرفته شود تا RR مصنوعی به حوالی 1R فشرده نشود.
+    level_set = None
+    try:
+        level_set = compute_key_levels(df, symbol=getattr(signal, "symbol", ""))
+    except Exception:
+        pass
+    target_candidates = _execution_target_levels(timeframe, is_buy, level_set)
+    ahead_candidates = [(name, price) for name, price in target_candidates
+                        if (is_buy and price > entry) or ((not is_buy) and price < entry)]
+    if ahead_candidates:
+        # Keep the full execution-timeframe ladder. The nearest level is a
+        # useful TP1, but the planner should not collapse TP3/RR to ~1R when
+        # higher valid structural levels are available.
+        structural_target_name, structural_target_ref = ahead_candidates[-1]
+    else:
         structural_target_ref = _best_reference_price(signal, ["measured_move_target"])
+        structural_target_name = "measured_move_target" if structural_target_ref is not None else None
 
-    if structural_stop_ref is not None:
+    if b5_stop is not None:
+        sl = b5_stop
+    elif structural_stop_ref is not None:
         buffer = 0.3 * atr
         sl = structural_stop_ref - buffer if is_buy else structural_stop_ref + buffer
         # اگر سطح ساختاری عملاً از entry فاصله‌ی معناداری نداشت (خیلی نزدیک)،
@@ -129,7 +254,14 @@ def _construct_entry_sl_tp(
     else:
         tp = entry + tp_atr_multiple * atr if is_buy else entry - tp_atr_multiple * atr
 
-    return {"entry": entry, "sl": sl, "tp": tp}
+    return {"entry": entry, "sl": sl, "tp": tp, "target_level_name": structural_target_name,
+            "target_level_source": "execution_timeframe_structure" if structural_target_name else None,
+            "target_level_candidates": ahead_candidates,
+            "swing_level": b5_swing, "swing_sl_buffer": (abs(b5_swing - b5_stop) if b5_stop is not None and b5_swing is not None else None),
+            "swing_quality_score": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_quality_score")),
+            "swing_quality_label": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_quality_label")),
+            "swing_index": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_index")),
+            "sl_mode": "b5_retest_swing" if b5_stop is not None else "structural_or_atr"}
 
 
 def run_new_engine_as_best(
@@ -163,9 +295,17 @@ def run_new_engine_as_best(
     active_signals = [s for s in signals if s.status in ("active", "updated")]
     if not active_signals:
         return None
-    best_signal = max(active_signals, key=lambda s: s.created_at_index)
+    # Prefer the strongest active KLSDE setup. B5/S5 is first-class, but we
+    # still let confluence score decide when several levels interact at once.
+    # This preserves the "check every key level" behavior while preventing a
+    # merely newer weak level from replacing a stronger confirmed setup.
+    setup_priority = {"B5": 2, "S5": 2, "BOF": 1, "TST": 1, "BPB": 1, "BP": 1, "CPB": 1}
+    best_signal = max(
+        active_signals,
+        key=lambda s: (setup_priority.get(s.anchor_native_event_type, 0), s.confluence_score, s.created_at_index),
+    )
 
-    plan_prices = _construct_entry_sl_tp(best_signal, df, live_price=live_price)
+    plan_prices = _construct_entry_sl_tp(best_signal, df, live_price=live_price, timeframe=timeframe)
     if plan_prices is None:
         return None
 
@@ -203,6 +343,13 @@ def run_new_engine_as_best(
         "signal_id": best_signal.signal_id,
         "n_supporting_evidence": len(best_signal.supporting_evidence),
         "taxonomy": best_signal.taxonomy,
+        "target_level_name": plan_prices.get("target_level_name"),
+        "target_level_source": plan_prices.get("target_level_source"),
+        "target_level_candidates": plan_prices.get("target_level_candidates", []),
+        "swing_level": plan_prices.get("swing_level"),
+        "swing_sl_buffer": plan_prices.get("swing_sl_buffer"),
+        "sl_mode": plan_prices.get("sl_mode"),
+        "klsde_setup_evidence": best_signal.reference_levels.get("klsde_setup_evidence", {}),
     }
 
 

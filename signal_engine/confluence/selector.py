@@ -72,6 +72,11 @@ def _extract_reference_levels(context) -> dict:
     lvl_price = getattr(payload, "level_price", None)
     if lvl_price is not None:
         levels["klsde_level_price"] = lvl_price
+    evidence = dict(getattr(payload, "evidence", {}) or {})
+    if evidence:
+        levels["klsde_setup_evidence"] = evidence
+    levels["klsde_window_open_index"] = getattr(payload, "window_opened_at_index", None)
+    levels["klsde_resolved_at_index"] = getattr(payload, "resolved_at_index", None)
     return levels
 
 

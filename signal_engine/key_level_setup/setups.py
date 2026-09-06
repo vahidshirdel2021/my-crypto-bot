@@ -29,8 +29,9 @@ import pandas as pd
 from signal_engine.common.candle_geometry import compute_candle_geometry
 from signal_engine.key_level_setup.interactions import InteractionWindow
 from signal_engine.swing_structure.swings import detect_swings
+from signal_engine.swing_structure.structure import detect_structure_events
 
-SetupType = Literal["BOF", "TST", "BPB", "BP", "CPB"]
+SetupType = Literal["BOF", "TST", "B5", "BPB", "BP", "CPB", "S5"]
 Direction = Literal["bullish", "bearish"]
 
 DEFAULT_SETUP_CONFIG = {
@@ -42,6 +43,10 @@ DEFAULT_SETUP_CONFIG = {
     "pullback_min_retrace_atr": 0.3,
     "resumption_min_atr": 0.2,
     "weakness_body_ratio_factor": 0.5,  # بدنه‌ی کندل رد کردن باید حداکثر نصف بدنه‌ی کندل شکست باشد
+    # B5/S5 structural quality: BOS/HL-LH are evidence by default, not hard gates.
+    "b5_require_bos": False,
+    "b5_require_hl_lh": False,
+    "b5_structure_bonus": 0.06,
 }
 
 
@@ -147,6 +152,64 @@ def _count_pullback_swings(df: pd.DataFrame, start_index: int, end_index: int, t
     return len(swings)
 
 
+
+def _b5_structure_evidence(
+    df: pd.DataFrame,
+    timeframe: str,
+    symbol: str,
+    direction: Direction,
+    breakout_index: int,
+    retest_index: int,
+    resumption_index: int,
+) -> dict:
+    """Extract non-lookahead BOS + HL/LH evidence around a B5/S5.
+
+    BOS is taken from the project's SDE structure engine and must occur on or
+    before the confirmed breakout candle.  The retest structure is evaluated
+    only from swings that were already confirmed by the resumption candle.
+    """
+    out = {
+        "bos_confirmed": False, "bos_index": None, "bos_broken_swing_price": None,
+        "structure_hl_lh_confirmed": False, "structure_swing_price": None,
+        "structure_prev_swing_price": None,
+    }
+    try:
+        if breakout_index < 0 or retest_index <= breakout_index or resumption_index <= retest_index:
+            return out
+        swings = detect_swings(df, timeframe=timeframe)
+        events = detect_structure_events(df, swings, timeframe=timeframe, symbol=symbol)
+        want = "bullish" if direction == "bullish" else "bearish"
+        bos = [e for e in events if e.event_type == "BOS" and e.direction == want
+               and breakout_index <= e.trigger_index <= resumption_index]
+        if bos:
+            e = min(bos, key=lambda x: x.trigger_index)
+            # A BOS after the nominal breakout candle is still structural
+            # evidence for the completed B5, but it is not allowed to alter
+            # the breakout timestamp itself.
+            out["bos_confirmed"] = True
+            out["bos_index"] = int(e.trigger_index)
+            out["bos_broken_swing_price"] = float(e.evidence.get("broken_price")) if e.evidence.get("broken_price") is not None else None
+
+        confirmed = [s for s in swings if s.status == "confirmed"
+                     and s.confirmed_at_index is not None and s.confirmed_at_index <= resumption_index]
+        if direction == "bullish":
+            prior = sorted([s for s in confirmed if s.type == "swing_low" and s.candle_index < breakout_index], key=lambda x: x.candle_index)
+            retest_lows = sorted([s for s in confirmed if s.type == "swing_low" and breakout_index <= s.candle_index <= retest_index], key=lambda x: x.candle_index)
+            if prior and retest_lows and retest_lows[-1].price > prior[-1].price:
+                out["structure_hl_lh_confirmed"] = True
+                out["structure_swing_price"] = float(retest_lows[-1].price)
+                out["structure_prev_swing_price"] = float(prior[-1].price)
+        else:
+            prior = sorted([s for s in confirmed if s.type == "swing_high" and s.candle_index < breakout_index], key=lambda x: x.candle_index)
+            retest_highs = sorted([s for s in confirmed if s.type == "swing_high" and breakout_index <= s.candle_index <= retest_index], key=lambda x: x.candle_index)
+            if prior and retest_highs and retest_highs[-1].price < prior[-1].price:
+                out["structure_hl_lh_confirmed"] = True
+                out["structure_swing_price"] = float(retest_highs[-1].price)
+                out["structure_prev_swing_price"] = float(prior[-1].price)
+    except Exception:
+        return out
+    return out
+
 def classify_setup(
     window: InteractionWindow,
     df: pd.DataFrame,
@@ -241,20 +304,52 @@ def classify_setup(
     pullback_reached_level = trough_pen <= 0  # یعنی واقعاً به سطح (یا فراتر) برگشته
 
     weakness_signal = False
+    b5_confirmation = False
+    b5_confirmation_body_ratio = None
     try:
         breakout_candle = df.iloc[breakout_confirm_index]
         trough_candle = df.iloc[trough_index]
+        confirm_candle = df.iloc[resumption_index]
         breakout_geom = compute_candle_geometry(breakout_candle["open"], breakout_candle["high"],
                                                   breakout_candle["low"], breakout_candle["close"])
         trough_geom = compute_candle_geometry(trough_candle["open"], trough_candle["high"],
                                                trough_candle["low"], trough_candle["close"])
+        confirm_geom = compute_candle_geometry(confirm_candle["open"], confirm_candle["high"],
+                                                confirm_candle["low"], confirm_candle["close"])
         if pd.notna(trough_geom.body_to_range_ratio) and pd.notna(breakout_geom.body_to_range_ratio):
             weakness_signal = (
                 trough_geom.primitive == "doji"
                 or trough_geom.body_to_range_ratio <= cfg["weakness_body_ratio_factor"] * breakout_geom.body_to_range_ratio
             )
+        if pd.notna(confirm_geom.body_to_range_ratio):
+            b5_confirmation_body_ratio = float(confirm_geom.body_to_range_ratio)
+            body_direction_ok = (
+                float(confirm_candle["close"]) > float(confirm_candle["open"]) if direction == "bullish"
+                else float(confirm_candle["close"]) < float(confirm_candle["open"])
+            )
+            b5_confirmation = bool(body_direction_ok and b5_confirmation_body_ratio >= 0.45)
     except Exception:
         weakness_signal = False
+        b5_confirmation = False
+
+    # B5/S5 is a first-class KLSDE setup: true breakout -> retest of the
+    # broken level -> directional confirmation. It is evaluated independently
+    # for every key-level interaction window, just like the other primary
+    # setups. The legacy BPB classification is retained only when the B5
+    # conditions are not fully satisfied.
+    b5_variant = bool(pullback_reached_level and b5_confirmation)
+    structure = _b5_structure_evidence(
+        d, timeframe, window.symbol, direction, breakout_confirm_index,
+        trough_index, resumption_index
+    ) if b5_variant else {
+        "bos_confirmed": False, "bos_index": None, "bos_broken_swing_price": None,
+        "structure_hl_lh_confirmed": False, "structure_swing_price": None,
+        "structure_prev_swing_price": None,
+    }
+    structure_ready = bool(structure["bos_confirmed"] and structure["structure_hl_lh_confirmed"])
+    structure_gate_ok = (not cfg.get("b5_require_bos", False) or structure["bos_confirmed"]) and (
+        not cfg.get("b5_require_hl_lh", False) or structure["structure_hl_lh_confirmed"]
+    )
 
     evidence = {
         "penetration_depth_atr": round(pen_at_confirm, 3),
@@ -262,21 +357,41 @@ def classify_setup(
         "pullback_swing_count": swing_count,
         "pullback_reached_level": pullback_reached_level,
         "weakness_signal": weakness_signal,
+        "b5_variant": b5_variant,
+        "b5_confirmation": b5_confirmation,
+        "b5_confirmation_body_ratio": round(b5_confirmation_body_ratio, 4) if b5_confirmation_body_ratio is not None else None,
+        "bos_confirmed": structure["bos_confirmed"],
+        "bos_index": structure["bos_index"],
+        "bos_broken_swing_price": structure["bos_broken_swing_price"],
+        "structure_hl_lh_confirmed": structure["structure_hl_lh_confirmed"],
+        "structure_swing_price": structure["structure_swing_price"],
+        "structure_prev_swing_price": structure["structure_prev_swing_price"],
+        "b5_structure_ready": structure_ready,
+        "breakout_confirm_index": breakout_confirm_index,
+        "retest_swing_index": trough_index,
+        "resumption_index": resumption_index,
         "level_significance_tier": window.level_tier,
         "is_confluent": window.is_confluent,
         "confluent_with": window.confluent_with,
         "confluence_strength": window.confluence_strength,
     }
 
-    if swing_count >= 2:
-        setup_type: SetupType = "CPB"
+    if b5_variant and not structure_gate_ok:
+        b5_variant = False
+        evidence["b5_variant"] = False
+        evidence["b5_structure_gate_failed"] = True
+    if b5_variant:
+        setup_type: SetupType = "B5" if direction == "bullish" else "S5"
+    elif swing_count >= 2:
+        setup_type = "CPB"
     elif pullback_reached_level and weakness_signal:
         setup_type = "BP"
     else:
         setup_type = "BPB"
 
-    base_conf = {"BP": 0.65, "BPB": 0.55, "CPB": 0.6}[setup_type]
-    confidence = min(1.0, base_conf + 0.2 * tier_weight + (0.1 if weakness_signal else 0.0))
+    base_conf = {"B5": 0.72, "S5": 0.72, "BP": 0.65, "BPB": 0.55, "CPB": 0.6}[setup_type]
+    confidence = min(1.0, base_conf + 0.2 * tier_weight + (0.1 if weakness_signal else 0.0)
+                       + (float(cfg.get("b5_structure_bonus", 0.06)) if b5_variant and structure_ready else 0.0))
 
     return SetupEvent(
         id=f"setup_{timeframe}_{window.id}", setup_type=setup_type, level_name=window.level_name,

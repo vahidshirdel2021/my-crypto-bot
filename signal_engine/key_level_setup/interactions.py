@@ -117,13 +117,10 @@ def detect_interactions(
 
     valid_levels = {name: info.price for name, info in level_set.levels.items() if info.price is not None}
 
-    # طبق درخواست کاربر: خوشه‌های «سطح قوی» یک‌بار (نه به‌ازای هر کندل)
-    # روی قیمت‌های ثابت سطوح محاسبه می‌شوند — چون خودِ سطوح در طول این
-    # سری ثابت‌اند (فقط در مرز دوره‌ی بعدی عوض می‌شوند). از آخرین ATR
-    # معتبر به‌عنوان مقیاس نزدیکی استفاده می‌شود.
-    last_valid_atr = next((v for v in reversed(atr_series.tolist()) if pd.notna(v) and v > 0), None)
-    confluence_map = detect_level_confluence(level_set, last_valid_atr, LEVEL_TIER) if last_valid_atr else {}
-
+    # سطوح قیمت در طول سری ثابت‌اند، اما مقیاس نزدیکیِ ATR ثابت نیست.
+    # بنابراین confluence باید با ATR همان کندل سنجیده شود؛ استفاده از
+    # آخرین ATR برای تمام تاریخچه می‌توانست خوشه/zone را در دوره‌های
+    # volatility متفاوت به‌اشتباه بزرگ یا کوچک کند.
     n = len(d)
     for i in range(n):
         atr_val = atr_series.iloc[i]
@@ -132,6 +129,8 @@ def detect_interactions(
         close_price = float(d["close"].iloc[i])
         high_price = float(d["high"].iloc[i])
         low_price = float(d["low"].iloc[i])
+
+        confluence_map = detect_level_confluence(level_set, float(atr_val), LEVEL_TIER)
 
         for level_name, level_price in valid_levels.items():
             tier = LEVEL_TIER.get(level_name, "daily")

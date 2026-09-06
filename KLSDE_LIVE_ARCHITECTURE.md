@@ -32,7 +32,7 @@ Live path cannot call them.
 
 ## Final flow
 
-`Watchlist -> Key Levels -> KLSDE interaction -> BOF/TST/BPB/BP/CPB ->
+`Watchlist -> Key Levels -> KLSDE interaction -> BOF/TST/B5/S5/BPB/BP/CPB ->
 Confluence confirmations -> Score -> HTF/RR/Risk -> Entry`
 
 TP prefers the nearest valid structural Key Level ahead of the entry; ATR is

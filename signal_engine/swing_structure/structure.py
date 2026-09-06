@@ -118,7 +118,7 @@ def detect_structure_events(
                     id=f"struct_{timeframe}_{len(events):06d}", timeframe=timeframe, symbol=symbol,
                     event_type="BOS", direction="bullish", trigger_price=close_price, trigger_index=i,
                     broken_swing_id=last_high.id, prior_trend=prior_trend, new_trend="uptrend",
-                    confidence=0.7, evidence={"broken_price": last_high.price},
+                    confidence=min(0.95, 0.7 + (float(last_high.quality_score or 0.0) / 1000.0)), evidence={"broken_price": last_high.price, "broken_swing_quality_score": last_high.quality_score, "broken_swing_quality_label": last_high.quality_label},
                 ))
                 already_broken_swing_ids.add(last_high.id)
                 continue
@@ -129,7 +129,7 @@ def detect_structure_events(
                     id=f"struct_{timeframe}_{len(events):06d}", timeframe=timeframe, symbol=symbol,
                     event_type="BOS", direction="bearish", trigger_price=close_price, trigger_index=i,
                     broken_swing_id=last_low.id, prior_trend=prior_trend, new_trend="downtrend",
-                    confidence=0.7, evidence={"broken_price": last_low.price},
+                    confidence=min(0.95, 0.7 + (float(last_low.quality_score or 0.0) / 1000.0)), evidence={"broken_price": last_low.price, "broken_swing_quality_score": last_low.quality_score, "broken_swing_quality_label": last_low.quality_label},
                 ))
                 already_broken_swing_ids.add(last_low.id)
                 continue
@@ -142,7 +142,7 @@ def detect_structure_events(
                     id=f"struct_{timeframe}_{len(events):06d}", timeframe=timeframe, symbol=symbol,
                     event_type="CHoCH", direction="bullish", trigger_price=close_price, trigger_index=i,
                     broken_swing_id=last_high.id, prior_trend=prior_trend, new_trend="range",
-                    confidence=0.4, evidence={"broken_price": last_high.price, "note": "leading_reversal_signal"},
+                    confidence=min(0.75, 0.4 + (float(last_high.quality_score or 0.0) / 1000.0)), evidence={"broken_price": last_high.price, "broken_swing_quality_score": last_high.quality_score, "broken_swing_quality_label": last_high.quality_label, "note": "leading_reversal_signal"},
                 ))
                 already_broken_swing_ids.add(last_high.id)
                 continue
@@ -153,7 +153,7 @@ def detect_structure_events(
                     id=f"struct_{timeframe}_{len(events):06d}", timeframe=timeframe, symbol=symbol,
                     event_type="CHoCH", direction="bearish", trigger_price=close_price, trigger_index=i,
                     broken_swing_id=last_low.id, prior_trend=prior_trend, new_trend="range",
-                    confidence=0.4, evidence={"broken_price": last_low.price, "note": "leading_reversal_signal"},
+                    confidence=min(0.75, 0.4 + (float(last_low.quality_score or 0.0) / 1000.0)), evidence={"broken_price": last_low.price, "broken_swing_quality_score": last_low.quality_score, "broken_swing_quality_label": last_low.quality_label, "note": "leading_reversal_signal"},
                 ))
                 already_broken_swing_ids.add(last_low.id)
                 continue

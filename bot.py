@@ -1794,10 +1794,14 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None,planned_rr=None,setup_identity=None):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
-    quality_score = None; quality_label = None; planned_rr = None
+    quality_score = None; quality_label = None
+    # RR is computed by build_trade_plan() and must travel explicitly through
+    # the execution boundary. Keep the reason-string parser only as a legacy
+    # fallback for older callers that do not provide planned_rr.
+    planned_rr = float(planned_rr) if planned_rr is not None else None
     scenario_code = (reason or '').split('|')[0].strip() or None
     # نکته: فرمت واقعی reason «امتیاز XX.X/100 (...)» است، نه «کیفیت XX/100» —
     # الگوی قبلی هرگز مچ نمی‌شد (کلمه‌ی اشتباه + فرض عدد صحیح به‌جای اعشاری) و
@@ -1807,9 +1811,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     m_score=re.search(r'امتیاز\s+([0-9]+(?:\.[0-9]+)?)/100\s*\(([^)]*)\)', reason or '')
     if m_score:
         quality_score=float(m_score.group(1)); quality_label=m_score.group(2)
-    m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
-    if m_rr:
-        planned_rr=float(m_rr.group(1))
+    if planned_rr is None:
+        m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
+        if m_rr:
+            planned_rr=float(m_rr.group(1))
     level_key = None
     m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
     if m_level:
@@ -1817,7 +1822,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # A setup is consumable only once. Use the latest closed signal identity so
     # repeated scan loops cannot create duplicate audit signals or re-enter the
     # exact same liquidity event.
-    setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
+    # Stable setup identity: same symbol/side/timeframe/scenario on the same
+    # closed signal candle is one liquidity event, even if intrabar prices or
+    # formatted reason text drift between scan loops. This prevents 4H/1H
+    # repeated Plan/Execute attempts without suppressing a genuinely new candle.
+    setup_source = str(setup_identity or f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}")
     setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
     if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
         _set_execute_block_reason(chat_id, 'همین ستاپ دقیقاً قبلاً به‌عنوان پوزیشن باز ثبت شده (تکراری)')
@@ -2344,8 +2353,8 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
 
 # دلیل دقیق آخرین رد شدن اجرای معامله برای هر chat_id — صرفاً برای گزارش
 # ردیابی معاملات (pipeline audit)؛ هیچ اثری روی منطق/کنترل جریان معامله ندارد
-# (به همین دلیل عمداً امضای execute_trade/_execute_trade_unlocked دست‌نخورده
-# ماند تا ریسک تغییر در مسیر بحرانی اجرای معامله‌ی واقعی صفر باشد). یافته‌شده
+# دلیل دقیق آخرین رد شدن اجرا برای گزارش قابل مشاهده است؛ امضای مسیر اجرا
+# حالا planned_rr را نیز به‌صورت صریح حمل می‌کند تا RR واقعی از Plan گم نشود. یافته‌شده
 # از بررسی گزارش pipeline_events: ۵ سیگنال معتبر با پیام خالی رد شده بودند و
 # دلیل واقعی (ظرفیت پر؟ کول‌داون؟ same_direction_guard؟) قابل مشاهده نبود.
 _EXECUTE_BLOCK_REASON: Dict[int, str] = {}
@@ -2365,7 +2374,7 @@ def pop_execute_block_reason(chat_id):
         return None
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,swing_level=None,swing_sl_buffer=None,tp_ladder=None,htf_trend=None,planned_rr=None,setup_identity=None):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -2377,7 +2386,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             _set_execute_block_reason(chat_id, 'ربات غیرفعال شد یا نسل اسکن در حین قفل عوض شد (رقابت زمانی)')
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder=tp_ladder,htf_trend=htf_trend)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,tp_ladder=tp_ladder,htf_trend=htf_trend,planned_rr=planned_rr,setup_identity=setup_identity)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -3070,6 +3079,7 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
         'breakout_buy_ok': False, 'breakout_sell_ok': False,
         'candle_volume_ok': False, 'candle_buy_ok': False, 'candle_sell_ok': False,
         'final_buy_ok': False, 'final_sell_ok': False,
+        'diagnostic_buy_filters_ok': False, 'diagnostic_sell_filters_ok': False,
     }
     try:
         if df is None or df.empty or len(df) < 60:
@@ -3117,8 +3127,14 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
             strong_bear = curr['close'] < curr['open'] and body / rng >= 0.60
             out['candle_buy_ok'] = bool(bullish_pin or strong_bull)
             out['candle_sell_ok'] = bool(bearish_pin or strong_bear)
-        out['final_buy_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_buy_ok'] and out['candle_volume_ok'] and (out['candle_buy_ok'] or not f.get('candlestick_filter', True)))
-        out['final_sell_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_sell_ok'] and out['candle_volume_ok'] and (out['candle_sell_ok'] or not f.get('candlestick_filter', True)))
+        out['diagnostic_buy_filters_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_buy_ok'] and out['candle_volume_ok'] and (out['candle_buy_ok'] or not f.get('candlestick_filter', True)))
+        out['diagnostic_sell_filters_ok'] = bool(out['adx_ok'] and out['volume_breakout_ok'] and out['body_ok'] and out['breakout_sell_ok'] and out['candle_volume_ok'] and (out['candle_sell_ok'] or not f.get('candlestick_filter', True)))
+        # Backward-compatible aliases. These fields are diagnostics only and
+        # are NOT the live KLSDE/Confluence signal decision.
+        out['final_buy_ok'] = out['diagnostic_buy_filters_ok']
+        out['final_sell_ok'] = out['diagnostic_sell_filters_ok']
+        out['final_buy_ok_semantics'] = 'LEGACY_DIAGNOSTIC_ONLY'
+        out['final_sell_ok_semantics'] = 'LEGACY_DIAGNOSTIC_ONLY'
     except Exception:
         pass
     return out
@@ -3585,7 +3601,25 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         market_data_dict=md, filters=s['filters'], regime=regime
     )
     if not plan:
-        return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
+        # Preserve the human-readable reason while exposing structured planner
+        # diagnostics to the audit pipeline.  This is especially important for
+        # ATR_CAP, which was the dominant blocker in the 15m/1h/4h reports.
+        audit_data = {'planner_reason': plan_reason or 'unknown'}
+        m_cap = re.search(
+            r'PLAN_BLOCK\|reason=ATR_CAP\|scenario=([^|]+)\|risk_atr=([0-9.]+)\|max_sl_atr=([0-9.]+)\|entry=([^|]+)\|sl=([^|]+)\|tp=([^|]+)',
+            plan_reason or ''
+        )
+        if m_cap:
+            audit_data.update({
+                'block_code': 'ATR_CAP',
+                'scenario_code': m_cap.group(1),
+                'risk_atr': float(m_cap.group(2)),
+                'max_sl_atr': float(m_cap.group(3)),
+                'entry': float(m_cap.group(4)),
+                'sl': float(m_cap.group(5)),
+                'tp': float(m_cap.group(6)),
+            })
+        return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig, data=audit_data)
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     # The V2 planner may return the same setup reason already emitted by the
     # signal engine. Do not concatenate duplicate evidence/EdgeProxy values.
@@ -3597,18 +3631,36 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         full_reason = planner_reason
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
+    # Keep the planner's SL mode visible in the execution/audit trail.  This
+    # is especially important for the adaptive ATR cap: the trade must be
+    # distinguishable from a normal structural-stop trade after execution.
+    sl_mode = plan.get('sl_mode')
+    if sl_mode:
+        full_reason = f"{full_reason} | SL_MODE={sl_mode}"
     full_reason = full_reason[:500]
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
-    # 5m Swing->Break only: carry the structural swing level + its original ATR
-    # buffer through to execution so a slipped fill re-anchors SL to real
-    # structure instead of shifting the signal-time SL by a fixed distance.
+    # Carry structural swing information through execution. B5/S5 uses the
+    # retest swing on every timeframe; the legacy 5m swing_break path remains
+    # supported as before.
     swing_level = None; swing_sl_buffer = None
-    if primary_tf == '5min' and plan.get('setup_family') == 'swing_break' and plan.get('swing_level') is not None:
+    if plan.get('swing_level') is not None:
+        swing_level = float(plan['swing_level'])
+        swing_sl_buffer = float(plan.get('swing_sl_buffer') or abs(float(plan['swing_level']) - sl))
+    elif primary_tf == '5min' and plan.get('setup_family') == 'swing_break' and plan.get('swing_level') is not None:
         swing_level = float(plan['swing_level'])
         swing_sl_buffer = abs(float(plan['swing_level']) - sl)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,htf_trend=signal_diag.get('htf_trend'),tp_ladder={
+    # Deduplicate by the last CLOSED primary candle. A repeated scan of the same
+    # 4H setup must not become a new setup merely because the live price/reason
+    # string changed; a new closed candle creates a fresh opportunity.
+    try:
+        signal_candle_id = str(primary.index[-2])
+    except Exception:
+        signal_candle_id = str(len(primary) - 2)
+    setup_identity = (f"{symbol}|{sig}|{primary_tf}|{plan.get('scenario_code','?')}|"
+                      f"{plan.get('level_source','KLSDE')}|candle={signal_candle_id}")
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),swing_level=swing_level,swing_sl_buffer=swing_sl_buffer,htf_trend=signal_diag.get('htf_trend'),planned_rr=plan.get('rr'),setup_identity=setup_identity,tp_ladder={
         'tp1': plan.get('tp1'), 'tp2': plan.get('tp2'), 'tp3': plan.get('tp3', tp),
         'tp1_pct': plan.get('tp1_pct'), 'tp2_pct': plan.get('tp2_pct'), 'tp3_pct': plan.get('tp3_pct'),
     } if plan.get('tp1') is not None else None)
@@ -4633,7 +4685,14 @@ async def _send_periodic_heartbeat():
             f"📌 تعداد پوزیشن‌های باز: {pos_count}{pnl_suffix}"
         )
         try:
-            send_message(cid, message)
+            # دکمه‌ی مستقل داخل همان پیام ۱۰ دقیقه‌ای؛ با کلیک، کارت زنده‌ی
+            # پوزیشن‌ها باز می‌شود و از منوی اصلی/کیبورد پایین مستقل است.
+            heartbeat_markup = {
+                'inline_keyboard': [
+                    [{'text': '📊 نمایش پوزیشن‌ها', 'callback_data': '/open_positions'}],
+                ]
+            }
+            send_message(cid, message, markup=heartbeat_markup)
             HEARTBEAT_LAST_SENT[cid] = now
         except Exception as exc:
             logger.warning('heartbeat send failed chat=%s: %s', cid, exc)

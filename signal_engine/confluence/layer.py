@@ -107,6 +107,22 @@ def generate_trade_signals(
         windows = detect_interactions(d, levels, symbol=symbol, timeframe=timeframe)
         klsde_signal_events = klsde_classify_all(windows, d, timeframe=timeframe, config=cfg.get("key_level_setup"))
 
+        # A KLSDE setup is an actionable event only while it is fresh.
+        # detect_interactions keeps windows open for up to N bars so the
+        # classifier can observe the full pattern; without this gate a
+        # window that resolved many bars ago could become a *new live entry*
+        # at the current price. That also makes the structural SL look
+        # artificially far away and inflates ATR-cap rejections.
+        default_klsde_age = {"5min": 6, "15min": 4, "1hour": 3, "4hour": 2}.get(timeframe, 3)
+        max_klsde_age = int(cfg.get("klsde_max_signal_age_bars", default_klsde_age))
+        if max_klsde_age >= 0 and klsde_signal_events:
+            last_closed_index = len(d) - 2 if len(d) >= 2 else len(d) - 1
+            cutoff = last_closed_index - max_klsde_age
+            klsde_signal_events = [
+                e for e in klsde_signal_events
+                if e.resolved_at_index >= cutoff
+            ]
+
     # --- نرمال‌سازی (بخش ۳ سند) ---
     # نکته‌ی حیاتی: PRE/SDE/MCDE/CPDE روی d_recent (بریده‌شده) اجرا شدند، پس
     # ایندکس‌های خروجی‌شان نسبت به d_recent است، نه df کامل. برای این‌که
