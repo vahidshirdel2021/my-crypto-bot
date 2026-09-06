@@ -6,7 +6,7 @@ signal_engine.key_level_setup
     - compute_key_levels     → ۱۲ سطح مرجع (P4H/P4L/P4EQ, PDH/PDL/PDEQ, PWH/PWL/PWEQ, PMH/PML/PMEQ)
     - get_reference_levels / min_klines_for_levels → سازگار با bot.py قدیمی (بیت‌به‌بیت تست‌شده)
     - detect_interactions    → پنجره‌ی برخورد با هر سطح (تلورانس ATR-normalized)
-    - classify_setup / classify_all → درخت تصمیم BOF/TST/BPB/BP/CPB
+    - classify_setup / classify_all → BOF/TST/BPB + trend PB/CPB
 
 هیچ‌کدام سفارش نمی‌گذارند یا حد سود/ضرر تعیین می‌کنند (طبق بخش ۱ سند).
 """

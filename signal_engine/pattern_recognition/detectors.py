@@ -38,7 +38,8 @@ DEFAULT_CONFIG = {
         "min_bars_each_side_of_low": 7, "handle_max_duration_ratio": 0.33,
     },
     "ascending_triangle": {
-        "level_tolerance_atr_multiple": 0.75, "min_touches": 2, "r2_min": 0.5,
+        "level_tolerance_atr_multiple": 0.75, "flat_slope_atr_per_bar_max": 0.12,
+        "min_touches": 2, "r2_min": 0.5, "confirmation_bars": 3,
     },
     "three_valleys_peaks": {
         "similarity_tolerance_pct": 0.5, "target_multiplier": 0.48,
@@ -82,6 +83,18 @@ def _linreg(y: np.ndarray) -> tuple:
     ss_tot = float(np.sum((y - y.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else (1.0 if ss_res < 1e-9 else 0.0)
     return float(slope), float(intercept), float(r2)
+
+
+def _breakout_confirmation(df: pd.DataFrame, start: int, level: float, direction: Direction,
+                           max_bars: int = 3) -> Optional[int]:
+    d = df.reset_index(drop=True)
+    for i in range(max(0, start + 1), min(len(d), start + 1 + int(max_bars))):
+        close = float(d["close"].iloc[i])
+        if direction == "bullish" and close > float(level):
+            return i
+        if direction == "bearish" and close < float(level):
+            return i
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -153,13 +166,14 @@ def detect_flag_pennant(
                 breakout_price = float(cons["high" if direction == "bullish" else "low"].iloc[-1])
                 target = breakout_price + flagpole_height if direction == "bullish" else breakout_price - flagpole_height
 
+                confirmation_idx = _breakout_confirmation(d, cons_end - 1, breakout_price, direction, 3)
                 events.append(PatternEvent(
                     pattern_name=f"{shape}_pennant" if shape == "pennant" else "flag",
                     direction=direction, type="continuation", timeframe=timeframe, symbol=symbol,
                     start_index=pole_start, end_index=cons_end, confidence=confidence,
                     key_levels={"flagpole_height": flagpole_height, "breakout_level": breakout_price, "measured_move_target": target},
-                    confirmation_status="unconfirmed",
-                    notes=f"flagpole {pole_len} bars, consolidation {cons_len} bars, shape={shape}",
+                    confirmation_status="confirmed" if confirmation_idx is not None else "unconfirmed",
+                    notes=f"flagpole {pole_len} bars, consolidation {cons_len} bars, shape={shape}, confirmation_index={confirmation_idx}",
                 ))
     return events
 
@@ -196,11 +210,11 @@ def _detect_triangle(
 
         if direction == "bullish":
             # مثلث صعودی: مقاومت افقی (شیب هایز ~۰) + حمایت صعودی
-            flat_ok = abs(h_slope) <= cfg["level_tolerance_atr_multiple"] * atr_val
+            flat_ok = abs(h_slope) / max(float(atr_val), 1e-12) <= cfg.get("flat_slope_atr_per_bar_max", 0.12)
             rising_ok = l_slope > 0 and l_r2 >= cfg["r2_min"]
             level = float(np.mean(h_prices))
         else:
-            flat_ok = abs(l_slope) <= cfg["level_tolerance_atr_multiple"] * atr_val
+            flat_ok = abs(l_slope) / max(float(atr_val), 1e-12) <= cfg.get("flat_slope_atr_per_bar_max", 0.12)
             rising_ok = h_slope < 0 and h_r2 >= cfg["r2_min"]
             level = float(np.mean(l_prices))
 
@@ -219,7 +233,7 @@ def _detect_triangle(
             timeframe=timeframe, symbol=symbol, start_index=start_idx, end_index=end_idx,
             confidence=confidence,
             key_levels={"horizontal_level": level, "triangle_height": height, "measured_move_target": target},
-            confirmation_status="unconfirmed",
+            confirmation_status=("confirmed" if _breakout_confirmation(d, end_idx, level, direction, cfg.get("confirmation_bars", 3)) is not None else "unconfirmed"),
             notes=f"{len(h_window)} highs / {len(l_candidates)} lows used",
         ))
     return events
@@ -283,7 +297,7 @@ def _detect_cup_and_handle(df, timeframe, symbol, cfg, direction: Direction) -> 
             timeframe=timeframe, symbol=symbol, start_index=left_rim.candle_index, end_index=handle_end,
             confidence=confidence,
             key_levels={"rim_level": right_rim.price, "cup_depth": cup_depth, "measured_move_target": target},
-            confirmation_status="unconfirmed",
+            confirmation_status=("confirmed" if _breakout_confirmation(d, handle_end, float(right_rim.price), direction, 5) is not None else "unconfirmed"),
             notes=f"cup_duration={cup_duration} bars, handle_retrace_pct={round(handle_retrace/max(cup_depth,1e-9),2)}",
         ))
     return events
@@ -333,7 +347,7 @@ def _detect_three_valleys_peaks(df, timeframe, symbol, cfg, direction: Direction
             timeframe=timeframe, symbol=symbol, start_index=v1.candle_index, end_index=v3.candle_index,
             confidence=confidence,
             key_levels={"breakout_level": breakout_level, "measured_move_target": target},
-            confirmation_status="unconfirmed",
+            confirmation_status=("confirmed" if _breakout_confirmation(df.reset_index(drop=True), v3.candle_index, breakout_level, direction, 5) is not None else "unconfirmed"),
             notes=f"v1={v1.price:.4f} v2={v2.price:.4f} v3={v3.price:.4f}",
         ))
     return events

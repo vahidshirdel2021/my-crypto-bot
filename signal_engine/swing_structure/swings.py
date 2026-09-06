@@ -233,77 +233,75 @@ def _filter_and_confirm(df: pd.DataFrame, candidates: List[dict], cfg: dict,
     d = compute_atr(df, period=atr_period)
     atr_series = d["atr"]
     swings: List[SwingPoint] = []
-    last_confirmed_opposite: Optional[dict] = None
-    candidates_sorted = sorted(candidates, key=lambda c: c["index"])
+    candidates_sorted = sorted(candidates, key=lambda c: (c["index"], c["type"]))
 
+    # IMPORTANT: a confirmed fractal is a swing by definition.  ATR magnitude
+    # and volume are quality/context filters, not prerequisites for the
+    # existence of the swing.  Keeping those concerns separate prevents a
+    # valid textbook HH/HL/LH/LL from disappearing merely because its move was
+    # small or its volume was ordinary.
+    last_high_price: Optional[float] = None
+    last_low_price: Optional[float] = None
     for cand in candidates_sorted:
-        idx = cand["index"]
+        idx = int(cand["index"])
         confirm_index = idx + k
-        # A candidate is not a confirmed swing until the full k-bar horizon exists.
         if confirm_index >= len(df):
             continue
         atr_val = atr_series.iloc[idx]
         if pd.isna(atr_val) or atr_val <= 0:
             continue
 
-        if last_confirmed_opposite is not None:
-            move = abs(cand["price"] - last_confirmed_opposite["price"])
-            magnitude_atr = move / atr_val
+        prior_opposite_price = last_low_price if cand["type"] == "swing_high" else last_high_price
+        if prior_opposite_price is not None:
+            magnitude_atr = abs(float(cand["price"]) - prior_opposite_price) / float(atr_val)
         else:
-            magnitude_atr = float("inf")
-
-        if magnitude_atr < min_atr_mult:
-            continue
-        if not _volume_ok(df, idx, vol_floor,
-                          magnitude_atr if np.isfinite(magnitude_atr) else 999.0):
-            continue
+            magnitude_atr = None
 
         score, label, quality_evidence = _swing_quality(
-            df, idx, confirm_index, cand["type"], cand["price"], atr_series, cfg,
-            None if last_confirmed_opposite is None else last_confirmed_opposite["price"],
+            df, idx, confirm_index, cand["type"], float(cand["price"]), atr_series, cfg,
+            prior_opposite_price,
         )
-
-        sw_id = f"swing_{timeframe}_{idx:06d}"
+        # Quality is descriptive. It may be weak, but the fractal remains a
+        # confirmed swing and can be selected explicitly by downstream users.
+        sw_id = f"swing_{timeframe}_{idx:06d}_{cand['type'].split('_')[-1]}"
         evidence = {
             "fractal_k": k,
             "atr_at_swing": float(atr_val),
+            "definition": "confirmed k-left/k-right local extremum",
+            "quality_is_filter_not_definition": True,
+            "volume_filter_applied_to_existence": False,
+            "atr_magnitude_filter_applied_to_existence": False,
             **quality_evidence,
         }
         sw = SwingPoint(
             id=sw_id, timeframe=timeframe, symbol=symbol,
-            type=cand["type"], price=cand["price"], candle_index=idx,
+            type=cand["type"], price=float(cand["price"]), candle_index=idx,
             confirmed_at_index=confirm_index,
-            confirmation_lag_bars=confirm_index - idx,
-            magnitude_atr=None if not np.isfinite(magnitude_atr) else round(float(magnitude_atr), 3),
-            status="confirmed",
-            quality_score=score,
-            quality_label=label,
-            evidence=evidence,
+            confirmation_lag_bars=k,
+            magnitude_atr=None if magnitude_atr is None else round(float(magnitude_atr), 3),
+            status="confirmed", quality_score=score, quality_label=label, evidence=evidence,
         )
         swings.append(sw)
-        last_confirmed_opposite = cand
+        if cand["type"] == "swing_high":
+            last_high_price = float(cand["price"])
+        else:
+            last_low_price = float(cand["price"])
 
-    return _apply_retrace_filter(df, swings, min_retrace)
+    return _dedupe_exact_swings(swings)
 
 
-def _apply_retrace_filter(df: pd.DataFrame, swings: List[SwingPoint], min_retrace_pct: float) -> List[SwingPoint]:
-    """Suppress same-direction swing spam while preserving quality metadata."""
-    if not swings:
-        return swings
-    swings_sorted = sorted(swings, key=lambda s: s.candle_index)
-    kept: List[SwingPoint] = []
-    for sw in swings_sorted:
-        if kept and kept[-1].type == sw.type:
-            prev = kept[-1]
-            if sw.type == "swing_high":
-                if sw.price >= prev.price:
-                    kept[-1] = sw
-            else:
-                if sw.price <= prev.price:
-                    kept[-1] = sw
+def _dedupe_exact_swings(swings: List[SwingPoint]) -> List[SwingPoint]:
+    """Remove only exact duplicate (index,type) points; never suppress a
+    legitimate same-direction local extremum merely because of its size."""
+    out: List[SwingPoint] = []
+    seen = set()
+    for s in sorted(swings, key=lambda x: (x.candle_index, x.type)):
+        key = (s.candle_index, s.type)
+        if key in seen:
             continue
-        kept.append(sw)
-    return kept
+        seen.add(key)
+        out.append(s)
+    return out
 
 
 def detect_swings(df: pd.DataFrame, timeframe: str, symbol: str = "",

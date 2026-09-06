@@ -68,7 +68,7 @@ def classify_promotion_trigger(
     if envelope_source_engine == "KLSDE":
         if envelope_native_event_type == "BOF" and triggers.get("breakout_failure"):
             return "breakout_failure"
-        if envelope_native_event_type in ("TST", "B5", "S5", "BPB", "BP", "CPB") and triggers.get("key_level_interaction"):
+        if envelope_native_event_type in ("TST", "B5", "S5", "BPB", "BP", "PB", "CPB") and triggers.get("key_level_interaction"):
             return "key_level_interaction"
 
     if envelope_source_engine == "MCDE" and envelope_native_event_type == "micro_breakout" and triggers.get("breakout"):

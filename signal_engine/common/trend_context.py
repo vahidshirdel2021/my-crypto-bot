@@ -149,6 +149,7 @@ def combined_trend_context(
     swing_prices: Optional[Sequence[float]] = None,
     swing_types: Optional[Sequence[Literal["high", "low"]]] = None,
     ema_period: int = 20,
+    timeframe: Optional[str] = None,
 ) -> TrendContext:
     """اگر جریان سوئینگ در دسترس باشد از روش swing_structure استفاده
     می‌کند (دقیق‌تر و اولویت‌دار طبق تمام اسناد طراحی)، وگرنه به
@@ -157,4 +158,23 @@ def combined_trend_context(
     """
     if swing_prices and swing_types and len(swing_prices) >= 2:
         return trend_from_swings(swing_prices, swing_types)
+
+    # V19: when a timeframe is supplied, the canonical trend source is the
+    # confirmed Swing Engine.  EMA slope remains an explicit fallback only
+    # for callers that do not have/need swing context.  This prevents the
+    # candlestick engine from silently disagreeing with the structure engine.
+    if timeframe and df is not None and not df.empty:
+        try:
+            from signal_engine.swing_structure.swings import detect_swings
+            swings = detect_swings(df.reset_index(drop=True), timeframe=timeframe)
+            confirmed = [s for s in swings if s.status == "confirmed"]
+            if len(confirmed) >= 4:
+                ordered = sorted(confirmed, key=lambda s: s.candle_index)
+                prices = [s.price for s in ordered]
+                types = ["high" if s.type == "swing_high" else "low" for s in ordered]
+                return trend_from_swings(prices, types)
+        except Exception:
+            # Do not make a pattern detector crash because structure data is
+            # temporarily unavailable.  The explicit fallback is still safe.
+            pass
     return trend_from_ema_slope(df, ema_period=ema_period)

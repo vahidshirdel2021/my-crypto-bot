@@ -105,7 +105,7 @@ def generate_trade_signals(
         # PWH/PML ممکن است چند روز طول بکشد؛ اگر اینجا هم d_recent کوچک
         # استفاده می‌شد، بخشی از پنجره‌ی برخورد ناقص می‌ماند.
         windows = detect_interactions(d, levels, symbol=symbol, timeframe=timeframe)
-        klsde_signal_events = klsde_classify_all(windows, d, timeframe=timeframe, config=cfg.get("key_level_setup"))
+        klsde_signal_events = klsde_classify_all(windows, d, timeframe=timeframe, config=cfg.get("key_level_setup"), symbol=symbol)
 
         # A KLSDE setup is an actionable event only while it is fresh.
         # detect_interactions keeps windows open for up to N bars so the

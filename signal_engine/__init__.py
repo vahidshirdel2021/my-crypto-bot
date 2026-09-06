@@ -8,7 +8,7 @@ signal_engine
 زیرپکیج‌ها:
     common          — ATR، Trend Context، هندسه‌ی کندل (مشترک بین همه)
     swing_structure — سوئینگ واقعی + BOS/CHoCH + هم‌راستایی چندتایم‌فریمی   [ساخته‌شده]
-    key_level_setup — P4H/PDH/PWH/PMH...، BOF/TST/BPB/BP/CPB                 [ساخته‌شده]
+    key_level_setup — P4H/PDH/PWH/PMH...، BOF/TST/BPB/PB/CPB                 [ساخته‌شده]
     candlestick     — الگوهای کندل استیک                                    [برنامه‌ریزی‌شده]
     pattern_recognition — الگوهای کلاسیک نموداری                            [برنامه‌ریزی‌شده]
     market_cycle    — فازهای Wyckoff + مدل ال بروکس                         [برنامه‌ریزی‌شده]

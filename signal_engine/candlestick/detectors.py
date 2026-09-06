@@ -47,6 +47,7 @@ DEFAULT_CONFIG = {
     "marubozu_max_shadow_pct": 0.05,
     "star_middle_max_body_pct": 0.3,
     "star_penetration_min_pct": 0.5,
+    "crypto_no_gap_adaptation": True,
 }
 
 
@@ -72,16 +73,36 @@ class CandlestickPatternEvent:
         }
 
 
-def _trend_before(df: pd.DataFrame, idx: int, lookback: int) -> str:
+def _trend_before(df: pd.DataFrame, idx: int, lookback: int, timeframe: str = "") -> str:
+    """Canonical pre-pattern trend: confirmed Swing HH/HL or LH/LL.
+
+    V19 deliberately removes the hidden EMA-vs-structure disagreement from
+    the candlestick engine. EMA remains available elsewhere as an explicit
+    fallback, but pattern context uses the same structural source as SDE.
+    """
+    if idx <= 0:
+        return "range"
+    sub = df.iloc[:idx].reset_index(drop=True)
+    try:
+        from signal_engine.swing_structure.swings import detect_swings
+        from signal_engine.common.trend_context import trend_from_swings
+        tf = timeframe or "15m"
+        swings = [x for x in detect_swings(sub, timeframe=tf) if x.status == "confirmed"
+                  and x.confirmed_at_index is not None and x.confirmed_at_index < len(sub)]
+        swings = sorted(swings, key=lambda x: x.candle_index)
+        if len(swings) >= 4:
+            return trend_from_swings(
+                [x.price for x in swings],
+                ["high" if x.type == "swing_high" else "low" for x in swings],
+            ).trend
+    except Exception:
+        pass
+    # Explicit data-scarcity fallback only.
     start = max(0, idx - lookback)
     sub = df.iloc[start:idx]
     if len(sub) < 3:
         return "range"
-    # ema_period باید متناسب با پنجره‌ی lookback باشد، وگرنه (طبق پیش‌فرض
-    # سراسری ema_period=20) با lookback کوچک‌تر (پیش‌فرض سند: ۱۰) هرگز
-    # داده‌ی کافی برای EMA نخواهد بود و trend همیشه "range" برمی‌گردد.
-    fitted_ema_period = max(3, len(sub) // 2)
-    return combined_trend_context(sub, ema_period=fitted_ema_period).trend
+    return combined_trend_context(sub, ema_period=max(3, len(sub) // 2)).trend
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +137,7 @@ def detect_hammer_family(
         bs = body_size[i]
         if bs <= 0 or pd.isna(bs):
             continue
-        trend = _trend_before(df, i, cfg["trend_lookback"])
+        trend = _trend_before(df, i, cfg["trend_lookback"], timeframe)
         if trend not in ("uptrend", "downtrend"):
             continue
 
@@ -188,7 +209,7 @@ def detect_doji_family(
     for i in range(cfg["trend_lookback"], n):
         if primitive[i] != "doji" or range_size[i] <= 0 or pd.isna(ratio[i]):
             continue
-        trend = _trend_before(df, i, cfg["trend_lookback"])
+        trend = _trend_before(df, i, cfg["trend_lookback"], timeframe)
         variant = "doji" if ratio[i] <= cfg["doji_body_max_pct"] * 0.3 else "spinning_top"
         rs = range_size[i]
 
@@ -260,7 +281,7 @@ def detect_harami(
         contained = g2.body_top <= g1.body_top and g2.body_bottom >= g1.body_bottom
         if not contained:
             continue
-        trend = _trend_before(df, i - 1, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 1, cfg["trend_lookback"], timeframe)
 
         if g1.is_bearish and g2.is_bullish and trend == "downtrend":
             events.append(CandlestickPatternEvent(
@@ -298,12 +319,12 @@ def detect_dark_cloud_cover(
         c1, c2 = d.iloc[i - 1], d.iloc[i]
         g1 = compute_candle_geometry(c1["open"], c1["high"], c1["low"], c1["close"])
         g2 = compute_candle_geometry(c2["open"], c2["high"], c2["low"], c2["close"])
-        trend = _trend_before(df, i - 1, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 1, cfg["trend_lookback"], timeframe)
         if trend != "uptrend" or not g1.is_bullish or not g2.is_bearish:
             continue
         if g1.body_size < cfg["dark_cloud_candle1_min_atr_multiple"] * atr_val:
             continue
-        gapped_above = c2["open"] >= c1["high"] or c2["open"] >= c1["close"]
+        gapped_above = (c2["open"] >= c1["high"] if not cfg.get("crypto_no_gap_adaptation", True) else c2["open"] >= c1["close"])
         midpoint = g1.body_bottom + 0.5 * g1.body_size
         penetrates_midpoint = c2["close"] < midpoint
         if not (gapped_above and penetrates_midpoint):
@@ -340,33 +361,38 @@ def detect_three_soldiers_crows(
         g2 = compute_candle_geometry(c2["open"], c2["high"], c2["low"], c2["close"])
 
         if g0.is_bullish and g1.is_bullish and g2.is_bullish:
+            trend = _trend_before(df, i - 2, cfg["trend_lookback"], timeframe)
             opens_ok = (g0.body_bottom <= c1["open"] <= g0.body_top) and (g1.body_bottom <= c2["open"] <= g1.body_top)
             closes_ok = c1["close"] > c0["close"] and c2["close"] > c1["close"]
-            if opens_ok and closes_ok:
+            close_near_high = all(g.upper_shadow <= 0.25 * max(g.range_size, 1e-12) for g in (g0, g1, g2))
+            if trend == "downtrend" and opens_ok and closes_ok and close_near_high:
                 shadow_quality = sum(
                     1 for g in (g0, g1, g2)
                     if g.body_size > 0 and g.lower_shadow <= cfg["three_soldiers_max_lower_shadow_pct"] * g.body_size
                 ) / 3.0
                 events.append(CandlestickPatternEvent(
                     pattern_name="three_white_soldiers", category="three_candle", direction="bullish",
-                    type="continuation", timeframe=timeframe, symbol=symbol, candle_indices=[i - 2, i - 1, i],
+                    type="reversal", timeframe=timeframe, symbol=symbol, candle_indices=[i - 2, i - 1, i],
+                    
                     confidence=round(0.5 + 0.3 * shadow_quality, 3), confirmation_status="confirmed",
-                    evidence={"shadow_quality_score": round(shadow_quality, 2)},
+                    evidence={"prior_trend": trend, "shadow_quality_score": round(shadow_quality, 2)},
                 ))
 
         if g0.is_bearish and g1.is_bearish and g2.is_bearish:
+            trend = _trend_before(df, i - 2, cfg["trend_lookback"], timeframe)
             opens_ok = (g0.body_bottom <= c1["open"] <= g0.body_top) and (g1.body_bottom <= c2["open"] <= g1.body_top)
             closes_ok = c1["close"] < c0["close"] and c2["close"] < c1["close"]
-            if opens_ok and closes_ok:
+            close_near_low = all(g.lower_shadow <= 0.25 * max(g.range_size, 1e-12) for g in (g0, g1, g2))
+            if trend == "uptrend" and opens_ok and closes_ok and close_near_low:
                 shadow_quality = sum(
                     1 for g in (g0, g1, g2)
                     if g.body_size > 0 and g.upper_shadow <= cfg["three_soldiers_max_lower_shadow_pct"] * g.body_size
                 ) / 3.0
                 events.append(CandlestickPatternEvent(
                     pattern_name="three_black_crows", category="three_candle", direction="bearish",
-                    type="continuation", timeframe=timeframe, symbol=symbol, candle_indices=[i - 2, i - 1, i],
+                    type="reversal", timeframe=timeframe, symbol=symbol, candle_indices=[i - 2, i - 1, i],
                     confidence=round(0.5 + 0.3 * shadow_quality, 3), confirmation_status="confirmed",
-                    evidence={"shadow_quality_score": round(shadow_quality, 2)},
+                    evidence={"prior_trend": trend, "shadow_quality_score": round(shadow_quality, 2)},
                 ))
     return events
 
@@ -386,15 +412,15 @@ def detect_three_methods(
         g1 = compute_candle_geometry(c1["open"], c1["high"], c1["low"], c1["close"])
         g5 = compute_candle_geometry(c5["open"], c5["high"], c5["low"], c5["close"])
         mids = [compute_candle_geometry(c["open"], c["high"], c["low"], c["close"]) for c in (c2, c3, c4)]
-        trend = _trend_before(df, i - 4, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 4, cfg["trend_lookback"], timeframe)
 
-        def _contained(gm, ref):
+        def _contained(gm, candle, ref):
             if cfg["three_methods_containment"] == "full_range":
-                return ref["low"] <= gm.body_bottom and gm.body_top <= ref["high"]
-            return ref["low"] <= gm.body_bottom and gm.body_top <= ref["high"]  # همان full_range به‌عنوان محافظه‌کارانه‌ترین حالت پیش‌فرض
+                return ref["low"] <= candle["low"] and candle["high"] <= ref["high"]
+            return ref["open"] <= gm.body_bottom and gm.body_top <= ref["close"]
 
         if trend == "uptrend" and g1.is_bullish and all(g.is_bearish for g in mids) and g5.is_bullish:
-            if all(_contained(g, c1) for g in mids) and c5["close"] > c1["high"]:
+            if all(_contained(g, c, c1) for g, c in zip(mids, (c2, c3, c4))) and c5["close"] > c1["high"]:
                 events.append(CandlestickPatternEvent(
                     pattern_name="rising_three_methods", category="three_candle", direction="bullish",
                     type="continuation", timeframe=timeframe, symbol=symbol,
@@ -403,7 +429,7 @@ def detect_three_methods(
                 ))
 
         if trend == "downtrend" and g1.is_bearish and all(g.is_bullish for g in mids) and g5.is_bearish:
-            if all(_contained(g, c1) for g in mids) and c5["close"] < c1["low"]:
+            if all(_contained(g, c, c1) for g, c in zip(mids, (c2, c3, c4))) and c5["close"] < c1["low"]:
                 events.append(CandlestickPatternEvent(
                     pattern_name="falling_three_methods", category="three_candle", direction="bearish",
                     type="continuation", timeframe=timeframe, symbol=symbol,
@@ -439,7 +465,7 @@ def detect_engulfing(
         engulfs = g2.body_top >= g1.body_top and g2.body_bottom <= g1.body_bottom and g2.body_size > g1.body_size
         if not engulfs:
             continue
-        trend = _trend_before(df, i - 1, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 1, cfg["trend_lookback"], timeframe)
 
         if g1.is_bearish and g2.is_bullish and trend == "downtrend":
             events.append(CandlestickPatternEvent(
@@ -510,12 +536,12 @@ def detect_piercing_line(
         c1, c2 = d.iloc[i - 1], d.iloc[i]
         g1 = compute_candle_geometry(c1["open"], c1["high"], c1["low"], c1["close"])
         g2 = compute_candle_geometry(c2["open"], c2["high"], c2["low"], c2["close"])
-        trend = _trend_before(df, i - 1, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 1, cfg["trend_lookback"], timeframe)
         if trend != "downtrend" or not g1.is_bearish or not g2.is_bullish:
             continue
         if g1.body_size < cfg["dark_cloud_candle1_min_atr_multiple"] * atr_val:
             continue
-        gapped_below = c2["open"] <= c1["low"] or c2["open"] <= c1["close"]
+        gapped_below = (c2["open"] <= c1["low"] if not cfg.get("crypto_no_gap_adaptation", True) else c2["open"] <= c1["close"])
         midpoint = g1.body_bottom + 0.5 * g1.body_size
         penetrates_midpoint = c2["close"] > midpoint
         if not (gapped_below and penetrates_midpoint):
@@ -554,7 +580,7 @@ def _detect_star(df, timeframe, symbol, cfg, direction: Direction) -> List[Candl
         g1 = compute_candle_geometry(c1["open"], c1["high"], c1["low"], c1["close"])
         g2 = compute_candle_geometry(c2["open"], c2["high"], c2["low"], c2["close"])
         g3 = compute_candle_geometry(c3["open"], c3["high"], c3["low"], c3["close"])
-        trend = _trend_before(df, i - 2, cfg["trend_lookback"])
+        trend = _trend_before(df, i - 2, cfg["trend_lookback"], timeframe)
 
         if g1.body_size < cfg["dark_cloud_candle1_min_atr_multiple"] * atr_val:
             continue
@@ -564,7 +590,7 @@ def _detect_star(df, timeframe, symbol, cfg, direction: Direction) -> List[Candl
         if direction == "bullish":
             if trend != "downtrend" or not g1.is_bearish or not g3.is_bullish or not star_small:
                 continue
-            gapped_down = max(c2["open"], c2["close"]) <= g1.body_bottom
+            gapped_down = (max(c2["open"], c2["close"]) <= g1.body_bottom if not cfg.get("crypto_no_gap_adaptation", True) else c2["open"] <= c1["close"])
             midpoint = g1.body_bottom + 0.5 * g1.body_size
             penetrates = c3["close"] > g1.body_bottom + penetration_min_pct * g1.body_size
             if gapped_down and penetrates:
@@ -578,7 +604,7 @@ def _detect_star(df, timeframe, symbol, cfg, direction: Direction) -> List[Candl
         else:
             if trend != "uptrend" or not g1.is_bullish or not g3.is_bearish or not star_small:
                 continue
-            gapped_up = min(c2["open"], c2["close"]) >= g1.body_top
+            gapped_up = (min(c2["open"], c2["close"]) >= g1.body_top if not cfg.get("crypto_no_gap_adaptation", True) else c2["open"] >= c1["close"])
             penetrates = c3["close"] < g1.body_top - penetration_min_pct * g1.body_size
             if gapped_up and penetrates:
                 events.append(CandlestickPatternEvent(

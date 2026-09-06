@@ -181,6 +181,37 @@ def _b5_retest_swing_stop(signal: TradeSignal, df: pd.DataFrame, entry: float, i
         return None, None
 
 
+def _trend_pullback_stop(signal: TradeSignal, entry: float, is_buy: bool, atr: float):
+    """Structural stop for the V18 PB/CPB trend setups.
+
+    PB/CPB are continuation setups, so the invalidation point is the
+    confirmed counter-trend pullback swing, not the prior breakout/key-level
+    price. The swing is already lookahead-safe in the setup evidence.
+    """
+    try:
+        evidence = dict(signal.reference_levels.get("klsde_setup_evidence") or {})
+        setup = getattr(signal, "anchor_native_event_type", "")
+        if setup not in ("PB", "CPB"):
+            return None, None
+        swing_price = evidence.get("trend_pullback_stop_price")
+        if swing_price is None:
+            return None, None
+        swing_price = float(swing_price)
+        if not np.isfinite(swing_price):
+            return None, None
+        buffer = max(float(atr) * 0.20, abs(swing_price) * 0.0008)
+        stop = swing_price - buffer if is_buy else swing_price + buffer
+        if (is_buy and stop >= entry) or ((not is_buy) and stop <= entry):
+            return None, None
+        evidence["trend_sl_swing_source"] = "confirmed_pullback_swing"
+        evidence["trend_sl_swing_price"] = swing_price
+        evidence["trend_sl_lookahead_safe"] = bool(evidence.get("lookahead_safe", False))
+        signal.reference_levels["klsde_setup_evidence"] = evidence
+        return float(stop), swing_price
+    except Exception:
+        return None, None
+
+
 def _construct_entry_sl_tp(
     signal: TradeSignal,
     df: pd.DataFrame,
@@ -209,6 +240,7 @@ def _construct_entry_sl_tp(
     structural_stop_ref = _best_reference_price(
         signal, ["klsde_level_price", "horizontal_level", "breakout_level", "rim_level"]
     )
+    trend_stop, trend_swing = _trend_pullback_stop(signal, entry, is_buy, atr)
     b5_stop, b5_swing = _b5_retest_swing_stop(signal, df, entry, is_buy, atr, timeframe=timeframe)
     # KLSDE carries the complete Key-Level map. Prefer the nearest valid
     # structural target in the trade direction (1H/4H/DAY/WEEK/MONTH), then
@@ -237,6 +269,8 @@ def _construct_entry_sl_tp(
 
     if b5_stop is not None:
         sl = b5_stop
+    elif trend_stop is not None:
+        sl = trend_stop
     elif structural_stop_ref is not None:
         buffer = 0.3 * atr
         sl = structural_stop_ref - buffer if is_buy else structural_stop_ref + buffer
@@ -257,11 +291,12 @@ def _construct_entry_sl_tp(
     return {"entry": entry, "sl": sl, "tp": tp, "target_level_name": structural_target_name,
             "target_level_source": "execution_timeframe_structure" if structural_target_name else None,
             "target_level_candidates": ahead_candidates,
-            "swing_level": b5_swing, "swing_sl_buffer": (abs(b5_swing - b5_stop) if b5_stop is not None and b5_swing is not None else None),
+            "swing_level": b5_swing if b5_swing is not None else trend_swing,
+            "swing_sl_buffer": (abs(b5_swing - b5_stop) if b5_stop is not None and b5_swing is not None else (abs(trend_swing - trend_stop) if trend_stop is not None and trend_swing is not None else None)),
             "swing_quality_score": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_quality_score")),
             "swing_quality_label": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_quality_label")),
             "swing_index": (dict(signal.reference_levels.get("klsde_setup_evidence") or {}).get("b5_sl_swing_index")),
-            "sl_mode": "b5_retest_swing" if b5_stop is not None else "structural_or_atr"}
+            "sl_mode": "b5_retest_swing" if b5_stop is not None else ("trend_pullback_swing" if trend_stop is not None else "structural_or_atr")}
 
 
 def run_new_engine_as_best(
@@ -299,7 +334,7 @@ def run_new_engine_as_best(
     # still let confluence score decide when several levels interact at once.
     # This preserves the "check every key level" behavior while preventing a
     # merely newer weak level from replacing a stronger confirmed setup.
-    setup_priority = {"B5": 2, "S5": 2, "BOF": 1, "TST": 1, "BPB": 1, "BP": 1, "CPB": 1}
+    setup_priority = {"B5": 2, "S5": 2, "BOF": 1, "TST": 1, "BPB": 1, "BP": 1, "PB": 1, "CPB": 1}
     best_signal = max(
         active_signals,
         key=lambda s: (setup_priority.get(s.anchor_native_event_type, 0), s.confluence_score, s.created_at_index),
