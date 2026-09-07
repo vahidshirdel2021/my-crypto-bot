@@ -296,7 +296,18 @@ STRATEGY_DEFAULTS = {
     # سخت‌گیر: سیگنال خلاف روند ساختاری HTF (از سوئینگ، نه اندیکاتور) بلاک
     # می‌شود، مگر ستاپ «استثنایی» باشد (امتیاز و RR بالا، هم‌راستا با همان
     # آستانه‌های same_direction_guard در bot.py).
-    "htf_trend_filter_enabled": True,
+    #
+    # ⚠️ طبق تصمیم صریح کاربر (بخش ۵، سند نقشه‌راه CMC-100، تصمیم باز شماره
+    # ۲): این وتوی انتهای مسیر از پیش‌فرض غیرفعال شد، چون گیت جهت‌دار جدید
+    # (bot.py::_passes_directional_gate، داخل refresh_cmc100_opportunity_scores)
+    # همین کار را *قبل* از امتیازدهی/انتخاب کاندید انجام می‌دهد و نگه‌داشتن
+    # هر دو لایه هم‌زمان زائد بود. توجه: این گیت جدید فقط داخل مسیر
+    # AdaptiveWatchlist/CMC-100 اجرا می‌شود (یعنی وقتی ADAPTIVE_WATCHLIST_ENABLED
+    # روشن باشد) — برای مسیرهایی که از آن عبور نمی‌کنند (مثلاً /analyze
+    # دستی روی یک نماد دلخواه، یا اجرای این استراتژی بیرون از scan_loop
+    # مثل بک‌تست) دیگر هیچ گیت جهت‌داری روی رژیم کلی بازار وجود ندارد مگر
+    # این‌جا دوباره True شود.
+    "htf_trend_filter_enabled": False,
     # در روند قطعی (صعودی/نزولی) دیگر استثنا وجود ندارد — فیلد‌های
     # htf_trend_exception_* دیگر استفاده نمی‌شوند و صرفاً برای سازگاری با
     # کدهای قدیمی/تنظیمات ذخیره‌شده نگه داشته شده‌اند.
@@ -523,6 +534,7 @@ def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=Non
                 df, timeframe or "5min", config=cfg,
                 live_price=cfg.get("_live_price"),
                 btc_context=cfg.get("btc_context"), asset_taxonomy=cfg.get("asset_taxonomy"),
+                market_data_dict=market_data_dict,
             )
             if diag is not None:
                 diag["engine"] = "signal_engine_v2"

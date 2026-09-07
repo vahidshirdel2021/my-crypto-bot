@@ -208,6 +208,14 @@ KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
 DEX_WATCHLIST_ENABLED = os.environ.get('DEX_WATCHLIST_ENABLED', 'true').lower() not in ('0','false','no')
 DEX_WATCHLIST_SIZE = max(20, int(os.environ.get('DEX_WATCHLIST_SIZE', '100')))
 DEX_WATCHLIST_REFRESH_SECONDS = max(300, int(os.environ.get('DEX_WATCHLIST_REFRESH_SECONDS', '1800')))
+# طبق درخواست کاربر: نمادهایی که مارکت‌کپ بالایی دارند ولی حجم معاملات
+# ۲۴ساعته‌شان خیلی پایین است (نقدشوندگی کم → اسپرد بد/اجرای نامطمئن،
+# معمولاً همراه با نوسان مصنوعی بازار نازک) از رتبه‌بندی ۱۰۰تایی کنار
+# گذاشته می‌شوند تا جای آن‌ها را کوین نقدشونده‌تر بعدی بگیرد (اندازه‌ی
+# نهایی واچ‌لیست همچنان DEX_WATCHLIST_SIZE می‌ماند، فقط ترکیبش سالم‌تر
+# می‌شود). داده‌ی حجم از همان فراخوانی CoinGecko موجود می‌آید، بدون
+# هزینه‌ی API اضافه.
+DEX_MIN_24H_DOLLAR_VOLUME = float(os.environ.get('DEX_MIN_24H_DOLLAR_VOLUME', '1000000'))
 DEX_CANDIDATE_SYMBOLS = {
     'BTC','ETH','BNB','SOL','XRP','DOGE','ADA','TRX','AVAX','LINK','DOT','TON','SUI','SHIB','LTC',
     'BCH','UNI','AAVE','NEAR','APT','ARB','OP','INJ','ATOM','FIL','ETC','XLM','HBAR','ICP','CRO',
@@ -2135,13 +2143,22 @@ def _refresh_dynamic_dex_watchlist(force=False):
             rows = r.json() or []
             ranked_full = []
             dollar_volume_by_symbol = {}
+            skipped_low_volume = []
             for row in rows:
                 sym = str(row.get('symbol') or '').upper()
                 if sym in DEX_CANDIDATE_SYMBOLS and sym not in ranked_full:
-                    ranked_full.append(sym)
                     tv = row.get('total_volume')
-                    if tv is not None:
-                        dollar_volume_by_symbol[sym] = float(tv)
+                    tv_f = float(tv) if tv is not None else 0.0
+                    if tv_f < DEX_MIN_24H_DOLLAR_VOLUME:
+                        skipped_low_volume.append(sym)
+                        continue
+                    ranked_full.append(sym)
+                    dollar_volume_by_symbol[sym] = tv_f
+            if skipped_low_volume:
+                logger.info(
+                    'DEX watchlist: %d symbol(s) skipped for low 24h volume (<%.0f$): %s',
+                    len(skipped_low_volume), DEX_MIN_24H_DOLLAR_VOLUME, skipped_low_volume,
+                )
             # Keep BTC/ETH as leaders and avoid directional Long/Short lists.
             ranked_full = [x for x in ranked_full if x not in ('1000SATS',)]
             if ranked_full:
@@ -4126,6 +4143,329 @@ async def get_mtf_aligned_regime(primary_tf):
     return _combine_mtf_regimes(breakdown, primary_tf), breakdown
 
 
+# --- ادغام CMC-100 با داشبورد بازار (طبق crypto-bot-cmc-dashboard-plan.md،
+# بخش ۵) --------------------------------------------------------------
+# تصمیم‌های کاربر برای این نسخه:
+#   ۱. جهان کاندید = همان واچ‌لیست DEX فعلی (_refresh_dynamic_dex_watchlist)
+#      که با DEX_WATCHLIST_SIZE=100 و ترتیب مارکت‌کپ CoinGecko از قبل عملاً
+#      «۱۰۰ نماد برتر قابل‌معامله» است — منبع کاندید جدیدی *جایگزین* نمی‌شود
+#      چون این یکی خودش CMC-100 است (CoinGecko، به انتخاب کاربر)؛ صرفاً از
+#      این‌جا به بعد به‌عنوان جهان ورودی گیت جهت‌دار/AdaptiveWatchlist هم
+#      استفاده می‌شود، نه فقط برای لیست دستی Long/Short.
+#   ۲. گیت جهت‌دار: قبل از امتیازدهی فرصت، رژیم داشبورد (روی تایم‌فریم
+#      مستقل ۴ساعته، طبق تصمیم کاربر) با روند خودِ هر نماد (همان فرمول
+#      EMA20/EMA50 که برای ۱۰ ارز شاخص استفاده می‌شود) مقایسه می‌شود.
+#   ۳. htf_trend_filter_enabled در strategy.py غیرفعال شد (پایین‌تر) چون
+#      طبق تصمیم کاربر این گیت زودتر همان کار را انجام می‌دهد.
+CMC100_GATE_TIMEFRAME = os.environ.get('CMC100_GATE_TIMEFRAME', '4hour')
+# طبق اصلاح صریح کاربر: این دیگر یک «فیلتر کیفیت» نیست (قبلاً همیشه فقط
+# ۳۰ نماد نقدشونده‌تر بررسی می‌شدند، حتی اگر ۸۰ نماد هم‌جهت با داشبورد
+# بودند و بقیه بدون دلیل واقعی کنار گذاشته می‌شدند). الان همه‌ی نمادهای
+# هم‌جهت (مرحله‌ی ۲) بررسی عمیق می‌شوند؛ این عدد فقط یک سقف ایمنیِ سست
+# است (پیش‌فرض = اندازه‌ی کل یونیورس، یعنی عملاً بی‌اثر در حالت عادی) —
+# صرفاً محافظت در برابر حالت غیرمنتظره (مثلاً یونیورس بزرگ‌تر از حد
+# معمول). چون همه‌ی کاندیدها الان می‌توانند بررسی شوند، محاسبه‌ی امتیاز
+# در refresh_cmc100_opportunity_scores به‌صورت موازی اجرا می‌شود (نه
+# یکی‌یکی) تا سرعت افت نکند.
+CMC100_DEEP_CANDIDATES_COUNT = max(5, int(os.environ.get('CMC100_DEEP_CANDIDATES_COUNT', str(DEX_WATCHLIST_SIZE))))
+CMC100_TOP_SETUP_COUNT = max(1, int(os.environ.get('CMC100_TOP_SETUP_COUNT', '10')))
+CMC100_REFRESH_SECONDS = max(120, int(os.environ.get('CMC100_REFRESH_SECONDS', '900')))
+CMC100_STATE: Dict[str, Any] = {'ts': 0.0, 'regime': None, 'candidates': [], 'gate_results': {}, 'promoted': []}
+
+
+def _passes_directional_gate(symbol_score, regime):
+    """گیت بولی (نه جزء امتیاز — طبق تصمیم صریح کاربر، دقیقاً مثل
+    hard_filters.py از نظر ماهیت). symbol_score همان خروجی '+1/-1/0'
+    فرمول _market_snapshot است (EMA20/EMA50 خودِ نماد).
+
+    - رژیم نامشخص یا RANGE → گیت باز است، هر دو جهت رد نمی‌شوند (طبق
+      همان فلسفه‌ی موجود «فقط در رنج هر دو جهت با احتیاط بررسی شوند»).
+    - رژیم BULLISH → فقط نمادهای هم‌جهت (score>0) رد می‌شوند به مرحله‌ی
+      بعد؛ BEARISH → فقط score<0.
+    """
+    if regime not in ('BULLISH', 'BEARISH'):
+        return True
+    if regime == 'BULLISH':
+        return symbol_score > 0
+    return symbol_score < 0
+
+
+# طبق اصلاح صریح کاربر (بعد از نسخه‌ی قبلیِ گیت‌های AND متوالی): MCDE/PRE/CPDE
+# دیگر گیت رد/قبول نیستند — فقط امتیازدهنده‌اند (هم‌جهت=مثبت، خلاف‌جهت=منفی،
+# بی‌الگو=خنثی/صفر). تنها فیلتر سختِ باقی‌مانده قبل از تشخیص ستاپ، KLSDE است.
+MCDE_SCORE_WEIGHT = float(os.environ.get('MCDE_SCORE_WEIGHT', '1.0'))
+PRE_SCORE_WEIGHT = float(os.environ.get('PRE_SCORE_WEIGHT', '1.0'))
+CPDE_SCORE_WEIGHT = float(os.environ.get('CPDE_SCORE_WEIGHT', '1.0'))
+PRE_GATE_LOOKBACK_BARS = int(os.environ.get('PRE_GATE_LOOKBACK_BARS', '5'))
+CPDE_GATE_LOOKBACK_BARS = int(os.environ.get('CPDE_GATE_LOOKBACK_BARS', '3'))
+KLSDE_GATE_MAX_ATR_DISTANCE = float(os.environ.get('KLSDE_GATE_MAX_ATR_DISTANCE', '1.5'))
+
+
+def _macro_phase_direction(phase):
+    """نگاشت فاز کلان MCDE به جهت — accumulation/markup یعنی زمینه‌ی
+    صعودی، distribution/markdown یعنی زمینه‌ی نزولی (طبق تعریف استاندارد
+    فازهای Wyckoff که market_cycle/macro.py از آن استفاده می‌کند)."""
+    if phase in ('accumulation', 'markup'):
+        return 'bullish'
+    if phase in ('distribution', 'markdown'):
+        return 'bearish'
+    return None
+
+
+def _regime_direction(regime):
+    if regime == 'BULLISH':
+        return 'bullish'
+    if regime == 'BEARISH':
+        return 'bearish'
+    return None  # RANGE یا None → جهتی برای هم‌راستاسازی وجود ندارد
+
+
+def _score_symbol_confirmation(symbol, tf, regime):
+    """بازنویسی‌شده طبق اصلاح صریح کاربر (نسخه‌ی قبلی این تابع، زنجیره‌ی
+    ۴ گیت AND بود که کاربر آن را هم رد کرد):
+
+    MCDE (سیکل کلان)، PRE (الگوی تکنیکال) و CPDE (الگوی کندلی) دیگر
+    فیلتر رد/قبول نیستند — فقط **امتیازدهنده**اند:
+        - الگو/فاز هم‌جهت با رژیم داشبورد → امتیاز مثبت (به‌اندازه‌ی
+          confidence آن الگو).
+        - الگو/فاز صریحاً خلاف‌جهت رژیم (نه بی‌الگو، بلکه برعکس) →
+          امتیاز منفی (طبق تصمیم کاربر: فقط جریمه، نه حذف کامل نماد؛
+          امتیاز کل ممکن است این جریمه را جبران کند).
+        - بی‌الگو/فاز نامشخص → امتیاز صفر (خنثی؛ عدم تشکیل الگو به معنی
+          «این نماد به‌درد نمی‌خورد» نیست).
+    خطای داخلی هرکدام از این ۳ موتور هم فقط لاگ می‌شود و سهم آن موتور صفر
+    در نظر گرفته می‌شود — نماد به‌خاطر خطای یک موتور امتیازی حذف نمی‌شود.
+
+    تنها فیلتر سخت باقی‌مانده قبل از ورود به مسیر تشخیص ستاپ، **KLSDE**
+    است (نزدیکی به سطح کلیدی ساعتی/۴ساعته/روزانه/هفتگی/ماهانه بر حسب
+    ATR) — چون طبق توضیح کاربر، ستاپ (که KLSDE پایه‌ی آن است) برای خودِ
+    معامله حیاتی است و باید همچنان به‌صورت فیلتر واقعی عمل کند؛ هر نماد
+    هم‌جهت با داشبورد (فارغ از امتیاز مثبت/منفی‌اش) باید به این فیلتر
+    برسد — طبق تصمیم صریح کاربر.
+
+    بعد از عبور از KLSDE، موتور تشخیص ستاپ (۶ سناریوی KLSDE در
+    setups.py) و اجرای معامله دقیقاً همان مسیر موجود scan_symbol/
+    strategy.py است؛ این‌جا بازتولید نمی‌شود.
+
+    خروجی: dict با کلیدهای symbol/passed(bool, نتیجه‌ی فیلتر KLSDE)/
+    stage(str)/detail(dict شامل امتیاز هر موتور)/total_score(float —
+    مجموع امتیاز ۳ موتور بالا، فقط برای اولویت‌بندی نهایی استفاده
+    می‌شود، نه برای رد/قبول).
+    """
+    out = {'symbol': symbol, 'passed': False, 'stage': None, 'detail': {}, 'total_score': 0.0}
+    want_dir = _regime_direction(regime)
+    try:
+        d = get_klines(symbol, tf, 260)
+    except Exception as exc:
+        out['stage'] = 'data_error'
+        out['detail']['error'] = str(exc)
+        return out
+    if d is None or d.empty or len(d) < 60:
+        out['stage'] = 'insufficient_data'
+        return out
+    d = d.reset_index(drop=True)
+    last_idx = len(d) - 1
+    total_score = 0.0
+
+    # --- MCDE: امتیاز (نه گیت) ---
+    try:
+        from signal_engine.market_cycle.macro import classify_macro_cycle
+        macro_events = classify_macro_cycle(d, timeframe=tf, symbol=symbol)
+        if macro_events:
+            last_macro = macro_events[-1]
+            macro_dir = _macro_phase_direction(last_macro.phase)
+            mcde_score = 0.0
+            if want_dir and macro_dir == want_dir:
+                mcde_score = last_macro.confidence
+            elif want_dir and macro_dir and macro_dir != want_dir:
+                mcde_score = -last_macro.confidence
+            out['detail']['mcde'] = {
+                'phase': last_macro.phase, 'confidence': last_macro.confidence, 'score': round(mcde_score, 4),
+            }
+            total_score += MCDE_SCORE_WEIGHT * mcde_score
+    except Exception as exc:
+        logger.warning('MCDE scoring skipped for %s: %s', symbol, exc)
+
+    # --- PRE: امتیاز (نه گیت) ---
+    try:
+        from signal_engine.pattern_recognition.detectors import detect_all as pre_detect_all
+        pre_events = pre_detect_all(d, tf, symbol)
+        recent_pre = [e for e in pre_events if e.end_index >= last_idx - PRE_GATE_LOOKBACK_BARS]
+        aligned = [e for e in recent_pre if want_dir and e.direction == want_dir]
+        opposed = [e for e in recent_pre if want_dir and e.direction and e.direction != want_dir]
+        pre_score = 0.0
+        best_pre = max(aligned, key=lambda e: e.confidence) if aligned else None
+        worst_pre = max(opposed, key=lambda e: e.confidence) if opposed else None
+        if best_pre:
+            pre_score += best_pre.confidence
+        if worst_pre:
+            pre_score -= worst_pre.confidence
+        show_pre = best_pre or worst_pre
+        if show_pre:
+            out['detail']['pre'] = {
+                'pattern_name': show_pre.pattern_name, 'direction': show_pre.direction,
+                'confidence': show_pre.confidence, 'score': round(pre_score, 4),
+            }
+        total_score += PRE_SCORE_WEIGHT * pre_score
+    except Exception as exc:
+        logger.warning('PRE scoring skipped for %s: %s', symbol, exc)
+
+    # --- CPDE: امتیاز (نه گیت) ---
+    try:
+        from signal_engine.candlestick.detectors import detect_all as cpde_detect_all
+        cpde_events = cpde_detect_all(d, tf, symbol)
+        recent_cpde = [e for e in cpde_events if e.candle_indices and max(e.candle_indices) >= last_idx - CPDE_GATE_LOOKBACK_BARS]
+        aligned = [e for e in recent_cpde if want_dir and e.direction == want_dir]
+        opposed = [e for e in recent_cpde if want_dir and e.direction and e.direction != want_dir]
+        cpde_score = 0.0
+        best_cpde = max(aligned, key=lambda e: e.confidence) if aligned else None
+        worst_cpde = max(opposed, key=lambda e: e.confidence) if opposed else None
+        if best_cpde:
+            cpde_score += best_cpde.confidence
+        if worst_cpde:
+            cpde_score -= worst_cpde.confidence
+        show_cpde = best_cpde or worst_cpde
+        if show_cpde:
+            out['detail']['cpde'] = {
+                'pattern_name': show_cpde.pattern_name, 'direction': show_cpde.direction,
+                'confidence': show_cpde.confidence, 'score': round(cpde_score, 4),
+            }
+        total_score += CPDE_SCORE_WEIGHT * cpde_score
+    except Exception as exc:
+        logger.warning('CPDE scoring skipped for %s: %s', symbol, exc)
+
+    out['total_score'] = round(total_score, 4)
+
+    # --- KLSDE: تنها فیلتر سخت باقی‌مانده، طبق تصمیم صریح کاربر ---
+    try:
+        from signal_engine.common.atr import compute_atr
+        from signal_engine.key_level_setup.levels import compute_key_levels
+        d_atr = compute_atr(d, period=14)
+        atr_val = float(d_atr['atr'].iloc[-1])
+        close_now = float(d['close'].iloc[-1])
+        level_set = compute_key_levels(d, symbol=symbol)
+        distances = {
+            name: abs(close_now - float(info.price)) / atr_val
+            for name, info in level_set.levels.items()
+            if info.price is not None and atr_val > 0
+        }
+    except Exception as exc:
+        out['stage'] = 'klsde_error'
+        out['detail']['error'] = str(exc)
+        return out
+    if not distances:
+        out['stage'] = 'klsde_no_levels'
+        return out
+    nearest_name = min(distances, key=distances.get)
+    nearest_dist = distances[nearest_name]
+    out['detail']['klsde'] = {'nearest_level': nearest_name, 'distance_atr': round(nearest_dist, 3)}
+    if nearest_dist > KLSDE_GATE_MAX_ATR_DISTANCE:
+        out['stage'] = 'klsde_too_far_from_level'
+        return out
+
+    out['passed'] = True
+    out['stage'] = 'klsde_passed'
+    return out
+
+
+async def refresh_cmc100_opportunity_scores(http):
+    """کار دوره‌ای اصلی این ادغام، طبق منطق زنجیره‌ی گیت متوالی که کاربر
+    صریحاً درخواست کرد (نه امتیاز وزنی ترکیبی):
+
+        ۱. وضعیت داشبورد بازار بررسی می‌شود (رژیم ۴ساعته، مستقل).
+        ۲. ۱۰۰ نماد برتر (همان جهان کاندید DEX/CMC-100 موجود — که با
+           فیلتر حداقل حجم DEX_MIN_24H_DOLLAR_VOLUME هم غربال شده) با
+           همان شاخص داشبورد (EMA20/EMA50) مقایسه می‌شوند → گیت جهت‌دار.
+        ۳. همه‌ی نمادهای هم‌جهت (نه فقط عدد ثابتی مثل ۳۰ تا — طبق اصلاح
+           صریح کاربر) کاندید بررسی عمیق می‌شوند؛
+           CMC100_DEEP_CANDIDATES_COUNT فقط یک سقف ایمنیِ سست است، نه
+           فیلتر کیفیت.
+        ۴. روی هر کاندید (به‌صورت موازی)، MCDE/PRE/CPDE فقط امتیاز
+           می‌دهند (نه گیت — طبق اصلاح صریح بعدی کاربر)؛ سپس KLSDE
+           به‌عنوان تنها فیلتر سخت باقی‌مانده اجرا می‌شود
+           (`_score_symbol_confirmation`).
+        ۵. همه‌ی نمادهای هم‌جهت که از KLSDE عبور کردند — فارغ از امتیاز
+           مثبت/منفی‌شان — واجد شرایط CORE شدن‌اند؛ اگر تعدادشان از سقف
+           CMC100_TOP_SETUP_COUNT بیشتر شد، امتیاز کل ۳ موتور بالا صرفاً
+           برای اولویت‌بندی نهایی استفاده می‌شود (نه رد/قبول). فقط
+           نمادهای نهایی CORE می‌شوند تا زمان‌بند/ترفیع رویدادمحور موجود
+           (بدون تغییر) روی همان‌ها پایش فوری/مکرر سطوح و تشخیص ستاپ
+           نهایی و اجرای معامله را انجام دهد (مسیر موجود scan_symbol —
+           چیزی اضافه بازتولید نشد).
+
+    فقط وقتی ADAPTIVE_WATCHLIST_ENABLED روشن باشد اجرا می‌شود؛ با
+    CMC100_REFRESH_SECONDS کش داخلی دارد تا هر تیک ۴۵ثانیه‌ای scan_loop
+    این فچ/محاسبه‌ی نسبتاً سنگین (fetch کندل + ۳ موتور امتیازده + KLSDE
+    برای تا ~۱۰۰ نماد، موازی) تکرار نشود.
+    """
+    try:
+        from signal_engine.watchlist_bridge import is_adaptive_watchlist_enabled, mark_core_symbols
+    except Exception:
+        return
+    if not is_adaptive_watchlist_enabled():
+        return
+    now = time.time()
+    if now - CMC100_STATE['ts'] < CMC100_REFRESH_SECONDS:
+        return
+    CMC100_STATE['ts'] = now
+    try:
+        # مرحله‌ی ۱: وضعیت داشبورد بازار
+        universe = _refresh_dynamic_dex_watchlist()
+        regime = await get_global_market_regime(CMC100_GATE_TIMEFRAME)
+        CMC100_STATE['regime'] = regime
+
+        # مرحله‌ی ۲: ۱۰۰ نماد برتر با همان شاخص داشبورد مقایسه می‌شوند
+        snapshots = []
+        with ThreadPoolExecutor(max_workers=min(10, max(1, len(universe)))) as ex:
+            futures = {ex.submit(_market_snapshot, sym, CMC100_GATE_TIMEFRAME): sym for sym in universe}
+            for f in as_completed(futures):
+                item = f.result()
+                if item:
+                    snapshots.append(item)
+        gated = [x for x in snapshots if _passes_directional_gate(x['score'], regime)]
+
+        # مرحله‌ی ۳: کاندیدهای هم‌جهت — طبق اصلاح صریح کاربر، این دیگر
+        # یک انتخاب کیفی نیست؛ همه‌ی هم‌جهت‌ها کاندید بررسی عمیق می‌شوند.
+        # مرتب‌سازی بر اساس نقدینگی فقط برای حالت نادر عبور از سقف ایمنی
+        # (CMC100_DEEP_CANDIDATES_COUNT) نگه داشته شده، نه برای فیلتر
+        # معمول.
+        dv_map = dict(DEX_WATCHLIST_CACHE.get('dollar_volume') or {})
+        gated.sort(key=lambda x: dv_map.get(x['symbol'], 0.0), reverse=True)
+        gated = gated[:CMC100_DEEP_CANDIDATES_COUNT]
+        candidate_symbols = [x['symbol'] for x in gated]
+        CMC100_STATE['candidates'] = candidate_symbols
+
+        # مرحله‌ی ۴: روی هر کاندید، MCDE/PRE/CPDE امتیاز می‌دهند و سپس
+        # KLSDE به‌عنوان تنها فیلتر سخت اجرا می‌شود. چون دیگر سقف کیفیتی
+        # نداریم (ممکن است تا ۱۰۰ نماد هم‌زمان کاندید باشند)، این محاسبه
+        # به‌صورت موازی اجرا می‌شود (نه یکی‌یکی) تا زمان کل این مرحله با
+        # افزایش تعداد کاندیدها به‌شدت رشد نکند.
+        score_results = await asyncio.gather(*[
+            asyncio.to_thread(_score_symbol_confirmation, sym, CMC100_GATE_TIMEFRAME, regime)
+            for sym in candidate_symbols
+        ])
+        scored = dict(zip(candidate_symbols, score_results))
+        CMC100_STATE['gate_results'] = scored
+
+        # مرحله‌ی ۵: هر نمادی که از KLSDE عبور کرد واجد شرایط CORE است —
+        # فارغ از این‌که امتیاز ۳ موتور بالا مثبت یا منفی باشد (طبق تصمیم
+        # صریح کاربر: «هر امتیازی برن جلو، KLSDE خودش فیلتر نهایی باشه»).
+        # امتیاز کل فقط برای اولویت‌بندی وقتی تعداد از سقف بیشتر شد استفاده
+        # می‌شود.
+        passed = [sym for sym, r in scored.items() if r['passed']]
+        passed.sort(key=lambda sym: scored[sym]['total_score'], reverse=True)
+        promoted = passed[:CMC100_TOP_SETUP_COUNT]
+        if promoted:
+            mark_core_symbols(promoted)
+        CMC100_STATE['promoted'] = promoted
+        logger.info(
+            'CMC-100 scoring: regime=%s candidates=%d passed_klsde=%d promoted=%s',
+            regime, len(candidate_symbols), len(passed), promoted,
+        )
+    except Exception as exc:
+        logger.warning('CMC-100 scoring refresh failed: %s', exc)
+
+
 def market_report(chat_id):
     s = get_session(chat_id)
     tf = s['timeframe']
@@ -4852,6 +5192,15 @@ async def scan_loop():
             timeout=aiohttp.ClientTimeout(total=10)
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
+                # طبق بخش ۵ سند نقشه‌راه CMC-100: یک‌بار در هر تیک اسکن (نه
+                # به‌ازای هر کاربر/جلسه — واچ‌لیست هوشمند سراسری و مشترک است)
+                # کاندیدهای هم‌جهت با داشبورد را بازبینی و Opportunity Score
+                # واقعی‌شان را به‌روز می‌کند. خودش با CMC100_REFRESH_SECONDS
+                # کش داخلی دارد، پس فراخوانی مکرر هزینه‌ی اضافه ندارد.
+                try:
+                    await refresh_cmc100_opportunity_scores(http)
+                except Exception as exc:
+                    logger.warning('CMC-100 refresh call failed: %s', exc)
                 tasks=[]
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue

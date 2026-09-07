@@ -43,6 +43,15 @@ from signal_engine.confluence.invalidation import check_structural_invalidation
 # status را در طول زمان mutate کند.
 _ACTIVE_TRADE_SIGNALS: dict = {}
 
+# طبق سیم‌کشی mtf_alignment: یک پله بالاتر از هر تایم‌فریم اصلی، دقیقاً
+# همان کلیدهایی که bot.py::scan_symbol از قبل در market_data_dict (`md`)
+# پر می‌کند (htf_specs) — پس فچ تازه‌ای لازم نیست، فقط همون داده‌ی
+# already-fetched هرچهار تایم‌فریم دوباره استفاده می‌شود.
+_HTF_ONE_STEP_UP = {
+    "5min": ("1h", "1hour"), "15min": ("1h", "1hour"),
+    "1hour": ("4h", "4hour"), "4hour": ("1d", "1day"),
+}
+
 
 def _best_reference_price(signal: TradeSignal, key_candidates) -> Optional[float]:
     for k in key_candidates:
@@ -111,6 +120,7 @@ def run_new_engine_as_best(
     live_price: Optional[float] = None,
     btc_context: Optional[dict] = None,
     asset_taxonomy: Optional[dict] = None,
+    market_data_dict: Optional[dict] = None,
 ) -> Optional[dict]:
     """نقطه‌ی ورود بریج: موتور جدید را اجرا می‌کند، آخرین سیگنال فعال را
     انتخاب می‌کند (اگر باشد) و آن را در قالب دیکشنری «best» قدیمی
@@ -118,11 +128,27 @@ def run_new_engine_as_best(
     (code, direction, entry, sl, tp, total_score, base_score, bonus, penalty).
 
     خروجی None یعنی «هیچ ستاپی» — دقیقاً مثل نسخه‌ی قدیمی.
+
+    market_data_dict (اختیاری، سیم‌کشی mtf_alignment): همان دیکشنری‌ای که
+    bot.py::scan_symbol از قبل برای فیلتر HTF می‌سازد (کلیدهای '1h'/'4h'/
+    '1d'). اگر داده شود، یک پله بالاتر از timeframe فعلی استخراج و به
+    generate_trade_signals پاس داده می‌شود تا برچسب هم‌جهتی چند-تایم‌فریمی
+    واقعاً محاسبه شود؛ اگر داده نشود یا کلید متناظر خالی باشد، رفتار دقیقاً
+    مثل قبل (بدون alignment) می‌ماند — fail-safe، نه یک وابستگی جدید سخت.
     """
+    higher_tf_df, higher_tf_timeframe = None, None
+    if market_data_dict:
+        htf_key, htf_label = _HTF_ONE_STEP_UP.get(timeframe, (None, None))
+        if htf_key:
+            cand = market_data_dict.get(htf_key)
+            if cand is not None and not cand.empty:
+                higher_tf_df, higher_tf_timeframe = cand, htf_label
+
     signals = generate_trade_signals(
         df, timeframe, symbol=symbol, config=config,
         lookback_cap_bars=(config or {}).get("new_engine_lookback_cap_bars", 300),
         btc_context=btc_context, asset_taxonomy=asset_taxonomy,
+        higher_tf_df=higher_tf_df, higher_tf_timeframe=higher_tf_timeframe,
     )
     if not signals:
         return None

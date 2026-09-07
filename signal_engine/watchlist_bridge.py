@@ -62,7 +62,11 @@ def get_global_watchlist(config: Optional[dict] = None) -> AdaptiveWatchlist:
 
 
 def is_adaptive_watchlist_enabled() -> bool:
-    return os.environ.get("ADAPTIVE_WATCHLIST_ENABLED", "false").lower() in ("1", "true", "yes")
+    # طبق تصمیم کاربر (بند ۴، بخش ۵ سند نقشه‌راه CMC-100): این سیستم دیگر
+    # یک قابلیت خاموشِ MVP نیست — پیش‌فرض حالا روشن است. برای برگشت به
+    # رفتار قدیم (بدون گیت جهت‌دار/امتیازدهی فرصت واقعی)، این متغیر محیطی
+    # را صراحتاً به "false" ست کنید.
+    return os.environ.get("ADAPTIVE_WATCHLIST_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
 def _build_cheap_snapshot(symbol: str, dollar_volume: Optional[float], time_index: int) -> MarketSnapshot:
@@ -169,6 +173,17 @@ def record_engine_event(
 
 def mark_core_symbols(symbols: List[str]) -> None:
     get_global_watchlist().mark_core(symbols)
+
+
+# توجه: نسخه‌ی قبلی این فایل دو تابع `apply_rich_snapshot`/
+# `promote_top_opportunities` داشت که بر اساس امتیاز وزنی ترکیبی
+# opportunity_score.py رتبه‌بندی می‌کردند. بعد از دو دور اصلاح توسط
+# کاربر، منطق فعلی در bot.py::_score_symbol_confirmation این‌طور است:
+# MCDE/PRE/CPDE فقط امتیاز می‌دهند (هم‌جهت=مثبت، خلاف‌جهت=منفی،
+# بی‌الگو=خنثی)، و KLSDE تنها فیلتر سخت باقی‌مانده است — هر نمادی که از
+# KLSDE عبور کند (فارغ از امتیازش) با همین `mark_core_symbols` بالا CORE
+# می‌شود؛ امتیاز کل فقط برای اولویت‌بندی وقتی تعداد از سقف بیشتر شود
+# استفاده می‌شود. آن دو تابع قدیمی چون دیگر صدا زده نمی‌شدند حذف شدند.
 
 
 def compute_btc_context(btc_df, timeframe: str = "15m") -> Optional[dict]:

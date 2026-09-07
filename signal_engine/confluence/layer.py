@@ -20,6 +20,7 @@ import pandas as pd
 from signal_engine.pattern_recognition.detectors import detect_all as pre_detect_all
 from signal_engine.swing_structure.swings import detect_swings
 from signal_engine.swing_structure.structure import detect_structure_events
+from signal_engine.swing_structure.mtf_alignment import align_timeframes
 from signal_engine.market_cycle.macro import classify_macro_cycle
 from signal_engine.market_cycle.micro import classify_micro_cycle
 from signal_engine.candlestick.detectors import detect_all as cpde_detect_all
@@ -47,6 +48,64 @@ def _shift_index(envelopes, offset: int):
     return envelopes
 
 
+def _apply_mtf_alignment(
+    structure_events,
+    lower_df: pd.DataFrame,
+    higher_tf_df: pd.DataFrame,
+    lower_label: str,
+    higher_label: str,
+) -> None:
+    """سیم‌کشی swing_structure.mtf_alignment (بخش ۷ سند): برای هر رویداد
+    ساختاری SDE تایم پایین، برچسب aligned/counter_trend/neutral را نسبت
+    به روند تایم بالا در همان لحظه محاسبه و مستقیماً روی خودِ آبجکت
+    StructureEvent (`.alignment`) می‌نشاند — چون `adapters.adapt_sde_structure_events`
+    همین آبجکت را به‌عنوان `native_payload` بدون تغییر منتقل می‌کند،
+    `confluence.scoring._counter_trend_alignment` (که دنبال
+    `native_payload.alignment` می‌گردد) از همین‌جا به بعد واقعاً مقدار
+    می‌بیند. قبلاً این دو هیچ‌وقت به هم وصل نمی‌شدند.
+
+    fail-safe عمدی: alignment فقط متادیتاست، نه بخشی از تصمیم اصلی —
+    هر خطایی اینجا (داده‌ی تایم بالا ناقص/کوتاه و غیره) باید بی‌صدا نادیده
+    گرفته شود، نه اینکه کل پایپ‌لاین سیگنال را متوقف کند. کالر این تابع
+    را داخل try/except صدا می‌زند.
+    """
+    if not structure_events or higher_tf_df is None or higher_tf_df.empty:
+        return
+    if "timestamp" not in lower_df.columns or "timestamp" not in higher_tf_df.columns:
+        return
+
+    higher_df = higher_tf_df.reset_index(drop=True)
+    higher_swings = detect_swings(higher_df, timeframe=higher_label, symbol=structure_events[0].symbol)
+    if not higher_swings:
+        return
+
+    valid_higher_swings, higher_swing_times = [], []
+    for sw in higher_swings:
+        if sw.confirmed_at_index is None or not (0 <= sw.confirmed_at_index < len(higher_df)):
+            continue
+        valid_higher_swings.append(sw)
+        higher_swing_times.append(higher_df["timestamp"].iloc[sw.confirmed_at_index])
+    if not valid_higher_swings:
+        return
+
+    valid_events, event_times = [], []
+    for e in structure_events:
+        if 0 <= e.trigger_index < len(lower_df):
+            valid_events.append(e)
+            event_times.append(lower_df["timestamp"].iloc[e.trigger_index])
+    if not valid_events:
+        return
+
+    aligned = align_timeframes(
+        valid_events, event_times, valid_higher_swings, higher_swing_times, lower_label, higher_label,
+    )
+    alignment_by_id = {a.lower_tf_event_id: a.alignment for a in aligned}
+    for e in valid_events:
+        label = alignment_by_id.get(e.id)
+        if label is not None:
+            e.alignment = label
+
+
 def generate_trade_signals(
     df: pd.DataFrame,
     timeframe: str,
@@ -55,6 +114,8 @@ def generate_trade_signals(
     lookback_cap_bars: Optional[int] = 800,
     btc_context: Optional[dict] = None,
     asset_taxonomy: Optional[dict] = None,
+    higher_tf_df: Optional[pd.DataFrame] = None,
+    higher_tf_timeframe: Optional[str] = None,
 ) -> List[TradeSignal]:
     """اجرای کامل خط لوله: ۵ موتور → آداپتور → همبستگی → امتیازدهی →
     انتخاب سیگنال. df باید ستون‌های استاندارد OHLC(V) داشته باشد و برای
@@ -95,6 +156,11 @@ def generate_trade_signals(
 
     swings = detect_swings(d_recent, timeframe=timeframe, symbol=symbol, config_overrides=cfg.get("swing_structure"))
     structure_events = detect_structure_events(d_recent, swings, timeframe=timeframe, symbol=symbol)
+    if higher_tf_df is not None and higher_tf_timeframe:
+        try:
+            _apply_mtf_alignment(structure_events, d_recent, higher_tf_df, timeframe, higher_tf_timeframe)
+        except Exception:
+            pass  # fail-safe طبق داکیومنت بالای _apply_mtf_alignment
 
     macro_events = classify_macro_cycle(d_recent, timeframe=timeframe, symbol=symbol, config=cfg.get("market_cycle_macro"))
     micro_events = classify_micro_cycle(d_recent, timeframe=timeframe, symbol=symbol, config=cfg.get("market_cycle_micro"))
