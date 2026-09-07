@@ -179,4 +179,14 @@ def select_signals(
                 "conflicting_context": ctx.context_id, "conflicting_score": sc.confluence_score,
             })
 
+    # Batch/replay safety: an active signal must never survive past its
+    # explicit expiry merely because no later eligible context arrived.
+    if all_signals:
+        last_index = max(sc.context.anchor.event_index for sc in scored_contexts) if scored_contexts else None
+        if last_index is not None:
+            for sig in all_signals:
+                if sig.status in ("active", "updated") and last_index >= sig.expires_at_index:
+                    sig.status = "expired"
+                    sig.history.append({"event": "signal_expired", "at_index": last_index, "reason": "end_of_replay"})
+
     return all_signals

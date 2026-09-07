@@ -21,7 +21,7 @@ from typing import Dict, List, Literal, Optional
 import pandas as pd
 
 from signal_engine.common.atr import compute_atr
-from signal_engine.key_level_setup.levels import LevelSet
+from signal_engine.key_level_setup.levels import LevelSet, LevelInfo
 from signal_engine.key_level_setup.confluence import detect_level_confluence, ConfluenceZone, DEFAULT_CONFLUENCE_CONFIG
 
 ApproachDirection = Literal["from_below", "from_above"]
@@ -92,6 +92,7 @@ def detect_interactions(
     atr_period: int = 14,
     approach_tolerance_atr: Optional[Dict[str, float]] = None,
     max_window_duration_bars: int = DEFAULT_MAX_WINDOW_DURATION_BARS,
+    causal_levels: Optional[pd.DataFrame] = None,
 ) -> List[InteractionWindow]:
     """پیمایش تمام کندل‌های df و باز/بستن پنجره‌ی برخورد برای هر سطح.
 
@@ -106,23 +107,35 @@ def detect_interactions(
     "چند کندل بدون تغییر معنادار دیگر رخ نداده" تشخیص نمی‌دهد؛ فقط timeout
     یا رسیدن انتهای داده را می‌بندد — بستن معنایی/رفتاری در setups.py رخ
     می‌دهد که این پنجره‌ی باز را می‌خواند و تصمیم می‌گیرد کِی resolved شده).
+
+    causal_levels (رفع Activation Blocker A، طبق
+    NEW_ENGINE_MIGRATION_PROGRESS.md — «KLSDE historical causality»):
+    دیتافریمی هم‌طول df با ستون‌های ``<LEVEL>_price`` (خروجی
+    ``levels.compute_causal_key_levels``). وقتی داده شود، کندل i فقط با
+    سطحی مقایسه می‌شود که در همان لحظه (با داده‌ی تا کندل i) واقعاً
+    شناخته‌شده بوده — نه سطح نهایی/«امروزِ» level_set که قبلاً برای *کل*
+    تاریخچه یکسان اعمال می‌شد (نگاه به آینده). اگر داده نشود، رفتار قدیمی
+    (یک LevelSet ثابت برای کل بازه) حفظ می‌شود — که فقط برای فراخوانی
+    زنده‌ی «همین الان» (بدون بازپخش تاریخی) صحیح است.
     """
     tolerance_cfg = approach_tolerance_atr or DEFAULT_APPROACH_TOLERANCE_ATR
     d = compute_atr(df.reset_index(drop=True), period=atr_period)
     atr_series = d["atr"]
 
+    causal = None
+    if causal_levels is not None:
+        causal_reset = causal_levels.reset_index(drop=True)
+        if len(causal_reset) == len(d):
+            causal = causal_reset
+        # طول ناسازگار → به رفتار ایمنِ قدیمی (LevelSet ثابت) برگرد، به‌جای
+        # map کردن اشتباهِ ایندکس‌ها.
+
     active_windows: Dict[str, InteractionWindow] = {}
     closed_windows: List[InteractionWindow] = []
     window_counter = 0
 
-    valid_levels = {name: info.price for name, info in level_set.levels.items() if info.price is not None}
-
-    # طبق درخواست کاربر: خوشه‌های «سطح قوی» یک‌بار (نه به‌ازای هر کندل)
-    # روی قیمت‌های ثابت سطوح محاسبه می‌شوند — چون خودِ سطوح در طول این
-    # سری ثابت‌اند (فقط در مرز دوره‌ی بعدی عوض می‌شوند). از آخرین ATR
-    # معتبر به‌عنوان مقیاس نزدیکی استفاده می‌شود.
-    last_valid_atr = next((v for v in reversed(atr_series.tolist()) if pd.notna(v) and v > 0), None)
-    confluence_map = detect_level_confluence(level_set, last_valid_atr, LEVEL_TIER) if last_valid_atr else {}
+    static_valid_levels = {name: info.price for name, info in level_set.levels.items() if info.price is not None}
+    all_level_names = list(LEVEL_TIER.keys())
 
     n = len(d)
     for i in range(n):
@@ -133,6 +146,26 @@ def detect_interactions(
         high_price = float(d["high"].iloc[i])
         low_price = float(d["low"].iloc[i])
 
+        if causal is not None:
+            row_prices = {
+                name: causal.at[i, f"{name}_price"]
+                for name in all_level_names
+                if f"{name}_price" in causal.columns
+            }
+            valid_levels = {name: float(price) for name, price in row_prices.items() if pd.notna(price)}
+            row_level_set = LevelSet(
+                symbol=symbol,
+                as_of_time=None,
+                levels={name: LevelInfo(price=valid_levels.get(name)) for name in all_level_names},
+            )
+        else:
+            valid_levels = static_valid_levels
+            row_level_set = level_set
+
+        # Confluence zones are ATR-normalized at the interaction time, and
+        # (when causal_levels is given) built only from the levels actually
+        # known as of this candle — not the final snapshot of the whole df.
+        confluence_map = detect_level_confluence(row_level_set, float(atr_val), LEVEL_TIER)
         for level_name, level_price in valid_levels.items():
             tier = LEVEL_TIER.get(level_name, "daily")
             tol = tolerance_cfg.get(tier, 0.1) * atr_val
@@ -154,7 +187,16 @@ def detect_interactions(
 
             if window is None:
                 if touches:
-                    approach_dir: ApproachDirection = "from_below" if close_price < level_price else "from_above"
+                    if i > 0:
+                        prev_close = float(d["close"].iloc[i - 1])
+                    else:
+                        prev_close = float(d["open"].iloc[i]) if "open" in d.columns else close_price
+                    if prev_close < level_price:
+                        approach_dir: ApproachDirection = "from_below"
+                    elif prev_close > level_price:
+                        approach_dir = "from_above"
+                    else:
+                        approach_dir = "from_below" if close_price < level_price else "from_above"
                     window_counter += 1
                     window = InteractionWindow(
                         id=f"win_{timeframe}_{level_name}_{window_counter:05d}",

@@ -215,6 +215,7 @@ _TM_DEFAULTS = {
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
     'quality_profile': 'balanced',
+    'mtf_alignment_enabled': True,
 }
 
 
@@ -229,6 +230,7 @@ def get_trend_management_keyboard(session=None):
     buy_range = bool(tm.get('allow_buy_in_range', True))
     sell_range = bool(tm.get('allow_sell_in_range', True))
     qp = tm.get('quality_profile', 'balanced')
+    mtf_align = bool(tm.get('mtf_alignment_enabled', True))
     # ردیف انتخاب تایم‌فریم: این تنظیمات مستقل برای هر تایم‌فریم است — این
     # دکمه‌ها فقط تعیین می‌کنند کدام تایم‌فریم را می‌بینی/ویرایش می‌کنی، و
     # باعث تغییر تایم‌فریم فعال اسکن ربات نمی‌شوند.
@@ -245,6 +247,8 @@ def get_trend_management_keyboard(session=None):
         [{"text": "➡️ بازار رنج (هر دو جهت با حساسیت بالا)", "callback_data": "/dummy"}],
         [{"text": f"{'🟢' if buy_range else '🔴'} خرید در رنج", "callback_data": "/toggle_trend_buy_range"},
          {"text": f"{'🟢' if sell_range else '🔴'} فروش در رنج", "callback_data": "/toggle_trend_sell_range"}],
+        [{"text": "🧬 هم‌جهتی چند-تایم‌فریمی (۱س/۱۵د/۵د)", "callback_data": "/dummy"}],
+        [{"text": f"{'🟢 روشن' if mtf_align else '🔴 خاموش'} — بلاک خلاف‌جهت فقط وقتی هر سه تایم‌فریم هم‌رای‌اند", "callback_data": "/toggle_trend_mtf_alignment"}],
         [{"text": "🎚 کیفیت معاملات", "callback_data": "/dummy"}],
         [{"text": f"{'🟢' if qp=='opportunity' else '🔴'} کیفیت پایین‌تر — سیگنال بیشتر", "callback_data": "/qp_opportunity"}],
         [{"text": f"{'🟢' if qp=='conservative' else '🔴'} کیفیت بالاتر — سیگنال کمتر", "callback_data": "/qp_conservative"}],

@@ -33,9 +33,42 @@ MIN_PERIOD_COMPLETENESS_RATIO = 0.85
 
 
 def _timestamp_to_datetime(df: pd.DataFrame) -> pd.Series:
-    ts = pd.to_numeric(df["timestamp"], errors="coerce")
-    unit = "ms" if float(ts.dropna().median() or 0) > 1e12 else "s"
-    return pd.to_datetime(ts, unit=unit, utc=True)
+    """Normalize exchange timestamps without assuming one numeric unit.
+
+    Supported inputs:
+    - pandas/python datetime-like values
+    - ISO/date strings
+    - Unix seconds, milliseconds, microseconds, or nanoseconds
+
+    The previous implementation used a single ``> 1e12`` cutoff, which
+    misclassified microsecond/nanosecond timestamps and could produce
+    out-of-bounds datetimes.  Unit inference is now based on magnitude with
+    explicit bounds, while non-numeric values fall back to datetime parsing.
+    """
+    raw = df["timestamp"]
+
+    # Datetime-like input should be parsed directly.
+    if pd.api.types.is_datetime64_any_dtype(raw):
+        return pd.to_datetime(raw, utc=True, errors="coerce")
+
+    numeric = pd.to_numeric(raw, errors="coerce")
+    numeric_count = int(numeric.notna().sum())
+    total_count = int(len(raw))
+
+    if numeric_count and numeric_count >= max(1, int(total_count * 0.8)):
+        magnitude = float(numeric.dropna().abs().median())
+        if magnitude >= 1e17:
+            unit = "ns"
+        elif magnitude >= 1e14:
+            unit = "us"
+        elif magnitude >= 1e11:
+            unit = "ms"
+        else:
+            unit = "s"
+        return pd.to_datetime(numeric, unit=unit, utc=True, errors="coerce")
+
+    # ISO-8601 / datetime strings and mixed object columns.
+    return pd.to_datetime(raw, utc=True, errors="coerce")
 
 
 def _infer_bar_seconds(d: pd.DataFrame) -> float:
@@ -45,21 +78,26 @@ def _infer_bar_seconds(d: pd.DataFrame) -> float:
     return float(diffs.dt.total_seconds().median() or 0.0)
 
 
-def _compute_period_levels(df: pd.DataFrame, period_key_fn, expected_seconds: float) -> Tuple:
-    """پیاده‌سازی مشترک سه دوره (روز/هفته/ماه) — تفاوت فقط در تابع
-    period_key_fn (چگونگی گروه‌بندی timestamp به دوره) و طول موردانتظار
-    دوره بر حسب ثانیه است.
+def _period_causal_frame(df: pd.DataFrame, period_key_fn, expected_seconds: float) -> Optional[pd.DataFrame]:
+    """هسته‌ی مشترک محاسبه‌ی سطوح دوره‌ای — همیشه ستون‌های ``_prev_hi``/
+    ``_prev_lo``/``_prev_complete`` را برای *هر* ردیف df برمی‌گرداند (نه
+    فقط یک ردیف انتخابی). چون ``_prev_hi``/``_prev_lo`` هر دوره از
+    ``shift(1)`` روی دوره‌ی *قبلی* ساخته می‌شود، مقدار هر ردیف به‌طور
+    ذاتی علّی (causal) است — کندلی در دوره‌ی P هرگز چیزی از داده‌ی خودِ
+    دوره‌ی P یا دوره‌های بعدی نمی‌بیند، فقط آخرین دوره‌ی کاملاً بسته‌شده‌ی
+    *پیش از* P را می‌بیند.
 
-    خروجی: (d, high, low, eq) — d دیتافریم غنی‌شده با ستون‌های کمکی است
-    (برای کالر قدیمی که به آن نیاز دارد)؛ high/low/eq اگر دوره‌ی قبلی
-    کامل نبود یا داده کافی نبود، None هستند.
+    این تابع پایه‌ی مشترک هم برای ``_compute_period_levels`` (که فقط یک
+    ردیف/عکس لحظه‌ای بیرون می‌کشد) و هم برای ``compute_causal_key_levels``
+    (که کل سری علّی را نگه می‌دارد تا KLSDE بتواند کندل‌های تاریخی را با
+    سطحِ *همان لحظه* مقایسه کند، نه سطح امروز) است.
     """
     if df is None or len(df) < 50 or "timestamp" not in df.columns:
-        return None, None, None, None
+        return None
     d = df.copy()
     d["_dt"] = _timestamp_to_datetime(d)
     if d["_dt"].isna().all():
-        return None, None, None, None
+        return None
     d = d.sort_values("_dt").reset_index(drop=True)
     bar_seconds = _infer_bar_seconds(d)
 
@@ -79,6 +117,26 @@ def _compute_period_levels(df: pd.DataFrame, period_key_fn, expected_seconds: fl
 
     d = d.merge(grp[["_prev_hi", "_prev_lo", "_prev_complete"]], left_on="_period", right_index=True, how="left")
     d = d.reset_index(drop=True)
+    return d
+
+
+def _compute_period_levels(df: pd.DataFrame, period_key_fn, expected_seconds: float) -> Tuple:
+    """پیاده‌سازی مشترک سه دوره (روز/هفته/ماه) — تفاوت فقط در تابع
+    period_key_fn (چگونگی گروه‌بندی timestamp به دوره) و طول موردانتظار
+    دوره بر حسب ثانیه است.
+
+    خروجی: (d, high, low, eq) — d دیتافریم غنی‌شده با ستون‌های کمکی است
+    (برای کالر قدیمی که به آن نیاز دارد)؛ high/low/eq اگر دوره‌ی قبلی
+    کامل نبود یا داده کافی نبود، None هستند.
+
+    توجه: این تابع فقط *یک* ردیف (آخرین کندل بسته‌شده) را از سری علّی
+    مشترک (``_period_causal_frame``) بیرون می‌کشد — رفتار و خروجی دقیقاً
+    همان نسخه‌ی قبلی است (صفر تغییر رفتاری)، فقط محاسبه‌ی داخلی با
+    ``compute_causal_key_levels`` مشترک شده.
+    """
+    d = _period_causal_frame(df, period_key_fn, expected_seconds)
+    if d is None:
+        return None, None, None, None
 
     idx_now = len(d) - 2  # آخرین کندل بسته‌شده (طبق قرارداد کل پروژه)
     if idx_now < 0:
@@ -134,12 +192,14 @@ def compute_prev_4h_levels(df: pd.DataFrame):
     )
 
 
+def _week_period_key(d: pd.DataFrame) -> pd.Series:
+    iso = d["_dt"].dt.isocalendar()
+    return iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
+
+
 def compute_prev_week_levels(df: pd.DataFrame):
     """PWH/PWL/PWEQ از آخرین هفته‌ی ISO کامل (شروع هفته: دوشنبه ۰۰:۰۰ UTC، تقویم کریپتویی ۲۴/۷)."""
-    def _week_key(d):
-        iso = d["_dt"].dt.isocalendar()
-        return iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
-    return _compute_period_levels(df, period_key_fn=_week_key, expected_seconds=7 * 86400.0)
+    return _compute_period_levels(df, period_key_fn=_week_period_key, expected_seconds=7 * 86400.0)
 
 
 def compute_prev_month_levels(df: pd.DataFrame):
@@ -265,3 +325,76 @@ def compute_key_levels(df: pd.DataFrame, symbol: str = "") -> LevelSet:
         "PMEQ": LevelInfo(pmeq),
     }
     return LevelSet(symbol=symbol, as_of_time=as_of, levels=levels)
+
+
+# ---------------------------------------------------------------------------
+# رفع Activation Blocker A (طبق NEW_ENGINE_MIGRATION_PROGRESS.md، بخش
+# «KLSDE historical causality»): compute_key_levels فقط یک عکسِ لحظه‌ای
+# (سطوح «امروز») برمی‌گرداند و برای رسم چارت/تصمیم زنده کافی است، اما
+# detect_interactions با همان یک عکس، *کل* تاریخچه‌ی df را پیمایش می‌کرد —
+# یعنی کندل ۳ هفته‌ی پیش با PDH/PWH «امروز» مقایسه می‌شد، نه سطحی که آن
+# لحظه واقعاً وجود داشت (نگاه به آینده). این تابع به‌جای یک LevelSet
+# ثابت، یک سری علّی هم‌طول df برمی‌گرداند تا هر کندل با سطح *همان لحظه*
+# مقایسه شود.
+# ---------------------------------------------------------------------------
+
+_CAUSAL_PERIOD_SPECS = [
+    ("P1H", "P1L", "P1EQ", lambda d: d["_dt"].dt.floor("1h"), 3600.0),
+    ("P4H", "P4L", "P4EQ", lambda d: d["_dt"].dt.floor("4h"), 4 * 3600.0),
+    ("PDH", "PDL", "PDEQ", lambda d: d["_dt"].dt.floor("D").dt.date, 86400.0),
+    ("PWH", "PWL", "PWEQ", _week_period_key, 7 * 86400.0),
+    ("PMH", "PML", "PMEQ", lambda d: d["_dt"].dt.strftime("%Y-%m"), 28 * 86400.0),
+]
+
+
+def compute_causal_key_levels(df: pd.DataFrame) -> pd.DataFrame:
+    """نسخه‌ی «تاریخچه‌ای/علّی» ``compute_key_levels``.
+
+    برخلاف ``compute_key_levels`` (یک LevelSet تک‌مقداری برای «الان»)،
+    این تابع دیتافریمی هم‌طول و هم‌ترتیب با ``df`` برمی‌گرداند که هر سطر
+    آن، مقدار هر یک از ۱۵ سطح را *دقیقاً همان‌طور که در آن کندل واقعاً
+    شناخته‌شده بود* نگه می‌دارد (ستون‌های ``<LEVEL>_price``، مثلاً
+    ``PDH_price``). این دقیقاً همان الگوریتم بیت‌به‌بیت
+    ``_compute_period_levels`` است (همان گروه‌بندی + همان
+    MIN_PERIOD_COMPLETENESS_RATIO=0.85) — فقط به‌جای بیرون‌کشیدن تک ردیف
+    آخر، تمام ردیف‌های سری علّی مشترک نگه داشته می‌شوند.
+
+    مقدار NaN در هر سلول دقیقاً معادل None در compute_key_levels است:
+    در آن لحظه دوره‌ی مرجع قبلی هنوز کامل/معتبر نبوده.
+
+    detect_interactions باید برای بازپخش/بک‌تست از همین (نه یک LevelSet
+    ثابت) استفاده کند تا کندل‌های تاریخی با سطحی که در آن لحظه وجود
+    نداشت مقایسه نشوند.
+    """
+    n = len(df) if df is not None else 0
+    out = pd.DataFrame(index=range(n))
+    if df is None or n == 0 or "timestamp" not in df.columns:
+        for hi_name, lo_name, eq_name, _fn, _sec in _CAUSAL_PERIOD_SPECS:
+            out[f"{hi_name}_price"] = float("nan")
+            out[f"{lo_name}_price"] = float("nan")
+            out[f"{eq_name}_price"] = float("nan")
+        return out
+
+    for hi_name, lo_name, eq_name, key_fn, expected_seconds in _CAUSAL_PERIOD_SPECS:
+        d = _period_causal_frame(df, key_fn, expected_seconds)
+        if d is None or len(d) != n:
+            # طول ناسازگار (مثلاً به‌خاطر _dt نامعتبر) یا داده‌ی ناکافی —
+            # همان رفتار «سطح نامعلوم» را حفظ کن، هرگز ایندکس اشتباه map نشود.
+            out[f"{hi_name}_price"] = float("nan")
+            out[f"{lo_name}_price"] = float("nan")
+            out[f"{eq_name}_price"] = float("nan")
+            continue
+        valid = (
+            d["_prev_complete"].fillna(False)
+            & d["_prev_hi"].notna()
+            & d["_prev_lo"].notna()
+            & (d["_prev_hi"] > d["_prev_lo"])
+        )
+        hi = d["_prev_hi"].where(valid)
+        lo = d["_prev_lo"].where(valid)
+        eq = (hi + lo) / 2.0
+        out[f"{hi_name}_price"] = hi.to_numpy()
+        out[f"{lo_name}_price"] = lo.to_numpy()
+        out[f"{eq_name}_price"] = eq.to_numpy()
+
+    return out

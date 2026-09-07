@@ -258,7 +258,7 @@ STRATEGY_DEFAULTS = {
     # هیچ تغییری در فیوزهای ایمنی build_trade_plan (سقف SL/ATR، حداقل R:R،
     # حداقل امتیاز) که همچنان دقیقاً همان‌طور که هستند روی خروجی موتور
     # جدید هم اجرا می‌شوند.
-    "use_new_signal_engine": False,
+    "use_new_signal_engine": True,
     # --- آستانه‌های موتور سناریو PDH/EQ/PDL ---
     "min_trade_score": ENGINE_DEFAULTS["min_score_to_trade"],
     "min_rr": ENGINE_DEFAULTS["min_rr"],
@@ -521,6 +521,7 @@ def _run_engine_multi_source(df, timeframe, cfg, market_data_dict=None, diag=Non
             from signal_engine.bridge import run_new_engine_as_best
             best = run_new_engine_as_best(
                 df, timeframe or "5min", config=cfg,
+                live_price=cfg.get("_live_price"),
                 btc_context=cfg.get("btc_context"), asset_taxonomy=cfg.get("asset_taxonomy"),
             )
             if diag is not None:
@@ -679,6 +680,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     خروجی: (signal: 'BUY'|'SELL'|None, reason: str)
     """
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    if live_price is not None:
+        cfg["_live_price"] = live_price
     diag = {}
 
     if strategy_type == "extra":
@@ -821,6 +824,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic",
         return None, "داده کافی برای طراحی معامله وجود ندارد"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    if live_price is not None:
+        cfg["_live_price"] = live_price
 
     if strategy_type == "extra":
         if not _EXTRA_ENGINE_AVAILABLE:

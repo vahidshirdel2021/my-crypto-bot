@@ -138,9 +138,12 @@ def _filter_and_confirm(
     timeframe: str,
     symbol: str,
 ) -> List[SwingPoint]:
-    """Stage 2 (فیلتر نویز) + Stage 3 (تأیید) با هم اجرا می‌شوند چون
-    شرط ریتریسمنت خودش نیازمند نگاه به کندل‌های بعد از کاندید است — دقیقاً
-    همان تأخیر تأییدی که Stage 3 رسماً مدل می‌کند.
+    """Causal Stage 2-4 processing.
+
+    A candidate becomes observable only at ``candidate_index + k``.  All
+    filtering decisions are made from information available by that
+    confirmation index.  In particular, we never run a final pass that can
+    replace/remove an already-confirmed swing because of a later swing.
     """
     atr_period = cfg["atr_period"]
     k = cfg["fractal_k"]
@@ -148,86 +151,91 @@ def _filter_and_confirm(
     min_retrace = cfg["min_retrace_pct"]
     vol_floor = cfg["volume_percentile_floor"]
 
-    d = compute_atr(df, period=atr_period)
+    d = compute_atr(df.reset_index(drop=True), period=atr_period)
     atr_series = d["atr"]
+    candidates_sorted = sorted(candidates, key=lambda c: (c["index"] + k, c["index"]))
 
     swings: List[SwingPoint] = []
-    last_confirmed_opposite: Optional[dict] = None  # آخرین سوئینگ تأییدشده‌ی جهت مخالف
-
-    candidates_sorted = sorted(candidates, key=lambda c: c["index"])
+    # Reference leg must always come from the LAST CONFIRMED SWING OF THE
+    # OPPOSITE TYPE TO THE CURRENT CANDIDATE — not merely "the last swing
+    # whose type differed from whatever was stored before". A single shared
+    # variable that flips based on its own previous type breaks as soon as
+    # two confirmed swings of the same type occur back-to-back (e.g. a Low
+    # between two Highs gets rejected by Stage-2 filters, which happens
+    # routinely): it would then hold a same-type swing while still being
+    # named/treated as "opposite", corrupting both the ATR-magnitude and the
+    # retracement checks. Two separate references (one per type) avoid this.
+    last_confirmed_high: Optional[SwingPoint] = None
+    last_confirmed_low: Optional[SwingPoint] = None
 
     for cand in candidates_sorted:
-        idx = cand["index"]
+        idx = int(cand["index"])
+        confirm_index = idx + k
+        if confirm_index >= len(d):
+            continue
+
         atr_val = atr_series.iloc[idx]
         if pd.isna(atr_val) or atr_val <= 0:
             continue
 
-        # اندازه‌ی حرکت نسبت به آخرین سوئینگ تأییدشده‌ی مخالف
-        if last_confirmed_opposite is not None:
-            move = abs(cand["price"] - last_confirmed_opposite["price"])
-            magnitude_atr = move / atr_val
+        reference = last_confirmed_low if cand["type"] == "swing_high" else last_confirmed_high
+
+        if reference is not None:
+            move = abs(float(cand["price"]) - reference.price)
+            magnitude_atr = move / float(atr_val)
         else:
-            magnitude_atr = float("inf")  # اولین سوئینگ در سری داده — بدون مرجع قبلی، رد نمی‌شود
+            magnitude_atr = float("inf")
 
         if magnitude_atr < min_atr_mult:
-            continue  # نویز — اندازه‌ی حرکت کافی نیست
-
-        if not _volume_ok(df, idx, vol_floor, magnitude_atr if np.isfinite(magnitude_atr) else 999.0):
             continue
 
-        # حداقل ریتریسمنت: بعد از این سوئینگ باید حداقل min_retrace از لگ
-        # منتهی به آن برگردد، قبل از این‌که سوئینگ *بعدی* (مخالف) تأیید شود.
-        # این شرط با بررسی این‌که آیا در بازه‌ی بین این کاندید و کاندید
-        # مخالفِ بعدی، حداقل درصد ریتریسمنت رخ داده، پیاده می‌شود.
-        confirm_index = min(idx + k, len(df) - 1)
-        # تأیید بدون look-ahead: سوئینگ تا k کندل بعد از خودش pending است.
-        if confirm_index >= len(df):
+        if not _volume_ok(
+            d, idx, vol_floor,
+            magnitude_atr if np.isfinite(magnitude_atr) else 999.0,
+        ):
+            continue
+
+        # Causal retracement check: only candles between the candidate and
+        # its confirmation candle are visible at confirmation time.
+        retrace_ok = True
+        if reference is not None:
+            leg = abs(float(cand["price"]) - reference.price)
+            if leg > 0:
+                path = d.iloc[idx:confirm_index + 1]
+                if cand["type"] == "swing_high":
+                    retrace = float(cand["price"]) - float(path["low"].min())
+                else:
+                    retrace = float(path["high"].max()) - float(cand["price"])
+                retrace_ok = retrace / leg >= min_retrace
+        if not retrace_ok:
             continue
 
         sw_id = f"swing_{timeframe}_{idx:06d}"
         sw = SwingPoint(
-            id=sw_id, timeframe=timeframe, symbol=symbol,
-            type=cand["type"], price=cand["price"], candle_index=idx,
+            id=sw_id,
+            timeframe=timeframe,
+            symbol=symbol,
+            type=cand["type"],
+            price=float(cand["price"]),
+            candle_index=idx,
             confirmed_at_index=confirm_index,
             confirmation_lag_bars=confirm_index - idx,
             magnitude_atr=None if not np.isfinite(magnitude_atr) else round(float(magnitude_atr), 3),
             status="confirmed",
-            evidence={"fractal_k": k, "atr_at_swing": float(atr_val)},
+            evidence={
+                "fractal_k": k,
+                "atr_at_swing": float(atr_val),
+                "causal_confirmation_index": confirm_index,
+                "causal_retrace_check": True,
+            },
         )
         swings.append(sw)
-        last_confirmed_opposite = cand
+        if sw.type == "swing_high":
+            last_confirmed_high = sw
+        else:
+            last_confirmed_low = sw
 
-    return _apply_retrace_filter(df, swings, min_retrace)
-
-
-def _apply_retrace_filter(df: pd.DataFrame, swings: List[SwingPoint], min_retrace_pct: float) -> List[SwingPoint]:
-    """حذف «سوئینگ‌اسپم» — بین دو سوئینگ هم‌جهت متوالی که سوئینگ مخالفی
-    بینشان با حداقل ریتریسمنت لازم شکل نگرفته، فقط سوئینگ قوی‌تر (برای
-    swing_high: بالاتر؛ برای swing_low: پایین‌تر) نگه داشته می‌شود.
-    """
-    if not swings:
-        return swings
-
-    swings_sorted = sorted(swings, key=lambda s: s.candle_index)
-    kept: List[SwingPoint] = []
-    for sw in swings_sorted:
-        if kept and kept[-1].type == sw.type:
-            # دو سوئینگ هم‌جهت پشت‌سرهم بدون سوئینگ مخالف بینشان → فقط
-            # قوی‌تر را نگه دار (این خودش پیاده‌سازی عملیِ شرط «۲۰٪
-            # ریتریسمنت لازم قبل از سوئینگ بعدی» است، چون اگر ریتریسمنت
-            # کافی رخ داده بود، یک کاندید مخالف بین این دو تأیید می‌شد).
-            prev = kept[-1]
-            if sw.type == "swing_high":
-                if sw.price >= prev.price:
-                    kept[-1] = sw
-                # وگرنه prev را نگه دار، sw را دور بینداز
-            else:  # swing_low
-                if sw.price <= prev.price:
-                    kept[-1] = sw
-            continue
-        kept.append(sw)
-
-    return kept
+    return swings
 
 
 # ---------------------------------------------------------------------------

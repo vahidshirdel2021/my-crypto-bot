@@ -148,6 +148,15 @@ TREND_MGMT_DEFAULTS = {
     'allow_buy_in_range': True,
     'allow_sell_in_range': True,
     'quality_profile': 'balanced',
+    # فیلتر هم‌جهتی چند-تایم‌فریمی (MTF Alignment) — طبق درخواست کاربر:
+    # به‌جای این‌که «وضعیت کلی بازار» فقط از سبد شاخص در همون تایم‌فریمی که
+    # داریم روش معامله می‌کنیم (مثلاً ۵ دقیقه) خوانده شود — که می‌تواند نویزی
+    # و خلاف جهت تایم‌فریم‌های بالاتر باشد — وقتی روشن باشد، رژیم قطعی
+    # (BULLISH/BEARISH) فقط زمانی پذیرفته می‌شود که ۱ساعته/۱۵دقیقه/۵دقیقه
+    # هر سه هم‌جهت باشند؛ در غیر این صورت به RANGE سقوط می‌کند (بلاک کامل
+    # نمی‌شود، فقط با آستانه‌ی سخت‌گیرانه‌تر رنج بررسی می‌شود؛ به get_mtf_aligned_regime
+    # نگاه کنید). پیش‌فرض روشن، چون خودِ این قابلیت به درخواست صریح کاربر اضافه شده.
+    'mtf_alignment_enabled': True,
 }
 
 # کیفیت معاملات: override روی min_trade_score/min_rr/min_adx پریست تایم‌فریم.
@@ -3510,7 +3519,6 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # و برعکس؛ فقط در بازار رنج با احتیاط هر دو جهت بررسی می‌شود» — این یک
     # قانون سراسری روی کل بازار است، نه یک فیلتر جداگانه به‌ازای هر نماد.
     signal_diag = {}
-    global_regime = await get_global_market_regime(tf)
     # مدیریت روند معاملات: سوئیچ‌های دستی کاربر (منوی «مدیریت روند معاملات»)،
     # مستقل به‌ازای همین تایم‌فریم (tf)، روی همین یک درخواست، بدون دست‌کاری
     # strategy_config ذخیره‌شده در session، به تنظیمات مؤثر تزریق می‌شوند —
@@ -3518,6 +3526,11 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # پیش‌فرض تایم‌فریم بازسازی می‌کند و این سوئیچ‌ها جدا نگه داشته شده‌اند
     # تا آن ری‌ست را دور بزنند.
     tm = get_trend_mgmt(s, tf)
+    if bool(tm.get('mtf_alignment_enabled', True)):
+        global_regime, mtf_breakdown = await get_mtf_aligned_regime(tf)
+        signal_diag['mtf_breakdown'] = mtf_breakdown
+    else:
+        global_regime = await get_global_market_regime(tf)
     effective_strategy_config = {
         **s['strategy_config'],
         'allow_buy_in_bearish_trend': tm['allow_buy_in_bearish'],
@@ -4061,26 +4074,120 @@ async def get_global_market_regime(tf):
     return regime
 
 
+# --- فیلتر هم‌جهتی چند-تایم‌فریمی (MTF Alignment) ---
+# طبق درخواست کاربر: مشکل اصلی «داشبورد ۱ساعته صعودی ولی ۵ دقیقه نزولی» این
+# است که هرکدام از این دو عدد از یک سبد/تایم‌فریم مستقل محاسبه می‌شوند و با
+# هم چک نمی‌شوند؛ در نتیجه سیگنال‌های تایم‌فریم پایین که فقط نویز خلاف روند
+# اصلی‌اند هم رد می‌شوند. راه‌حل: به‌جای رژیم تک‌تایم‌فریمی، هر سه تایم‌فریم
+# مرتبط را مستقل می‌سنجیم و فقط وقتی هر سه هم‌رای‌اند رژیم قطعی برمی‌گردانیم.
+MTF_ALIGNMENT_STACK = {
+    '5min': ('1hour', '15min', '5min'),
+    '15min': ('1hour', '15min'),
+}
+
+
+def _combine_mtf_regimes(breakdown, fallback_tf):
+    """منطق ترکیب مشترک: از یک dict {tf: regime|None} یک رژیم واحد می‌سازد.
+    fallback_tf فقط برای حالت fail-safe (یکی از تایم‌فریم‌ها داده نداشت)
+    استفاده می‌شود — همان تایم‌فریمی که بدون فیلتر MTF هم استفاده می‌شد."""
+    if any(v is None for v in breakdown.values()):
+        return breakdown.get(fallback_tf)
+    if all(v == 'BULLISH' for v in breakdown.values()):
+        return 'BULLISH'
+    if all(v == 'BEARISH' for v in breakdown.values()):
+        return 'BEARISH'
+    return 'RANGE'
+
+
+async def get_mtf_aligned_regime(primary_tf):
+    """نسخه‌ی هم‌جهتی‌سنج (چند-تایم‌فریمی) از get_global_market_regime.
+
+    برای primary_tf، دنباله‌ی تایم‌فریم‌های MTF_ALIGNMENT_STACK را (هرکدام از
+    طریق همان get_global_market_regime کش‌شده، بدون فراخوانی تکراری/اضافه)
+    مستقل می‌خواند:
+        - اگر یکی از تایم‌فریم‌ها داده نداشت (None) → fail-safe: به رفتار
+          قدیمی (فقط رژیم primary_tf) برمی‌گردیم تا فیلتر کاملاً از کار نیفتد.
+        - اگر همه BULLISH بودند → 'BULLISH'
+        - اگر همه BEARISH بودند → 'BEARISH'
+        - در غیر این صورت (حتی یکی مخالف/رنج بود) → 'RANGE' — یعنی طبق منطق
+          موجود در strategy.py هر دو جهت با آستانه‌ی سخت‌گیرانه‌ترِ رنج
+          بررسی می‌شوند، نه بلاک کامل یک طرف.
+
+    خروجی: (regime: 'BULLISH'|'BEARISH'|'RANGE'|None, breakdown: dict[tf->regime])
+    """
+    tfs = MTF_ALIGNMENT_STACK.get(primary_tf, (primary_tf,))
+    breakdown = {}
+    for tf in tfs:
+        try:
+            breakdown[tf] = await get_global_market_regime(tf)
+        except Exception as exc:
+            logger.warning('mtf alignment: regime fetch failed tf=%s: %s', tf, exc)
+            breakdown[tf] = None
+    return _combine_mtf_regimes(breakdown, primary_tf), breakdown
+
+
 def market_report(chat_id):
     s = get_session(chat_id)
     tf = s['timeframe']
-    regime, bullish, bearish, ranged, total = _classify_market_regime(tf)
-    if not regime:
+    tm = get_trend_mgmt(s, tf)
+    mtf_on = bool(tm.get('mtf_alignment_enabled', True))
+    stack = MTF_ALIGNMENT_STACK.get(tf, (tf,))
+
+    per_tf = {}
+    for stf in stack:
+        r = _classify_market_regime(stf)
+        per_tf[stf] = r
+        if r[0]:
+            MARKET_REGIME_CACHE[stf] = {'ts': time.time(), 'regime': r[0], 'bullish': r[1], 'bearish': r[2], 'ranged': r[3], 'total': r[4]}
+
+    primary = per_tf.get(tf)
+    if not primary or not primary[0]:
         return '❌ داده کافی برای ساخت داشبورد بازار دریافت نشد.'
+    regime, bullish, bearish, ranged, total = primary
+
     overall = {
         'BULLISH': '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.',
         'BEARISH': '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.',
         'RANGE': '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.',
     }[regime]
-    # همان مقدار تازه‌محاسبه‌شده را در کش هم می‌گذاریم تا اسکن زنده و پیام
-    # دوره‌ای هم بلافاصله همین عدد تازه را ببینند، نه نسخه‌ی قدیمی‌تر کش.
-    MARKET_REGIME_CACHE[tf] = {'ts': time.time(), 'regime': regime, 'bullish': bullish, 'bearish': bearish, 'ranged': ranged, 'total': total}
-    return (
-        '🌐 *داشبورد بازار*\n'
-        f"⏱ تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`\n\n"
-        f"{overall}\n"
-        f"📊 از بین {total} ارز بررسی‌شده: {bullish} صعودی، {bearish} نزولی، {ranged} رنج"
-    )
+
+    lines = [
+        '🌐 *داشبورد بازار*',
+        f"⏱ تایم‌فریم فعال: `{TF_DISPLAY.get(tf, tf)}`\n",
+        overall,
+        f"📊 از بین {total} ارز بررسی‌شده ({TF_DISPLAY.get(tf, tf)}): {bullish} صعودی، {bearish} نزولی، {ranged} رنج",
+    ]
+
+    if len(stack) > 1:
+        # شکست تایم‌فریم‌ها به‌تفکیک — دقیقاً همان چیزی که وقتی تایم‌فریم‌ها
+        # با هم هم‌جهت نیستند (مثلاً ۱ساعته صعودی ولی ۵ دقیقه نزولی) باعث
+        # سردرگمی می‌شود؛ این‌جا شفاف نشان داده می‌شود.
+        lines.append('\n🧬 *شکست به‌تفکیک تایم‌فریم:*')
+        breakdown = {}
+        for stf in stack:
+            r = per_tf[stf]
+            breakdown[stf] = r[0]
+            label = MARKET_REGIME_LABELS.get(r[0], MARKET_REGIME_LABELS[None])
+            lines.append(f"• {TF_DISPLAY.get(stf, stf)}: {label} ({r[1]} صعودی / {r[2]} نزولی / {r[3]} رنج)")
+
+        if mtf_on:
+            final_regime = _combine_mtf_regimes(breakdown, tf)
+            final_label = MARKET_REGIME_LABELS.get(final_regime, MARKET_REGIME_LABELS[None])
+            lines.append(
+                f"\n✅ *رژیم مؤثر برای گیت ورود (هم‌جهتی چند-تایم‌فریمی روشن است):* {final_label}"
+            )
+            if final_regime == 'RANGE' and regime != 'RANGE':
+                lines.append(
+                    "⚠️ توجه: تایم‌فریم‌ها هم‌رای نیستند؛ به همین دلیل گیت ورود این حالت را «رنج» "
+                    "در نظر می‌گیرد (نه بلاک کامل یک طرف)، یعنی هر دو جهت با آستانه‌ی سخت‌گیرانه‌تر رنج بررسی می‌شوند."
+                )
+        else:
+            lines.append(
+                f"\nℹ️ هم‌جهتی چند-تایم‌فریمی خاموش است — گیت ورود فقط از رژیم همین تایم‌فریم "
+                f"({TF_DISPLAY.get(tf, tf)}) استفاده می‌کند. از منوی «مدیریت روند معاملات» قابل تغییر است."
+            )
+
+    return "\n".join(lines)
 
 
 def runtime_audit(chat_id):
@@ -4220,6 +4327,11 @@ def process_command(cmd,chat_id,message_id=None):
         tm['allow_sell_in_range'] = not bool(tm['allow_sell_in_range'])
         save_session(chat_id)
         edit_page(chat_id, f"📤 فروش در بازار رنج ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن' if tm['allow_sell_in_range'] else '🔴 خاموش شد'}", get_trend_management_keyboard(s), message_id); return
+    if cl == '/toggle_trend_mtf_alignment':
+        tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
+        tm['mtf_alignment_enabled'] = not bool(tm.get('mtf_alignment_enabled', True))
+        save_session(chat_id)
+        edit_page(chat_id, f"🧬 هم‌جهتی چند-تایم‌فریمی ({TF_LABELS.get(s.get('trend_mgmt_view_tf'), '')}): {'🟢 روشن شد — رژیم قطعی فقط وقتی ۱ساعته/۱۵د/۵د هم‌رای‌اند اعمال می‌شود' if tm['mtf_alignment_enabled'] else '🔴 خاموش شد — رژیم فقط از تایم‌فریم فعلی خوانده می‌شود (رفتار قدیم)'}", get_trend_management_keyboard(s), message_id); return
     if cl in ('/qp_conservative','/qp_balanced','/qp_opportunity'):
         profile={'/qp_conservative':'conservative','/qp_balanced':'balanced','/qp_opportunity':'opportunity'}[cl]
         tm = get_trend_mgmt(s, s.get('trend_mgmt_view_tf'))
@@ -4640,6 +4752,41 @@ MARKET_REGIME_LABELS = {
 }
 
 
+def _heartbeat_account_summary(chat_id, s):
+    """موجودی لحظه‌ای حساب + مجموع سود/زیان شناورِ پوزیشن‌های باز — برای پیام
+    دوره‌ای (heartbeat). موجودی همون منبعی است که منوی اصلی (menu()) نشون
+    می‌ده (بدون احتساب PnL شناور پوزیشن‌های باز، تا با بقیه‌ی رابط کاربری
+    یک‌دست بمونه)؛ PnL پوزیشن‌های باز جدا و به‌صورت مجموع محاسبه می‌شود."""
+    try:
+        bal = exchange_balance(chat_id) if s.get('trading_mode') == 'REAL' else float(s.get('paper_balance', 0.0))
+        bal_txt = f"{bal:,.2f} USDT"
+    except Exception as exc:
+        logger.warning('heartbeat balance fetch failed chat=%s: %s', chat_id, exc)
+        bal_txt = "نامشخص (خطای دریافت موجودی)"
+
+    positions = list(s.get('paper_positions') or [])
+    if not positions:
+        pnl_txt = "بدون پوزیشن باز"
+    else:
+        total_pnl = 0.0
+        priced = 0
+        for p in positions:
+            try:
+                live = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                live = float(live or 0)
+                if not live:
+                    continue
+                entry = float(p.get('entry_price') or 0)
+                amount = abs(float(p.get('amount') or 0))
+                total_pnl += (live - entry) * amount if side_long(p['side']) else (entry - live) * amount
+                priced += 1
+            except Exception:
+                continue
+        missing_note = '' if priced == len(positions) else f' (قیمت {len(positions) - priced} پوزیشن دریافت نشد)'
+        pnl_txt = f"{total_pnl:+.2f} USDT در {len(positions)} پوزیشن باز{missing_note}"
+    return bal_txt, pnl_txt
+
+
 async def _send_periodic_heartbeat():
     now = time.time()
     due = []
@@ -4653,20 +4800,40 @@ async def _send_periodic_heartbeat():
         return
     price = latest_price('BTC')
     price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
-    regime_by_tf = {}
+    info_by_key = {}
     for cid in due:
         sess = USER_SESSIONS.get(cid) or {}
         tf = sess.get('timeframe', '5min')
-        if tf not in regime_by_tf:
-            regime_by_tf[tf] = await get_global_market_regime(tf)
-        regime_label = MARKET_REGIME_LABELS.get(regime_by_tf[tf], MARKET_REGIME_LABELS[None])
+        tm = get_trend_mgmt(sess, tf)
+        mtf_on = bool(tm.get('mtf_alignment_enabled', True))
+        cache_key = (tf, mtf_on)
+        if cache_key not in info_by_key:
+            if mtf_on:
+                regime, breakdown = await get_mtf_aligned_regime(tf)
+            else:
+                regime, breakdown = await get_global_market_regime(tf), None
+            info_by_key[cache_key] = (regime, breakdown)
+        regime, breakdown = info_by_key[cache_key]
+        regime_label = MARKET_REGIME_LABELS.get(regime, MARKET_REGIME_LABELS[None])
+        breakdown_txt = ""
+        if breakdown and len(breakdown) > 1:
+            # وقتی هم‌جهتی چند-تایم‌فریمی روشنه، شکست تایم‌فریم‌ها هم نشون
+            # داده می‌شه — تا وقتی این‌ها با هم ناهم‌جهت‌اند (و رژیم نهایی به
+            # همین دلیل RANGE شده) کاربر گیج نشه که چرا فقط یک برچسب اومده.
+            parts = [f"{TF_DISPLAY.get(t, t)}: {MARKET_REGIME_LABELS.get(v, MARKET_REGIME_LABELS[None])}" for t, v in breakdown.items()]
+            breakdown_txt = f"\n🧬 شکست تایم‌فریم‌ها: {' | '.join(parts)}"
+        bal_txt, pnl_txt = _heartbeat_account_summary(cid, sess)
         message = (
             HEARTBEAT_TEXT + "\n\n"
-            f"📊 وضعیت کلی بازار ( براساس داشبورد بازار ): {regime_label}\n"
-            f"💰 قیمت لحظه‌ای BTC: {price_txt}"
+            f"📊 وضعیت کلی بازار ( براساس داشبورد بازار ): {regime_label}"
+            f"{breakdown_txt}\n"
+            f"💰 قیمت لحظه‌ای BTC: {price_txt}\n\n"
+            f"💳 موجودی اکانت: {bal_txt}\n"
+            f"📈 سود/زیان پوزیشن‌های باز: {pnl_txt}"
         )
+        keyboard = {"inline_keyboard": [[{"text": "📌 نمایش پوزیشن‌ها", "callback_data": "/open_positions"}]]}
         try:
-            send_message(cid, message)
+            send_message(cid, message, keyboard)
             HEARTBEAT_LAST_SENT[cid] = now
         except Exception as exc:
             logger.warning('heartbeat send failed chat=%s: %s', cid, exc)

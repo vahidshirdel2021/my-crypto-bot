@@ -23,7 +23,7 @@ from signal_engine.swing_structure.structure import detect_structure_events
 from signal_engine.market_cycle.macro import classify_macro_cycle
 from signal_engine.market_cycle.micro import classify_micro_cycle
 from signal_engine.candlestick.detectors import detect_all as cpde_detect_all
-from signal_engine.key_level_setup.levels import compute_key_levels
+from signal_engine.key_level_setup.levels import compute_key_levels, compute_causal_key_levels
 from signal_engine.key_level_setup.interactions import detect_interactions
 from signal_engine.key_level_setup.setups import classify_all as klsde_classify_all
 
@@ -84,6 +84,10 @@ def generate_trade_signals(
     """
     cfg = config or {}
     d = df.reset_index(drop=True)
+    # Global project contract: [-1] is the currently-forming candle.
+    # Signal decisions must be based only on closed candles.
+    if not bool(cfg.get("new_engine_include_forming_candle", False)) and len(d) > 1:
+        d = d.iloc[:-1].reset_index(drop=True)
     d_recent = d.tail(lookback_cap_bars).reset_index(drop=True) if lookback_cap_bars else d
 
     # --- اجرای مستقل هر ۵ موتور (هرکدام black-box، بدون دانستن از بقیه) ---
@@ -99,11 +103,16 @@ def generate_trade_signals(
 
     klsde_signal_events = []
     if "timestamp" in d.columns:
-        levels = compute_key_levels(d, symbol=symbol)  # عمداً df کامل (ارزان: طبق پروفایل، <0.3s)
+        levels = compute_key_levels(d, symbol=symbol)  # عمداً df کامل (ارزان: طبق پروفایل، <0.3s) — سطوح «امروز»/لحظه‌ی فعلی
         # پنجره‌ی برخورد را هم روی همان df کامل می‌سازیم چون یک برخورد با
         # PWH/PML ممکن است چند روز طول بکشد؛ اگر اینجا هم d_recent کوچک
         # استفاده می‌شد، بخشی از پنجره‌ی برخورد ناقص می‌ماند.
-        windows = detect_interactions(d, levels, symbol=symbol, timeframe=timeframe)
+        # رفع Activation Blocker A (KLSDE historical causality): به‌جای
+        # اعمال همین یک LevelSet ثابت («امروز») روی *کل* تاریخچه‌ی d،
+        # یک سری علّی هم‌طول d می‌سازیم تا هر کندل تاریخی با سطحی که در
+        # همان لحظه واقعاً شناخته‌شده بود مقایسه شود، نه سطح امروز.
+        causal_levels = compute_causal_key_levels(d)
+        windows = detect_interactions(d, levels, symbol=symbol, timeframe=timeframe, causal_levels=causal_levels)
         klsde_signal_events = klsde_classify_all(windows, d, timeframe=timeframe, config=cfg.get("key_level_setup"))
 
     # --- نرمال‌سازی (بخش ۳ سند) ---

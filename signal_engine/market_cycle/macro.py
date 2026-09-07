@@ -159,12 +159,14 @@ def classify_macro_cycle(
             # فیلتر شکست کاذب: عبور گذرا از رنج که به‌سرعت برگردد، شواهد فاز
             # فعلی را تقویت می‌کند نه پایان آن را (طبق سند، بخش ۴.۱/۴.۳)
             if close.iloc[i] > range_hi:
-                revert = i + cfg["false_breakout_revert_bars"] < n and close.iloc[i + cfg["false_breakout_revert_bars"]] < range_hi
+                lookback = cfg["false_breakout_revert_bars"]
+                revert = i >= lookback and close.iloc[i - lookback] > range_hi and close.iloc[i] < range_hi
                 if revert and current_phase == "accumulation":
                     false_breakout_counts["accumulation"] += 1
                     scores["accumulation"] += 0.2
             if close.iloc[i] < range_lo:
-                revert = i + cfg["false_breakout_revert_bars"] < n and close.iloc[i + cfg["false_breakout_revert_bars"]] > range_lo
+                lookback = cfg["false_breakout_revert_bars"]
+                revert = i >= lookback and close.iloc[i - lookback] < range_lo and close.iloc[i] > range_lo
                 if revert and current_phase == "distribution":
                     false_breakout_counts["distribution"] += 1
                     scores["distribution"] += 0.2
