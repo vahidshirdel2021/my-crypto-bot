@@ -574,7 +574,48 @@ def _adaptive_intraday_levels(d, before_idx, cfg):
             levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
         if best_l is not None:
             levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
+
+    # Higher-timeframe anchors: high/low of the most recently *closed* 1h and 4h
+    # candle, calendar week, and calendar month. Causal by construction (shift(1) per
+    # bucket) — only fully-completed prior periods are ever exposed, never the
+    # still-forming one that contains the signal candle.
+    htf = _compute_prev_htf_levels(d, before_idx)
+    for key, price in htf.items():
+        levels[key] = {"price": price, "kind": key, "count": 1}
     return levels
+
+
+def _compute_prev_htf_levels(d, before_idx):
+    """Causal previous-period high/low for 1h, 4h, week, and month buckets (no EQ —
+    just the high and low of the most recent fully-closed period of each kind).
+    `d` must already carry a `_dt` UTC timestamp column (as produced by
+    _compute_prev_day_levels). Returns {} when there isn't enough history."""
+    out = {}
+    if d is None or "_dt" not in d.columns or before_idx is None or before_idx < 5 or before_idx >= len(d):
+        return out
+    dt_col = d["_dt"]
+    dt_naive = dt_col.dt.tz_localize(None) if dt_col.dt.tz is not None else dt_col
+    specs = [
+        ("P1H", "P1L", dt_col.dt.floor("1h")),
+        ("P4H", "P4L", dt_col.dt.floor("4h")),
+        ("PWH", "PWL", dt_naive.dt.to_period("W-MON").dt.start_time),
+        ("PMH", "PML", dt_naive.dt.to_period("M").dt.start_time),
+    ]
+    for hi_key, lo_key, bucket in specs:
+        try:
+            tmp = pd.DataFrame({"_bucket": bucket, "high": d["high"], "low": d["low"]})
+            agg = tmp.groupby("_bucket").agg(_h=("high", "max"), _l=("low", "min"))
+            agg["_ph"] = agg["_h"].shift(1)
+            agg["_pl"] = agg["_l"].shift(1)
+            as_of_bucket = bucket.iloc[before_idx]
+            if as_of_bucket in agg.index:
+                ph, pl = agg.loc[as_of_bucket, "_ph"], agg.loc[as_of_bucket, "_pl"]
+                if pd.notna(ph) and pd.notna(pl):
+                    out[hi_key] = float(ph)
+                    out[lo_key] = float(pl)
+        except Exception:
+            continue
+    return out
 
 
 def _adaptive_anchor_candidates(d, idx, atr, cfg):
@@ -587,7 +628,7 @@ def _adaptive_anchor_candidates(d, idx, atr, cfg):
     c = float(d.iloc[idx]["close"])
     max_dist = atr * float(cfg.get("adaptive_max_anchor_distance_atr", 1.60))
     min_dist = atr * float(cfg.get("adaptive_min_anchor_distance_atr", 0.20))
-    priority = {"LONDON": 3, "NEW_YORK": 3, "ASIA": 2, "OPENING_RANGE": 2, "SWING": 1}
+    priority = {"PMH": 5, "PML": 5, "PWH": 4, "PWL": 4, "LONDON": 3, "NEW_YORK": 3, "P4H": 3, "P4L": 3, "P1H": 2, "P1L": 2, "ASIA": 2, "OPENING_RANGE": 2, "SWING": 1}
     out = []
     for name, item in levels.items():
         p = float(item["price"])

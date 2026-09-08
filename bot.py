@@ -125,13 +125,13 @@ LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
-LONG_WATCHLIST = ['ATOM','BCH','AVAX','UNI','HOT','FIL','ANKR','DOT','THETA','LINK','BNB','SHIB','TRX','DASH','BTT','QTUM','ADA','ZEC','CRV','GALA','EGLD','NEAR','WAVES','RUNE','KSM','HNT','DYDX','ETC','STORJ']
+LONG_WATCHLIST = ['BTC','ETH','DEFI','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SRM','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','ALPHA','TOMO','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','BZRX','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','NU','GTC','CELO','1000XEC','YFII','CTSI']
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
 
 # لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
 # لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
-SHORT_WATCHLIST = ['IOTA','ALGO','MASK','NEO','UNI','STORJ','BTC','DASH','RUNE','COMP','BNB','ONE','GALA','AR','LUNA','MANA','ETH','ETC','SOL','SUSHI','LINK','SKL','CHZ','TRB','EGLD','BTT','VET','NEAR','SLP','ANKR','ADA','ZIL','BCH','AAVE','DYDX','RVN','SHIB','TRX','ATOM','ENJ','WAVES','ZEC','XTZ','AVAX','AXS','SNX','KSM','SAND','RSR','ZRX','RAY','QTUM']
+SHORT_WATCHLIST = ['BTC','ETH','DEFI','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SRM','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','ALPHA','TOMO','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','BZRX','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','NU','GTC','CELO','1000XEC','YFII','CTSI']
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
 # اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
@@ -572,6 +572,8 @@ def default_session():
         'created_at': int(time.time()),
         'bottom_menu_open': True,
         'entry_diag_enabled': True,
+        'trade_pipeline_enabled': False,
+        'trade_pipeline_audit': [],
         'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT,
         'platform_fee_total_usdt': 0.0,
         'platform_fee_trade_count': 0,
@@ -587,6 +589,8 @@ def normalize_session(data):
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
     s['trade_audit'] = list(data.get('trade_audit') or [])[-2000:]
+    s['trade_pipeline_enabled'] = bool(data.get('trade_pipeline_enabled', False))
+    s['trade_pipeline_audit'] = list(data.get('trade_pipeline_audit') or [])[-5000:]
     ss = data.get('scan_stats') or {}
     s['scan_stats'] = {**default_session()['scan_stats'], **ss}
     s['scan_stats'].setdefault('reason_counts', {})
@@ -2454,7 +2458,32 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
     return out
 
 
+def _pipeline_record(chat_id, symbol, stage, status='', reason='', signal=None, data=None):
+    """Persist an end-to-end scan/entry pipeline event when the audit toggle is on."""
+    try:
+        s = get_session(chat_id)
+        if not s.get('trade_pipeline_enabled', False):
+            return
+        event = {
+            'pipeline_id': f"{symbol}:{s.get('timeframe','5min')}:{int(time.time()*1000)}",
+            'symbol': symbol, 'timeframe': s.get('timeframe','5min'),
+            'stage': str(stage), 'status': str(status or ''),
+            'reason': str(reason or ''), 'signal': signal, 'ts': time.time(),
+            'data': data or {},
+        }
+        s.setdefault('trade_pipeline_audit', []).append(event)
+        s['trade_pipeline_audit'] = s['trade_pipeline_audit'][-5000:]
+        save_session(chat_id)
+    except Exception:
+        logger.exception('pipeline audit failed chat=%s symbol=%s stage=%s', chat_id, symbol, stage)
+
+
+def _pipeline_start(chat_id, symbol):
+    _pipeline_record(chat_id, symbol, 'watchlist_review', 'review_started', 'نماد وارد مرحله بررسی شد')
+
+
 def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None, diagnostics=None):
+    _pipeline_record(chat_id, symbol, stage or status, status, reason, signal, diagnostics)
     return {
         'chat_id': chat_id,
         'symbol': symbol,
@@ -2627,6 +2656,47 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
         lines.append('\n' + _entry_diag_next_step([x[0] for x in active_items]))
     return '\n'.join(lines)
 
+def _simple_status_report(chat_id):
+    """گزارش دوره‌ای ساده: وضعیت کلی بازار، قیمت لحظه‌ای BTC/ETH، موجودی کیف پول
+    و سود/زیان لحظه‌ای پوزیشن‌های باز — به‌جای داشبورد طولانی تشخیصی."""
+    s = get_session(chat_id)
+    regime = MARKET_REGIME_CACHE.get('regime', 'NEUTRAL')
+    regime_label = {'BULLISH': '📈 صعودی', 'BEARISH': '📉 نزولی', 'NEUTRAL': '➡️ رنج'}.get(regime, '➡️ رنج')
+
+    btc_price = latest_price('BTC')
+    eth_price = latest_price('ETH')
+
+    balance = exchange_balance(chat_id) if s.get('trading_mode') == 'REAL' else float(s.get('paper_balance', 0.0))
+
+    positions = list(s.get('paper_positions') or [])
+    total_pnl = 0.0
+    for p in positions:
+        try:
+            symbol = p['symbol']
+            live = exchange_latest_price(chat_id, symbol) if p.get('is_real') else latest_price(symbol)
+            live = float(live or p.get('last_price') or p.get('entry_price') or 0)
+            entry = float(p.get('entry_price') or live or 0)
+            amount = abs(float(p.get('amount') or 0))
+            pnl = (live - entry) * amount if side_long(p['side']) else (entry - live) * amount
+            total_pnl += pnl
+        except Exception:
+            continue
+
+    lines = [
+        '📊 *وضعیت بازار و حساب*',
+        '━━━━━━━━━━━━━━━━━━━━',
+        f'🧭 وضعیت بازار: {regime_label}',
+        f'₿ BTC: `{fmt(btc_price) if btc_price is not None else "—"}`',
+        f'Ξ ETH: `{fmt(eth_price) if eth_price is not None else "—"}`',
+        f'💰 موجودی کیف پول: `{balance:.2f} USDT`',
+    ]
+    if positions:
+        lines.append(f'📈 سود/زیان پوزیشن‌های باز ({len(positions)}): `{total_pnl:+.2f} USDT`')
+    else:
+        lines.append('📈 سود/زیان پوزیشن‌های باز: پوزیشن باز ندارید')
+    return '\n'.join(lines), {'inline_keyboard': [[{'text': '📂 نمایش پوزیشن‌های باز', 'callback_data': '/positions'}]]}
+
+
 def _entry_diag_batch_update(chat_id, results):
     now = time.time()
     state = ENTRY_DIAG_STATE.setdefault(chat_id, {
@@ -2675,14 +2745,8 @@ def _entry_diag_batch_update(chat_id, results):
     if (not last_report) or now - last_report >= NO_ENTRY_REPORT_SECONDS:
         try:
             elapsed = now - float(state.get('no_entry_since') or now)
-            report = _entry_diag_report(
-                chat_id,
-                list(state['window_results']),
-                elapsed,
-                symbol_states=state['symbol_states'],
-                transitions=state['transitions'],
-            )
-            send_message(chat_id, report, parse_mode='Markdown')
+            report_text, report_markup = _simple_status_report(chat_id)
+            send_message(chat_id, report_text, report_markup, parse_mode='Markdown')
             state['last_report_at'] = now
             state['window_results'] = []
             state['transitions'] = []
@@ -2693,6 +2757,7 @@ def _entry_diag_batch_update(chat_id, results):
 
 async def scan_symbol(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
+    _pipeline_start(chat_id, symbol)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
     scan_generation=int(s.get('scan_generation',0))
@@ -2818,6 +2883,147 @@ def performance_period_report(chat_id, period='all'):
         lines.append('━━━━━━━━━━━━━━━━━━━━')
         lines.append(f'📐 R واقعی میانگین: `{sum(rvals)/len(rvals):+.2f}R`')
     return '\n'.join(lines)
+
+
+def today_trades_report(chat_id):
+    """Detailed list of trades closed on the current calendar day."""
+    s = get_session(chat_id)
+    closed = list(s.get('closed_positions') or [])
+
+    tz = None
+    if ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(DAILY_CLOSE_TZ)
+        except Exception:
+            tz = None
+    now_local = datetime.now(tz) if tz else datetime.utcnow()
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start_ts = day_start.timestamp()
+
+    trades = [
+        p for p in closed
+        if float(p.get('close_timestamp', 0) or 0) >= day_start_ts
+    ]
+    trades.sort(key=lambda p: float(p.get('close_timestamp', 0) or 0), reverse=True)
+
+    if not trades:
+        return (
+            '📋 *معاملات امروز*\n'
+            '━━━━━━━━━━━━━━━━━━━━\n'
+            'امروز هنوز معامله بسته‌شده‌ای ثبت نشده است.'
+        )
+
+    lines = [
+        f'📋 *معاملات امروز* — `{len(trades)}` معامله',
+        '━━━━━━━━━━━━━━━━━━━━'
+    ]
+
+    for idx, p in enumerate(trades, 1):
+        pnl = float(p.get('pnl_usdt', 0) or 0)
+        side = '🟢 LONG' if side_long(p.get('side')) else '🔴 SHORT'
+        close_ts = float(p.get('close_timestamp', 0) or 0)
+        try:
+            close_dt = datetime.fromtimestamp(close_ts, tz=tz) if tz else datetime.fromtimestamp(close_ts)
+            close_time = close_dt.strftime('%H:%M')
+        except Exception:
+            close_time = '—'
+
+        lines.extend([
+            f'*{idx}. {p.get("symbol", "—")} | {side} | `{close_time}`*',
+            f'• ورود: `{fmt(p.get("entry_price", 0))}`',
+            f'• TP: `{fmt(p.get("tp", 0))}` | SL: `{fmt(p.get("sl", 0))}`',
+            f'• سود/زیان: `{pnl:+.2f} USDT`',
+            f'• علت بسته‌شدن: `{p.get("close_reason") or "—"}`',
+            '━━━━━━━━━━━━━━━━━━━━'
+        ])
+
+    return '\n'.join(lines).rstrip('━\n ')
+
+
+def trade_tracking_keyboard(chat_id):
+    s = get_session(chat_id)
+    enabled = bool(s.get('trade_pipeline_enabled', False))
+    icon = '🟢' if enabled else '🔴'
+    state = 'روشن' if enabled else 'خاموش'
+    return {
+        'inline_keyboard': [
+            [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
+            [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
+            [{'text': '🧭 نمایش آخرین مسیرهای ثبت‌شده', 'callback_data': '/trade_pipeline'}],
+            [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
+            [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
+            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+        ]
+    }
+
+
+def trade_pipeline_report(chat_id):
+    s = get_session(chat_id)
+    events = list(s.get('trade_pipeline_audit') or [])
+    if not events:
+        return '🔎 *ممیزی کامل مسیر معاملات*\n\nهنوز داده‌ای ثبت نشده است. اول از دکمه‌ی «ردیابی معاملات» روشنش کن.'
+    events = events[-120:]
+    lines = ['🔎 *ممیزی کامل مسیر معاملات*', '━━━━━━━━━━━━━━━━━━━━', f'📌 آخرین رویدادها: `{len(events)}`', '']
+    grouped = {}
+    for e in events:
+        key = f"{e.get('symbol','?')}|{e.get('timeframe','?')}"
+        grouped.setdefault(key, []).append(e)
+    for key, rows in list(grouped.items())[-40:]:
+        last = rows[-1]
+        path = ' → '.join(str(x.get('stage') or '—') for x in rows[-8:])
+        status = last.get('status', '—')
+        reason = last.get('reason', '—')
+        lines.append(f"• `{key}` → `{status}`\n  مسیر: `{path}`\n  علت نهایی: {reason}")
+    return '\n'.join(lines)
+
+
+def export_trade_pipeline(chat_id):
+    if not is_admin(chat_id) or not TELEGRAM_TOKEN:
+        return False
+    s = get_session(chat_id)
+    pipeline = list(s.get('trade_pipeline_audit') or [])
+    opens = [audit_trade_record(p) for p in s.get('paper_positions', [])]
+    closes = [audit_trade_record(p) for p in s.get('closed_positions', [])]
+    payload = {
+        'report_metadata': {
+            'report_type': 'trade_pipeline_audit',
+            'generated_at': time.time(),
+            'chat_id': chat_id,
+            'timeframe': s.get('timeframe'),
+            'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
+        },
+        'pipeline_events': pipeline,
+        'open_positions': opens,
+        'closed_positions': closes,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode('utf-8')
+    try:
+        fname = f"trade_pipeline_audit_{s.get('timeframe','5min')}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.json"
+        caption = f'🧭 خروجی کامل ممیزی Pipeline | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))}'
+        resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument', data={'chat_id': chat_id, 'caption': caption}, files={'document': (fname, io.BytesIO(raw), 'application/json')}, timeout=30)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('export trade pipeline telegram send failed: %s', resp.text[:500])
+            send_message(chat_id, '❌ خروجی JSON ممیزی ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
+            return False
+        return True
+    except Exception as exc:
+        logger.warning('export trade pipeline failed: %s', exc)
+        send_message(chat_id, f'❌ خطا در خروجی JSON ممیزی: {exc}')
+        return False
+
+
+def full_reset(chat_id):
+    """پاک کردن کامل سشن این کاربر (پوزیشن‌ها، آمار، تنظیمات، فیلترها، همه‌چیز) و
+    بازگشت به حالت پیش‌فرض کاملاً تازه — دقیقاً مثل یک کاربر جدید."""
+    s = get_session(chat_id)
+    if s.get('paper_positions'):
+        return False, '❌ تا وقتی پوزیشن باز دارید، ریست کامل مجاز نیست. ابتدا همه پوزیشن‌ها را ببندید.'
+    if s.get('is_bot_active'):
+        stop_scan(chat_id, 'full-reset')
+    with STATE_LOCK:
+        USER_SESSIONS[chat_id] = default_session()
+    save_session(chat_id)
+    return True, '✅ *همه‌چیز پاک شد.*\nحالا از صفر شروع می‌کنیم؛ لطفاً تنظیمات را قدم‌به‌قدم دوباره انتخاب کنید.'
 
 
 def trade_audit_report(chat_id):
@@ -3403,6 +3609,27 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'⚠️ آیا از ریست آمار عملکرد اطمینان دارید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
         elif cl=='/reset_stats_confirm':
             ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
+        return
+    if cl=='/today_trades':
+        send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
+        return
+    if cl=='/trade_pipeline':
+        send_message(chat_id, trade_pipeline_report(chat_id), trade_tracking_keyboard(chat_id))
+        return
+    if cl=='/toggle_trade_pipeline':
+        s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False)
+        save_session(chat_id)
+        send_message(chat_id, f"🧭 ردیابی معاملات: {'🟢 روشن' if s['trade_pipeline_enabled'] else '🔴 خاموش'}", trade_tracking_keyboard(chat_id))
+        return
+    if cl=='/export_trade_pipeline':
+        export_trade_pipeline(chat_id)
+        return
+    if cl=='/full_reset_prompt':
+        send_message(chat_id, '⚠️ *ریست کامل ربات*\n\nاین کار همه‌چیز را برای همیشه پاک می‌کند: پوزیشن‌ها، تاریخچه معاملات، آمار، فیلترها و تمام تنظیمات شما (تایم‌فریم، حالت حساب، مارجین، اهرم و...).\nبعد از تأیید، دوباره از صفر و قدم‌به‌قدم تنظیمات را از شما می‌پرسیم.\n\nآیا مطمئن هستید؟', {"inline_keyboard": [[{"text":"🗑 بله، همه‌چیز پاک شود","callback_data":"/full_reset_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
+        return
+    if cl=='/full_reset_confirm':
+        ok,msg=full_reset(chat_id)
+        send_message(chat_id,msg, None if ok else get_performance_keyboard())
         return
 
 
