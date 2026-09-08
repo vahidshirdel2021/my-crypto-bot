@@ -809,24 +809,47 @@ def _confirm_active_structure(d, idx, signal, cfg):
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
-    """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
-
-    The primary signal still uses only the latest closed candle. If that exact
-    candle was missed by the scanner, a very recent valid sweep/retest can remain
-    actionable for a few candles, but only while price is still close to the
-    original PDH/PDL level. This avoids both missed entries and FOMO/chasing.
+    """
+    شکار نقدینگی روی تمام سطوح کلیدی HTF شامل:
+    ماهانه، هفتگی، ۴ ساعته، ۱ ساعته و روزانه
     """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
-        return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
-    if pdh is None or pdl is None:
-        return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
+        return None, "داده کافی نیست"
+    
+    # استخراج سطوح 1 ساعته، 4 ساعته، هفتگی و ماهانه از توابع ربات
+    htf_levels = _compute_prev_htf_levels(d, len(d) - 2)
+    
+    p1h = htf_levels.get("P1H")
+    p1l = htf_levels.get("P1L")
+    p4h = htf_levels.get("P4H")
+    p4l = htf_levels.get("P4L")
+    pwh = htf_levels.get("PWH")
+    pwl = htf_levels.get("PWL")
+    pmh = htf_levels.get("PMH")
+    pml = htf_levels.get("PML")
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
-    # 5m is more noisy: require structure confirmation. Keep 15m faster.
-    require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
+
+    # تجمیع تمام سطوح (ماهانه، هفتگی، 4 ساعته، 1 ساعته، روزانه) در یک فهرست
+    key_levels = []
+    if pmh is not None and pml is not None:
+        key_levels.append(('PMH (ماهانه)', pmh, 'SELL'))
+        key_levels.append(('PML (ماهانه)', pml, 'BUY'))
+    if pwh is not None and pwl is not None:
+        key_levels.append(('PWH (هفتگی)', pwh, 'SELL'))
+        key_levels.append(('PWL (هفتگی)', pwl, 'BUY'))
+    if p4h is not None and p4l is not None:
+        key_levels.append(('P4H (۴ ساعته)', p4h, 'SELL'))
+        key_levels.append(('P4L (۴ ساعته)', p4l, 'BUY'))
+    if p1h is not None and p1l is not None:
+        key_levels.append(('P1H (۱ ساعته)', p1h, 'SELL'))
+        key_levels.append(('P1L (۱ ساعته)', p1l, 'BUY'))
+    if pdh is not None and pdl is not None:
+        key_levels.append(('PDH (روزانه)', pdh, 'SELL'))
+        key_levels.append(('PDL (روزانه)', pdl, 'BUY'))
 
     def detect_at(idx):
         if idx < 0 or idx >= len(d):
@@ -837,131 +860,30 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             return None, None, None
         min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
         o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
-        if h >= pdh + min_sweep:
-            reclaimed = (not require_reclaim) or (c < pdh)
-            reversal = (not require_reversal) or (c < o)
-            if reclaimed and reversal:
-                return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی", atr
-        if l <= pdl - min_sweep:
-            reclaimed = (not require_reclaim) or (c > pdl)
-            reversal = (not require_reversal) or (c > o)
-            if reclaimed and reversal:
-                return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی", atr
-        if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
-            sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
-            if sig:
-                return sig, reason, atr
+
+        # بررسی برخورد قیمت با هر کدام از سطوح ۵ گانه
+        for level_name, level_val, expected_side in key_levels:
+            if expected_side == 'SELL' and h >= level_val + min_sweep:
+                reclaimed = (not require_reclaim) or (c < level_val)
+                reversal = (not require_reversal) or (c < o)
+                if reclaimed and reversal:
+                    return "SELL", f"Liquidity Sweep روی سقف {level_name} ({level_val:.6g}) + ریکلیم نزولی", atr
+            
+            elif expected_side == 'BUY' and l <= level_val - min_sweep:
+                reclaimed = (not require_reclaim) or (c > level_val)
+                reversal = (not require_reversal) or (c > o)
+                if reclaimed and reversal:
+                    return "BUY", f"Liquidity Sweep روی کف {level_name} ({level_val:.6g}) + ریکلیم صعودی", atr
+
         return None, None, None
 
-    latest_idx = len(d) - 2  # آخرین کندل کاملاً بسته‌شده
+    latest_idx = len(d) - 2
     sig, reason, atr = detect_at(latest_idx)
-
-    # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
-    # روز قبل بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
-    # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
-    try:
-        live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
-    except Exception:
-        live_for_guard = float(d.iloc[latest_idx]["close"])
-    if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
-        level = pdl if sig == "BUY" else pdh
-        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
-        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
-        too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
-        invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
-        if not too_far and not invalidated:
-            return sig, reason
-        sig, reason = None, None
-    elif sig:
+    
+    if sig:
         return sig, reason
-
-    # If the daily liquidity is no longer realistically reachable, rotate the reference
-    # instead of widening the old setup. This is the key anti-dead-bot mechanism.
-    try:
-        guard_atr = float(atr) if atr is not None and np.isfinite(atr) and atr > 0 else _safe_float(d.iloc[latest_idx].get("atr"), 0.0)
-        daily_activation_atr = float(cfg.get("adaptive_activation_distance_atr", 1.00))
-        daily_nearest_dist = min(abs(live_for_guard - pdh), abs(live_for_guard - pdl))
-        daily_far = daily_nearest_dist >= guard_atr * daily_activation_atr if guard_atr > 0 else False
-    except Exception:
-        guard_atr = 0.0
-        daily_far = False
-
-    if daily_far:
-        adaptive_sig, adaptive_reason, adaptive_atr = _detect_adaptive_liquidity(d, latest_idx, cfg)
-        if adaptive_sig:
-            # Do not allow adaptive continuation entries inside the previous-day range
-            # unless a confirmed PDH/PDL breakout already happened. This prevents
-            # buying below PDH or selling above PDL from intraday anchors.
-            if _has_confirmed_daily_breakout(
-                d, latest_idx, pdh, pdl, adaptive_sig,
-                adaptive_atr if adaptive_atr else guard_atr,
-                cfg
-            ):
-                return adaptive_sig, adaptive_reason
-
-    if not bool(cfg.get("active_setup_enabled", True)):
-        return None, "ستاپ جدیدی ثبت نشد"
-
-    try:
-        live = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
-    except Exception:
-        live = float(d.iloc[latest_idx]["close"])
-    if not np.isfinite(live) or live <= 0:
-        return None, "قیمت فعلی معتبر نیست"
-
-    max_age = max(1, int(cfg.get("active_setup_max_age_candles", cfg.get("active_setup_lookback_candles", 3))))
-    lookback = max(max_age, int(cfg.get("active_setup_lookback_candles", 3)))
-    min_idx = max(1, latest_idx - lookback)
-    # Newest candidate wins. We intentionally do not search older than the short freshness window.
-    latest_date = d.loc[latest_idx, "_date"] if "_date" in d.columns else None
-    current = d.iloc[latest_idx]
-    co, cc, ch, cl = (float(current["open"]), float(current["close"]),
-                       float(current["high"]), float(current["low"]))
-    for idx in range(latest_idx - 1, min_idx - 1, -1):
-        if latest_date is not None and d.loc[idx, "_date"] != latest_date:
-            continue
-        sig, reason, atr = detect_at(idx)
-        if not sig or atr <= 0:
-            continue
-        if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
-            continue
-        level = pdl if sig == "BUY" else pdh
-        tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
-        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
-        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
-
-        # IMPORTANT: an old setup is NOT enough by itself. The latest closed candle
-        # must now perform a fresh pullback/reclaim of the original PDH/PDL level.
-        # This prevents entering merely because live price happens to be near the level.
-        if sig == "BUY":
-            retest = cl <= level + tol
-            reclaimed = cc > level
-            directional = (cc > co) if require_reversal else True
-        else:
-            retest = ch >= level - tol
-            reclaimed = cc < level
-            directional = (cc < co) if require_reversal else True
-        if not (retest and reclaimed and directional):
-            continue
-
-        # The live price is only used as an anti-chasing guard after the closed-candle
-        # revalidation above. We never enter from a live tick alone.
-        if sig == "BUY":
-            if live < level - invalid_dist or live > level + max_dist:
-                continue
-        else:
-            if live > level + invalid_dist or live < level - max_dist:
-                continue
-        if bool(cfg.get("active_structure_confirmation", True)) or require_micro_structure:
-            if not _confirm_active_structure(d, latest_idx, sig, cfg):
-                continue
-
-        age = latest_idx - idx
-        return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
-                     f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
-                     f"ورود با قیمت فعلی، بدون تعقیب قیمت")
-
-    return None, "ستاپ جدیدی ثبت نشد یا ستاپ‌های اخیر بدون Pullback/Reclaim جدید معتبر نیستند"
+        
+    return None, "سطح جدیدی برای شکار نقدینگی لمس نشد"
 
 def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
     """
@@ -1126,7 +1048,6 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     }
     return plan, plan["reason"]
 
-
 def evaluate_trend_weakness(df, side, strategy_config=None):
     """
     بررسی می‌کند که آیا روند معامله باز، در حال از دست دادن قدرت است یا نه.
@@ -1192,7 +1113,6 @@ def evaluate_trend_weakness(df, side, strategy_config=None):
     threshold = float(cfg.get("weakness_exit_score", 45.0))
     is_weak = score >= threshold
     return is_weak, int(round(score)), reasons
-
 
 def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
     f = _flt(filters)
