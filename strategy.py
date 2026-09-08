@@ -451,16 +451,6 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست"
 
-    # فیلتر موانع مسیر: تمام سطوح سنگین HTF باید از entry تا TP پاک باشند.
-    htf_levels = _htf_scan_levels(d, idx)
-    clearance_ok, clearance_reason = _htf_path_clearance(
-        entry, tp, atr, htf_levels,
-        ignore_names={str(anchor_level and "")} | {k for k, v in htf_levels.items() if anchor_level is not None and abs(v - float(anchor_level)) < 1e-12},
-        clearance_atr=float(cfg.get("htf_path_clearance_atr", 0.35)),
-    )
-    if not clearance_ok:
-        return None, clearance_reason
-
     # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
     est_risk_usdt = 500.0 * risk_pct
@@ -488,19 +478,6 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if score < min_score:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
-    # Full HTF path-clearance applies to non-sweep plans as well.
-    htf_levels = _htf_scan_levels(df, len(df) - 2)
-    clearance_ok, clearance_reason = _htf_path_clearance(
-        entry, tp, atr, htf_levels,
-        clearance_atr=float(cfg.get("htf_path_clearance_atr", 0.35)),
-    )
-    if not clearance_ok:
-        return None, clearance_reason
-
-    # Keep the exact HTF map attached to every sweep plan.  This used to
-    # reference `htf_levels` before it was created, which could abort an
-    # otherwise valid HTF sweep before execution.
-    htf_levels = _htf_scan_levels(d, idx)
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
@@ -509,8 +486,6 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         "rsi": rsi, "volume_ratio": vr,
         "swing_level": float(swing_level) if swing_level is not None and np.isfinite(swing_level) else None,
         "pattern": pattern_name,
-        "setup_tag": None,
-        "htf_levels": htf_levels,
         "reason": f"کیفیت {score}/100 ({quality_label}) | ADX {adx:.1f} | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
     }
     return plan, plan["reason"]
@@ -643,103 +618,6 @@ def _compute_prev_htf_levels(d, before_idx):
     return out
 
 
-
-def _htf_scan_levels(d, before_idx):
-    """Return causal heavy HTF levels (previous closed 1h/4h/week/month + PDH/PDL)."""
-    if d is None or before_idx is None or before_idx < 2 or before_idx >= len(d):
-        return {}
-    out = {}
-    try:
-        if "_dt" not in d.columns:
-            ts = pd.to_datetime(d.get("timestamp"), errors="coerce", utc=True)
-            if ts.notna().any():
-                d = d.copy()
-                d["_dt"] = ts
-        if "_dt" in d.columns:
-            htf = _compute_prev_htf_levels(d, before_idx)
-            out.update({k: float(v) for k, v in htf.items() if np.isfinite(v)})
-    except Exception:
-        pass
-    try:
-        dd, pdh, pdl = _compute_prev_day_levels(d)
-        if pdh is not None: out["PDH"] = float(pdh)
-        if pdl is not None: out["PDL"] = float(pdl)
-    except Exception:
-        pass
-    return out
-
-
-def _detect_htf_sweep(d, idx, cfg):
-    """Scan all heavy HTF liquidity levels for a causal sweep/reclaim setup."""
-    if not bool(cfg.get("htf_scan_enabled", True)) or d is None or idx < 2:
-        return None
-    try:
-        row = d.iloc[idx]
-        atr = float(row.get("atr", 0))
-        if atr <= 0 or not np.isfinite(atr):
-            return None
-        o, c, h, l = map(float, (row["open"], row["close"], row["high"], row["low"]))
-        vr = _safe_float(row.get("volume_ratio"), 0.0)
-        body = _safe_float(row.get("body_ratio"), 0.0)
-        min_dist = atr * float(cfg.get("adaptive_sweep_min_distance_atr", 0.15))
-        min_vol = float(cfg.get("adaptive_min_volume_ratio", 1.12))
-        min_body = float(cfg.get("adaptive_min_body_ratio", 0.50))
-        levels = _htf_scan_levels(d, idx)
-        priority = {"PMH": 5, "PML": 5, "PWH": 4, "PWL": 4, "P4H": 3, "P4L": 3,
-                    "P1H": 2, "P1L": 2, "PDH": 2, "PDL": 2}
-        candidates = []
-        for name, level in levels.items():
-            if not name.startswith(("PM", "PW", "P4", "P1", "PD")):
-                continue
-            dist = abs(c - level)
-            if dist <= atr * 2.5:
-                candidates.append((-priority.get(name, 1), dist, name, level))
-        candidates.sort()
-        for _, _, name, level in candidates:
-            if h >= level + min_dist and c < level and c < o and body >= min_body and vr >= min_vol:
-                return {
-                    "signal": "SELL", "name": name, "level": level,
-                    "tag": _setup_tag_for_level(name),
-                    "reason": f"HTF SWEEP | {name}={level:.10g} | نزولی"
-                }
-            if l <= level - min_dist and c > level and c > o and body >= min_body and vr >= min_vol:
-                return {
-                    "signal": "BUY", "name": name, "level": level,
-                    "tag": _setup_tag_for_level(name),
-                    "reason": f"HTF SWEEP | {name}={level:.10g} | صعودی"
-                }
-    except Exception:
-        return None
-    return None
-
-
-def _htf_path_clearance(entry, tp, atr, levels, ignore_names=None, clearance_atr=0.60):
-    """Reject trades whose path contains a heavy HTF obstacle or is blind near entry."""
-    if not all(np.isfinite(x) for x in (entry, tp, atr)) or atr <= 0 or entry == tp:
-        return True, None
-    ignore = set(ignore_names or [])
-    clearance = abs(atr) * max(0.0, float(clearance_atr))
-    lo, hi = sorted((float(entry), float(tp)))
-    # Balanced mode: only major 4H/Weekly/Monthly liquidity blocks the whole path.
-    # 1H/Daily levels are treated as local obstacles only when they sit very close to entry.
-    major = {"P4H", "P4L", "PWH", "PWL", "PMH", "PML"}
-    local = {"P1H", "P1L", "PDH", "PDL"}
-    for name, level in (levels or {}).items():
-        if name in ignore or not np.isfinite(level):
-            continue
-        level = float(level)
-        if name in local:
-            if abs(level - entry) <= clearance:
-                return False, f"مانع نزدیک ورود است ({name}, فاصله {abs(level-entry)/atr:.2f} ATR)"
-            continue
-        if name in major:
-            if abs(level - entry) <= clearance:
-                return False, f"مانع HTF نزدیک ورود است ({name}, فاصله {abs(level-entry)/atr:.2f} ATR)"
-            if lo < level < hi:
-                return False, f"مانع HTF اصلی در مسیر TP قرار دارد ({name}={level:.10g})"
-    return True, None
-
-
 def _adaptive_anchor_candidates(d, idx, atr, cfg):
     """Return only anchors close enough to be actionable, ranked by hierarchy."""
     if atr <= 0:
@@ -784,16 +662,6 @@ def _adaptive_target_level(d, idx, signal, anchor, atr, cfg):
     _, p, name = candidates[0]
     return p, name
 
-def _setup_tag_for_level(name):
-    n = str(name or "").upper()
-    if n.startswith("PM"): return "[SETUP Monthly]"
-    if n.startswith("PW"): return "[SETUP Weekly]"
-    if n.startswith("P4"): return "[SETUP 4h]"
-    if n.startswith("P1"): return "[SETUP 1h]"
-    if n.startswith("PD"): return "[SETUP Daily]"
-    return "[SETUP Intraday]"
-
-
 def _detect_adaptive_liquidity(d, idx, cfg):
     """Detect one high-quality intraday sweep or trend retest on a non-daily anchor."""
     if idx < 2:
@@ -820,13 +688,12 @@ def _detect_adaptive_liquidity(d, idx, cfg):
         if h >= level + sweep_min and c < level and c < o and body >= min_body and vr >= min_vol:
             target, target_name = _adaptive_target_level(d, idx, "SELL", level, atr, cfg)
             target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
-            tag = _setup_tag_for_level(name)
-            return "SELL", (f"{tag} | ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+            return "SELL", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
                              f"intraday liquidity sweep + reclaim نزولی | حجم={vr:.2f}x | body={body:.2f}"), atr
         if l <= level - sweep_min and c > level and c > o and body >= min_body and vr >= min_vol:
             target, target_name = _adaptive_target_level(d, idx, "BUY", level, atr, cfg)
             target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
-            return "BUY", (f"{_setup_tag_for_level(name)} | ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+            return "BUY", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
                             f"intraday liquidity sweep + reclaim صعودی | حجم={vr:.2f}x | body={body:.2f}"), atr
 
         # Trend continuation: two-step confirmation. The previous candle must already
@@ -1251,8 +1118,6 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
-        "setup_tag": None,
-        "htf_levels": htf_levels,
         "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
         "risk_atr_source_index": int(risk_idx),
         "setup_index": int(idx),
@@ -1646,9 +1511,6 @@ V2_DEFAULTS = {
     "adaptive_min_body_ratio": 0.50,
     "adaptive_min_target_distance_atr": 1.20,
     "adaptive_trend_adx": 23.0,
-    # Full HTF liquidity scan / path-clearance protection.
-    "htf_path_clearance_atr": 0.35,
-    "htf_scan_enabled": True,
 }
 
 
@@ -2033,23 +1895,6 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
 
 def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     cfg = get_v2_config(strategy_config)
-    # Full scan has priority: sweep any fully-closed 1h/4h/weekly/monthly liquidity level.
-    if bool(cfg.get("htf_scan_enabled", True)):
-        _idx = len(df_primary) - 2 if df_primary is not None and len(df_primary) >= 3 else None
-        htf_setup = _detect_htf_sweep(df_primary, _idx, cfg) if _idx is not None else None
-        if htf_setup:
-            hsig = htf_setup["signal"]
-            hplan, hreason = build_sweep_trade_plan(
-                df_primary, hsig, cfg, grid_levels=grid_levels,
-                live_price=live_price, anchor_level=htf_setup["level"]
-            )
-            if hplan:
-                hplan = dict(hplan)
-                hplan["setup_tag"] = htf_setup["tag"]
-                hplan["setup_level_name"] = htf_setup["name"]
-                hplan["setup_level"] = float(htf_setup["level"])
-                tagged_reason = f'{htf_setup["tag"]} | SETUP_LEVEL_NAME={htf_setup["name"]} | SETUP_LEVEL={htf_setup["level"]:.10g} | {htf_setup["reason"]} | {hreason}'
-                return hsig, hplan, tagged_reason
     if bool(cfg.get("enhanced_v1_enabled", True)):
         esig, eplan, ereason = _select_enhanced_v1_setup(
             df_primary, market_data_dict=market_data_dict, timeframe=timeframe,

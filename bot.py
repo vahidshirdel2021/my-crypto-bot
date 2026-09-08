@@ -30,7 +30,7 @@ from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, _compute_prev_htf_levels, _htf_scan_levels, _setup_tag_for_level, evaluate_trend_weakness, compute_swing_stop,
+    _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
 )
 from ui import (
@@ -1353,24 +1353,11 @@ def chart(chat_id, symbol, df, trade):
 
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
-        setup_level = trade.get('setup_level')
-        setup_level_name = trade.get('setup_level_name')
-        setup_tag = trade.get('setup_tag')
-        reason_text = str(trade.get('reason') or '')
-        if setup_level is None:
-            m = re.search(r'SETUP_LEVEL=([0-9.eE+-]+)', reason_text)
-            if m:
-                try: setup_level = float(m.group(1))
-                except Exception: setup_level = None
-        if not setup_level_name:
-            m = re.search(r'SETUP_LEVEL_NAME=([A-Z0-9_]+)', reason_text)
-            if m: setup_level_name = m.group(1)
-        if not setup_tag and setup_level_name:
-            setup_tag = _setup_tag_for_level(setup_level_name)
+        pdh = pdl = None
 
         if tf in ('5min', '15min'):
             try:
-                dated_df, _, _ = _compute_prev_day_levels(df)
+                dated_df, pdh, pdl = _compute_prev_day_levels(df)
             except Exception:
                 dated_df = None
             if dated_df is not None and '_date' in dated_df.columns:
@@ -1410,10 +1397,10 @@ def chart(chat_id, symbol, df, trade):
             (tp, '#22c55e', 'TP', '--', 2.0),
             (sl, '#ef4444', 'SL', '--', 2.0),
         ]
-        # Draw only the liquidity level responsible for this setup, not a fixed PDH/PDL pair.
-        if setup_level is not None and math.isfinite(float(setup_level)):
-            label = setup_level_name or setup_tag or 'SETUP'
-            levels.append((float(setup_level), '#f97316', str(label), ':', 1.8))
+        if pdh is not None:
+            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
+        if pdl is not None:
+            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
 
         x_right = len(d) + 1.8
         for value, color, label, style, width in levels:
@@ -1441,7 +1428,7 @@ def chart(chat_id, symbol, df, trade):
         ax.set_xlim(-1, len(d) + 5.5)
         ymin = float(d['low'].min()); ymax = float(d['high'].max())
         pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
-        extra_vals = [float(setup_level)] if setup_level is not None and math.isfinite(float(setup_level)) else []
+        extra_vals = [v for v in (pdh, pdl) if v is not None]
         ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
         ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
         ax.grid(False, axis='x')
@@ -2495,40 +2482,6 @@ def _pipeline_start(chat_id, symbol):
     _pipeline_record(chat_id, symbol, 'watchlist_review', 'review_started', 'نماد وارد مرحله بررسی شد')
 
 
-def _pipeline_htf_snapshot(df):
-    """Return a JSON-safe snapshot of the causal HTF levels used for diagnostics."""
-    try:
-        from strategy import _htf_scan_levels
-        levels = _htf_scan_levels(df, len(df) - 2)
-        return {k: float(v) for k, v in (levels or {}).items() if np.isfinite(float(v))}
-    except Exception as exc:
-        return {'_error': str(exc)}
-
-
-def _pipeline_plan_snapshot(plan):
-    if not isinstance(plan, dict):
-        return {}
-    keys = (
-        'entry', 'sl', 'tp', 'rr', 'score', 'quality_label',
-        'setup_tag', 'setup_level_name', 'setup_level', 'anchor_level',
-        'target_level', 'structural_target', 'pattern', 'htf_levels'
-    )
-    out = {}
-    for k in keys:
-        if k in plan:
-            v = plan[k]
-            try:
-                if isinstance(v, dict):
-                    out[k] = {str(a): float(x) for a, x in v.items()}
-                elif isinstance(v, (int, float, np.integer, np.floating)):
-                    out[k] = float(v)
-                else:
-                    out[k] = v
-            except Exception:
-                out[k] = v
-    return out
-
-
 def _entry_diag_result(chat_id, symbol, status, reason='', stage='', signal=None, diagnostics=None):
     _pipeline_record(chat_id, symbol, stage or status, status, reason, signal, diagnostics)
     return {
@@ -2857,21 +2810,6 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
-    htf_snapshot = _pipeline_htf_snapshot(primary)
-    _pipeline_record(
-        chat_id, symbol, 'htf_scan', 'completed',
-        'اسکن سطوح HTF تکمیل شد',
-        sig, {'levels': htf_snapshot, 'strategy': strat, 'timeframe': primary_tf}
-    )
-    _pipeline_record(
-        chat_id, symbol, 'signal', 'signal_found' if sig else 'no_signal',
-        reason or ('سیگنال معتبر پیدا شد' if sig else 'شرایط ورود کامل نیست'),
-        sig, {
-            'breakout_diagnostics': diagnostics,
-            'htf_levels': htf_snapshot,
-            'signal_found': bool(sig),
-        }
-    )
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
@@ -2891,17 +2829,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         setup_index=active_setup_index, live_price=live_entry_price
     )
     if not plan:
-        _pipeline_record(
-            chat_id, symbol, 'trade_plan', 'trade_plan_blocked',
-            plan_reason or 'طرح معامله معتبر نشد', sig,
-            {'htf_levels': htf_snapshot}
-        )
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
-    _pipeline_record(
-        chat_id, symbol, 'trade_plan', 'trade_plan_created',
-        plan_reason or 'طرح معامله ساخته شد', sig,
-        _pipeline_plan_snapshot(plan)
-    )
     entry=float(plan['entry']); sl=float(plan['sl']); tp=float(plan['tp'])
     # The V2 planner may return the same setup reason already emitted by the
     # signal engine. Do not concatenate duplicate evidence/EdgeProxy values.
@@ -2913,43 +2841,9 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         full_reason = planner_reason
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
-    # Persist setup identity in the reason so Telegram/chart rendering remains tied to the
-    # exact liquidity level that generated the entry.
-    setup_tag = plan.get("setup_tag")
-    setup_level_name = plan.get("setup_level_name")
-    setup_level = plan.get("setup_level")
-    if not setup_tag:
-        setup_level_name = setup_level_name or None
-        if setup_level_name:
-            setup_tag = _setup_tag_for_level(setup_level_name)
-    if setup_tag:
-        meta = f" | {setup_tag}"
-        if setup_level_name:
-            meta += f" | SETUP_LEVEL_NAME={setup_level_name}"
-        if setup_level is not None:
-            try:
-                meta += f" | SETUP_LEVEL={float(setup_level):.10g}"
-            except Exception:
-                pass
-        full_reason = (full_reason + meta)[:900]
-    else:
-        full_reason = full_reason[:500]
-    # The planner has already applied path-clearance. Persist a dedicated stage so
-    # the audit tells the operator where the decision happened.
-    _pipeline_record(
-        chat_id, symbol, 'path_clearance', 'passed',
-        'مسیر Entry تا TP توسط پلنر تأیید شد',
-        sig, {
-            'entry': entry, 'tp': tp, 'atr': _safe_float(plan.get('atr'), _safe_float(primary.iloc[-2].get('atr'), 0)),
-            'htf_levels': plan.get('htf_levels') or htf_snapshot,
-        }
-    )
+    full_reason = full_reason[:500]
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
-        _pipeline_record(
-            chat_id, symbol, 'leader_guard', 'leader_guard_blocked',
-            guard_reason, sig, {'entry': entry, 'sl': sl, 'tp': tp}
-        )
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)))
     if ok:
@@ -3084,78 +2978,43 @@ def trade_pipeline_report(chat_id):
 
 
 def export_trade_pipeline(chat_id):
-    """ارسال خروجی JSON کامل از مسیر تصمیم تا ورود/خروج معامله."""
-    if not TELEGRAM_TOKEN:
-        send_message(chat_id, '❌ توکن تلگرام تنظیم نشده است؛ فایل JSON قابل ارسال نیست.')
+    if not is_admin(chat_id) or not TELEGRAM_TOKEN:
         return False
     s = get_session(chat_id)
+    pipeline = list(s.get('trade_pipeline_audit') or [])
+    opens = [audit_trade_record(p) for p in s.get('paper_positions', [])]
+    closes = [audit_trade_record(p) for p in s.get('closed_positions', [])]
+    payload = {
+        'report_metadata': {
+            'report_type': 'trade_pipeline_audit',
+            'generated_at': time.time(),
+            'chat_id': chat_id,
+            'timeframe': s.get('timeframe'),
+            'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
+        },
+        'pipeline_events': pipeline,
+        'open_positions': opens,
+        'closed_positions': closes,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode('utf-8')
     try:
-        pipeline = list(s.get('trade_pipeline_audit') or [])
-        opens = [audit_trade_record(p) for p in s.get('paper_positions', [])]
-        closes = [audit_trade_record(p) for p in s.get('closed_positions', [])]
-
-        # علاوه بر رویدادهای Pipeline، وضعیت کامل مرتبط با همان سشن هم ذخیره می‌شود
-        # تا فایل واقعاً قابل استفاده برای دیباگ/بک‌تست مسیر معامله باشد.
-        payload = {
-            'report_metadata': {
-                'report_type': 'trade_pipeline_full',
-                'version': 'V1.5-HTF-BALANCED',
-                'generated_at': time.time(),
-                'chat_id': chat_id,
-                'timeframe': s.get('timeframe'),
-                'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
-            },
-            'settings': {
-                'trading_mode': s.get('trading_mode'),
-                'timeframe': s.get('timeframe'),
-                'active_strategy': s.get('active_strategy'),
-                'trade_amount_usdt': s.get('trade_amount_usdt'),
-                'leverage': s.get('leverage'),
-                'max_open_positions': s.get('max_open_positions'),
-                'max_same_direction_positions': s.get('max_same_direction_positions'),
-                'same_direction_entry_cooldown_seconds': s.get('same_direction_entry_cooldown_seconds'),
-                'risk_per_trade_pct': s.get('risk_per_trade_pct'),
-                'daily_loss_limit_pct': s.get('daily_loss_limit_pct'),
-                'strategy_config': s.get('strategy_config', {}),
-            },
-            'runtime': {
-                'is_bot_active': bool(s.get('is_bot_active', False)),
-                'daily_stopped': bool(s.get('daily_stopped', False)),
-                'scan_generation': s.get('scan_generation', 0),
-                'last_stop_reason': s.get('last_stop_reason'),
-            },
-            'scan_stats': s.get('scan_stats', {}),
-            'pipeline_events': pipeline,
-            'open_positions': opens,
-            'closed_positions': closes,
-            'trade_audit': s.get('trade_audit', []),
-        }
-        raw = json.dumps(payload, ensure_ascii=False, indent=2, default=str).encode('utf-8')
-        fname = f"trade_pipeline_full_{s.get('timeframe','5min')}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.json"
-        caption = f'📦 خروجی JSON کامل مسیر معاملات | رویدادها: {len(pipeline)} | معاملات بسته: {len(closes)}'
-        resp = requests.post(
-            f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
-            data={'chat_id': chat_id, 'caption': caption},
-            files={'document': (fname, io.BytesIO(raw), 'application/json')},
-            timeout=30
-        )
-        try:
-            result = resp.json()
-        except Exception:
-            result = {}
-        if not resp.ok or not result.get('ok', False):
-            logger.warning('export trade pipeline telegram send failed: %s', resp.text[:1000])
-            send_message(chat_id, f'❌ ارسال فایل JSON ناموفق بود.\nکد HTTP: `{resp.status_code}`')
+        fname = f"trade_pipeline_audit_{s.get('timeframe','5min')}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.json"
+        caption = f'🧭 خروجی کامل ممیزی Pipeline | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))}'
+        resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument', data={'chat_id': chat_id, 'caption': caption}, files={'document': (fname, io.BytesIO(raw), 'application/json')}, timeout=30)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('export trade pipeline telegram send failed: %s', resp.text[:500])
+            send_message(chat_id, '❌ خروجی JSON ممیزی ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
             return False
         return True
     except Exception as exc:
-        logger.exception('export trade pipeline failed')
-        send_message(chat_id, f'❌ خطا در ساخت/ارسال خروجی JSON: `{exc}`')
+        logger.warning('export trade pipeline failed: %s', exc)
+        send_message(chat_id, f'❌ خطا در خروجی JSON ممیزی: {exc}')
         return False
 
 
 def full_reset(chat_id):
-    """ریست واقعی سشن و سپس ورود مستقیم به مرحله اول تنظیمات."""
+    """پاک کردن کامل سشن این کاربر (پوزیشن‌ها، آمار، تنظیمات، فیلترها، همه‌چیز) و
+    بازگشت به حالت پیش‌فرض کاملاً تازه — دقیقاً مثل یک کاربر جدید."""
     s = get_session(chat_id)
     if s.get('paper_positions'):
         return False, '❌ تا وقتی پوزیشن باز دارید، ریست کامل مجاز نیست. ابتدا همه پوزیشن‌ها را ببندید.'
@@ -3163,12 +3022,8 @@ def full_reset(chat_id):
         stop_scan(chat_id, 'full-reset')
     with STATE_LOCK:
         USER_SESSIONS[chat_id] = default_session()
-        USER_SESSIONS[chat_id]['user_state'] = None
-        USER_SESSIONS[chat_id]['is_bot_active'] = False
-        USER_SESSIONS[chat_id]['daily_stopped'] = False
-        USER_SESSIONS[chat_id]['scan_generation'] = int(USER_SESSIONS[chat_id].get('scan_generation', 0)) + 1
     save_session(chat_id)
-    return True, '✅ *ریست کامل انجام شد.*\n\nهمه تنظیمات، فیلترها، آمار و تاریخچه این سشن پاک شد.\nحالا تنظیمات را از مرحله اول دوباره انتخاب می‌کنیم.'
+    return True, '✅ *همه‌چیز پاک شد.*\nحالا از صفر شروع می‌کنیم؛ لطفاً تنظیمات را قدم‌به‌قدم دوباره انتخاب کنید.'
 
 
 def trade_audit_report(chat_id):
@@ -3774,11 +3629,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/full_reset_confirm':
         ok,msg=full_reset(chat_id)
-        if not ok:
-            send_message(chat_id,msg,get_performance_keyboard())
-            return
-        send_message(chat_id,msg,get_start_keyboard())
-        sync_bottom_keyboard(chat_id, "🔴 اسکن خاموش است. تنظیمات را از مرحله اول انتخاب کنید.")
+        send_message(chat_id,msg, None if ok else get_performance_keyboard())
         return
 
 
@@ -3810,7 +3661,6 @@ def handle_text(chat_id,text):
         '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu',
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
         '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
-        '🟢 اسکن روشن':'/stop_scan', '🔴 اسکن خاموش':'/start_scan',
         '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
         '📊 وضعیت بازار':'/market_report', 'وضعیت بازار':'/market_report',
         '⚙️ تنظیمات معامله':'/check_wizard', 'تنظیمات معامله':'/check_wizard',
