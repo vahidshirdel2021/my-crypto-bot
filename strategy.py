@@ -811,7 +811,7 @@ def _confirm_active_structure(d, idx, signal, cfg):
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
     """
     شکار نقدینگی روی تمام سطوح کلیدی HTF شامل:
-    ماهانه، هفتگی، ۴ ساعته، ۱ ساعته و روزانه
+    ماهانه، هفتگی، ۴ ساعته، ۱ ساعته و روزانه همراه با تگ نام‌گذاری ستاپ
     """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
@@ -833,23 +833,23 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
 
-    # تجمیع تمام سطوح (ماهانه، هفتگی، 4 ساعته، 1 ساعته، روزانه) در یک فهرست
+    # تجمیع تمام سطوح همراه با تگ نام‌گذاری اختصاصی ستاپ
     key_levels = []
     if pmh is not None and pml is not None:
-        key_levels.append(('PMH (ماهانه)', pmh, 'SELL'))
-        key_levels.append(('PML (ماهانه)', pml, 'BUY'))
+        key_levels.append(('PMH', pmh, 'SELL', 'SETUP Monthly'))
+        key_levels.append(('PML', pml, 'BUY', 'SETUP Monthly'))
     if pwh is not None and pwl is not None:
-        key_levels.append(('PWH (هفتگی)', pwh, 'SELL'))
-        key_levels.append(('PWL (هفتگی)', pwl, 'BUY'))
+        key_levels.append(('PWH', pwh, 'SELL', 'SETUP Weekly'))
+        key_levels.append(('PWL', pwl, 'BUY', 'SETUP Weekly'))
     if p4h is not None and p4l is not None:
-        key_levels.append(('P4H (۴ ساعته)', p4h, 'SELL'))
-        key_levels.append(('P4L (۴ ساعته)', p4l, 'BUY'))
+        key_levels.append(('P4H', p4h, 'SELL', 'SETUP 4h'))
+        key_levels.append(('P4L', p4l, 'BUY', 'SETUP 4h'))
     if p1h is not None and p1l is not None:
-        key_levels.append(('P1H (۱ ساعته)', p1h, 'SELL'))
-        key_levels.append(('P1L (۱ ساعته)', p1l, 'BUY'))
+        key_levels.append(('P1H', p1h, 'SELL', 'SETUP 1h'))
+        key_levels.append(('P1L', p1l, 'BUY', 'SETUP 1h'))
     if pdh is not None and pdl is not None:
-        key_levels.append(('PDH (روزانه)', pdh, 'SELL'))
-        key_levels.append(('PDL (روزانه)', pdl, 'BUY'))
+        key_levels.append(('PDH', pdh, 'SELL', 'SETUP Daily'))
+        key_levels.append(('PDL', pdl, 'BUY', 'SETUP Daily'))
 
     def detect_at(idx):
         if idx < 0 or idx >= len(d):
@@ -861,19 +861,19 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
         o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
 
-        # بررسی برخورد قیمت با هر کدام از سطوح ۵ گانه
-        for level_name, level_val, expected_side in key_levels:
+        # بررسی برخورد قیمت با لحاظ کردن تگ نام ستاپ
+        for level_name, level_val, expected_side, setup_tag in key_levels:
             if expected_side == 'SELL' and h >= level_val + min_sweep:
                 reclaimed = (not require_reclaim) or (c < level_val)
                 reversal = (not require_reversal) or (c < o)
                 if reclaimed and reversal:
-                    return "SELL", f"Liquidity Sweep روی سقف {level_name} ({level_val:.6g}) + ریکلیم نزولی", atr
+                    return "SELL", f"[{setup_tag}] Liquidity Sweep روی سقف {level_name} ({level_val:.6g}) + ریکلیم نزولی", atr
             
             elif expected_side == 'BUY' and l <= level_val - min_sweep:
                 reclaimed = (not require_reclaim) or (c > level_val)
                 reversal = (not require_reversal) or (c > o)
                 if reclaimed and reversal:
-                    return "BUY", f"Liquidity Sweep روی کف {level_name} ({level_val:.6g}) + ریکلیم صعودی", atr
+                    return "BUY", f"[{setup_tag}] Liquidity Sweep روی کف {level_name} ({level_val:.6g}) + ریکلیم صعودی", atr
 
         return None, None, None
 
@@ -884,192 +884,6 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         return sig, reason
         
     return None, "سطح جدیدی برای شکار نقدینگی لمس نشد"
-
-def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
-    """
-    اگر یک سطح شبکه‌ی لگاریتمی خیلی نزدیک به نقطه‌ی sweep باشد (حداکثر ۱.۵ ATR جلوتر)،
-    استاپ را کمی جلوتر از آن سطح می‌گذاریم، نه فقط بر اساس بافر ثابت ATR - چون طبق
-    بررسی کاربر قیمت تاریخی به این سطوح واکنش نشان داده و ممکن است قبل از برگشت واقعی
-    یک ویک (wick) کوتاه به آن سطح بخورد؛ استاپ صرفاً ATR-محور ممکن است زودتر از موعد بخورد.
-    """
-    if not levels:
-        return naive_sl
-    if direction == -1:  # SELL: استاپ بالای sweep_extreme
-        cands = [lv['price'] for lv in levels if sweep_extreme < lv['price'] <= sweep_extreme + atr * 1.5]
-        if cands:
-            return max(naive_sl, min(cands) + atr * 0.15)
-    else:  # BUY: استاپ پایین sweep_extreme
-        cands = [lv['price'] for lv in levels if sweep_extreme - atr * 1.5 <= lv['price'] < sweep_extreme]
-        if cands:
-            return min(naive_sl, max(cands) - atr * 0.15)
-    return naive_sl
-
-
-def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_target):
-    """
-    اگر بین قیمت ورود و هدف فعلی یک سطح شبکه‌ی لگاریتمی معتبر (با رعایت حداقل R:R) وجود
-    داشته باشد، هدف را به نزدیک‌ترین آن سطح محدود می‌کند - چون طبق بررسی تاریخی کاربر،
-    قیمت معمولاً پیش از عبور از این سطوح واکنش نشان می‌دهد و رسیدن به هدف دورتر بعید است.
-    """
-    if not levels:
-        return current_target
-    candidates = []
-    for lv in levels:
-        p = lv['price']
-        dist = (entry - p) if direction == -1 else (p - entry)
-        if dist <= 0:
-            continue
-        if dist / risk_dist < min_rr:
-            continue
-        candidates.append((dist, p))
-    if not candidates:
-        return current_target
-    candidates.sort()
-    _, nearest_price = candidates[0]
-    if direction == -1 and nearest_price > current_target:
-        return nearest_price
-    if direction == 1 and nearest_price < current_target:
-        return nearest_price
-    return current_target
-
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
-    if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
-        return None, "داده کافی برای طراحی معامله وجود ندارد"
-    d, pdh, pdl = _compute_prev_day_levels(df)
-    if d is None or pdh is None or pdl is None:
-        return None, "سطوح روز قبل هنوز آماده نیست"
-    idx = (len(d) - 2) if setup_index is None else int(setup_index)
-    if idx < 1 or idx >= len(d):
-        return None, "شاخص ستاپ معتبر نیست"
-    curr = d.iloc[idx]
-    # Active setup: the liquidity anchor/extreme belongs to the original setup candle,
-    # but risk must be sized from the latest closed candle because entry is current.
-    risk_idx = len(d) - 2 if setup_index is not None else idx
-    risk_row = d.iloc[risk_idx]
-    try:
-        entry = float(live_price) if (setup_index is not None and live_price is not None) else float(curr["close"])
-        atr = float(risk_row["atr"])
-    except Exception:
-        return None, "ATR یا قیمت ورود نامعتبر است"
-    if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
-        return None, "ATR یا قیمت ورود نامعتبر است"
-
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_rr = float(cfg.get("min_rr", 1.30))
-    target_rr = max(min_rr, float(cfg.get("sweep_risk_reward", 1.8)))
-    buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
-    min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
-    max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
-    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
-    body_ratio = _safe_float(curr.get("body_ratio"), 0)
-    vr = _safe_float(curr.get("volume_ratio"), 1)
-
-    extend_to_structure = bool(cfg.get("extend_tp_to_pdl", True))
-
-    if signal == "SELL":
-        sweep_extreme = float(curr["high"])
-        sl = sweep_extreme + (atr * buffer_atr)
-        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, -1)
-        if (sl - entry) / entry < min_sl_pct:
-            sl = entry * (1.0 + min_sl_pct)
-        risk_dist = sl - entry
-        if risk_dist <= 0:
-            return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
-            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
-        reclaim_depth = (sweep_extreme - entry) / risk_dist
-        soft_tp = entry - (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdl
-        if extend_to_structure and target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = max(tp, target_ref)
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
-    else:
-        sweep_extreme = float(curr["low"])
-        sl = sweep_extreme - (atr * buffer_atr)
-        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, 1)
-        if (entry - sl) / entry < min_sl_pct:
-            sl = entry * (1.0 - min_sl_pct)
-        risk_dist = entry - sl
-        if risk_dist <= 0:
-            return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
-            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
-        reclaim_depth = (entry - sweep_extreme) / risk_dist
-        soft_tp = entry + (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdh
-        if extend_to_structure and target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = min(tp, target_ref)
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
-
-    # --- فیلتر هوشمند بررسی تمام موانع بین راه (ماهانه، هفتگی، ۴ساعته، ۱ساعته، روزانه) ---
-    d_full, pdh_lvl, pdl_lvl = _compute_prev_day_levels(df)
-    htf_levels_dict = _compute_prev_htf_levels(d_full, idx) if d_full is not None else {}
-    
-    all_lvl_list = [pdh_lvl, pdl_lvl] + [v for v in htf_levels_dict.values() if v is not None]
-    intermediate_levels = [float(v) for v in all_lvl_list if v is not None and np.isfinite(v)]
-
-    if signal == "SELL":
-        blockers = [lvl for lvl in intermediate_levels if tp < lvl < entry]
-        if blockers:
-            nearest_blocker = max(blockers)
-            if (entry - nearest_blocker) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: حمایت سرسخت در `{nearest_blocker:.4g}` مانع ریزش است و R:R را خراب می‌کند"
-            else:
-                tp = max(tp, nearest_blocker + atr * 0.10)
-
-    elif signal == "BUY":
-        blockers = [lvl for lvl in intermediate_levels if entry < lvl < tp]
-        if blockers:
-            nearest_blocker = min(blockers)
-            if (nearest_blocker - entry) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: مقاومت سرسخت در `{nearest_blocker:.4g}` مانع رشد است و R:R را خراب می‌کند"
-            else:
-                tp = min(tp, nearest_blocker - atr * 0.10)
-    # --------------------------------------------------------------------------
-
-    # فیلتر کارمزد به ریسک دلاری
-    risk_pct = risk_dist / entry
-    est_risk_usdt = 500.0 * risk_pct
-    if est_risk_usdt > 0:
-        if (0.50 / est_risk_usdt) > max_fee_ratio:
-            return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
-
-    rr = abs(tp - entry) / risk_dist
-    if rr < min_rr:
-        return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
-
-    reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
-    candle_score = min(20.0, max(0.0, body_ratio * 27.0))
-    volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
-    rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
-    pattern_df = d.iloc[:idx + 1].copy() if setup_index is not None else df
-    pattern_score, pattern_name = candle_pattern_score(pattern_df, signal, regime="range", near_structure=True, max_points=10.0)
-    score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
-
-    min_score = float(cfg.get("min_trade_score", 58.0))
-    quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
-        return None, f"امتیاز کیفیت پایین است ({score}/100)"
-
-    plan = {
-        "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
-        "quality_label": quality_label, "rr": float(rr),
-        "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
-        "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
-        "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
-        "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
-        "risk_atr_source_index": int(risk_idx),
-        "setup_index": int(idx),
-        "pattern": pattern_name,
-        "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
-    }
-    return plan, plan["reason"]
 
 def evaluate_trend_weakness(df, side, strategy_config=None):
     """
