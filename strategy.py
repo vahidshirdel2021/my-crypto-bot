@@ -497,6 +497,10 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if not clearance_ok:
         return None, clearance_reason
 
+    # Keep the exact HTF map attached to every sweep plan.  This used to
+    # reference `htf_levels` before it was created, which could abort an
+    # otherwise valid HTF sweep before execution.
+    htf_levels = _htf_scan_levels(d, idx)
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),

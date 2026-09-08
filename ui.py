@@ -7,7 +7,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     # کیبورد سفارشی سبک و ثابت (پایین صفحه) - همیشه در دسترس، مستقل از منوی این‌لاین
     return {
         "keyboard": [
-            [{"text": "📊 وضعیت بازار"}, {"text": "🔄 پوزیشن‌ها"}],
+            [{"text": "📊 وضعیت بازار"}, {"text": "🟢 اسکن روشن" if is_active else "🔴 اسکن خاموش"}],
             [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
         ],
         "resize_keyboard": True,
