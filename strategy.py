@@ -932,7 +932,6 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
         return nearest_price
     return current_target
 
-
 def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
@@ -1008,6 +1007,32 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
             tp = min(tp, target_ref)
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
 
+    # --- فیلتر هوشمند بررسی تمام موانع بین راه (ماهانه، هفتگی، ۴ساعته، ۱ساعته، روزانه) ---
+    d_full, pdh_lvl, pdl_lvl = _compute_prev_day_levels(df)
+    htf_levels_dict = _compute_prev_htf_levels(d_full, idx) if d_full is not None else {}
+    
+    all_lvl_list = [pdh_lvl, pdl_lvl] + [v for v in htf_levels_dict.values() if v is not None]
+    intermediate_levels = [float(v) for v in all_lvl_list if v is not None and np.isfinite(v)]
+
+    if signal == "SELL":
+        blockers = [lvl for lvl in intermediate_levels if tp < lvl < entry]
+        if blockers:
+            nearest_blocker = max(blockers)
+            if (entry - nearest_blocker) / risk_dist < min_rr:
+                return None, f"مسیریابی مسدود: حمایت سرسخت در `{nearest_blocker:.4g}` مانع ریزش است و R:R را خراب می‌کند"
+            else:
+                tp = max(tp, nearest_blocker + atr * 0.10)
+
+    elif signal == "BUY":
+        blockers = [lvl for lvl in intermediate_levels if entry < lvl < tp]
+        if blockers:
+            nearest_blocker = min(blockers)
+            if (nearest_blocker - entry) / risk_dist < min_rr:
+                return None, f"مسیریابی مسدود: مقاومت سرسخت در `{nearest_blocker:.4g}` مانع رشد است و R:R را خراب می‌کند"
+            else:
+                tp = min(tp, nearest_blocker - atr * 0.10)
+    # --------------------------------------------------------------------------
+
     # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
     est_risk_usdt = 500.0 * risk_pct
@@ -1023,8 +1048,6 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     candle_score = min(20.0, max(0.0, body_ratio * 27.0))
     volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
     rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
-    # این استراتژی خودش یک برگشت روی سطح کلیدی (PDH/PDL) است، پس همیشه «نزدیک سطح ساختاری»
-    # و رژیم «رنج/برگشتی» در نظر گرفته می‌شود؛ کندل ریکلیم با الگوهای شناخته‌شده تقویت/تضعیف می‌شود.
     pattern_df = d.iloc[:idx + 1].copy() if setup_index is not None else df
     pattern_score, pattern_name = candle_pattern_score(pattern_df, signal, regime="range", near_structure=True, max_points=10.0)
     score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
