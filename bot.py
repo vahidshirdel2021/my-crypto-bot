@@ -2197,14 +2197,16 @@ def _refresh_dynamic_dex_watchlist(force=False):
     return fallback
 
 
-def scan_watchlist_for_timeframe(timeframe, regime=None):
-    # One shared universe for both directions.  Regime no longer hard-switches
-    # Long vs Short symbols; it only affects scoring/filtering downstream.
-    symbols = _refresh_dynamic_dex_watchlist()
-    # واچ‌لیست هوشمند (signal_engine.watchlist): از بین همان universe بالا،
-    # فقط نمادهایی که طبق اولویت توجه در این سیکل سزاوار اسکن‌اند برمی‌گرداند.
-    # پیش‌فرض خاموش (ADAPTIVE_WATCHLIST_ENABLED=false) — صفر تغییر رفتاری
-    # مگر صراحتاً فعال شود.
+def scan_watchlist_for_timeframe(symbols, timeframe=None, regime=None):
+    """مرحله‌ی نهایی صف انتخاب نماد.
+
+    ورودی `symbols` طبق تصمیم کاربر از قبل دو فیلتر را پشت سر گذاشته:
+    ۱) ۱۰۰ نماد برتر بازار (مارکت‌کپ/حجم دلاری، از _refresh_dynamic_dex_watchlist)
+    ۲) هم‌سویی با رژیم بازار (مبنای ۴ ساعته، از get_regime_aligned_universe)
+    این تابع فقط لایه‌ی سوم (اختیاری) را روی همان لیست اعمال می‌کند: واچ‌لیست
+    هوشمند توجه/فرکانس اسکن (signal_engine.watchlist) — پیش‌فرض خاموش
+    (ADAPTIVE_WATCHLIST_ENABLED=false) — صفر تغییر رفتاری مگر صراحتاً فعال شود.
+    """
     try:
         from signal_engine.watchlist_bridge import is_adaptive_watchlist_enabled, select_symbols_for_cycle
         if is_adaptive_watchlist_enabled():
@@ -2213,6 +2215,79 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
     except Exception as exc:
         logger.warning('adaptive watchlist selection failed, falling back to full watchlist: %s', exc)
     return symbols
+
+
+# --- مرحله ۱: فیلتر هم‌سویی نماد با رژیم بازار (تصمیم صریح کاربر) --------
+# روش تشخیص: همان روش ساده‌ی «داشبورد بازار» (close نسبت به EMA20/EMA50 در
+# تایم‌فریم MARKET_REGIME_BASE_TF)، نه منطق ساختاری سوینگ — طبق انتخاب کاربر،
+# تا داشبورد بازار و فیلتر انتخاب نماد همیشه دقیقاً یک معیار را به کار ببرند.
+SYMBOL_REGIME_SCORE_CACHE: Dict[str, Dict[str, Any]] = {}
+SYMBOL_REGIME_SCORE_CACHE_TTL_SECONDS = float(os.environ.get('SYMBOL_REGIME_SCORE_CACHE_TTL_SECONDS', '900'))
+REGIME_ALIGNED_UNIVERSE_CACHE: Dict[str, Any] = {'ts': 0.0, 'regime': None, 'candidates': (), 'symbols': []}
+
+
+async def _symbol_regime_score_cached(http, symbol, tf):
+    """امتیاز جهت نماد (۱=صعودی، ۱-=نزولی، ۰=رنج) روی تایم‌فریم رژیم، با کش
+    TTL دار تا اسکن هر نماد در هر سیکل باعث صدها فراخوانی API نشود. در خطا/
+    کمبود داده، آخرین مقدار معتبر کش (اگر باشد) برگردانده می‌شود، وگرنه None
+    (یعنی «نامشخص» — این نماد در همین سیکل از فهرست هم‌سو کنار گذاشته می‌شود،
+    نه این‌که به‌غلط پذیرفته یا رد قطعی شود)."""
+    now = time.time()
+    c = SYMBOL_REGIME_SCORE_CACHE.get(symbol)
+    if c and now - c['ts'] < SYMBOL_REGIME_SCORE_CACHE_TTL_SECONDS:
+        return c['score']
+    try:
+        d = await get_klines_async(http, symbol, tf, 160)
+        if d is None or d.empty or len(d) < 60:
+            return c['score'] if c else None
+        d = calculate_indicators(d)
+        row = d.iloc[-2]
+        close = float(row.close); ema20 = float(row.ema20); ema50 = float(row.ema50)
+        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+    except Exception as exc:
+        logger.warning('symbol regime score failed for %s: %s', symbol, exc)
+        return c['score'] if c else None
+    SYMBOL_REGIME_SCORE_CACHE[symbol] = {'ts': now, 'score': score}
+    return score
+
+
+async def get_regime_aligned_universe(http, candidates, regime):
+    """از بین `candidates` (۱۰۰ نماد برتر)، فقط نمادهای هم‌سو با `regime`
+    (مبنای ۴ ساعته) را برمی‌گرداند:
+        BULLISH -> فقط نمادهایی که خودشان هم صعودی‌اند (score > 0)
+        BEARISH -> فقط نمادهایی که خودشان هم نزولی‌اند (score < 0)
+        RANGE   -> فقط نمادهایی که خودشان هم رنج/خنثی‌اند (score == 0)
+    اگر رژیم نامشخص باشد (داده‌ی داشبورد بازار موقتاً در دسترس نیست)،
+    fail-open می‌شود: کل candidates بدون فیلتر برگردانده می‌شود تا یک قطعی
+    موقت داده باعث توقف کامل اسکن نشود."""
+    if regime not in ('BULLISH', 'BEARISH', 'RANGE'):
+        return list(candidates)
+
+    now = time.time()
+    cached = REGIME_ALIGNED_UNIVERSE_CACHE
+    if (cached['regime'] == regime and tuple(candidates) == cached['candidates']
+            and now - cached['ts'] < SYMBOL_REGIME_SCORE_CACHE_TTL_SECONDS):
+        return list(cached['symbols'])
+
+    sem = asyncio.Semaphore(MAX_ASYNC_REQUESTS)
+
+    async def _one(sym):
+        async with sem:
+            return sym, await _symbol_regime_score_cached(http, sym, MARKET_REGIME_BASE_TF)
+
+    results = await asyncio.gather(*[_one(sym) for sym in candidates], return_exceptions=True)
+    aligned = []
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        sym, score = item
+        if score is None:
+            continue
+        if (regime == 'BULLISH' and score > 0) or (regime == 'BEARISH' and score < 0) or (regime == 'RANGE' and score == 0):
+            aligned.append(sym)
+
+    REGIME_ALIGNED_UNIVERSE_CACHE.update({'ts': now, 'regime': regime, 'candidates': tuple(candidates), 'symbols': aligned})
+    return aligned
 
 
 MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))  # فقط برای برچسب نمایشی /analyze استفاده می‌شود؛ دیگر در مسیر تصمیم‌گیری ورود اثر ندارد (حذف سیستم Regime/Extreme قدیمی طبق تصمیم مشترک با کاربر - جایگزین: تشخیص روند ساختاری تایم بالاتر خودِ نماد در strategy.py)
@@ -3512,6 +3587,9 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     # و برعکس؛ فقط در بازار رنج با احتیاط هر دو جهت بررسی می‌شود» — این یک
     # قانون سراسری روی کل بازار است، نه یک فیلتر جداگانه به‌ازای هر نماد.
     signal_diag = {}
+    # طبق تصمیم کاربر: رژیم ۴ ساعته فقط برای فیلتر انتخاب نماد (مرحله ۱)
+    # است. گیت ایمنی نهایی همین‌جا به منطق قبلی برمی‌گردد: بر مبنای همان
+    # تایم‌فریم معاملاتی فعال کاربر (tf) — دقیقاً هماهنگ با /داشبورد بازار.
     global_regime = await get_global_market_regime(tf)
     # مدیریت روند معاملات: سوئیچ‌های دستی کاربر (منوی «مدیریت روند معاملات»)،
     # مستقل به‌ازای همین تایم‌فریم (tf)، روی همین یک درخواست، بدون دست‌کاری
@@ -4011,11 +4089,14 @@ def _market_snapshot(symbol, tf):
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
 
 # --- وضعیت کلی بازار: منبع واحد، هم برای «داشبورد بازار» (دستی) و هم برای
-# گیت واقعی روند قطعی در scan_symbol. طبق تصمیم کاربر این دو باید همیشه
-# دقیقاً یک عدد را نشان بدهند/استفاده کنند، نه دو منطق جدا (وگرنه دوباره
-# می‌شود همون تناقض «داشبورد رنج ولی معامله‌ی خلاف‌جهت باز شد»).
+# گیت واقعی روند قطعی در scan_symbol — بر مبنای همان تایم‌فریم معاملاتی فعال
+# کاربر (نه یک تایم‌فریم ثابت)، تا این دو همیشه دقیقاً یک عدد را نشان بدهند.
+# طبق تصمیم صریح کاربر: تایم‌فریم ثابت ۴ ساعته (MARKET_REGIME_BASE_TF) فقط
+# مخصوص فیلتر انتخاب نماد (مرحله ۱، در scan_loop/get_regime_aligned_universe)
+# است و به این دو مصرف‌کننده (داشبورد/گیت نهایی) سرایت نمی‌کند.
+MARKET_REGIME_BASE_TF = os.environ.get('MARKET_REGIME_BASE_TF', '4hour')
 MARKET_REGIME_CACHE: Dict[str, dict] = {}
-MARKET_REGIME_CACHE_TTL_SECONDS = 120.0
+MARKET_REGIME_CACHE_TTL_SECONDS = float(os.environ.get('MARKET_REGIME_CACHE_TTL_SECONDS', '120'))
 
 
 def _classify_market_regime(tf):
@@ -4064,6 +4145,10 @@ async def get_global_market_regime(tf):
 
 
 def market_report(chat_id):
+    # طبق تصمیم کاربر: رژیم بر مبنای ۴ ساعته فقط برای فیلتر انتخاب نماد
+    # (مرحله ۱) استفاده می‌شود. داشبورد بازار (دستی) و گیت ایمنی نهایی در
+    # scan_symbol به منطق قبلی برمی‌گردند: بر مبنای تایم‌فریم معاملاتی فعال
+    # کاربر — این دو باید همیشه دقیقاً یک عدد را نشان بدهند.
     s = get_session(chat_id)
     tf = s['timeframe']
     regime, bullish, bearish, ranged, total = _classify_market_regime(tf)
@@ -4655,6 +4740,9 @@ async def _send_periodic_heartbeat():
         return
     price = latest_price('BTC')
     price_txt = f"${price:,.2f}" if price else "نامشخص (خطای دریافت قیمت)"
+    # طبق تصمیم کاربر: رژیم ۴ ساعته فقط برای فیلتر انتخاب نماد (مرحله ۱)
+    # است. پیام دوره‌ای به منطق قبلی برمی‌گردد: بر مبنای تایم‌فریم معاملاتی
+    # فعال هر کاربر — دقیقاً هماهنگ با /داشبورد بازار و گیت ایمنی scan_symbol.
     regime_by_tf = {}
     for cid in due:
         sess = USER_SESSIONS.get(cid) or {}
@@ -4687,6 +4775,13 @@ async def scan_loop():
             timeout=aiohttp.ClientTimeout(total=10)
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
+                # مرحله ۱ (یک‌بار در هر سیکل، مشترک بین همه کاربران — نه به‌ازای
+                # هر سشن): ۱۰۰ نماد برتر بازار -> فیلتر هم‌سویی با رژیم بازار
+                # (مبنای ۴ ساعته). طبق تصمیم صریح کاربر.
+                global_regime = await get_global_market_regime(MARKET_REGIME_BASE_TF)
+                top_candidates = _refresh_dynamic_dex_watchlist()
+                aligned_universe = await get_regime_aligned_universe(http, top_candidates, global_regime)
+
                 tasks=[]
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
@@ -4694,9 +4789,12 @@ async def scan_loop():
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'))
+                    # مرحله ۲: از بین همان لیست هم‌سو، لایه‌ی اختیاری واچ‌لیست
+                    # هوشمند (توجه/فرکانس) اعمال می‌شود؛ سپس هر نماد باقی‌مانده
+                    # وارد بررسی سطوح/ستاپ و گیت ایمنی جهت در scan_symbol می‌شود.
+                    watchlist = scan_watchlist_for_timeframe(aligned_universe, s.get('timeframe','5min'), regime=global_regime)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym))
+                        tasks.append(scan_symbol(http,cid,sym,regime=global_regime))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
