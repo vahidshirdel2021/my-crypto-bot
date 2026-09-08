@@ -32,6 +32,8 @@ from strategy import (
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
+    _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
+    extract_setup_tag, extract_setup_level, tag_setup_reason,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -1354,6 +1356,11 @@ def chart(chat_id, symbol, df, trade):
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
         pdh = pdl = None
+        # سطحی که این ستاپ دقیقاً روی آن باز شده (مثلاً P4H/P1L/PWH/...)، تا به‌جای
+        # همیشه رسم PDH/PDL پیش‌فرض، سطح مرتبط با همان معامله روی چارت نشان داده شود.
+        setup_level_name = None
+        setup_level_value = None
+        setup_tag = None
 
         if tf in ('5min', '15min'):
             try:
@@ -1366,6 +1373,24 @@ def chart(chat_id, symbol, df, trade):
                 d = today_df.copy().reset_index(drop=True) if len(today_df) >= 10 else df.tail(60).copy().reset_index(drop=True)
             else:
                 d = df.tail(60).copy().reset_index(drop=True)
+
+            trade_reason = trade.get('entry_reason') or trade.get('signal_reason') or ''
+            setup_tag = extract_setup_tag(trade_reason)
+            _level_tag, setup_token, setup_value = extract_setup_level(trade_reason)
+            if setup_token is not None:
+                setup_level_name, setup_level_value = setup_token, float(setup_value)
+            elif dated_df is not None and setup_tag and setup_tag != 'Daily':
+                # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
+                # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.
+                htf = _compute_prev_htf_levels(dated_df, len(dated_df) - 2)
+                spec = LEVEL_SETUP_DEFS.get(setup_tag)
+                if spec:
+                    hi_key, lo_key, _, _ = spec
+                    hi, lo = htf.get(hi_key), htf.get(lo_key)
+                    if hi is not None and lo is not None:
+                        is_long_setup = side_long(trade.get('side', 'BUY'))
+                        setup_level_name = lo_key if is_long_setup else hi_key
+                        setup_level_value = lo if is_long_setup else hi
         else:
             d = df.tail(50).copy().reset_index(drop=True)
 
@@ -1397,10 +1422,15 @@ def chart(chat_id, symbol, df, trade):
             (tp, '#22c55e', 'TP', '--', 2.0),
             (sl, '#ef4444', 'SL', '--', 2.0),
         ]
-        if pdh is not None:
-            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
-        if pdl is not None:
-            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
+        if setup_level_name is not None and setup_level_value is not None:
+            # فقط سطحی که واقعاً معامله روی آن باز شده رسم می‌شود (Daily/1h/4h/Weekly/Monthly)،
+            # نه همیشه PDH/PDL پیش‌فرض.
+            levels.append((float(setup_level_value), '#f97316', setup_level_name, ':', 1.6))
+        else:
+            if pdh is not None:
+                levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
+            if pdl is not None:
+                levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
 
         x_right = len(d) + 1.8
         for value, color, label, style, width in levels:
@@ -1417,10 +1447,13 @@ def chart(chat_id, symbol, df, trade):
 
         mode = 'REAL' if trade.get('is_real') else 'PAPER'
         direction = 'LONG' if is_long else 'SHORT'
-        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}', loc='left',
+        setup_badge = f'  •  [SETUP {setup_tag}]' if setup_tag else ''
+        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}{setup_badge}', loc='left',
                      color='white', fontsize=15, fontweight='bold', pad=14)
 
         summary = f"TF: {tf_label} | Entry: {fmt(entry)} | TP: {fmt(tp)} | SL: {fmt(sl)}"
+        if setup_tag:
+            summary += f" | Setup: {setup_tag}"
         ax.text(0.01, 0.015, summary, transform=ax.transAxes, color='#cbd5e1',
                 fontsize=9.5, va='bottom', ha='left',
                 bbox=dict(boxstyle='round,pad=0.35', facecolor='#1e293b', edgecolor='#334155', alpha=0.95))
@@ -1428,7 +1461,7 @@ def chart(chat_id, symbol, df, trade):
         ax.set_xlim(-1, len(d) + 5.5)
         ymin = float(d['low'].min()); ymax = float(d['high'].max())
         pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
-        extra_vals = [v for v in (pdh, pdl) if v is not None]
+        extra_vals = [v for v in (pdh, pdl, setup_level_value) if v is not None]
         ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
         ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
         ax.grid(False, axis='x')
@@ -1445,11 +1478,13 @@ def chart(chat_id, symbol, df, trade):
         b.seek(0)
 
         metrics = expected_trade_metrics(trade)
+        setup_caption_line = f"• ستاپ: `[SETUP {setup_tag}]`\n" if setup_tag else ""
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *پوزیشن معامله [{mode}]*\n"
             f"• نماد: `{symbol}` ({trade['side']})\n"
             f"• تایم‌فریم: `{tf_label}`\n"
+            + setup_caption_line +
             f"• ورود: `{fmt(entry)}`\n"
             f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
@@ -1505,9 +1540,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if m_rr:
         planned_rr=float(m_rr.group(1))
     level_key = None
-    m_level = re.search(r'PD([HL])=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)', reason or '')
-    if m_level:
-        level_key = f"{symbol}:{m_level.group(1)}:{m_level.group(2)}"
+    _level_tag, _level_token, _level_value = extract_setup_level(reason)
+    if _level_token is not None:
+        level_key = f"{symbol}:{_level_token}:{_level_value}"
     # A setup is consumable only once. Use the latest closed signal identity so
     # repeated scan loops cannot create duplicate audit signals or re-enter the
     # exact same liquidity event.

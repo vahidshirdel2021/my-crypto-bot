@@ -1,3 +1,4 @@
+import re
 import pandas as pd
 import numpy as np
 
@@ -618,6 +619,129 @@ def _compute_prev_htf_levels(d, before_idx):
     return out
 
 
+# --- Multi-timeframe key-level scanning (Monthly/Weekly/Daily/4h/1h) -------
+#
+# V1 originally only ever looked at the previous day's high/low (PDH/PDL).
+# The scan was extended so the same liquidity-sweep logic can be evaluated,
+# simultaneously, against every key higher-timeframe level the bot already
+# extracts: previous month (PMH/PML), previous week (PWH/PWL), previous day
+# (PDH/PDL), previous 4h candle (P4H/P4L) and previous 1h candle (P1H/P1L).
+# Levels are checked in descending order of significance so that, when more
+# than one level would qualify on the same candle, the setup is attributed
+# to the most meaningful (rarest) liquidity pool.
+LEVEL_SETUP_DEFS = {
+    "Monthly": ("PMH", "PML", "سقف ماه قبل", "کف ماه قبل"),
+    "Weekly": ("PWH", "PWL", "سقف هفته قبل", "کف هفته قبل"),
+    "Daily": ("PDH", "PDL", "سقف روز قبل", "کف روز قبل"),
+    "4h": ("P4H", "P4L", "سقف ۴ ساعته قبل", "کف ۴ ساعته قبل"),
+    "1h": ("P1H", "P1L", "سقف ۱ ساعته قبل", "کف ۱ ساعته قبل"),
+}
+
+_SETUP_TAG_RE = re.compile(r"^\[SETUP\s+([A-Za-z0-9]+)\]\s*")
+_LEVEL_TOKEN_RE = re.compile(
+    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
+)
+_LEVEL_TOKEN_TAG = {
+    "PMH": "Monthly", "PML": "Monthly",
+    "PWH": "Weekly", "PWL": "Weekly",
+    "PDH": "Daily", "PDL": "Daily",
+    "P4H": "4h", "P4L": "4h",
+    "P1H": "1h", "P1L": "1h",
+}
+
+
+def tag_setup_reason(tag, reason):
+    """Prefix a strategy reason string with its `[SETUP <tf>]` tag.
+
+    Downstream consumers (Telegram message, chart drawer, dedup keys) rely on
+    substring/regex search rather than a fixed prefix, so tagging never
+    breaks existing parsing.
+    """
+    reason = reason or ""
+    if not tag:
+        return reason
+    return f"[SETUP {tag}] {reason}"
+
+
+def extract_setup_tag(reason):
+    """Return the `[SETUP <tf>]` tag from a reason string, if present."""
+    m = _SETUP_TAG_RE.match(str(reason or ""))
+    return m.group(1) if m else None
+
+
+def extract_setup_level(reason):
+    """Parse the first key-level token (e.g. ``P4H=1.234``) out of a reason
+    string. Returns ``(tag, level_key, level_value)`` or ``(None, None, None)``
+    when no known level token is present."""
+    m = _LEVEL_TOKEN_RE.search(str(reason or ""))
+    if not m:
+        return None, None, None
+    key = m.group(1)
+    try:
+        value = float(m.group(2))
+    except (TypeError, ValueError):
+        return None, None, None
+    return _LEVEL_TOKEN_TAG.get(key), key, value
+
+
+def _adaptive_anchor_tag(reason):
+    """Map an ``ADAPTIVE_ANCHOR=<name>`` token (produced by
+    `_detect_adaptive_liquidity`) onto the same [SETUP ...] taxonomy used for
+    the direct multi-timeframe sweep scan."""
+    m = re.search(r"ADAPTIVE_ANCHOR=([A-Za-z0-9_]+)", str(reason or ""))
+    name = m.group(1) if m else ""
+    if name.startswith(("P1H", "P1L")):
+        return "1h"
+    if name.startswith(("P4H", "P4L")):
+        return "4h"
+    if name.startswith(("PW",)):
+        return "Weekly"
+    if name.startswith(("PM",)):
+        return "Monthly"
+    return "Intraday"
+
+
+def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
+                               cfg, require_reclaim, require_reversal):
+    """Generic single-candle liquidity-sweep detector for a (hi, lo) level pair.
+
+    This mirrors the original PDH/PDL-only logic in
+    `strategy_liquidity_sweep_5m`, but is parametrized so it can run against
+    any of the higher-timeframe levels (1h/4h/week/month) as well.
+    """
+    if d is None or idx < 0 or idx >= len(d) or hi is None or lo is None:
+        return None, None, None
+    curr = d.iloc[idx]
+    atr = _safe_float(curr.get("atr"), 0.0)
+    if not np.isfinite(atr) or atr <= 0:
+        return None, None, None
+    min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
+    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+    if h >= hi + min_sweep:
+        reclaimed = (not require_reclaim) or (c < hi)
+        reversal = (not require_reversal) or (c < o)
+        if reclaimed and reversal:
+            return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی", atr
+    if l <= lo - min_sweep:
+        reclaimed = (not require_reclaim) or (c > lo)
+        reversal = (not require_reversal) or (c > o)
+        if reclaimed and reversal:
+            return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی", atr
+    return None, None, None
+
+
+def _level_pair_for_tag(d, idx, tag, pdh, pdl):
+    """Return the (hi, lo) level pair for a given [SETUP tag] as of `idx`."""
+    if tag == "Daily":
+        return pdh, pdl
+    spec = LEVEL_SETUP_DEFS.get(tag)
+    if not spec:
+        return None, None
+    hi_key, lo_key, _, _ = spec
+    htf_levels = _compute_prev_htf_levels(d, idx)
+    return htf_levels.get(hi_key), htf_levels.get(lo_key)
+
+
 def _adaptive_anchor_candidates(d, idx, atr, cfg):
     """Return only anchors close enough to be actionable, ranked by hierarchy."""
     if atr <= 0:
@@ -809,12 +933,22 @@ def _confirm_active_structure(d, idx, signal, cfg):
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
-    """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
+    """Liquidity Sweep scanned across every key level (Monthly/Weekly/Daily/4h/1h),
+    with a short-lived active-setup window on the daily level.
+
+    V1 originally checked only the previous day's high/low (PDH/PDL). The scan
+    now simultaneously extracts and evaluates the previous month, previous
+    week, previous day, previous 4h candle and previous 1h candle levels on
+    every closed candle (Monthly > Weekly > Daily > 4h > 1h priority), and the
+    winning setup is tagged with `[SETUP Monthly]`, `[SETUP Weekly]`,
+    `[SETUP Daily]`, `[SETUP 4h]` or `[SETUP 1h]` so it is unambiguous which
+    timeframe the trade was opened on.
 
     The primary signal still uses only the latest closed candle. If that exact
-    candle was missed by the scanner, a very recent valid sweep/retest can remain
-    actionable for a few candles, but only while price is still close to the
-    original PDH/PDL level. This avoids both missed entries and FOMO/chasing.
+    candle was missed by the scanner, a very recent valid sweep/retest on the
+    *daily* level can remain actionable for a few candles, but only while
+    price is still close to the original PDH/PDL level. This avoids both
+    missed entries and FOMO/chasing.
     """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
@@ -828,52 +962,82 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     # 5m is more noisy: require structure confirmation. Keep 15m faster.
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
 
-    def detect_at(idx):
+    def detect_daily_at(idx):
+        """Original Daily-only detection (direct sweep + retest-continuation).
+        Kept separate so the Active-Setup recovery window below (which is
+        specifically a "did we miss the PDH/PDL reclaim" mechanism) keeps its
+        exact original behaviour."""
         if idx < 0 or idx >= len(d):
             return None, None, None
         curr = d.iloc[idx]
         atr = _safe_float(curr.get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
             return None, None, None
-        min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
-        o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
-        if h >= pdh + min_sweep:
-            reclaimed = (not require_reclaim) or (c < pdh)
-            reversal = (not require_reversal) or (c < o)
-            if reclaimed and reversal:
-                return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی", atr
-        if l <= pdl - min_sweep:
-            reclaimed = (not require_reclaim) or (c > pdl)
-            reversal = (not require_reversal) or (c > o)
-            if reclaimed and reversal:
-                return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی", atr
+        sig, reason, _ = _detect_named_level_sweep(
+            d, idx, pdh, pdl, "PDH", "PDL", "سقف روز قبل", "کف روز قبل",
+            cfg, require_reclaim, require_reversal
+        )
+        if sig:
+            return sig, reason, atr
         if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
             sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
             if sig:
                 return sig, reason, atr
         return None, None, None
 
+    def detect_at(idx):
+        """Multi-timeframe scan: checks Monthly, Weekly, Daily, 4h and 1h
+        levels (in that priority order) for a sweep on this exact candle."""
+        if idx < 0 or idx >= len(d):
+            return None, None, None, None
+        curr = d.iloc[idx]
+        atr = _safe_float(curr.get("atr"), 0.0)
+        if not np.isfinite(atr) or atr <= 0:
+            return None, None, None, None
+        htf_levels = _compute_prev_htf_levels(d, idx)
+        for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
+            if tag == "Daily":
+                hi, lo = pdh, pdl
+            else:
+                hi, lo = htf_levels.get(hi_key), htf_levels.get(lo_key)
+            if hi is None or lo is None:
+                continue
+            sig, reason, _ = _detect_named_level_sweep(
+                d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
+                cfg, require_reclaim, require_reversal
+            )
+            if sig:
+                return sig, reason, atr, tag
+            if tag == "Daily" and bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
+                rsig, rreason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
+                if rsig:
+                    return rsig, rreason, atr, "Daily"
+        return None, None, None, None
+
     latest_idx = len(d) - 2  # آخرین کندل کاملاً بسته‌شده
-    sig, reason, atr = detect_at(latest_idx)
+    sig, reason, atr, tag = detect_at(latest_idx)
 
     # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
-    # روز قبل بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
+    # شناسایی‌شده بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
     # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
     try:
         live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
     except Exception:
         live_for_guard = float(d.iloc[latest_idx]["close"])
     if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
-        level = pdl if sig == "BUY" else pdh
+        hi, lo = _level_pair_for_tag(d, latest_idx, tag, pdh, pdl)
+        level = (lo if sig == "BUY" else hi)
+        if level is None:
+            level = pdl if sig == "BUY" else pdh
         max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
         invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
         too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
         invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
         if not too_far and not invalidated:
-            return sig, reason
+            return sig, tag_setup_reason(tag, reason)
         sig, reason = None, None
     elif sig:
-        return sig, reason
+        return sig, tag_setup_reason(tag, reason)
 
     # If the daily liquidity is no longer realistically reachable, rotate the reference
     # instead of widening the old setup. This is the key anti-dead-bot mechanism.
@@ -897,7 +1061,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 adaptive_atr if adaptive_atr else guard_atr,
                 cfg
             ):
-                return adaptive_sig, adaptive_reason
+                return adaptive_sig, tag_setup_reason(_adaptive_anchor_tag(adaptive_reason), adaptive_reason)
 
     if not bool(cfg.get("active_setup_enabled", True)):
         return None, "ستاپ جدیدی ثبت نشد"
@@ -920,7 +1084,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     for idx in range(latest_idx - 1, min_idx - 1, -1):
         if latest_date is not None and d.loc[idx, "_date"] != latest_date:
             continue
-        sig, reason, atr = detect_at(idx)
+        sig, reason, atr = detect_daily_at(idx)
         if not sig or atr <= 0:
             continue
         if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
@@ -957,9 +1121,10 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 continue
 
         age = latest_idx - idx
-        return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
+        return sig, tag_setup_reason("Daily", (
+                     f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
                      f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
-                     f"ورود با قیمت فعلی، بدون تعقیب قیمت")
+                     f"ورود با قیمت فعلی، بدون تعقیب قیمت"))
 
     return None, "ستاپ جدیدی ثبت نشد یا ستاپ‌های اخیر بدون Pullback/Reclaim جدید معتبر نیستند"
 
