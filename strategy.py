@@ -38,6 +38,13 @@ FILTER_DEFAULTS = {
 }
 
 def compute_swing_stop(df, is_long, lookback=12, buffer_atr=0.40, confirm_candles=2):
+    """
+    استاپ‌لاس را بر اساس آخرین سوینگ معاملاتی (کف/سقف تأییدشده اخیر) محاسبه می‌کند،
+    نه یک فاصله ثابت ATR. کندل‌های خیلی اخیر (confirm_candles) کنار گذاشته می‌شوند
+    تا سوینگ استفاده‌شده واقعاً «شکل‌گرفته» باشد نه یک نوسان لحظه‌ای.
+
+    خروجی: (sl, swing_level) یا (None, None) اگر داده کافی نبود.
+    """
     if df is None or df.empty:
         return None, None
     need = lookback + confirm_candles
@@ -76,6 +83,13 @@ def _candle_metrics(c):
 
 
 def detect_candlestick_patterns(df):
+    """
+    الگوهای معروف کندلی را روی آخرین کندل تأییدشده (و ۲ کندل قبل از آن برای الگوهای
+    چندکندلی) شناسایی می‌کند. کندل در حال شکل‌گیری (آخرین ردیف df) استفاده نمی‌شود -
+    دقیقاً مثل بقیه منطق build_trade_plan که از df.iloc[-2] به‌عنوان کندل تأییدشده استفاده می‌کند.
+
+    خروجی: لیستی از تاپل (نام_فارسی, جهت, قدرت) - جهت: +1 صعودی، -1 نزولی، 0 خنثی/بی‌تصمیم.
+    """
     if df is None or len(df) < 4:
         return []
     c0, c1, c2 = df.iloc[-2], df.iloc[-3], df.iloc[-4]
@@ -118,6 +132,19 @@ def detect_candlestick_patterns(df):
 
 
 def candle_pattern_score(df, signal, regime="mixed", near_structure=False, max_points=10.0):
+    """
+    امتیاز کمکی (نه فیلتر سخت) بر اساس الگوهای کندلی شناخته‌شده - همسو با جهت سیگنال و
+    منطبق با رژیم فعلی بازار (روند / رنج) وزن می‌گیرد:
+      - الگوهای برگشتی (چکش، ستاره تیرانداز، انگالفینگ، مورنینگ/ایونینگ استار) در رژیم رنج
+        یا نزدیک یک سطح ساختاری (سوینگ/PDH/PDL) وزن کامل می‌گیرند.
+      - همان الگوهای برگشتی وسط یک روند قوی و دور از سطح ساختاری، با احتیاط و وزن نصف
+        اعمال می‌شوند (چون می‌توانند تله باشند).
+      - الگوی ادامه‌دهنده (مارابوزو هم‌جهت با سیگنال) در رژیم روند/بریک‌اوت وزن کامل می‌گیرد.
+      - دوجی در وسط روند قوی (بی‌تصمیمی خلاف تداوم) کمی امتیاز منفی می‌دهد؛ نزدیک سطح
+        ساختاری خنثی تا کمی مثبت است.
+      - الگوی خلاف جهت سیگنال، امتیاز را کم می‌کند (رد نمی‌کند - فقط هشدار احتیاط).
+    خروجی: (امتیاز بین -max_points تا +max_points, نام الگوی غالب یا None)
+    """
     patterns = detect_candlestick_patterns(df)
     if not patterns:
         return 0.0, None
@@ -165,11 +192,14 @@ STRATEGY_DEFAULTS = {
     "sweep_enable_retest_continuation": True,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
+    # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
     "active_setup_enabled": True,
     "active_setup_lookback_candles": 3,
     "active_setup_max_age_candles": 3,
     "active_setup_max_distance_atr": 0.80,
     "active_setup_invalidation_atr": 0.25,
+    # Active setup only becomes valid after a confirmed PDH/PDL breakout
+    # and sufficient distance from the previous-day range.
     "active_setup_require_daily_breakout": True,
     "active_setup_breakout_distance_atr": 1.00,
     "active_setup_breakout_confirm_candles": 1,
@@ -179,15 +209,18 @@ STRATEGY_DEFAULTS = {
     "min_sl_percent": 0.005,
     "max_fee_risk_ratio": 0.20,
     "cooldown_seconds": 1200,
-    "swing_lookback": 12,
-    "swing_confirm_candles": 2,
-    "swing_buffer_atr": 0.40,
-    "extend_tp_to_pdl": True,
-    "weakness_exit_min_r": 1.0,
-    "weakness_exit_score": 55.0,
+    # --- استاپ‌لاس بر اساس سوینگ ساختاری ---
+    "swing_lookback": 12,           # تعداد کندل قبل برای یافتن آخرین سوینگ معاملاتی
+    "swing_confirm_candles": 2,     # این تعداد کندل آخر نادیده گرفته می‌شود تا سوینگ «تأییدشده» باشد
+    "swing_buffer_atr": 0.40,       # فاصله اضافه (بر حسب ATR) زیر/بالای سوینگ برای جلوگیری از شکار استاپ
+    # --- مدیریت هوشمند هدف سود (PDL/PDH) ---
+    "extend_tp_to_pdl": True,       # هدف اصلی معامله = سقف/کف روز قبل، به‌جای هدف کوتاه RR ثابت
+    "weakness_exit_min_r": 1.0,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
+    "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
     "weakness_profit_lock_min_r": 1.0,
     "early_loss_weakness_exit_enabled": False,
-    "use_edge_proxy_gate": False,
+    "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
+    "early_loss_weakness_exit_enabled": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -295,6 +328,9 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_strategy_params(strategy_config=None):
+    # توجه: این تابع فقط بر اساس strategy_config کار می‌کند (که خودش قبلاً بر اساس
+    # تایم‌فریم واقعی جلسه، در get_timeframe_preset ساخته شده)؛ به همین دلیل دیگر
+    # آرگومان جداگانه‌ی timeframe نمی‌گیرد تا در فراخوانی‌ها گمراه‌کننده نباشد.
     c = _cfg(strategy_config)
     return {
         "adx": float(c.get("min_adx", 20.0)),
@@ -378,6 +414,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
         elif atr_ratio < 0.80: base_mult -= 0.10
         base_mult = max(1.25, min(max_sl_atr, base_mult))
         atr_sl = entry - atr * base_mult
+        # اولویت با استاپ ساختاری (زیر آخرین سوینگ) است؛ فقط اگر سوینگ معتبر نبود یا
+        # پشت قیمت ورود نبود، به فاصله مبتنی بر ATR برمی‌گردیم.
         sl = swing_sl if (swing_sl is not None and swing_sl < entry) else atr_sl
         if (entry - sl) / entry < min_sl_pct:
             sl = entry * (1.0 - min_sl_pct)
@@ -413,6 +451,7 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
     if risk_dist <= 0 or not np.isfinite(risk_dist):
         return None, "فاصله حد ضرر معتبر نیست"
 
+    # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
     est_risk_usdt = 500.0 * risk_pct
     if est_risk_usdt > 0:
@@ -474,7 +513,83 @@ def _compute_prev_day_levels(df):
     return d, float(pdh), float(pdl)
 
 
+
+def _adaptive_intraday_levels(d, before_idx, cfg):
+    """Build conservative, non-future intraday liquidity anchors.
+
+    Priority is deliberately lower than PDH/PDL.  We only expose levels that were
+    already formed before the signal candle and have enough observations to avoid
+    turning every tiny fluctuation into a tradable level.
+    """
+    if d is None or before_idx < 10 or "_dt" not in d.columns or "_date" not in d.columns:
+        return {}
+    work = d.iloc[:before_idx].copy()  # strictly before the signal candle
+    if work.empty:
+        return {}
+    today = d.loc[before_idx, "_date"]
+    day = work[work["_date"] == today].copy()
+    if len(day) < 5:
+        return {}
+
+    min_candles = max(3, int(cfg.get("adaptive_min_level_candles", 6)))
+    levels = {}
+
+    # UTC session buckets are intentional and configurable.  They are stable for
+    # crypto and do not introduce exchange-local DST ambiguity.
+    sessions = {
+        "ASIA": (0, 8),
+        "LONDON": (8, 13),
+        "NEW_YORK": (13, 21),
+    }
+    for name, (h0, h1) in sessions.items():
+        part = day[(day["_dt"].dt.hour >= h0) & (day["_dt"].dt.hour < h1)]
+        if len(part) >= min_candles:
+            levels[f"{name}_HIGH"] = {"price": float(part["high"].max()), "kind": f"{name}_HIGH", "count": len(part)}
+            levels[f"{name}_LOW"] = {"price": float(part["low"].min()), "kind": f"{name}_LOW", "count": len(part)}
+
+    # Opening range: first N minutes of the UTC day. It becomes static once formed.
+    or_minutes = max(15, int(cfg.get("adaptive_opening_range_minutes", 30)))
+    day_start = pd.Timestamp(today, tz="UTC")
+    opening = day[(day["_dt"] >= day_start) & (day["_dt"] < day_start + pd.Timedelta(minutes=or_minutes))]
+    if len(opening) >= max(3, min_candles // 2) and len(work) >= len(opening) + 2:
+        levels["OPENING_RANGE_HIGH"] = {"price": float(opening["high"].max()), "kind": "OPENING_RANGE_HIGH", "count": len(opening)}
+        levels["OPENING_RANGE_LOW"] = {"price": float(opening["low"].min()), "kind": "OPENING_RANGE_LOW", "count": len(opening)}
+
+    # Confirmed intraday swings. The last two candles are excluded; a swing must
+    # have candles on both sides, so the level is not based on the current move.
+    swing_left = max(2, int(cfg.get("adaptive_swing_left", 2)))
+    swing_right = max(2, int(cfg.get("adaptive_swing_right", 2)))
+    if len(day) >= swing_left + swing_right + 3:
+        highs = day["high"].to_numpy(dtype=float)
+        lows = day["low"].to_numpy(dtype=float)
+        best_h = None; best_l = None
+        for i in range(swing_left, len(day) - swing_right):
+            if i >= len(day) - 2:
+                continue
+            if highs[i] >= np.max(highs[i-swing_left:i]) and highs[i] > np.max(highs[i+1:i+1+swing_right]):
+                best_h = float(highs[i])
+            if lows[i] <= np.min(lows[i-swing_left:i]) and lows[i] < np.min(lows[i+1:i+1+swing_right]):
+                best_l = float(lows[i])
+        if best_h is not None:
+            levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
+        if best_l is not None:
+            levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
+
+    # Higher-timeframe anchors: high/low of the most recently *closed* 1h and 4h
+    # candle, calendar week, and calendar month. Causal by construction (shift(1) per
+    # bucket) — only fully-completed prior periods are ever exposed, never the
+    # still-forming one that contains the signal candle.
+    htf = _compute_prev_htf_levels(d, before_idx)
+    for key, price in htf.items():
+        levels[key] = {"price": price, "kind": key, "count": 1}
+    return levels
+
+
 def _compute_prev_htf_levels(d, before_idx):
+    """Causal previous-period high/low for 1h, 4h, week, and month buckets (no EQ —
+    just the high and low of the most recent fully-closed period of each kind).
+    `d` must already carry a `_dt` UTC timestamp column (as produced by
+    _compute_prev_day_levels). Returns {} when there isn't enough history."""
     out = {}
     if d is None or "_dt" not in d.columns or before_idx is None or before_idx < 5 or before_idx >= len(d):
         return out
@@ -503,6 +618,114 @@ def _compute_prev_htf_levels(d, before_idx):
     return out
 
 
+def _adaptive_anchor_candidates(d, idx, atr, cfg):
+    """Return only anchors close enough to be actionable, ranked by hierarchy."""
+    if atr <= 0:
+        return []
+    levels = _adaptive_intraday_levels(d, idx, cfg)
+    if not levels:
+        return []
+    c = float(d.iloc[idx]["close"])
+    max_dist = atr * float(cfg.get("adaptive_max_anchor_distance_atr", 1.60))
+    min_dist = atr * float(cfg.get("adaptive_min_anchor_distance_atr", 0.20))
+    priority = {"PMH": 5, "PML": 5, "PWH": 4, "PWL": 4, "LONDON": 3, "NEW_YORK": 3, "P4H": 3, "P4L": 3, "P1H": 2, "P1L": 2, "ASIA": 2, "OPENING_RANGE": 2, "SWING": 1}
+    out = []
+    for name, item in levels.items():
+        p = float(item["price"])
+        dist = abs(c - p)
+        if not np.isfinite(p) or p <= 0 or dist > max_dist:
+            continue
+        # A level immediately under/over price is not useful until it has room to be swept.
+        if dist < min_dist:
+            continue
+        base = next((v for k, v in priority.items() if name.startswith(k)), 1)
+        out.append((base, -dist, name, p))
+    out.sort(reverse=True)
+    return [(name, price) for _, _, name, price in out]
+
+
+def _adaptive_target_level(d, idx, signal, anchor, atr, cfg):
+    """Choose a nearby opposing liquidity target; fall back to the opposite daily level."""
+    levels = _adaptive_intraday_levels(d, idx, cfg)
+    c = float(d.iloc[idx]["close"])
+    min_move = atr * float(cfg.get("adaptive_min_target_distance_atr", 1.20))
+    candidates = []
+    for name, item in levels.items():
+        p = float(item["price"])
+        if signal == "SELL" and p < c - min_move:
+            candidates.append((c - p, p, name))
+        elif signal == "BUY" and p > c + min_move:
+            candidates.append((p - c, p, name))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda x: x[0])
+    _, p, name = candidates[0]
+    return p, name
+
+def _detect_adaptive_liquidity(d, idx, cfg):
+    """Detect one high-quality intraday sweep or trend retest on a non-daily anchor."""
+    if idx < 2:
+        return None, None, None
+    curr = d.iloc[idx]
+    prev = d.iloc[idx - 1]
+    atr = _safe_float(curr.get("atr"), 0.0)
+    if atr <= 0:
+        return None, None, None
+    o, c, h, l = map(float, (curr["open"], curr["close"], curr["high"], curr["low"]))
+    po, pc, ph, pl = map(float, (prev["open"], prev["close"], prev["high"], prev["low"]))
+    vr = _safe_float(curr.get("volume_ratio"), 0.0)
+    body = _safe_float(curr.get("body_ratio"), 0.0)
+    adx = _safe_float(curr.get("adx"), 0.0)
+    candidates = _adaptive_anchor_candidates(d, idx, atr, cfg)
+    sweep_min = atr * float(cfg.get("adaptive_sweep_min_distance_atr", 0.15))
+    tol = atr * float(cfg.get("adaptive_retest_tolerance_atr", 0.22))
+    min_vol = float(cfg.get("adaptive_min_volume_ratio", 1.12))
+    min_body = float(cfg.get("adaptive_min_body_ratio", 0.50))
+    trend_adx = float(cfg.get("adaptive_trend_adx", 23.0))
+
+    for name, level in candidates:
+        # Reversal/sweep: price pierces the anchor and closes back through it.
+        if h >= level + sweep_min and c < level and c < o and body >= min_body and vr >= min_vol:
+            target, target_name = _adaptive_target_level(d, idx, "SELL", level, atr, cfg)
+            target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
+            return "SELL", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+                             f"intraday liquidity sweep + reclaim نزولی | حجم={vr:.2f}x | body={body:.2f}"), atr
+        if l <= level - sweep_min and c > level and c > o and body >= min_body and vr >= min_vol:
+            target, target_name = _adaptive_target_level(d, idx, "BUY", level, atr, cfg)
+            target_txt = f"|TARGET={target:.10g}|TARGET_NAME={target_name}" if target is not None else ""
+            return "BUY", (f"ADAPTIVE_SWEEP|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}{target_txt}|"
+                            f"intraday liquidity sweep + reclaim صعودی | حجم={vr:.2f}x | body={body:.2f}"), atr
+
+        # Trend continuation: two-step confirmation. The previous candle must already
+        # have accepted beyond the anchor; current candle must retest and hold it.
+        if adx >= trend_adx and pc > level and c > level and l <= level + tol and c > o and body >= min_body and vr >= min_vol:
+            return "BUY", (f"ADAPTIVE_CONTINUATION|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}|"
+                            f"breakout acceptance + retest موفق | ADX={adx:.1f} | حجم={vr:.2f}x"), atr
+        if adx >= trend_adx and pc < level and c < level and h >= level - tol and c < o and body >= min_body and vr >= min_vol:
+            return "SELL", (f"ADAPTIVE_CONTINUATION|ADAPTIVE_ANCHOR={name}|ANCHOR={level:.10g}|"
+                             f"breakdown acceptance + retest موفق | ADX={adx:.1f} | حجم={vr:.2f}x"), atr
+    return None, None, None
+
+def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
+    start = max(0, before_idx - lookback)
+    window = d.iloc[start:before_idx]
+    if window.empty:
+        return None, None
+    today = d.loc[before_idx, "_date"]
+    same_day = window[window["_date"] == today]
+    if same_day.empty:
+        return None, None
+    up = same_day[same_day["close"] > pdh]
+    down = same_day[same_day["close"] < pdl]
+    up_last = up.index.max() if not up.empty else None
+    down_last = down.index.max() if not down.empty else None
+    if up_last is not None and (down_last is None or up_last > down_last):
+        return "UP", pdh
+    if down_last is not None:
+        return "DOWN", pdl
+    return None, None
+
+
 def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
     lookback = int(cfg.get("retest_lookback_candles", 48))
     direction, level = _find_recent_breakout(d, before_idx, pdh, pdl, lookback)
@@ -526,28 +749,73 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
     return None, None
 
 
-def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
-    start = max(0, before_idx - lookback)
-    window = d.iloc[start:before_idx]
-    if window.empty:
-        return None, None
-    today = d.loc[before_idx, "_date"]
-    same_day = window[window["_date"] == today]
-    if same_day.empty:
-        return None, None
-    up = same_day[same_day["close"] > pdh]
-    down = same_day[same_day["close"] < pdl]
-    up_last = up.index.max() if not up.empty else None
-    down_last = down.index.max() if not down.empty else None
-    if up_last is not None and (down_last is None or up_last > down_last):
-        return "UP", pdh
-    if down_last is not None:
-        return "DOWN", pdl
-    return None, None
 
+def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
+    """Active setup guard:
+    Only allow recovery entries after a real PDH/PDL breakout with enough distance.
+    Prevents buying below PDH or selling above PDL from random intraday anchors.
+    """
+    if not bool(cfg.get("active_setup_require_daily_breakout", True)):
+        return True
+    if atr <= 0:
+        return False
+
+    distance = atr * float(cfg.get("active_setup_breakout_distance_atr", 1.0))
+    confirms = max(1, int(cfg.get("active_setup_breakout_confirm_candles", 1)))
+
+    start = max(0, before_idx - 20)
+    window = d.iloc[start:before_idx]
+
+    if signal == "BUY":
+        # Must have closed above PDH and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+
+    else:
+        # Must have closed below PDL and moved away from it.
+        closes = window["close"].tail(confirms)
+        if len(closes) < confirms:
+            return False
+        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+
+
+
+
+def _confirm_active_structure(d, idx, signal, cfg):
+    """Require a confirmed micro swing after PDH/PDL reclaim before active entry.
+    Prevents immediate breakout continuation entries without market structure.
+    """
+    lookback = int(cfg.get("active_structure_lookback", 8))
+    confirm = int(cfg.get("active_structure_confirm_candles", 2))
+    if idx < confirm + 2:
+        return False
+    end = idx
+    start = max(0, end - lookback)
+    w = d.iloc[start:end+1]
+    if len(w) < confirm + 2:
+        return False
+    recent = w.iloc[:-confirm] if confirm > 0 else w
+    last = w.iloc[-1]
+    if signal == "BUY":
+        swing_low = float(recent["low"].min())
+        recent_high = float(recent["high"].max())
+        # higher-low style confirmation: price must leave a defended low
+        return float(last["close"]) > recent_high and swing_low < float(last["close"])
+    else:
+        swing_high = float(recent["high"].max())
+        recent_low = float(recent["low"].min())
+        return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
-    """Liquidity Sweep on PDH/PDL and HTF levels with setup tags."""
+    """Liquidity Sweep on PDH/PDL with a short-lived active-setup window.
+
+    The primary signal still uses only the latest closed candle. If that exact
+    candle was missed by the scanner, a very recent valid sweep/retest can remain
+    actionable for a few candles, but only while price is still close to the
+    original PDH/PDL level. This avoids both missed entries and FOMO/chasing.
+    """
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
         return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
@@ -557,33 +825,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
-
-    htf_levels = _compute_prev_htf_levels(d, len(d) - 2)
-    p1h = htf_levels.get("P1H")
-    p1l = htf_levels.get("P1L")
-    p4h = htf_levels.get("P4H")
-    p4l = htf_levels.get("P4L")
-    pwh = htf_levels.get("PWH")
-    pwl = htf_levels.get("PWL")
-    pmh = htf_levels.get("PMH")
-    pml = htf_levels.get("PML")
-
-    key_levels = []
-    if pmh is not None and pml is not None:
-        key_levels.append(('PMH', pmh, 'SELL', 'SETUP Monthly'))
-        key_levels.append(('PML', pml, 'BUY', 'SETUP Monthly'))
-    if pwh is not None and pwl is not None:
-        key_levels.append(('PWH', pwh, 'SELL', 'SETUP Weekly'))
-        key_levels.append(('PWL', pwl, 'BUY', 'SETUP Weekly'))
-    if p4h is not None and p4l is not None:
-        key_levels.append(('P4H', p4h, 'SELL', 'SETUP 4h'))
-        key_levels.append(('P4L', p4l, 'BUY', 'SETUP 4h'))
-    if p1h is not None and p1l is not None:
-        key_levels.append(('P1H', p1h, 'SELL', 'SETUP 1h'))
-        key_levels.append(('P1L', p1l, 'BUY', 'SETUP 1h'))
-    if pdh is not None and pdl is not None:
-        key_levels.append(('PDH', pdh, 'SELL', 'SETUP Daily'))
-        key_levels.append(('PDL', pdl, 'BUY', 'SETUP Daily'))
+    # 5m is more noisy: require structure confirmation. Keep 15m faster.
+    require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
 
     def detect_at(idx):
         if idx < 0 or idx >= len(d):
@@ -594,41 +837,146 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             return None, None, None
         min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
         o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
-
-        for level_name, level_val, expected_side, setup_tag in key_levels:
-            if expected_side == 'SELL' and h >= level_val + min_sweep:
-                reclaimed = (not require_reclaim) or (c < level_val)
-                reversal = (not require_reversal) or (c < o)
-                if reclaimed and reversal:
-                    return "SELL", f"[{setup_tag}] Liquidity Sweep روی سقف {level_name} ({level_val:.6g}) + ریکلیم نزولی", atr
-            elif expected_side == 'BUY' and l <= level_val - min_sweep:
-                reclaimed = (not require_reclaim) or (c > level_val)
-                reversal = (not require_reversal) or (c > o)
-                if reclaimed and reversal:
-                    return "BUY", f"[{setup_tag}] Liquidity Sweep روی کف {level_name} ({level_val:.6g}) + ریکلیم صعودی", atr
-
+        if h >= pdh + min_sweep:
+            reclaimed = (not require_reclaim) or (c < pdh)
+            reversal = (not require_reversal) or (c < o)
+            if reclaimed and reversal:
+                return "SELL", f"Liquidity Sweep سقف روز قبل (PDH={pdh:.6g}) + ریکلیم نزولی", atr
+        if l <= pdl - min_sweep:
+            reclaimed = (not require_reclaim) or (c > pdl)
+            reversal = (not require_reversal) or (c > o)
+            if reclaimed and reversal:
+                return "BUY", f"Liquidity Sweep کف روز قبل (PDL={pdl:.6g}) + ریکلیم صعودی", atr
         if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
             sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
             if sig:
                 return sig, reason, atr
         return None, None, None
 
-    latest_idx = len(d) - 2
+    latest_idx = len(d) - 2  # آخرین کندل کاملاً بسته‌شده
     sig, reason, atr = detect_at(latest_idx)
-    if sig:
+
+    # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
+    # روز قبل بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
+    # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
+    try:
+        live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
+    except Exception:
+        live_for_guard = float(d.iloc[latest_idx]["close"])
+    if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
+        level = pdl if sig == "BUY" else pdh
+        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
+        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
+        too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
+        invalidated = (live_for_guard < level - invalid_dist) if sig == "BUY" else (live_for_guard > level + invalid_dist)
+        if not too_far and not invalidated:
+            return sig, reason
+        sig, reason = None, None
+    elif sig:
         return sig, reason
 
-    return None, "سطح جدیدی برای شکار نقدینگی لمس نشد"
+    # If the daily liquidity is no longer realistically reachable, rotate the reference
+    # instead of widening the old setup. This is the key anti-dead-bot mechanism.
+    try:
+        guard_atr = float(atr) if atr is not None and np.isfinite(atr) and atr > 0 else _safe_float(d.iloc[latest_idx].get("atr"), 0.0)
+        daily_activation_atr = float(cfg.get("adaptive_activation_distance_atr", 1.00))
+        daily_nearest_dist = min(abs(live_for_guard - pdh), abs(live_for_guard - pdl))
+        daily_far = daily_nearest_dist >= guard_atr * daily_activation_atr if guard_atr > 0 else False
+    except Exception:
+        guard_atr = 0.0
+        daily_far = False
 
+    if daily_far:
+        adaptive_sig, adaptive_reason, adaptive_atr = _detect_adaptive_liquidity(d, latest_idx, cfg)
+        if adaptive_sig:
+            # Do not allow adaptive continuation entries inside the previous-day range
+            # unless a confirmed PDH/PDL breakout already happened. This prevents
+            # buying below PDH or selling above PDL from intraday anchors.
+            if _has_confirmed_daily_breakout(
+                d, latest_idx, pdh, pdl, adaptive_sig,
+                adaptive_atr if adaptive_atr else guard_atr,
+                cfg
+            ):
+                return adaptive_sig, adaptive_reason
+
+    if not bool(cfg.get("active_setup_enabled", True)):
+        return None, "ستاپ جدیدی ثبت نشد"
+
+    try:
+        live = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
+    except Exception:
+        live = float(d.iloc[latest_idx]["close"])
+    if not np.isfinite(live) or live <= 0:
+        return None, "قیمت فعلی معتبر نیست"
+
+    max_age = max(1, int(cfg.get("active_setup_max_age_candles", cfg.get("active_setup_lookback_candles", 3))))
+    lookback = max(max_age, int(cfg.get("active_setup_lookback_candles", 3)))
+    min_idx = max(1, latest_idx - lookback)
+    # Newest candidate wins. We intentionally do not search older than the short freshness window.
+    latest_date = d.loc[latest_idx, "_date"] if "_date" in d.columns else None
+    current = d.iloc[latest_idx]
+    co, cc, ch, cl = (float(current["open"]), float(current["close"]),
+                       float(current["high"]), float(current["low"]))
+    for idx in range(latest_idx - 1, min_idx - 1, -1):
+        if latest_date is not None and d.loc[idx, "_date"] != latest_date:
+            continue
+        sig, reason, atr = detect_at(idx)
+        if not sig or atr <= 0:
+            continue
+        if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
+            continue
+        level = pdl if sig == "BUY" else pdh
+        tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
+        max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
+        invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
+
+        # IMPORTANT: an old setup is NOT enough by itself. The latest closed candle
+        # must now perform a fresh pullback/reclaim of the original PDH/PDL level.
+        # This prevents entering merely because live price happens to be near the level.
+        if sig == "BUY":
+            retest = cl <= level + tol
+            reclaimed = cc > level
+            directional = (cc > co) if require_reversal else True
+        else:
+            retest = ch >= level - tol
+            reclaimed = cc < level
+            directional = (cc < co) if require_reversal else True
+        if not (retest and reclaimed and directional):
+            continue
+
+        # The live price is only used as an anti-chasing guard after the closed-candle
+        # revalidation above. We never enter from a live tick alone.
+        if sig == "BUY":
+            if live < level - invalid_dist or live > level + max_dist:
+                continue
+        else:
+            if live > level + invalid_dist or live < level - max_dist:
+                continue
+        if bool(cfg.get("active_structure_confirmation", True)) or require_micro_structure:
+            if not _confirm_active_structure(d, latest_idx, sig, cfg):
+                continue
+
+        age = latest_idx - idx
+        return sig, (f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
+                     f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
+                     f"ورود با قیمت فعلی، بدون تعقیب قیمت")
+
+    return None, "ستاپ جدیدی ثبت نشد یا ستاپ‌های اخیر بدون Pullback/Reclaim جدید معتبر نیستند"
 
 def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
+    """
+    اگر یک سطح شبکه‌ی لگاریتمی خیلی نزدیک به نقطه‌ی sweep باشد (حداکثر ۱.۵ ATR جلوتر)،
+    استاپ را کمی جلوتر از آن سطح می‌گذاریم، نه فقط بر اساس بافر ثابت ATR - چون طبق
+    بررسی کاربر قیمت تاریخی به این سطوح واکنش نشان داده و ممکن است قبل از برگشت واقعی
+    یک ویک (wick) کوتاه به آن سطح بخورد؛ استاپ صرفاً ATR-محور ممکن است زودتر از موعد بخورد.
+    """
     if not levels:
         return naive_sl
-    if direction == -1:
+    if direction == -1:  # SELL: استاپ بالای sweep_extreme
         cands = [lv['price'] for lv in levels if sweep_extreme < lv['price'] <= sweep_extreme + atr * 1.5]
         if cands:
             return max(naive_sl, min(cands) + atr * 0.15)
-    else:
+    else:  # BUY: استاپ پایین sweep_extreme
         cands = [lv['price'] for lv in levels if sweep_extreme - atr * 1.5 <= lv['price'] < sweep_extreme]
         if cands:
             return min(naive_sl, max(cands) - atr * 0.15)
@@ -636,6 +984,11 @@ def _extend_stop_to_grid(levels, sweep_extreme, naive_sl, atr, direction):
 
 
 def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_target):
+    """
+    اگر بین قیمت ورود و هدف فعلی یک سطح شبکه‌ی لگاریتمی معتبر (با رعایت حداقل R:R) وجود
+    داشته باشد، هدف را به نزدیک‌ترین آن سطح محدود می‌کند - چون طبق بررسی تاریخی کاربر،
+    قیمت معمولاً پیش از عبور از این سطوح واکنش نشان می‌دهد و رسیدن به هدف دورتر بعید است.
+    """
     if not levels:
         return current_target
     candidates = []
@@ -668,6 +1021,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     if idx < 1 or idx >= len(d):
         return None, "شاخص ستاپ معتبر نیست"
     curr = d.iloc[idx]
+    # Active setup: the liquidity anchor/extreme belongs to the original setup candle,
+    # but risk must be sized from the latest closed candle because entry is current.
     risk_idx = len(d) - 2 if setup_index is not None else idx
     risk_row = d.iloc[risk_idx]
     try:
@@ -731,33 +1086,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
             tp = min(tp, target_ref)
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
 
-    # --- فیلتر هوشمند موانع مسیر با ضریب متعادل 0.6 ATR ---
-    htf_levels_dict = _compute_prev_htf_levels(d, idx) if d is not None else {}
-    all_lvl_list = [pdh, pdl] + [v for v in htf_levels_dict.values() if v is not None]
-    intermediate_levels = [float(v) for v in all_lvl_list if v is not None and np.isfinite(v)]
-
-    if signal == "SELL":
-        blockers = [lvl for lvl in intermediate_levels if tp < lvl < entry]
-        if blockers:
-            nearest_blocker = max(blockers)
-            if (entry - nearest_blocker) < (atr * 0.6):
-                return None, f"مسیریابی مسدود: حمایت بسیار نزدیک در `{nearest_blocker:.4g}` فضای حرکت را کور کرده است"
-            if (entry - nearest_blocker) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: حمایت سرسخت در `{nearest_blocker:.4g}` مانع ریزش است و R:R را خراب می‌کند"
-            else:
-                tp = max(tp, nearest_blocker + atr * 0.10)
-    elif signal == "BUY":
-        blockers = [lvl for lvl in intermediate_levels if entry < lvl < tp]
-        if blockers:
-            nearest_blocker = min(blockers)
-            if (nearest_blocker - entry) < (atr * 0.6):
-                return None, f"مسیریابی مسدود: مقاومت بسیار نزدیک در `{nearest_blocker:.4g}` فضای حرکت را کور کرده است"
-            if (nearest_blocker - entry) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: مقاومت سرسخت در `{nearest_blocker:.4g}` مانع رشد است و R:R را خراب می‌کند"
-            else:
-                tp = min(tp, nearest_blocker - atr * 0.10)
-    # --------------------------------------------------------------------------
-
+    # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
     est_risk_usdt = 500.0 * risk_pct
     if est_risk_usdt > 0:
@@ -772,6 +1101,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     candle_score = min(20.0, max(0.0, body_ratio * 27.0))
     volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
     rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
+    # این استراتژی خودش یک برگشت روی سطح کلیدی (PDH/PDL) است، پس همیشه «نزدیک سطح ساختاری»
+    # و رژیم «رنج/برگشتی» در نظر گرفته می‌شود؛ کندل ریکلیم با الگوهای شناخته‌شده تقویت/تضعیف می‌شود.
     pattern_df = d.iloc[:idx + 1].copy() if setup_index is not None else df
     pattern_score, pattern_name = candle_pattern_score(pattern_df, signal, regime="range", near_structure=True, max_points=10.0)
     score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
@@ -797,6 +1128,18 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
 
 def evaluate_trend_weakness(df, side, strategy_config=None):
+    """
+    بررسی می‌کند که آیا روند معامله باز، در حال از دست دادن قدرت است یا نه.
+    برای استفاده در مدیریت خودکار پوزیشن: وقتی معامله سود دارد ولی هنوز به هدف
+    ساختاری (PDH/PDL) نرسیده، این تابع علائم ضعف را روی آخرین کندل بسته‌شده
+    می‌سنجد تا در صورت لزوم با سود بسته شود؛ در غیر این صورت اجازه می‌دهد
+    معامله تا رسیدن به هدف ادامه یابد.
+
+    df باید از قبل با calculate_indicators پردازش شده باشد (حداقل ۶۰ کندل).
+    side: 'BUY'/'LONG' یا 'SELL'/'SHORT'
+
+    خروجی: (is_weak: bool, score: int 0-100, reasons: list[str])
+    """
     if df is None or len(df) < 20:
         return False, 0, []
     required_cols = {"adx", "rsi", "ema20", "plus_di", "minus_di", "body_ratio", "volume_ratio"}
@@ -824,7 +1167,7 @@ def evaluate_trend_weakness(df, side, strategy_config=None):
 
     if is_long:
         if minus_di > plus_di:
-            score += 30.0; reasons.append("DI منفی از DI مثبت عبور کرد")
+            score += 30.0; reasons.append("DI منفی از DI مثبت عبور کرد (تغییر جهت روند)")
         if adx < prev_adx and adx < 22:
             score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
         if close < ema20:
@@ -835,7 +1178,7 @@ def evaluate_trend_weakness(df, side, strategy_config=None):
             score += 20.0; reasons.append("کندل نزولی قدرتمند مخالف روند با حجم بالا")
     else:
         if plus_di > minus_di:
-            score += 30.0; reasons.append("DI مثبت از DI منفی عبور کرد")
+            score += 30.0; reasons.append("DI مثبت از DI منفی عبور کرد (تغییر جهت روند)")
         if adx < prev_adx and adx < 22:
             score += 15.0; reasons.append(f"قدرت روند (ADX={adx:.1f}) رو به افت است")
         if close > ema20:
@@ -994,8 +1337,13 @@ def _htf_trend_aligned(df, want_bullish):
 
 
 def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
+    """HTF liquidity reversal model for 1H/4H.
+    Uses higher-timeframe liquidity events instead of intraday breakout chasing.
+    Entry requires sweep/reclaim + structure confirmation.
+    """
     if df_primary is None or len(df_primary) < 80:
         return None, "HTF: داده کافی نیست"
+
     d = df_primary.copy()
     try:
         atr = float(d.iloc[-2].get("atr", 0) or 0)
@@ -1008,6 +1356,8 @@ def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe
     low = float(d.iloc[-2]["low"])
     close = float(d.iloc[-2]["close"])
 
+    # HTF liquidity anchors. Prefer supplied higher timeframe levels;
+    # fallback to local structure if unavailable.
     anchors = market_data_dict or {}
     prev_week_high = anchors.get("prev_week_high")
     prev_week_low = anchors.get("prev_week_low")
@@ -1023,13 +1373,18 @@ def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe
         resistance = prev_week_high or prev_day_high
         support = prev_week_low or prev_day_low
 
+    # Fallback keeps old datasets compatible.
     highs = float(resistance) if resistance is not None else d["high"].rolling(20).max().iloc[-3]
     lows = float(support) if support is not None else d["low"].rolling(20).min().iloc[-3]
 
+    # Long: liquidity grab below support + reclaim + bullish structure candle
     if low < lows and close > lows and close > float(d.iloc[-3]["close"]):
         return "BUY", "HTF Liquidity Sweep + Reclaim + ساختار صعودی تأیید شد"
+
+    # Short: liquidity grab above resistance + reclaim + bearish structure candle
     if high > highs and close < highs and close < float(d.iloc[-3]["close"]):
         return "SELL", "HTF Liquidity Sweep + Reclaim + ساختار نزولی تأیید شد"
+
     return None, "HTF: ستاپ نقدینگی تشکیل نشده"
 
 
@@ -1077,6 +1432,16 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     else:
         sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
 
+    # --- محافظ خلاف‌جهت بازار ---
+    # این فیلتر روی خروجی *همه‌ی* مسیرهای بالا (شامل dynamic V2 که مسیر پیش‌فرض ربات است)
+    # به‌طور یکسان اعمال می‌شود - قبلاً مسیر V2 زودتر از این نقطه return می‌کرد و این فیلتر
+    # را دور می‌زد؛ این نقص برطرف شد.
+    # regime این‌جا یا از رژیم ماکرو (BTC/ETH روی 4 ساعته با ADX بالا) می‌آید یا از اجماع
+    # فوری همان تایم‌فریم معاملاتی با همان اکثریت ساده (>=۵۰٪) که در «وضعیت بازار» دیده
+    # می‌شود؛ یعنی هر وقت خودِ کاربر «وضعیت بازار» را صعودی/نزولی ببیند، همان لحظه این
+    # فیلتر هم فعال است. این یک فیلتر عمومی روی همه‌ی سیگنال‌ها نیست - در حالت رنج/نامشخص
+    # (نه اکثریت صعودی نه نزولی) هیچ تاثیری ندارد؛ فقط دقیقاً سناریویی را می‌گیرد که معامله
+    # *خلاف* جهت ارزیابی‌شده‌ی بازار باز می‌شود (مثل فروش وسط یک ارزیابی بازار صعودی).
     if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH"):
         if regime == "BULLISH" and sig == "SELL":
             return None, f"وضعیت بازار صعودی ارزیابی شده - سیگنال فروش خلاف جهت بازار نادیده گرفته شد | {reason}"
@@ -1084,6 +1449,9 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
             return None, f"وضعیت بازار نزولی ارزیابی شده - سیگنال خرید خلاف جهت بازار نادیده گرفته شد | {reason}"
     return sig, reason
 
+# ========================= STRATEGY V2 =========================
+# Adaptive regime + setup selection + execution-quality filters.
+# This layer intentionally keeps the public APIs above backward compatible.
 
 V1_ENHANCED_DEFAULTS = {
     "enhanced_v1_enabled": True,
@@ -1092,7 +1460,7 @@ V1_ENHANCED_DEFAULTS = {
     "enhanced_use_dead_zone": True,
     "enhanced_use_confluence": True,
     "enhanced_use_orb_judas": True,
-    "enhanced_orb_enabled": False,
+    "enhanced_orb_enabled": False,  # opt-in: preserves V1 default frequency
     "enhanced_dead_zone_atr": 0.35,
     "enhanced_dead_zone_pct": 0.0015,
     "enhanced_swing_left": 3,
@@ -1129,6 +1497,7 @@ V2_DEFAULTS = {
     "sweep_score_bonus": 8.0,
     "regime_confidence_min": 0.55,
     "max_atr_ratio_for_entry": 2.20,
+    # Adaptive intraday liquidity: deliberately conservative to prevent signal spam.
     "adaptive_activation_distance_atr": 1.00,
     "adaptive_min_level_candles": 6,
     "adaptive_opening_range_minutes": 30,
@@ -1164,6 +1533,13 @@ def _ema_slope_atr(df, ema_col="ema20", lookback=5):
 
 
 def detect_market_regime(df, strategy_config=None):
+    """Return trend and volatility as separate state dimensions.
+
+    The previous implementation made HIGH_VOL mutually exclusive with trend,
+    which could route a strong high-vol trend into mean reversion. Here trend
+    state is detected first from directional structure, while volatility is
+    reported independently.
+    """
     if df is None or len(df) < 65:
         return {
             "name": "MIXED", "confidence": 0.0, "atr_ratio": 1.0,
@@ -1202,6 +1578,8 @@ def detect_market_regime(df, strategy_config=None):
     else:
         volatility_state = "NORMAL"
 
+    # Preserve stable names for downstream/UI compatibility while ensuring
+    # strong trends remain trend regimes even when volatility is high/low.
     if trend_state == "BULL":
         name = "TREND_BULL"
         conf = 0.60 + min(0.35, max(0.0, (adx - 23.0) / 30.0))
@@ -1258,6 +1636,7 @@ def _v2_htf_bias(market_data_dict, want_bullish):
 
 
 def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
+    """Conservative expectancy proxy. It is NOT a backtest-derived probability."""
     base_p = 0.40 + max(0.0, min(0.18, (float(score) - 55.0) / 250.0))
     if regime_name in ("TREND_BULL", "TREND_BEAR"):
         base_p += 0.025
@@ -1272,8 +1651,258 @@ def _v2_edge_proxy(score, rr, regime_name, atr_ratio):
     return float(ev), float(base_p)
 
 
+
+def _enhanced_confirmed_swings(df, left=3, right=3, min_wick_atr=0.12, min_volume_ratio=0.55):
+    """Causal swing detector. A swing at i is emitted only after i+right exists.
+    The caller should still only consume swings with i <= last_closed_index.
+    """
+    if df is None or len(df) < left + right + 5:
+        return []
+    out = []
+    highs = pd.to_numeric(df["high"], errors="coerce")
+    lows = pd.to_numeric(df["low"], errors="coerce")
+    atr = pd.to_numeric(df.get("atr", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    vr = pd.to_numeric(df.get("volume_ratio", pd.Series(index=df.index, dtype=float)), errors="coerce")
+    for i in range(left, len(df) - right):
+        h = float(highs.iloc[i]); l = float(lows.iloc[i]); a = float(atr.iloc[i]) if np.isfinite(atr.iloc[i]) else 0.0
+        if not np.isfinite(h) or not np.isfinite(l):
+            continue
+        win_h = highs.iloc[i-left:i+right+1]
+        win_l = lows.iloc[i-left:i+right+1]
+        is_high = h >= float(win_h.max()) and h > float(highs.iloc[i-1]) and h >= float(highs.iloc[i+1])
+        is_low = l <= float(win_l.min()) and l < float(lows.iloc[i-1]) and l <= float(lows.iloc[i+1])
+        if is_high:
+            wick = h - max(float(df.iloc[i]["open"]), float(df.iloc[i]["close"]))
+            wick_ok = a <= 0 or wick / a >= min_wick_atr
+            vol_ok = not np.isfinite(vr.iloc[i]) or float(vr.iloc[i]) >= min_volume_ratio
+            if wick_ok and vol_ok:
+                out.append({"index": i, "type": "HIGH", "price": h})
+        if is_low:
+            wick = min(float(df.iloc[i]["open"]), float(df.iloc[i]["close"])) - l
+            wick_ok = a <= 0 or wick / a >= min_wick_atr
+            vol_ok = not np.isfinite(vr.iloc[i]) or float(vr.iloc[i]) >= min_volume_ratio
+            if wick_ok and vol_ok:
+                out.append({"index": i, "type": "LOW", "price": l})
+    return out
+
+
+def _enhanced_key_levels(df, idx):
+    """Historical-only key levels available at idx; no future rows are used."""
+    if df is None or idx < 2:
+        return {}
+    d = df.iloc[:idx+1].copy()
+    levels = {}
+    if "timestamp" in d.columns:
+        ts = pd.to_datetime(d["timestamp"], errors="coerce", utc=True)
+        valid = ts.notna()
+        if valid.any():
+            d = d.loc[valid].copy(); ts = ts.loc[valid]
+            days = ts.dt.floor("D")
+            cur_day = days.iloc[-1]
+            prev = d.loc[days < cur_day]
+            if not prev.empty:
+                levels["PDH"] = float(prev["high"].max())
+                levels["PDL"] = float(prev["low"].min())
+    # Fallback to the existing V1 previous-day computation.
+    if "PDH" not in levels:
+        try:
+            _, pdh, pdl = _compute_prev_day_levels(d)
+            if pdh is not None: levels["PDH"] = float(pdh)
+            if pdl is not None: levels["PDL"] = float(pdl)
+        except Exception:
+            pass
+    look = d.iloc[max(0, len(d)-96):]
+    if len(look) >= 20:
+        levels.setdefault("SWING_HIGH", float(look["high"].max()))
+        levels.setdefault("SWING_LOW", float(look["low"].min()))
+    return levels
+
+
+def _enhanced_dead_zone(entry, atr, levels, cfg):
+    if not bool(cfg.get("enhanced_use_dead_zone", True)):
+        return False, None
+    atr_dist = abs(float(atr)) * float(cfg.get("enhanced_dead_zone_atr", 0.35))
+    pct_dist = abs(float(entry)) * float(cfg.get("enhanced_dead_zone_pct", 0.0015))
+    dist = max(atr_dist, pct_dist)
+    nearest = None
+    nearest_dist = float("inf")
+    for name, level in (levels or {}).items():
+        if not np.isfinite(level):
+            continue
+        dd = abs(float(entry) - float(level))
+        if dd < nearest_dist:
+            nearest_dist = dd; nearest = name
+    return nearest_dist <= dist, nearest
+
+
+def _enhanced_structure_context(df, idx, signal, cfg):
+    swings = _enhanced_confirmed_swings(
+        df.iloc[:idx+1],
+        int(cfg.get("enhanced_swing_left", 3)),
+        int(cfg.get("enhanced_swing_right", 3)),
+        float(cfg.get("enhanced_swing_min_wick_atr", 0.12)),
+        float(cfg.get("enhanced_swing_min_volume_ratio", 0.55)),
+    )
+    highs = [s for s in swings if s["type"] == "HIGH"]
+    lows = [s for s in swings if s["type"] == "LOW"]
+    c = df.iloc[idx]
+    close = float(c["close"])
+    if signal == "BUY":
+        prior = max([s["price"] for s in highs if s["index"] < idx], default=None)
+        bos = prior is not None and close > prior
+        hl = len(lows) >= 2 and lows[-1]["price"] >= lows[-2]["price"]
+        return {"bos": bos, "continuation": hl, "swings": swings, "last_level": prior}
+    prior = min([s["price"] for s in lows if s["index"] < idx], default=None)
+    bos = prior is not None and close < prior
+    lh = len(highs) >= 2 and highs[-1]["price"] <= highs[-2]["price"]
+    return {"bos": bos, "continuation": lh, "swings": swings, "last_level": prior}
+
+
+def _enhanced_scenario(signal, swept, reclaim, structure, retest=False):
+    """Compact B1..B7/S1..S7 taxonomy, layered over V1's existing setup logic."""
+    p = "B" if signal == "BUY" else "S"
+    if swept and reclaim and structure.get("bos"):
+        return p + "1", 12.0
+    if swept and reclaim and structure.get("continuation"):
+        return p + "2", 9.0
+    if swept and reclaim:
+        return p + "3", 7.0
+    if retest and structure.get("bos"):
+        return p + "4", 5.0
+    if structure.get("bos"):
+        return p + "5", 3.0
+    return p + "6", 0.0
+
+
+def _enhanced_orb_judas_candidate(df, signal=None, cfg=None):
+    """Event-driven ORB/Judas: sweep event must occur before MSS confirmation.
+    Disabled by default to preserve V1 behavior unless explicitly opted in.
+    """
+    cfg = cfg or {}
+    if not bool(cfg.get("enhanced_orb_enabled", False)) or df is None or len(df) < 80:
+        return None
+    if "timestamp" not in df.columns:
+        return None
+    ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    if ts.isna().all(): return None
+    day = ts.dt.floor("D").iloc[-1]
+    today = df.loc[ts.dt.floor("D") == day].copy()
+    if len(today) < 20: return None
+    start_h = int(cfg.get("enhanced_orb_killzone_start", 7)); end_h = int(cfg.get("enhanced_orb_killzone_end", 10))
+    orb_minutes = int(cfg.get("enhanced_orb_minutes", 30))
+    zone = today[(ts.loc[today.index].dt.hour >= start_h) & (ts.loc[today.index].dt.hour < end_h)]
+    if len(zone) < 10: return None
+    zts = ts.loc[zone.index]
+    orb_start = zts.min(); orb_end = orb_start + pd.Timedelta(minutes=orb_minutes)
+    orb = zone[zts < orb_end]
+    post = zone[zts >= orb_end]
+    if len(orb) < 3 or len(post) < 4: return None
+    oh = float(orb["high"].max()); ol = float(orb["low"].min())
+    # Search chronologically for a sweep event, then require a later MSS event.
+    for j in range(1, len(post)):
+        row = post.iloc[j]
+        prev = post.iloc[:j]
+        if signal in (None, "BUY") and float(row["low"]) < ol:
+            if float(row["close"]) <= ol: continue
+            post2 = post.iloc[j+1:]
+            for k in range(1, len(post2)):
+                m = post2.iloc[k]
+                prior_high = float(post2.iloc[:k]["high"].max())
+                if float(m["close"]) > prior_high:
+                    return {"signal":"BUY", "sweep_index":int(df.index.get_loc(row.name)), "mss_index":int(df.index.get_loc(m.name)), "orb_high":oh,"orb_low":ol}
+        if signal in (None, "SELL") and float(row["high"]) > oh:
+            if float(row["close"]) >= oh: continue
+            post2 = post.iloc[j+1:]
+            for k in range(1, len(post2)):
+                m = post2.iloc[k]
+                prior_low = float(post2.iloc[:k]["low"].min())
+                if float(m["close"]) < prior_low:
+                    return {"signal":"SELL", "sweep_index":int(df.index.get_loc(row.name)), "mss_index":int(df.index.get_loc(m.name)), "orb_high":oh,"orb_low":ol}
+    return None
+
+
+def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
+    """V1-first enhancement layer. It enriches and filters existing V1/V2 setups;
+    it does not replace V1's execution/risk/position-management path.
+    """
+    cfg = get_v2_config(strategy_config)
+    if df_primary is None or len(df_primary) < 100:
+        return None, None, "Enhanced V1: داده کافی نیست"
+    idx = len(df_primary) - 2  # strictly last fully closed candle
+    c = df_primary.iloc[idx]
+    atr = _safe_float(c.get("atr"), 0.0)
+    entry = _safe_float(live_price, _safe_float(c.get("close"), 0.0))
+    if atr <= 0 or entry <= 0:
+        return None, None, "Enhanced V1: ATR/entry نامعتبر"
+    regime_info = detect_market_regime(df_primary.iloc[:idx+1], cfg)
+    candidates = []
+
+    def consider(sig, family, base_reason, bonus=0.0, plan=None):
+        if sig not in ("BUY", "SELL"):
+            return
+        levels = _enhanced_key_levels(df_primary, idx)
+        dead, near = _enhanced_dead_zone(entry, atr, levels, cfg)
+        # Dead-zone is a rejection only when there is no clear liquidity event.
+        if dead and family not in ("liquidity_sweep", "orb_judas"):
+            return
+        structure = _enhanced_structure_context(df_primary, idx, sig, cfg)
+        swept = ("Sweep" in (base_reason or "") or "sweep" in (base_reason or ""))
+        reclaim = swept and (sig == "BUY" and entry > levels.get("PDL", -np.inf) or sig == "SELL" and entry < levels.get("PDH", np.inf))
+        scenario, scenario_bonus = _enhanced_scenario(sig, swept, reclaim, structure)
+        # Evidence buckets prevent EMA/DI/ADX from being counted repeatedly as independent proof.
+        location = 25.0 if (near or swept) else 8.0
+        struct = 25.0 if structure.get("bos") else (17.0 if structure.get("continuation") else 8.0)
+        confirm = min(20.0, _safe_float(c.get("body_ratio"), 0.0) * 18.0 + max(0.0, _safe_float(c.get("volume_ratio"), 1.0)-0.8) * 6.0)
+        regime_bucket = 15.0 if ((sig == "BUY" and regime_info.get("trend_state") == "BULL") or (sig == "SELL" and regime_info.get("trend_state") == "BEAR")) else (8.0 if regime_info.get("trend_state") in ("RANGE","NEUTRAL") else 3.0)
+        rr_bucket = min(15.0, max(0.0, float(plan.get("rr", 0)) / 2.5 * 15.0)) if plan else 0.0
+        quality = min(100.0, location + struct + confirm + regime_bucket + rr_bucket + float(bonus) + scenario_bonus)
+        min_q = float(cfg.get("enhanced_high_vol_min_quality",72.0) if regime_info.get("volatility_state")=="HIGH" else cfg.get("enhanced_min_quality_score",65.0))
+        if plan is None or float(plan.get("rr",0)) < float(cfg.get("enhanced_min_rr",1.35)) or quality < min_q:
+            return
+        p = dict(plan)
+        p.update({"score": int(round(quality)), "quality_score": int(round(quality)), "score_model":"V1.5 evidence buckets", "scenario":scenario, "structure_bos":bool(structure.get("bos")), "structure_continuation":bool(structure.get("continuation")), "dead_zone":bool(dead), "near_key_level":near, "regime":regime_info.get("name"), "regime_confidence":regime_info.get("confidence"), "volatility_state":regime_info.get("volatility_state"), "setup_family":family, "edge_proxy":None, "model_win_proxy":None})
+        candidates.append((quality * max(float(p.get("rr",0)),0.01), sig, p, f"V1.5 | {scenario} | {family} | Quality {quality:.0f}/100 | Location {location:.0f} Structure {struct:.0f} Confirm {confirm:.0f} Regime {regime_bucket:.0f} TradeQuality {rr_bucket:.0f} | {base_reason}"))
+
+    # 1) Preserve V1's strongest 5m/15m liquidity sweep path.
+    if timeframe in ("5min", "15min"):
+        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
+        if sig in ("BUY","SELL"):
+            plan, _ = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price)
+            consider(sig, "liquidity_sweep", reason, float(cfg.get("sweep_score_bonus",8.0)), plan)
+
+    # 2) Keep V1/V2 trend/breakout families, but score them by independent evidence buckets.
+    for family, fn in (("trend", lambda: strategy_trend_following(df_primary, timeframe, filters, cfg)), ("breakout", lambda: strategy_breakout(df_primary, filters, cfg))):
+        sig, reason = fn()
+        if sig in ("BUY","SELL"):
+            plan, _ = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=timeframe, grid_levels=grid_levels, live_price=live_price)
+            consider(sig, family, reason, 4.0 if family=="breakout" else 2.0, plan)
+
+    # 3) Optional ORB/Judas family is deliberately opt-in.
+    orb = _enhanced_orb_judas_candidate(df_primary, cfg=cfg) if bool(cfg.get("enhanced_use_orb_judas", True)) else None
+    if orb and orb.get("mss_index") <= idx:
+        sig = orb["signal"]
+        # Only allow a live signal if the causal MSS is the latest closed event or very recent.
+        if idx - int(orb["mss_index"]) <= 2:
+            plan, _ = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price)
+            if plan:
+                consider(sig, "orb_judas", f"ORB/Judas event-driven sweep={orb['sweep_index']} -> MSS={orb['mss_index']}", 5.0, plan)
+
+    if not candidates:
+        return None, None, f"Enhanced V1: ستاپ معتبر نبود | regime={regime_info.get('name')} | ATRx={regime_info.get('atr_ratio',0):.2f}"
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, sig, plan, reason = candidates[0]
+    return sig, plan, reason
+
 def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     cfg = get_v2_config(strategy_config)
+    if bool(cfg.get("enhanced_v1_enabled", True)):
+        esig, eplan, ereason = _select_enhanced_v1_setup(
+            df_primary, market_data_dict=market_data_dict, timeframe=timeframe,
+            filters=filters, strategy_config=cfg, regime=regime,
+            grid_levels=grid_levels, live_price=live_price
+        )
+        if esig in ("BUY", "SELL") and eplan:
+            return esig, eplan, ereason
     regime_info = detect_market_regime(df_primary, cfg)
     rname = regime_info["name"]
     rconf = regime_info["confidence"]
@@ -1287,10 +1916,25 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
     def add_candidate(sig, reason, family, bonus=0):
         if sig not in ("BUY", "SELL"):
             return
+        # Risk plan must use the signal timeframe. HTF is context, not execution.
         plan_tf = timeframe
         active_setup_index = None
+        if family == "liquidity_sweep":
+            m_active = __import__("re").search(r"ACTIVE_SETUP_INDEX=(\d+)", reason or "")
+            if m_active:
+                active_setup_index = int(m_active.group(1))
         anchor_level = None
         target_level = None
+        if family == "liquidity_sweep" and "ADAPTIVE_SWEEP" in (reason or ""):
+            import re as _re
+            ma = _re.search(r"\bANCHOR=([0-9.eE+-]+)", reason or "")
+            mt = _re.search(r"\bTARGET=([0-9.eE+-]+)", reason or "")
+            if ma:
+                try: anchor_level = float(ma.group(1))
+                except Exception: anchor_level = None
+            if mt:
+                try: target_level = float(mt.group(1))
+                except Exception: target_level = None
         if family == "liquidity_sweep":
             plan, plan_reason = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels,
@@ -1310,6 +1954,9 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         score = max(0.0, min(100.0, score))
         rr = float(plan.get("rr", 0))
         ev, pwin = _v2_edge_proxy(score, rr, rname, regime_info["atr_ratio"])
+        # Strong trend is allowed to remain directional even in HIGH/LOW volatility,
+        # but high volatility requires stricter score/RR. Mean reversion is never selected
+        # merely because volatility is high.
         if vol_state == "HIGH":
             min_score = float(cfg["high_vol_min_score"])
             min_rr = float(cfg["high_vol_min_rr"])
@@ -1337,9 +1984,11 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
 
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
-        family = "liquidity_sweep"
-        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]))
+        family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
+        add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
     else:
+        # Strategy selection is driven by trend state, while volatility only changes
+        # strictness. This prevents high-vol trends from being treated as mean-reversion.
         if trend_state in ("BULL", "BEAR", "NEUTRAL"):
             sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
             add_candidate(sig, reason, "trend", 4 if trend_state in ("BULL", "BEAR") else 0)
@@ -1350,7 +1999,10 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
-        return None, None, f"V2: ستاپ مناسب پیدا نشد | regime={rname}"
+        return None, None, (
+            f"V2: ستاپ مناسب پیدا نشد | regime={rname} trend={trend_state} "
+            f"vol={vol_state} conf={rconf:.2f} ATRx={regime_info['atr_ratio']:.2f}"
+        )
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, best_plan, best_sig, best_reason = candidates[0]
     return best_sig, best_plan, best_reason
@@ -1366,222 +2018,3 @@ def get_signal_with_reason_v2(df_primary, market_data_dict=None, timeframe_mode=
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         return strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     return get_signal_with_reason(df_primary, market_data_dict, timeframe_mode, timeframe, strategy_type, filters, strategy_config, regime, live_price=live_price)
-
-
-# ==========================================
-# تابع اصلاح‌شده اسکن نقدینگی همراه با تگ‌های ستاپ
-# ==========================================
-def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
-    """Liquidity Sweep on PDH/PDL and HTF levels with setup tags."""
-    d, pdh, pdl = _compute_prev_day_levels(df)
-    if d is None:
-        return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
-    if pdh is None or pdl is None:
-        return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
-
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
-    require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
-
-    htf_levels = _compute_prev_htf_levels(d, len(d) - 2)
-    p1h = htf_levels.get("P1H")
-    p1l = htf_levels.get("P1L")
-    p4h = htf_levels.get("P4H")
-    p4l = htf_levels.get("P4L")
-    pwh = htf_levels.get("PWH")
-    pwl = htf_levels.get("PWL")
-    pmh = htf_levels.get("PMH")
-    pml = htf_levels.get("PML")
-
-    key_levels = []
-    if pmh is not None and pml is not None:
-        key_levels.append(('PMH', pmh, 'SELL', 'SETUP Monthly'))
-        key_levels.append(('PML', pml, 'BUY', 'SETUP Monthly'))
-    if pwh is not None and pwl is not None:
-        key_levels.append(('PWH', pwh, 'SELL', 'SETUP Weekly'))
-        key_levels.append(('PWL', pwl, 'BUY', 'SETUP Weekly'))
-    if p4h is not None and p4l is not None:
-        key_levels.append(('P4H', p4h, 'SELL', 'SETUP 4h'))
-        key_levels.append(('P4L', p4l, 'BUY', 'SETUP 4h'))
-    if p1h is not None and p1l is not None:
-        key_levels.append(('P1H', p1h, 'SELL', 'SETUP 1h'))
-        key_levels.append(('P1L', p1l, 'BUY', 'SETUP 1h'))
-    if pdh is not None and pdl is not None:
-        key_levels.append(('PDH', pdh, 'SELL', 'SETUP Daily'))
-        key_levels.append(('PDL', pdl, 'BUY', 'SETUP Daily'))
-
-    def detect_at(idx):
-        if idx < 0 or idx >= len(d):
-            return None, None, None
-        curr = d.iloc[idx]
-        atr = _safe_float(curr.get("atr"), 0.0)
-        if not np.isfinite(atr) or atr <= 0:
-            return None, None, None
-        min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
-        o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
-
-        for level_name, level_val, expected_side, setup_tag in key_levels:
-            if expected_side == 'SELL' and h >= level_val + min_sweep:
-                reclaimed = (not require_reclaim) or (c < level_val)
-                reversal = (not require_reversal) or (c < o)
-                if reclaimed and reversal:
-                    return "SELL", f"[{setup_tag}] Liquidity Sweep روی سقف {level_name} ({level_val:.6g}) + ریکلیم نزولی", atr
-            elif expected_side == 'BUY' and l <= level_val - min_sweep:
-                reclaimed = (not require_reclaim) or (c > level_val)
-                reversal = (not require_reversal) or (c > o)
-                if reclaimed and reversal:
-                    return "BUY", f"[{setup_tag}] Liquidity Sweep روی کف {level_name} ({level_val:.6g}) + ریکلیم صعودی", atr
-
-        if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
-            sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
-            if sig:
-                return sig, reason, atr
-        return None, None, None
-
-    latest_idx = len(d) - 2
-    sig, reason, atr = detect_at(latest_idx)
-    if sig:
-        return sig, reason
-
-    return None, "سطح جدیدی برای شکار نقدینگی لمس نشد"
-
-
-# ==========================================
-# تابع اصلاح‌شده طراحی معامله همراه با فیلتر موانع با ضریب 0.6 ATR
-# ==========================================
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
-    if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
-        return None, "داده کافی برای طراحی معامله وجود ندارد"
-    d, pdh, pdl = _compute_prev_day_levels(df)
-    if d is None or pdh is None or pdl is None:
-        return None, "سطوح روز قبل هنوز آماده نیست"
-    idx = (len(d) - 2) if setup_index is None else int(setup_index)
-    if idx < 1 or idx >= len(d):
-        return None, "شاخص ستاپ معتبر نیست"
-    curr = d.iloc[idx]
-    risk_idx = len(d) - 2 if setup_index is not None else idx
-    risk_row = d.iloc[risk_idx]
-    try:
-        entry = float(live_price) if (setup_index is not None and live_price is not None) else float(curr["close"])
-        atr = float(risk_row["atr"])
-    except Exception:
-        return None, "ATR یا قیمت ورود نامعتبر است"
-    if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
-        return None, "ATR یا قیمت ورود نامعتبر است"
-
-    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_rr = float(cfg.get("min_rr", 1.30))
-    target_rr = max(min_rr, float(cfg.get("sweep_risk_reward", 1.8)))
-    buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
-    min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
-    max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
-    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
-    body_ratio = _safe_float(curr.get("body_ratio"), 0)
-    vr = _safe_float(curr.get("volume_ratio"), 1)
-
-    extend_to_structure = bool(cfg.get("extend_tp_to_pdl", True))
-
-    if signal == "SELL":
-        sweep_extreme = float(curr["high"])
-        sl = sweep_extreme + (atr * buffer_atr)
-        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, -1)
-        if (sl - entry) / entry < min_sl_pct:
-            sl = entry * (1.0 + min_sl_pct)
-        risk_dist = sl - entry
-        if risk_dist <= 0:
-            return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
-            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
-        reclaim_depth = (sweep_extreme - entry) / risk_dist
-        soft_tp = entry - (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdl
-        if extend_to_structure and target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = max(tp, target_ref)
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
-    else:
-        sweep_extreme = float(curr["low"])
-        sl = sweep_extreme - (atr * buffer_atr)
-        sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, 1)
-        if (entry - sl) / entry < min_sl_pct:
-            sl = entry * (1.0 - min_sl_pct)
-        risk_dist = entry - sl
-        if risk_dist <= 0:
-            return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
-            return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
-        reclaim_depth = (entry - sweep_extreme) / risk_dist
-        soft_tp = entry + (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdh
-        if extend_to_structure and target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = min(tp, target_ref)
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
-
-    # --- فیلتر هوشمند موانع مسیر با ضریب متعادل 0.6 ATR ---
-    htf_levels_dict = _compute_prev_htf_levels(d, idx) if d is not None else {}
-    all_lvl_list = [pdh, pdl] + [v for v in htf_levels_dict.values() if v is not None]
-    intermediate_levels = [float(v) for v in all_lvl_list if v is not None and np.isfinite(v)]
-
-    if signal == "SELL":
-        blockers = [lvl for lvl in intermediate_levels if tp < lvl < entry]
-        if blockers:
-            nearest_blocker = max(blockers)
-            if (entry - nearest_blocker) < (atr * 0.6):
-                return None, f"مسیریابی مسدود: حمایت بسیار نزدیک در `{nearest_blocker:.4g}` فضای حرکت را کور کرده است"
-            if (entry - nearest_blocker) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: حمایت سرسخت در `{nearest_blocker:.4g}` مانع ریزش است و R:R را خراب می‌کند"
-            else:
-                tp = max(tp, nearest_blocker + atr * 0.10)
-    elif signal == "BUY":
-        blockers = [lvl for lvl in intermediate_levels if entry < lvl < tp]
-        if blockers:
-            nearest_blocker = min(blockers)
-            if (nearest_blocker - entry) < (atr * 0.6):
-                return None, f"مسیریابی مسدود: مقاومت بسیار نزدیک در `{nearest_blocker:.4g}` فضای حرکت را کور کرده است"
-            if (nearest_blocker - entry) / risk_dist < min_rr:
-                return None, f"مسیریابی مسدود: مقاومت سرسخت در `{nearest_blocker:.4g}` مانع رشد است و R:R را خراب می‌کند"
-            else:
-                tp = min(tp, nearest_blocker - atr * 0.10)
-    # --------------------------------------------------------------------------
-
-    risk_pct = risk_dist / entry
-    est_risk_usdt = 500.0 * risk_pct
-    if est_risk_usdt > 0:
-        if (0.50 / est_risk_usdt) > max_fee_ratio:
-            return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
-
-    rr = abs(tp - entry) / risk_dist
-    if rr < min_rr:
-        return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
-
-    reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
-    candle_score = min(20.0, max(0.0, body_ratio * 27.0))
-    volume_score = min(20.0, max(0.0, (vr - 0.8) * 25.0))
-    rr_score = min(15.0, max(0.0, (rr - min_rr) * 10.0))
-    pattern_df = d.iloc[:idx + 1].copy() if setup_index is not None else df
-    pattern_score, pattern_name = candle_pattern_score(pattern_df, signal, regime="range", near_structure=True, max_points=10.0)
-    score = int(round(max(0.0, min(100.0, reclaim_score + candle_score + volume_score + rr_score + pattern_score))))
-
-    min_score = float(cfg.get("min_trade_score", 58.0))
-    quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
-        return None, f"امتیاز کیفیت پایین است ({score}/100)"
-
-    plan = {
-        "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
-        "quality_label": quality_label, "rr": float(rr),
-        "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
-        "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
-        "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
-        "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
-        "risk_atr_source_index": int(risk_idx),
-        "setup_index": int(idx),
-        "pattern": pattern_name,
-        "reason": f"Liquidity Sweep | کیفیت {score}/100 ({quality_label}) | عمق ریکلیم {reclaim_depth:.2f}x ریسک | R:R {rr:.2f}R" + (f" | الگو: {pattern_name}" if pattern_name else "")
-    }
-    return plan, plan["reason"]
