@@ -30,7 +30,7 @@ from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
     strategy_trend_following,
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
-    _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
+    _compute_prev_day_levels, _compute_prev_htf_levels, _htf_scan_levels, _setup_tag_for_level, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
 )
 from ui import (
@@ -1353,11 +1353,24 @@ def chart(chat_id, symbol, df, trade):
 
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
-        pdh = pdl = None
+        setup_level = trade.get('setup_level')
+        setup_level_name = trade.get('setup_level_name')
+        setup_tag = trade.get('setup_tag')
+        reason_text = str(trade.get('reason') or '')
+        if setup_level is None:
+            m = re.search(r'SETUP_LEVEL=([0-9.eE+-]+)', reason_text)
+            if m:
+                try: setup_level = float(m.group(1))
+                except Exception: setup_level = None
+        if not setup_level_name:
+            m = re.search(r'SETUP_LEVEL_NAME=([A-Z0-9_]+)', reason_text)
+            if m: setup_level_name = m.group(1)
+        if not setup_tag and setup_level_name:
+            setup_tag = _setup_tag_for_level(setup_level_name)
 
         if tf in ('5min', '15min'):
             try:
-                dated_df, pdh, pdl = _compute_prev_day_levels(df)
+                dated_df, _, _ = _compute_prev_day_levels(df)
             except Exception:
                 dated_df = None
             if dated_df is not None and '_date' in dated_df.columns:
@@ -1397,10 +1410,10 @@ def chart(chat_id, symbol, df, trade):
             (tp, '#22c55e', 'TP', '--', 2.0),
             (sl, '#ef4444', 'SL', '--', 2.0),
         ]
-        if pdh is not None:
-            levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
-        if pdl is not None:
-            levels.append((float(pdl), '#f97316', 'PDL', ':', 1.4))
+        # Draw only the liquidity level responsible for this setup, not a fixed PDH/PDL pair.
+        if setup_level is not None and math.isfinite(float(setup_level)):
+            label = setup_level_name or setup_tag or 'SETUP'
+            levels.append((float(setup_level), '#f97316', str(label), ':', 1.8))
 
         x_right = len(d) + 1.8
         for value, color, label, style, width in levels:
@@ -1428,7 +1441,7 @@ def chart(chat_id, symbol, df, trade):
         ax.set_xlim(-1, len(d) + 5.5)
         ymin = float(d['low'].min()); ymax = float(d['high'].max())
         pad = max((ymax - ymin) * 0.08, abs(entry) * 0.002)
-        extra_vals = [v for v in (pdh, pdl) if v is not None]
+        extra_vals = [float(setup_level)] if setup_level is not None and math.isfinite(float(setup_level)) else []
         ax.set_ylim(min([ymin, sl, tp, *extra_vals]) - pad, max([ymax, sl, tp, *extra_vals]) + pad)
         ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7)
         ax.grid(False, axis='x')
@@ -2841,7 +2854,27 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
         full_reason = planner_reason
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
-    full_reason = full_reason[:500]
+    # Persist setup identity in the reason so Telegram/chart rendering remains tied to the
+    # exact liquidity level that generated the entry.
+    setup_tag = plan.get("setup_tag")
+    setup_level_name = plan.get("setup_level_name")
+    setup_level = plan.get("setup_level")
+    if not setup_tag:
+        setup_level_name = setup_level_name or None
+        if setup_level_name:
+            setup_tag = _setup_tag_for_level(setup_level_name)
+    if setup_tag:
+        meta = f" | {setup_tag}"
+        if setup_level_name:
+            meta += f" | SETUP_LEVEL_NAME={setup_level_name}"
+        if setup_level is not None:
+            try:
+                meta += f" | SETUP_LEVEL={float(setup_level):.10g}"
+            except Exception:
+                pass
+        full_reason = (full_reason + meta)[:900]
+    else:
+        full_reason = full_reason[:500]
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
