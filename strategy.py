@@ -637,7 +637,7 @@ LEVEL_SETUP_DEFS = {
     "1h": ("P1H", "P1L", "سقف ۱ ساعته قبل", "کف ۱ ساعته قبل"),
 }
 
-_SETUP_TAG_RE = re.compile(r"^\[SETUP\s+([A-Za-z0-9]+)\]\s*")
+_SETUP_TAG_RE = re.compile(r"\[SETUP\s+([A-Za-z0-9]+)\]")
 _LEVEL_TOKEN_RE = re.compile(
     r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
 )
@@ -664,8 +664,11 @@ def tag_setup_reason(tag, reason):
 
 
 def extract_setup_tag(reason):
-    """Return the `[SETUP <tf>]` tag from a reason string, if present."""
-    m = _SETUP_TAG_RE.match(str(reason or ""))
+    """Return the `[SETUP <tf>]` tag from a reason string, if present.
+    The tag may be wrapped by outer layers (Enhanced V1 / V2 composite
+    reasons), so this searches anywhere in the string rather than only
+    at the start."""
+    m = _SETUP_TAG_RE.search(str(reason or ""))
     return m.group(1) if m else None
 
 
@@ -1579,7 +1582,12 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     st = strategy_type
-    if st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour"):
+    only_sweep = bool(get_v2_config(strategy_config).get("only_liquidity_sweep", False))
+    if st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour") and only_sweep:
+        # liquidity_sweep is only implemented for 5m/15m candles; on higher timeframes,
+        # with only_liquidity_sweep enabled, no other family is allowed to trade.
+        sig, reason = None, "فقط خانواده Liquidity Sweep فعال است و روی این تایم‌فریم قابل اجرا نیست (فقط ۵ و ۱۵ دقیقه پشتیبانی می‌شود)"
+    elif st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour"):
         sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
     elif st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
@@ -1643,6 +1651,11 @@ V1_ENHANCED_DEFAULTS = {
 
 V2_DEFAULTS = {
     "v2_enabled": True,
+    # وقتی True باشد، فقط خانواده‌ی liquidity_sweep (اسکن چندتایم‌فریمی PMH/PWH/PDH/P4H/P1H)
+    # اجازه‌ی باز کردن معامله دارد؛ trend، breakout، mean_reversion و orb_judas همه غیرفعال
+    # می‌شوند. توجه: liquidity_sweep فقط روی تایم‌فریم ۵ و ۱۵ دقیقه کار می‌کند — اگر تایم‌فریم
+    # فعال ربات روی ۱h/۴h/۱d باشد و این گزینه True باشد، هیچ سیگنالی تولید نخواهد شد.
+    "only_liquidity_sweep": True,
     "regime_adx_trend": 23.0,
     "regime_adx_strong": 30.0,
     "regime_atr_high": 1.35,
@@ -2028,6 +2041,8 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
         p.update({"score": int(round(quality)), "quality_score": int(round(quality)), "score_model":"V1.5 evidence buckets", "scenario":scenario, "structure_bos":bool(structure.get("bos")), "structure_continuation":bool(structure.get("continuation")), "dead_zone":bool(dead), "near_key_level":near, "regime":regime_info.get("name"), "regime_confidence":regime_info.get("confidence"), "volatility_state":regime_info.get("volatility_state"), "setup_family":family, "edge_proxy":None, "model_win_proxy":None})
         candidates.append((quality * max(float(p.get("rr",0)),0.01), sig, p, f"V1.5 | {scenario} | {family} | Quality {quality:.0f}/100 | Location {location:.0f} Structure {struct:.0f} Confirm {confirm:.0f} Regime {regime_bucket:.0f} TradeQuality {rr_bucket:.0f} | {base_reason}"))
 
+    only_sweep = bool(cfg.get("only_liquidity_sweep", False))
+
     # 1) Preserve V1's strongest 5m/15m liquidity sweep path.
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
@@ -2036,14 +2051,17 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
             consider(sig, "liquidity_sweep", reason, float(cfg.get("sweep_score_bonus",8.0)), plan)
 
     # 2) Keep V1/V2 trend/breakout families, but score them by independent evidence buckets.
-    for family, fn in (("trend", lambda: strategy_trend_following(df_primary, timeframe, filters, cfg)), ("breakout", lambda: strategy_breakout(df_primary, filters, cfg))):
-        sig, reason = fn()
-        if sig in ("BUY","SELL"):
-            plan, _ = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=timeframe, grid_levels=grid_levels, live_price=live_price)
-            consider(sig, family, reason, 4.0 if family=="breakout" else 2.0, plan)
+    #    Skipped entirely when only_liquidity_sweep is enabled.
+    if not only_sweep:
+        for family, fn in (("trend", lambda: strategy_trend_following(df_primary, timeframe, filters, cfg)), ("breakout", lambda: strategy_breakout(df_primary, filters, cfg))):
+            sig, reason = fn()
+            if sig in ("BUY","SELL"):
+                plan, _ = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=timeframe, grid_levels=grid_levels, live_price=live_price)
+                consider(sig, family, reason, 4.0 if family=="breakout" else 2.0, plan)
 
-    # 3) Optional ORB/Judas family is deliberately opt-in.
-    orb = _enhanced_orb_judas_candidate(df_primary, cfg=cfg) if bool(cfg.get("enhanced_use_orb_judas", True)) else None
+    # 3) Optional ORB/Judas family is deliberately opt-in. Skipped entirely when
+    #    only_liquidity_sweep is enabled.
+    orb = _enhanced_orb_judas_candidate(df_primary, cfg=cfg) if (not only_sweep and bool(cfg.get("enhanced_use_orb_judas", True))) else None
     if orb and orb.get("mss_index") <= idx:
         sig = orb["signal"]
         # Only allow a live signal if the causal MSS is the latest closed event or very recent.
@@ -2147,11 +2165,13 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         })
         candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
+    only_sweep = bool(cfg.get("only_liquidity_sweep", False))
+
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
         add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
-    else:
+    elif not only_sweep:
         # Strategy selection is driven by trend state, while volatility only changes
         # strictness. This prevents high-vol trends from being treated as mean-reversion.
         if trend_state in ("BULL", "BEAR", "NEUTRAL"):
@@ -2162,6 +2182,8 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         if trend_state in ("RANGE", "NEUTRAL"):
             sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
             add_candidate(sig, reason, "mean_reversion", 0)
+    # when only_sweep is True and timeframe is not 5m/15m, no candidate family exists
+    # (liquidity_sweep is only implemented for 5m/15m) — no trade will be opened, by design.
 
     if not candidates:
         return None, None, (

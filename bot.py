@@ -3013,7 +3013,10 @@ def trade_pipeline_report(chat_id):
 
 
 def export_trade_pipeline(chat_id):
-    if not is_admin(chat_id) or not TELEGRAM_TOKEN:
+    if not TELEGRAM_TOKEN:
+        return False
+    if not is_admin(chat_id):
+        send_message(chat_id, '⛔ این خروجی (ردیابی کامل Pipeline) فقط برای ادمین در دسترس است. برای خروجی معاملات خودتان از دکمه «📦 خروجی کامل معاملات» استفاده کنید.')
         return False
     s = get_session(chat_id)
     pipeline = list(s.get('trade_pipeline_audit') or [])
@@ -3078,9 +3081,16 @@ def export_trade_data(chat_id):
     payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[])}
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
-        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        resp=requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('export trade data telegram send failed: %s', resp.text[:500])
+            send_message(chat_id, '❌ خروجی JSON ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
+            return False
         return True
-    except Exception as exc: logger.warning('export trade data failed: %s',exc); return False
+    except Exception as exc:
+        logger.warning('export trade data failed: %s',exc)
+        send_message(chat_id, f'❌ خطا در ساخت/ارسال خروجی JSON: {exc}')
+        return False
 
 
 def reset_stats(chat_id):
@@ -3664,7 +3674,12 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/full_reset_confirm':
         ok,msg=full_reset(chat_id)
-        send_message(chat_id,msg, None if ok else get_performance_keyboard())
+        if ok:
+            send_message(chat_id,msg)
+            send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
+            sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
+        else:
+            send_message(chat_id,msg,get_performance_keyboard())
         return
 
 
