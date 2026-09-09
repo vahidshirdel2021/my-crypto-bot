@@ -193,6 +193,10 @@ STRATEGY_DEFAULTS = {
     "sweep_enable_retest_continuation": True,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
+    # کدام سطوح کلیدی (ستاپ‌ها) اجازه‌ی تولید سیگنال دارند. حذف یک تگ از این لیست
+    # یعنی آن سطح کاملاً از مسیر اسکن مستقیم + مسیر Adaptive + بازیابی Active-Setup
+    # (فقط برای Daily) نادیده گرفته می‌شود. پیش‌فرض: همه فعال.
+    "enabled_setup_tags": ["Monthly", "Weekly", "Daily", "4h", "1h"],
     # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
     "active_setup_enabled": True,
     "active_setup_lookback_candles": 3,
@@ -998,6 +1002,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
     # 5m is more noisy: require structure confirmation. Keep 15m faster.
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
+    enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
 
     def detect_daily_at(idx):
         """Original Daily-only detection (direct sweep + retest-continuation).
@@ -1033,6 +1038,8 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             return None, None, None, None
         htf_levels = _compute_prev_htf_levels(d, idx)
         for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
+            if tag not in enabled_tags:
+                continue
             if tag == "Daily":
                 hi, lo = pdh, pdl
             else:
@@ -1098,9 +1105,11 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 adaptive_atr if adaptive_atr else guard_atr,
                 cfg
             ):
-                return adaptive_sig, tag_setup_reason(_adaptive_anchor_tag(adaptive_reason), adaptive_reason)
+                _adaptive_tag = _adaptive_anchor_tag(adaptive_reason)
+                if _adaptive_tag in enabled_tags:
+                    return adaptive_sig, tag_setup_reason(_adaptive_tag, adaptive_reason)
 
-    if not bool(cfg.get("active_setup_enabled", True)):
+    if not bool(cfg.get("active_setup_enabled", True)) or "Daily" not in enabled_tags:
         return None, "ستاپ جدیدی ثبت نشد"
 
     try:

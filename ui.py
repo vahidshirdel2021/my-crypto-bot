@@ -127,12 +127,42 @@ def get_timeframe_keyboard():
     ]}
 
 
+SETUP_TAG_ORDER = ("1h", "4h", "Daily", "Weekly", "Monthly")
+SETUP_TAG_LABELS = {
+    "1h": "Setup 1h",
+    "4h": "Setup 4h",
+    "Daily": "Setup Daily",
+    "Weekly": "Setup Weekly",
+    "Monthly": "Setup Monthly",
+}
+SETUP_TAG_CALLBACK = {
+    "1h": "/toggle_setup_1h",
+    "4h": "/toggle_setup_4h",
+    "Daily": "/toggle_setup_daily",
+    "Weekly": "/toggle_setup_weekly",
+    "Monthly": "/toggle_setup_monthly",
+}
+
+
+def get_setup_management_keyboard(session=None):
+    s = session or {}
+    enabled = set(s.get("enabled_setup_tags") or SETUP_TAG_ORDER)
+    rows = []
+    for tag in SETUP_TAG_ORDER:
+        is_on = tag in enabled
+        icon = "🟢" if is_on else "🔴"
+        rows.append([{"text": f"{icon} {SETUP_TAG_LABELS[tag]}", "callback_data": SETUP_TAG_CALLBACK[tag]}])
+    rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
+    return {"inline_keyboard": rows}
+
+
 def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
     rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
         [{"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
+        [{"text": "🎛 مدیریت ستاپ‌های معاملاتی", "callback_data": "/setup_management"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
