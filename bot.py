@@ -33,7 +33,7 @@ from strategy import (
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
-    extract_setup_tag, extract_setup_level, tag_setup_reason,
+    extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -1379,6 +1379,12 @@ def chart(chat_id, symbol, df, trade):
             _level_tag, setup_token, setup_value = extract_setup_level(trade_reason)
             if setup_token is not None:
                 setup_level_name, setup_level_value = setup_token, float(setup_value)
+            elif setup_tag in ('London', 'NewYork', 'Asia', 'ORB', 'Swing', 'Intraday'):
+                # سطح session/opening-range/swing است — قیمت دقیقش داخل reason
+                # به‌صورت ADAPTIVE_ANCHOR=<name>|ANCHOR=<value> ذخیره شده.
+                anchor_name, anchor_value = extract_adaptive_anchor(trade_reason)
+                if anchor_name is not None and anchor_value is not None:
+                    setup_level_name, setup_level_value = anchor_name, float(anchor_value)
             elif dated_df is not None and setup_tag and setup_tag != 'Daily':
                 # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
                 # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.
@@ -2984,7 +2990,6 @@ def trade_tracking_keyboard(chat_id):
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
-            [{'text': '🧭 نمایش آخرین مسیرهای ثبت‌شده', 'callback_data': '/trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
@@ -3013,10 +3018,7 @@ def trade_pipeline_report(chat_id):
 
 
 def export_trade_pipeline(chat_id):
-    if not TELEGRAM_TOKEN:
-        return False
-    if not is_admin(chat_id):
-        send_message(chat_id, '⛔ این خروجی (ردیابی کامل Pipeline) فقط برای ادمین در دسترس است. برای خروجی معاملات خودتان از دکمه «📦 خروجی کامل معاملات» استفاده کنید.')
+    if not is_allowed(chat_id) or not TELEGRAM_TOKEN:
         return False
     s = get_session(chat_id)
     pipeline = list(s.get('trade_pipeline_audit') or [])
@@ -3576,7 +3578,7 @@ def process_command(cmd,chat_id,message_id=None):
         s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
         live=latest_price(tmp['symbol'])
         send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
-    if cl in ('/open_positions','/positions','positions') or any(x in c.replace('‌','') for x in ('پوزیشن‌ها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
+    if cl in ('/open_positions','/positions','positions') or any(x in c.replace('\u200c','') for x in ('پوزیشنها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
     if cl in ('/add_long_symbol','/remove_long_symbol','/add_short_symbol','/remove_short_symbol'):
@@ -3658,8 +3660,10 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/today_trades':
         send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
         return
-    if cl=='/trade_pipeline':
-        send_message(chat_id, trade_pipeline_report(chat_id), trade_tracking_keyboard(chat_id))
+    if cl in ('/trade_pipeline', '/trade_tracking_menu'):
+        s2 = get_session(chat_id)
+        enabled = bool(s2.get('trade_pipeline_enabled', False))
+        send_message(chat_id, f"🧭 *ردیابی معاملات*\n\nوضعیت فعلی: {'🟢 روشن' if enabled else '🔴 خاموش'}\n\nاز این بخش فقط می‌توانید ردیابی را روشن/خاموش کنید یا خروجی JSON کامل آن را دریافت کنید.", trade_tracking_keyboard(chat_id))
         return
     if cl=='/toggle_trade_pipeline':
         s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False)
@@ -3721,6 +3725,14 @@ def handle_text(chat_id,text):
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
+    # Fallback: some Telegram clients/keyboards can alter zero-width non-joiner (ZWNJ,
+    # U+200C) characters when echoing a pressed reply-keyboard button back as text,
+    # which would otherwise make the exact-match lookup above silently fail (e.g. for
+    # "پوزیشن‌ها"). Retry with ZWNJ stripped from both sides before giving up.
+    raw_norm = raw.replace('\u200c', '')
+    for btn_text, cmd in fixed_buttons.items():
+        if btn_text.replace('\u200c', '') == raw_norm:
+            process_command(cmd, chat_id); return
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')

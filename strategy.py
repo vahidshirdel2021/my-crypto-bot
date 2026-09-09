@@ -532,49 +532,57 @@ def _adaptive_intraday_levels(d, before_idx, cfg):
     if len(day) < 5:
         return {}
 
-    min_candles = max(3, int(cfg.get("adaptive_min_level_candles", 6)))
     levels = {}
 
-    # UTC session buckets are intentional and configurable.  They are stable for
-    # crypto and do not introduce exchange-local DST ambiguity.
-    sessions = {
-        "ASIA": (0, 8),
-        "LONDON": (8, 13),
-        "NEW_YORK": (13, 21),
-    }
-    for name, (h0, h1) in sessions.items():
-        part = day[(day["_dt"].dt.hour >= h0) & (day["_dt"].dt.hour < h1)]
-        if len(part) >= min_candles:
-            levels[f"{name}_HIGH"] = {"price": float(part["high"].max()), "kind": f"{name}_HIGH", "count": len(part)}
-            levels[f"{name}_LOW"] = {"price": float(part["low"].min()), "kind": f"{name}_LOW", "count": len(part)}
+    # Session/opening-range/swing anchors are OFF by default: with the primary
+    # multi-timeframe scan already checking Monthly/Weekly/Daily/4h/1h directly on
+    # every closed candle, fresh 1h/4h levels arrive every 1-4 hours, so this
+    # secondary "Intraday" pool (London/NY/Asia/Opening-Range/Swing) is rarely
+    # needed and made it too easy for the bot to always find *some* setup. Set
+    # `adaptive_allow_session_swing_anchors: True` in strategy_config to re-enable.
+    if bool(cfg.get("adaptive_allow_session_swing_anchors", False)):
+        min_candles = max(3, int(cfg.get("adaptive_min_level_candles", 6)))
 
-    # Opening range: first N minutes of the UTC day. It becomes static once formed.
-    or_minutes = max(15, int(cfg.get("adaptive_opening_range_minutes", 30)))
-    day_start = pd.Timestamp(today, tz="UTC")
-    opening = day[(day["_dt"] >= day_start) & (day["_dt"] < day_start + pd.Timedelta(minutes=or_minutes))]
-    if len(opening) >= max(3, min_candles // 2) and len(work) >= len(opening) + 2:
-        levels["OPENING_RANGE_HIGH"] = {"price": float(opening["high"].max()), "kind": "OPENING_RANGE_HIGH", "count": len(opening)}
-        levels["OPENING_RANGE_LOW"] = {"price": float(opening["low"].min()), "kind": "OPENING_RANGE_LOW", "count": len(opening)}
+        # UTC session buckets are intentional and configurable.  They are stable for
+        # crypto and do not introduce exchange-local DST ambiguity.
+        sessions = {
+            "ASIA": (0, 8),
+            "LONDON": (8, 13),
+            "NEW_YORK": (13, 21),
+        }
+        for name, (h0, h1) in sessions.items():
+            part = day[(day["_dt"].dt.hour >= h0) & (day["_dt"].dt.hour < h1)]
+            if len(part) >= min_candles:
+                levels[f"{name}_HIGH"] = {"price": float(part["high"].max()), "kind": f"{name}_HIGH", "count": len(part)}
+                levels[f"{name}_LOW"] = {"price": float(part["low"].min()), "kind": f"{name}_LOW", "count": len(part)}
 
-    # Confirmed intraday swings. The last two candles are excluded; a swing must
-    # have candles on both sides, so the level is not based on the current move.
-    swing_left = max(2, int(cfg.get("adaptive_swing_left", 2)))
-    swing_right = max(2, int(cfg.get("adaptive_swing_right", 2)))
-    if len(day) >= swing_left + swing_right + 3:
-        highs = day["high"].to_numpy(dtype=float)
-        lows = day["low"].to_numpy(dtype=float)
-        best_h = None; best_l = None
-        for i in range(swing_left, len(day) - swing_right):
-            if i >= len(day) - 2:
-                continue
-            if highs[i] >= np.max(highs[i-swing_left:i]) and highs[i] > np.max(highs[i+1:i+1+swing_right]):
-                best_h = float(highs[i])
-            if lows[i] <= np.min(lows[i-swing_left:i]) and lows[i] < np.min(lows[i+1:i+1+swing_right]):
-                best_l = float(lows[i])
-        if best_h is not None:
-            levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
-        if best_l is not None:
-            levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
+        # Opening range: first N minutes of the UTC day. It becomes static once formed.
+        or_minutes = max(15, int(cfg.get("adaptive_opening_range_minutes", 30)))
+        day_start = pd.Timestamp(today, tz="UTC")
+        opening = day[(day["_dt"] >= day_start) & (day["_dt"] < day_start + pd.Timedelta(minutes=or_minutes))]
+        if len(opening) >= max(3, min_candles // 2) and len(work) >= len(opening) + 2:
+            levels["OPENING_RANGE_HIGH"] = {"price": float(opening["high"].max()), "kind": "OPENING_RANGE_HIGH", "count": len(opening)}
+            levels["OPENING_RANGE_LOW"] = {"price": float(opening["low"].min()), "kind": "OPENING_RANGE_LOW", "count": len(opening)}
+
+        # Confirmed intraday swings. The last two candles are excluded; a swing must
+        # have candles on both sides, so the level is not based on the current move.
+        swing_left = max(2, int(cfg.get("adaptive_swing_left", 2)))
+        swing_right = max(2, int(cfg.get("adaptive_swing_right", 2)))
+        if len(day) >= swing_left + swing_right + 3:
+            highs = day["high"].to_numpy(dtype=float)
+            lows = day["low"].to_numpy(dtype=float)
+            best_h = None; best_l = None
+            for i in range(swing_left, len(day) - swing_right):
+                if i >= len(day) - 2:
+                    continue
+                if highs[i] >= np.max(highs[i-swing_left:i]) and highs[i] > np.max(highs[i+1:i+1+swing_right]):
+                    best_h = float(highs[i])
+                if lows[i] <= np.min(lows[i-swing_left:i]) and lows[i] < np.min(lows[i+1:i+1+swing_right]):
+                    best_l = float(lows[i])
+            if best_h is not None:
+                levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
+            if best_l is not None:
+                levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
 
     # Higher-timeframe anchors: high/low of the most recently *closed* 1h and 4h
     # candle, calendar week, and calendar month. Causal by construction (shift(1) per
@@ -687,6 +695,22 @@ def extract_setup_level(reason):
     return _LEVEL_TOKEN_TAG.get(key), key, value
 
 
+def extract_adaptive_anchor(reason):
+    """Parse the ``ADAPTIVE_ANCHOR=<name>|ANCHOR=<value>`` pair out of an
+    adaptive-detection reason string (session/opening-range/swing anchors
+    that fall outside the 5 main tagged levels). Returns
+    ``(anchor_name, anchor_value)`` or ``(None, None)``."""
+    reason = str(reason or "")
+    m_name = re.search(r"ADAPTIVE_ANCHOR=([A-Za-z0-9_]+)", reason)
+    m_val = re.search(r"\bANCHOR=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", reason)
+    if not m_name or not m_val:
+        return None, None
+    try:
+        return m_name.group(1), float(m_val.group(1))
+    except (TypeError, ValueError):
+        return None, None
+
+
 def _adaptive_anchor_tag(reason):
     """Map an ``ADAPTIVE_ANCHOR=<name>`` token (produced by
     `_detect_adaptive_liquidity`) onto the same [SETUP ...] taxonomy used for
@@ -701,6 +725,16 @@ def _adaptive_anchor_tag(reason):
         return "Weekly"
     if name.startswith(("PM",)):
         return "Monthly"
+    if name.startswith("LONDON"):
+        return "London"
+    if name.startswith("NEW_YORK"):
+        return "NewYork"
+    if name.startswith("ASIA"):
+        return "Asia"
+    if name.startswith("OPENING_RANGE"):
+        return "ORB"
+    if name.startswith("SWING"):
+        return "Swing"
     return "Intraday"
 
 
