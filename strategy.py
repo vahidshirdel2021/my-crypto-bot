@@ -193,6 +193,17 @@ STRATEGY_DEFAULTS = {
     "sweep_enable_retest_continuation": True,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
+    # کدام سطوح کلیدی (ستاپ‌ها) اجازه‌ی تولید سیگنال دارند. حذف یک تگ از این لیست
+    # یعنی آن سطح کاملاً از مسیر اسکن مستقیم + مسیر Adaptive + بازیابی Active-Setup
+    # (فقط برای Daily) نادیده گرفته می‌شود. پیش‌فرض: همه فعال.
+    "enabled_setup_tags": ["Monthly", "Weekly", "Daily", "4h", "1h"],
+    # فشردگی سطوح: وقتی سطوح فعال (بالا) همه در یک بازه‌ی تنگ جمع شوند (دامنه‌ی
+    # سقف تا کف ≤ ضریب زیر × ATR)، به‌جای سویپ تک‌سطحی، کل خوشه یک ناحیه در
+    # نظر گرفته می‌شود و فقط منتظر شکست تأییدشده‌ی سقف/کف همان ناحیه می‌مانیم.
+    "level_compression_enabled": True,
+    "level_compression_max_atr": 1.2,
+    "level_compression_max_wait_candles": 12,
+    "level_compression_breakout_buffer_atr": 0.15,
     # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
     "active_setup_enabled": True,
     "active_setup_lookback_candles": 3,
@@ -514,6 +525,23 @@ def _compute_prev_day_levels(df):
     return d, float(pdh), float(pdl)
 
 
+def _pdh_pdl_at(d, idx):
+    """Per-candle-correct PDH/PDL, i.e. the value that was actually valid AS OF
+    that specific candle's own calendar day — not today's (necessary because
+    `_compute_prev_day_levels` only returns a single scalar for the *latest*
+    row; `d`'s merged `_pdh`/`_pdl` columns are already correct per-row, this
+    just reads the right one). Prevents a backward-lookback window that spans
+    a day rollover from silently re-evaluating yesterday's candles against
+    today's (freshly-shifted) PDH/PDL instead of the one that was live then."""
+    if d is None or idx is None or idx < 0 or idx >= len(d) or "_pdh" not in d.columns:
+        return None, None
+    row = d.iloc[idx]
+    ph, pl = row.get("_pdh"), row.get("_pdl")
+    if pd.isna(ph) or pd.isna(pl):
+        return None, None
+    return float(ph), float(pl)
+
+
 
 def _adaptive_intraday_levels(d, before_idx, cfg):
     """Build conservative, non-future intraday liquidity anchors.
@@ -711,6 +739,28 @@ def extract_adaptive_anchor(reason):
         return None, None
 
 
+def extract_sweep_anchor_target(reason):
+    """Parse the generic ``ANCHOR=<value>|TARGET=<value>`` pair that both the
+    direct multi-timeframe sweep (`_detect_named_level_sweep`, tags
+    Monthly/Weekly/Daily/4h/1h) and the Adaptive sweep (`_detect_adaptive_liquidity`)
+    now embed in their reason strings. Returns ``(anchor_value, target_value)``
+    or ``(None, None)`` when absent (e.g. the Daily retest-continuation /
+    Active-Setup reasons, which intentionally fall back to PDH/PDL in
+    `build_sweep_trade_plan`)."""
+    reason = str(reason or "")
+    m_anchor = re.search(r"\bANCHOR=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", reason)
+    m_target = re.search(r"\bTARGET=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", reason)
+    anchor = None
+    target = None
+    if m_anchor:
+        try: anchor = float(m_anchor.group(1))
+        except (TypeError, ValueError): anchor = None
+    if m_target:
+        try: target = float(m_target.group(1))
+        except (TypeError, ValueError): target = None
+    return anchor, target
+
+
 def _adaptive_anchor_tag(reason):
     """Map an ``ADAPTIVE_ANCHOR=<name>`` token (produced by
     `_detect_adaptive_liquidity`) onto the same [SETUP ...] taxonomy used for
@@ -758,12 +808,12 @@ def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label
         reclaimed = (not require_reclaim) or (c < hi)
         reversal = (not require_reversal) or (c < o)
         if reclaimed and reversal:
-            return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی", atr
+            return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی|ANCHOR={hi:.10g}|TARGET={lo:.10g}", atr
     if l <= lo - min_sweep:
         reclaimed = (not require_reclaim) or (c > lo)
         reversal = (not require_reversal) or (c > o)
         if reclaimed and reversal:
-            return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی", atr
+            return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی|ANCHOR={lo:.10g}|TARGET={hi:.10g}", atr
     return None, None, None
 
 
@@ -998,6 +1048,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
     # 5m is more noisy: require structure confirmation. Keep 15m faster.
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
+    enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
 
     def detect_daily_at(idx):
         """Original Daily-only detection (direct sweep + retest-continuation).
@@ -1022,6 +1073,93 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 return sig, reason, atr
         return None, None, None
 
+    def _active_level_pairs_at(idx):
+        """(hi, lo) for every currently-enabled tag, evaluated as of idx.
+        Uses the per-candle-correct PDH/PDL (see `_pdh_pdl_at`) rather than the
+        single latest-snapshot `pdh, pdl`, since this helper is also used for
+        the compression age-walk below, which looks back over several
+        candles and can straddle a day rollover."""
+        htf = _compute_prev_htf_levels(d, idx)
+        pairs = {}
+        for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
+            if tag not in enabled_tags:
+                continue
+            if tag == "Daily":
+                hi, lo = _pdh_pdl_at(d, idx)
+            else:
+                hi, lo = htf.get(hi_key), htf.get(lo_key)
+            if hi is not None and lo is not None:
+                pairs[tag] = (hi, lo)
+        return pairs
+
+    def detect_compression_at(idx):
+        """Level-compression handling: when the enabled key levels are all
+        clustered within `level_compression_max_atr` x ATR of each other, a
+        sweep of any single one of them is unreliable — a small wick can tag
+        two or three overlapping levels at once and whipsaw the mean-reversion
+        logic above. Instead of trading each level independently, treat the
+        whole cluster as one zone (ceiling = highest level, floor = lowest
+        level) and only trade a *confirmed* breakout of either side. While
+        the zone stays compressed (up to `level_compression_max_wait_candles`),
+        the normal per-level scan is suppressed entirely for this candle —
+        once the wait window elapses without a breakout, or the levels spread
+        back out, the lock is released and the normal scan resumes."""
+        if idx < 5 or idx >= len(d) or not bool(cfg.get("level_compression_enabled", True)):
+            return None, None, None, None, False
+        curr = d.iloc[idx]
+        atr = _safe_float(curr.get("atr"), 0.0)
+        if not np.isfinite(atr) or atr <= 0:
+            return None, None, None, None, False
+        pairs = _active_level_pairs_at(idx)
+        if len(pairs) < 2:
+            return None, None, None, None, False
+        ceiling = max(p[0] for p in pairs.values())
+        floor = min(p[1] for p in pairs.values())
+        domain = ceiling - floor
+        k = max(0.1, float(cfg.get("level_compression_max_atr", 1.2)))
+        if domain > atr * k:
+            return None, None, None, None, False
+
+        # یک شکستِ تأییدشده همیشه قابل معامله است، صرف‌نظر از اینکه فشردگی
+        # از چه زمانی برقرار بوده — محدودیت زمانی (max_wait) فقط برای زمانی
+        # است که هنوز شکستی رخ نداده (وگرنه یک محدوده‌ی آرام و طولانی‌مدت که
+        # بالاخره شکسته می‌شود، به‌اشتباه نادیده گرفته می‌شد).
+        buffer_atr = atr * max(0.0, float(cfg.get("level_compression_breakout_buffer_atr", 0.15)))
+        o, c = float(curr["open"]), float(curr["close"])
+        n_levels = len(pairs)
+        if c >= ceiling + buffer_atr and c > o:
+            reason = (f"شکست تأییدشده‌ی سقف ناحیه‌ی فشرده (Ceiling={ceiling:.6g} | دامنه={domain:.4g} | "
+                      f"{n_levels} سطح هم‌پوشان) + کندل صعودی|ANCHOR={ceiling:.10g}")
+            return "BUY", reason, atr, "Compression", True
+        if c <= floor - buffer_atr and c < o:
+            reason = (f"شکست تأییدشده‌ی کف ناحیه‌ی فشرده (Floor={floor:.6g} | دامنه={domain:.4g} | "
+                      f"{n_levels} سطح هم‌پوشان) + کندل نزولی|ANCHOR={floor:.10g}")
+            return "SELL", reason, atr, "Compression", True
+
+        # هنوز شکستی تأیید نشده — سن این فشردگی (چند کندل پشت‌سرهم برقرار بوده)
+        # را می‌سنجیم؛ اگر از حد انتظار طولانی‌تر شده، قفل را آزاد می‌کنیم تا
+        # اسکن معمول تک‌سطحی دوباره ادامه پیدا کند (به‌جای انتظار بی‌پایان).
+        max_wait = max(1, int(cfg.get("level_compression_max_wait_candles", 12)))
+        lock_age = 0
+        for back in range(1, max_wait + 1):
+            j = idx - back
+            if j < 5:
+                break
+            prev_atr = _safe_float(d.iloc[j].get("atr"), 0.0)
+            prev_pairs = _active_level_pairs_at(j)
+            if prev_atr <= 0 or len(prev_pairs) < 2:
+                break
+            prev_ceiling = max(p[0] for p in prev_pairs.values())
+            prev_floor = min(p[1] for p in prev_pairs.values())
+            if (prev_ceiling - prev_floor) > prev_atr * k:
+                break
+            lock_age = back
+        if lock_age >= max_wait:
+            return None, None, None, None, False  # قفل منقضی شده -> اسکن معمول ادامه یابد
+        # هنوز داخل قفل هستیم اما شکست تأیید نشده -> این کندل بدون سیگنال
+        # می‌ماند و اسکن تک‌سطحی معمول هم برای همین کندل غیرفعال می‌شود.
+        return None, None, None, None, True
+
     def detect_at(idx):
         """Multi-timeframe scan: checks Monthly, Weekly, Daily, 4h and 1h
         levels (in that priority order) for a sweep on this exact candle."""
@@ -1031,8 +1169,16 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         atr = _safe_float(curr.get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
             return None, None, None, None
+        comp_sig, comp_reason, comp_atr, comp_tag, locked = detect_compression_at(idx)
+        if comp_sig:
+            return comp_sig, comp_reason, comp_atr, comp_tag
+        if locked:
+            # فشردگی برقرار است و هنوز شکست تأیید نشده -> اسکن تک‌سطحی این کندل را رد می‌کنیم
+            return None, None, None, None
         htf_levels = _compute_prev_htf_levels(d, idx)
         for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
+            if tag not in enabled_tags:
+                continue
             if tag == "Daily":
                 hi, lo = pdh, pdl
             else:
@@ -1057,6 +1203,11 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
     # شناسایی‌شده بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
     # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
+    # (سیگنال «فشردگی» از قبل روی بسته‌شدن قیمت فراتر از سقف/کف ناحیه تأیید شده
+    # است -- برخلاف سویپ میانگین‌گرا، دورشدن قیمت از سطح دقیقاً همان چیزی است
+    # که شکست را تأیید می‌کند، نه نشانه‌ی تعقیب قیمت -- پس این گارد را ندارد.)
+    if sig and tag == "Compression":
+        return sig, tag_setup_reason(tag, reason)
     try:
         live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
     except Exception:
@@ -1098,9 +1249,11 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 adaptive_atr if adaptive_atr else guard_atr,
                 cfg
             ):
-                return adaptive_sig, tag_setup_reason(_adaptive_anchor_tag(adaptive_reason), adaptive_reason)
+                _adaptive_tag = _adaptive_anchor_tag(adaptive_reason)
+                if _adaptive_tag in enabled_tags:
+                    return adaptive_sig, tag_setup_reason(_adaptive_tag, adaptive_reason)
 
-    if not bool(cfg.get("active_setup_enabled", True)):
+    if not bool(cfg.get("active_setup_enabled", True)) or "Daily" not in enabled_tags:
         return None, "ستاپ جدیدی ثبت نشد"
 
     try:
@@ -2081,7 +2234,13 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
     if timeframe in ("5min", "15min"):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
         if sig in ("BUY","SELL"):
-            plan, _ = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price)
+            m_active = re.search(r"ACTIVE_SETUP_INDEX=(\d+)", reason or "")
+            active_setup_index = int(m_active.group(1)) if m_active else None
+            anchor_level, target_level = extract_sweep_anchor_target(reason)
+            plan, _ = build_sweep_trade_plan(
+                df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price,
+                setup_index=active_setup_index, anchor_level=anchor_level, target_level=target_level
+            )
             consider(sig, "liquidity_sweep", reason, float(cfg.get("sweep_score_bonus",8.0)), plan)
 
     # 2) Keep V1/V2 trend/breakout families, but score them by independent evidence buckets.
@@ -2142,16 +2301,8 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
                 active_setup_index = int(m_active.group(1))
         anchor_level = None
         target_level = None
-        if family == "liquidity_sweep" and "ADAPTIVE_SWEEP" in (reason or ""):
-            import re as _re
-            ma = _re.search(r"\bANCHOR=([0-9.eE+-]+)", reason or "")
-            mt = _re.search(r"\bTARGET=([0-9.eE+-]+)", reason or "")
-            if ma:
-                try: anchor_level = float(ma.group(1))
-                except Exception: anchor_level = None
-            if mt:
-                try: target_level = float(mt.group(1))
-                except Exception: target_level = None
+        if family == "liquidity_sweep":
+            anchor_level, target_level = extract_sweep_anchor_target(reason)
         if family == "liquidity_sweep":
             plan, plan_reason = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels,

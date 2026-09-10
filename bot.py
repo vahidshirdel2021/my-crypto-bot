@@ -34,6 +34,7 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
+    extract_sweep_anchor_target,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -45,6 +46,7 @@ from ui import (
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
+    get_setup_management_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -554,6 +556,7 @@ def default_session():
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
+        'enabled_setup_tags': list(LEVEL_SETUP_DEFS.keys()),
         'paper_positions': [],
         'closed_positions': [],
         'trade_audit': [],
@@ -613,7 +616,11 @@ def normalize_session(data):
         s[k] = float(s.get(k, default_session()[k]))
     if s.get('timeframe') not in SUPPORTED_TRADING_TIMEFRAMES:
         s['timeframe'] = '5min'
+    valid_tags = list(LEVEL_SETUP_DEFS.keys())
+    stored_tags = [t for t in (data.get('enabled_setup_tags') or []) if t in valid_tags]
+    s['enabled_setup_tags'] = stored_tags or valid_tags
     s['strategy_config'] = get_timeframe_preset(s['timeframe'])
+    s['strategy_config']['enabled_setup_tags'] = s['enabled_setup_tags']
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
@@ -1385,6 +1392,13 @@ def chart(chat_id, symbol, df, trade):
                 anchor_name, anchor_value = extract_adaptive_anchor(trade_reason)
                 if anchor_name is not None and anchor_value is not None:
                     setup_level_name, setup_level_value = anchor_name, float(anchor_value)
+            elif setup_tag == 'Compression':
+                # سقف/کف ناحیه‌ی فشرده که شکسته شده، به‌صورت ANCHOR=<value> در
+                # reason ذخیره شده (بدون سطح مخالف، چون منطق شکست است نه ریورس).
+                anchor_value, _ = extract_sweep_anchor_target(trade_reason)
+                if anchor_value is not None:
+                    setup_level_name = 'Ceiling' if side_long(trade.get('side', 'BUY')) else 'Floor'
+                    setup_level_value = float(anchor_value)
             elif dated_df is not None and setup_tag and setup_tag != 'Daily':
                 # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
                 # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.
@@ -3216,6 +3230,7 @@ def reload_and_restart_scan(chat_id, message_id=None):
     try:
         s = get_session(chat_id)
         s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
+        s['strategy_config']['enabled_setup_tags'] = s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys())
         save_session(chat_id)
         start_scan(chat_id, message_id)
         send_message(chat_id, "🔄 *تنظیمات استراتژی بر اساس تایم‌فریم فعلی بازسازی شد و اسکن فعال گردید.*")
@@ -3541,13 +3556,38 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_tf_'):
         tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
         if cl in tf_map:
-            s['timeframe']=tf_map[cl]; s['strategy_config']=get_timeframe_preset(s['timeframe']); save_session(chat_id); menu(chat_id, message_id); return
+            s['timeframe']=tf_map[cl]; s['strategy_config']=get_timeframe_preset(s['timeframe'])
+            s['strategy_config']['enabled_setup_tags'] = s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys())
+            save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
         send_message(chat_id, market_report(chat_id)); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
         edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}", get_entry_diag_keyboard(enabled), message_id); return
+    if cl == '/setup_management':
+        edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
+    if cl.startswith('/toggle_setup_'):
+        toggle_tag_map = {
+            '/toggle_setup_1h': '1h', '/toggle_setup_4h': '4h',
+            '/toggle_setup_daily': 'Daily', '/toggle_setup_weekly': 'Weekly',
+            '/toggle_setup_monthly': 'Monthly',
+        }
+        tag = toggle_tag_map.get(cl)
+        if tag:
+            current = list(s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys()))
+            if tag in current:
+                if len(current) > 1:
+                    current.remove(tag)
+                else:
+                    send_message(chat_id, "⚠️ حداقل یک ستاپ باید فعال باقی بماند.")
+                    edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
+            else:
+                current.append(tag)
+            s['enabled_setup_tags'] = current
+            s['strategy_config']['enabled_setup_tags'] = current
+            save_session(chat_id)
+            edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
     if cl == '/toggle_entry_diag':
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
