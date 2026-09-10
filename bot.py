@@ -65,6 +65,26 @@ RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
 DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
 
+
+def _local_tz():
+    if ZoneInfo is not None:
+        try:
+            return ZoneInfo(DAILY_CLOSE_TZ)
+        except Exception:
+            return None
+    return None
+
+
+def fmt_scan_time(ts=None):
+    """زمان اسکن را به فرمت خوانا و بر اساس تایم‌زون تهران برمی‌گرداند."""
+    try:
+        ts = float(ts if ts is not None else time.time())
+        tz = _local_tz()
+        dt = datetime.fromtimestamp(ts, tz=tz) if tz else datetime.utcfromtimestamp(ts)
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return '—'
+
 # تایم‌فریم مدیریت سریع‌تر از تایم‌فریم اصلی معامله است.
 # این نگاشت فقط برای مدیریت پوزیشن است و هیچ اثری روی منطق ورود/سیگنال ندارد.
 POSITION_MANAGEMENT_TIMEFRAME_MAP = {
@@ -1354,6 +1374,59 @@ def format_trade_status(p, price=None):
     return '\n'.join(lines)
 
 
+def compute_trade_setup_levels(df, tf, trade):
+    """سطح دقیقی که یک معامله روی آن باز شده (PDH/PDL/P4H/P1L/PWH/PWL/PMH/PML یا
+    لنگر Adaptive) را از روی reason معامله استخراج می‌کند. هم چارت PNG تلگرام و
+    هم چارت تعاملی MiniApp از همین یک منبع مشترک استفاده می‌کنند تا همیشه همان
+    سطحی که واقعاً باعث ورود شده رسم شود، نه همیشه PDH/PDL پیش‌فرض.
+    برمی‌گرداند: (d, pdh, pdl, setup_tag, setup_level_name, setup_level_value)
+    """
+    pdh = pdl = None
+    setup_level_name = None
+    setup_level_value = None
+    setup_tag = None
+
+    if tf in ('5min', '15min'):
+        try:
+            dated_df, pdh, pdl = _compute_prev_day_levels(df)
+        except Exception:
+            dated_df = None
+        if dated_df is not None and '_date' in dated_df.columns:
+            today_date = dated_df['_date'].iloc[-1]
+            today_df = dated_df[dated_df['_date'] == today_date]
+            d = today_df.copy().reset_index(drop=True) if len(today_df) >= 10 else df.tail(60).copy().reset_index(drop=True)
+        else:
+            d = df.tail(60).copy().reset_index(drop=True)
+
+        trade_reason = trade.get('entry_reason') or trade.get('signal_reason') or ''
+        setup_tag = extract_setup_tag(trade_reason)
+        _level_tag, setup_token, setup_value = extract_setup_level(trade_reason)
+        if setup_token is not None:
+            setup_level_name, setup_level_value = setup_token, float(setup_value)
+        elif setup_tag in ('London', 'NewYork', 'Asia', 'ORB', 'Swing', 'Intraday'):
+            # سطح session/opening-range/swing است — قیمت دقیقش داخل reason
+            # به‌صورت ADAPTIVE_ANCHOR=<name>|ANCHOR=<value> ذخیره شده.
+            anchor_name, anchor_value = extract_adaptive_anchor(trade_reason)
+            if anchor_name is not None and anchor_value is not None:
+                setup_level_name, setup_level_value = anchor_name, float(anchor_value)
+        elif dated_df is not None and setup_tag and setup_tag != 'Daily':
+            # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
+            # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.
+            htf = _compute_prev_htf_levels(dated_df, len(dated_df) - 2)
+            spec = LEVEL_SETUP_DEFS.get(setup_tag)
+            if spec:
+                hi_key, lo_key, _, _ = spec
+                hi, lo = htf.get(hi_key), htf.get(lo_key)
+                if hi is not None and lo is not None:
+                    is_long_setup = side_long(trade.get('side', 'BUY'))
+                    setup_level_name = lo_key if is_long_setup else hi_key
+                    setup_level_value = lo if is_long_setup else hi
+    else:
+        d = df.tail(50).copy().reset_index(drop=True)
+
+    return d, pdh, pdl, setup_tag, setup_level_name, setup_level_value
+
+
 def chart(chat_id, symbol, df, trade):
     try:
         if df.empty or len(df) < 5:
@@ -1361,50 +1434,7 @@ def chart(chat_id, symbol, df, trade):
 
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
-        pdh = pdl = None
-        # سطحی که این ستاپ دقیقاً روی آن باز شده (مثلاً P4H/P1L/PWH/...)، تا به‌جای
-        # همیشه رسم PDH/PDL پیش‌فرض، سطح مرتبط با همان معامله روی چارت نشان داده شود.
-        setup_level_name = None
-        setup_level_value = None
-        setup_tag = None
-
-        if tf in ('5min', '15min'):
-            try:
-                dated_df, pdh, pdl = _compute_prev_day_levels(df)
-            except Exception:
-                dated_df = None
-            if dated_df is not None and '_date' in dated_df.columns:
-                today_date = dated_df['_date'].iloc[-1]
-                today_df = dated_df[dated_df['_date'] == today_date]
-                d = today_df.copy().reset_index(drop=True) if len(today_df) >= 10 else df.tail(60).copy().reset_index(drop=True)
-            else:
-                d = df.tail(60).copy().reset_index(drop=True)
-
-            trade_reason = trade.get('entry_reason') or trade.get('signal_reason') or ''
-            setup_tag = extract_setup_tag(trade_reason)
-            _level_tag, setup_token, setup_value = extract_setup_level(trade_reason)
-            if setup_token is not None:
-                setup_level_name, setup_level_value = setup_token, float(setup_value)
-            elif setup_tag in ('London', 'NewYork', 'Asia', 'ORB', 'Swing', 'Intraday'):
-                # سطح session/opening-range/swing است — قیمت دقیقش داخل reason
-                # به‌صورت ADAPTIVE_ANCHOR=<name>|ANCHOR=<value> ذخیره شده.
-                anchor_name, anchor_value = extract_adaptive_anchor(trade_reason)
-                if anchor_name is not None and anchor_value is not None:
-                    setup_level_name, setup_level_value = anchor_name, float(anchor_value)
-            elif dated_df is not None and setup_tag and setup_tag != 'Daily':
-                # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
-                # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.
-                htf = _compute_prev_htf_levels(dated_df, len(dated_df) - 2)
-                spec = LEVEL_SETUP_DEFS.get(setup_tag)
-                if spec:
-                    hi_key, lo_key, _, _ = spec
-                    hi, lo = htf.get(hi_key), htf.get(lo_key)
-                    if hi is not None and lo is not None:
-                        is_long_setup = side_long(trade.get('side', 'BUY'))
-                        setup_level_name = lo_key if is_long_setup else hi_key
-                        setup_level_value = lo if is_long_setup else hi
-        else:
-            d = df.tail(50).copy().reset_index(drop=True)
+        d, pdh, pdl, setup_tag, setup_level_name, setup_level_value = compute_trade_setup_levels(df, tf, trade)
 
         fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
         fig.patch.set_facecolor('#0f172a')
@@ -1545,7 +1575,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
-    m_score=re.search(r'کیفیت (\d+)/100 \(([^)]+)\)', reason or '')
+    # لایه V1.5 Enhanced Selection رشته دلیل را با فرمت انگلیسی «Quality XX/100»
+    # (بدون برچسب داخل پرانتز) می‌سازد، در حالی که build_trade_plan/build_sweep_trade_plan
+    # فرمت فارسی «کیفیت XX/100 (برچسب)» را تولید می‌کنند. قبلاً فقط فرمت فارسی match
+    # می‌شد و در نتیجه quality_score برای اکثر معاملات V1.5 همیشه None ثبت می‌شد.
+    m_score=re.search(r'(?:کیفیت|Quality) (\d+)/100(?: \(([^)]+)\))?', reason or '')
     if m_score:
         quality_score=int(m_score.group(1)); quality_label=m_score.group(2)
     m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
@@ -2278,7 +2312,15 @@ def _build_open_positions_view(chat_id, prices=None):
             ]
         except Exception as exc:
             logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
-    return '\n'.join(lines), get_positions_keyboard(positions)
+    chart_urls = {}
+    for p in positions:
+        try:
+            url = miniapp_chart_url(p['symbol'], p.get('timeframe', '5min'))
+            if url:
+                chart_urls[p['symbol']] = url
+        except Exception:
+            continue
+    return '\n'.join(lines), get_positions_keyboard(positions, chart_urls)
 
 
 def _send_or_edit_positions_view(chat_id, message_id=None, force_send=False):
@@ -2506,16 +2548,42 @@ def _breakout_filter_diagnostics(df, filters=None, strategy_config=None):
 
 
 def _pipeline_record(chat_id, symbol, stage, status='', reason='', signal=None, data=None):
-    """Persist an end-to-end scan/entry pipeline event when the audit toggle is on."""
+    """Persist an end-to-end scan/entry pipeline event when the audit toggle is on.
+
+    هر رویداد بلافاصله زیر نماد، زمان دقیق همان اسکن را (هم به‌صورت epoch و هم
+    خوانا با تایم‌زون تهران) ثبت می‌کند. همچنین بر اساس سیستم ستاپ‌های چندسطحی
+    جدید (Monthly/Weekly/Daily/4h/1h) تگ ستاپ و سطح دقیق شناسایی‌شده از روی
+    reason/سیگنال استخراج و در رویداد ذخیره می‌شود تا مسیر ممیزی همیشه با آخرین
+    ساختار استراتژی هماهنگ باشد.
+    """
     try:
         s = get_session(chat_id)
         if not s.get('trade_pipeline_enabled', False):
             return
+        scan_ts = time.time()
+        reason_text = str(reason or '')
+        signal_reason = ''
+        if isinstance(signal, dict):
+            signal_reason = str(signal.get('reason') or signal.get('signal_reason') or '')
+        setup_source = reason_text or signal_reason
+        try:
+            setup_tag = extract_setup_tag(setup_source) or None
+        except Exception:
+            setup_tag = None
+        try:
+            level_tag, level_token, level_value = extract_setup_level(setup_source)
+        except Exception:
+            level_tag, level_token, level_value = (None, None, None)
         event = {
-            'pipeline_id': f"{symbol}:{s.get('timeframe','5min')}:{int(time.time()*1000)}",
-            'symbol': symbol, 'timeframe': s.get('timeframe','5min'),
+            'pipeline_id': f"{symbol}:{s.get('timeframe','5min')}:{int(scan_ts*1000)}",
+            'symbol': symbol,
+            'scan_time': fmt_scan_time(scan_ts),
+            'timeframe': s.get('timeframe','5min'),
             'stage': str(stage), 'status': str(status or ''),
-            'reason': str(reason or ''), 'signal': signal, 'ts': time.time(),
+            'reason': reason_text, 'signal': signal,
+            'setup_tag': setup_tag,
+            'setup_level': {'timeframe': level_tag, 'name': level_token, 'value': level_value} if level_tag else None,
+            'ts': scan_ts,
             'data': data or {},
         }
         s.setdefault('trade_pipeline_audit', []).append(event)
@@ -2703,12 +2771,31 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
         lines.append('\n' + _entry_diag_next_step([x[0] for x in active_items]))
     return '\n'.join(lines)
 
+def _active_tf_regime_status(tf):
+    """رژیم واقعی‌ای که همین الان روی تایم‌فریم فعال کاربر، فیلتر ورود خلاف‌جهت را
+    فعال/غیرفعال می‌کند (همان چیزی که scan_loop به get_signal_with_reason پاس می‌دهد) —
+    مجزا از «وضعیت کلی بازار» که فقط بر اساس BTC/ETH ۴ساعته است و صرفاً واچ‌لیست را
+    انتخاب می‌کند، نه فیلتر ورود را."""
+    macro_extreme = MARKET_REGIME_CACHE.get('extreme')
+    micro_cache = TIMEFRAME_REGIME_CACHE.get(tf) or {}
+    micro_extreme = micro_cache.get('extreme')
+    combined = combine_extreme_regime(macro_extreme, micro_extreme)
+    if combined == 'BULLISH':
+        return '🟢 صعودی قوی — ورود فروش مسدود'
+    if combined == 'BEARISH':
+        return '🔴 نزولی قوی — ورود خرید مسدود'
+    return '➡️ بدون فیلتر جهت‌دار (هر دو جهت مجاز)'
+
+
 def _simple_status_report(chat_id):
     """گزارش دوره‌ای ساده: وضعیت کلی بازار، قیمت لحظه‌ای BTC/ETH، موجودی کیف پول
     و سود/زیان لحظه‌ای پوزیشن‌های باز — به‌جای داشبورد طولانی تشخیصی."""
     s = get_session(chat_id)
     regime = MARKET_REGIME_CACHE.get('regime', 'NEUTRAL')
     regime_label = {'BULLISH': '📈 صعودی', 'BEARISH': '📉 نزولی', 'NEUTRAL': '➡️ رنج'}.get(regime, '➡️ رنج')
+    tf = s.get('timeframe', '5min')
+    tf_label = TF_DISPLAY.get(tf, tf)
+    active_tf_status = _active_tf_regime_status(tf)
 
     btc_price = latest_price('BTC')
     eth_price = latest_price('ETH')
@@ -2732,7 +2819,8 @@ def _simple_status_report(chat_id):
     lines = [
         '📊 *وضعیت بازار و حساب*',
         '━━━━━━━━━━━━━━━━━━━━',
-        f'🧭 وضعیت بازار: {regime_label}',
+        f'🧭 وضعیت کلی بازار (BTC/ETH ۴h): {regime_label}',
+        f'⚡ رژیم تایم‌فریم فعال ({tf_label}): {active_tf_status}',
         f'₿ BTC: `{fmt(btc_price) if btc_price is not None else "—"}`',
         f'Ξ ETH: `{fmt(eth_price) if eth_price is not None else "—"}`',
         f'💰 موجودی کیف پول: `{balance:.2f} USDT`',
@@ -3016,10 +3104,17 @@ def trade_pipeline_report(chat_id):
         grouped.setdefault(key, []).append(e)
     for key, rows in list(grouped.items())[-40:]:
         last = rows[-1]
+        first = rows[0]
         path = ' → '.join(str(x.get('stage') or '—') for x in rows[-8:])
         status = last.get('status', '—')
         reason = last.get('reason', '—')
-        lines.append(f"• `{key}` → `{status}`\n  مسیر: `{path}`\n  علت نهایی: {reason}")
+        scan_time = first.get('scan_time') or fmt_scan_time(first.get('ts'))
+        setup_tag = last.get('setup_tag') or first.get('setup_tag')
+        line = f"• `{key}` → `{status}`\n  🕒 زمان اسکن: `{scan_time}`"
+        if setup_tag:
+            line += f"\n  🎯 ستاپ: `{setup_tag}`"
+        line += f"\n  مسیر: `{path}`\n  علت نهایی: {reason}"
+        lines.append(line)
     return '\n'.join(lines)
 
 
@@ -3296,6 +3391,41 @@ def combine_extreme_regime(macro, micro):
     if macro and micro and macro != micro:
         return None
     return macro or micro
+
+
+# --- فیلتر «هم‌رژیمی با داشبورد بازار» - پیش از رسیدن به مرحله‌ی اسکن سطوح -------------
+# هدف: وقتی داشبورد بازار (همان ۱۰ ارز لیدر MARKET_REPORT_SYMBOLS، همان تایم‌فریم معاملاتی)
+# صعودی یا نزولی اعلام می‌کند، از بین کل واچ‌لیست (۱۲۰+ نماد) فقط نمادهایی که خودشان هم
+# در همان جهت هستند (با همان معیار ساده‌ی close/ema20/ema50 که در _market_snapshot استفاده
+# می‌شود) وارد مرحله‌ی سنگین اسکن سطوح (scan_symbol: فچ ۶۵۰ کندل + HTF + شبکه‌ی سطوح +
+# قیمت لحظه‌ای + گارد همبستگی لیدر) می‌شوند. بقیه همین‌جا حذف می‌شوند و اصلاً به آن مرحله
+# نمی‌رسند - این دقیقاً همان چیزی است که سیکل اسکن را کوتاه می‌کند. وقتی داشبورد رنج/نامشخص
+# است (نه صعودی نه نزولی)، هیچ فیلتری اعمال نمی‌شود و کل لیست مثل قبل بررسی می‌شود.
+REGIME_ALIGN_FILTER_ENABLED = os.environ.get('REGIME_ALIGN_FILTER_ENABLED', '1').strip().lower() not in ('0', 'false', 'off')
+SYMBOL_REGIME_SCORE_TTL = float(os.environ.get('SYMBOL_REGIME_SCORE_TTL_SECONDS', '150'))
+SYMBOL_REGIME_SCORE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tf -> symbol -> {'ts':..,'score':..}
+
+
+async def _cached_symbol_regime_score(http, symbol, tf):
+    now = time.time()
+    per_tf = SYMBOL_REGIME_SCORE_CACHE.setdefault(tf, {})
+    c = per_tf.get(symbol)
+    if c and now - c['ts'] < SYMBOL_REGIME_SCORE_TTL:
+        return c['score']
+    score = await _market_snapshot_async(http, symbol, tf)
+    per_tf[symbol] = {'ts': now, 'score': score}
+    return score
+
+
+async def filter_watchlist_by_market_regime(http, watchlist, tf, regime):
+    """فقط نمادهای هم‌جهت با رژیم داشبورد بازار (BULLISH/BEARISH) را نگه می‌دارد.
+    اگر رژیم نامشخص باشد (نه صعودی نه نزولی) یا فیلتر غیرفعال باشد، کل لیست بدون تغییر
+    برمی‌گردد (رفتار فعلی حفظ می‌شود)."""
+    if not REGIME_ALIGN_FILTER_ENABLED or regime not in ('BULLISH', 'BEARISH'):
+        return list(watchlist)
+    want = 1 if regime == 'BULLISH' else -1
+    scores = await asyncio.gather(*[_cached_symbol_regime_score(http, sym, tf) for sym in watchlist])
+    return [sym for sym, sc in zip(watchlist, scores) if sc == want]
 
 
 def market_report(chat_id):
@@ -3998,17 +4128,26 @@ async def scan_loop():
                     if s.get('is_bot_active') and not s.get('daily_stopped')
                 }
                 micro_extreme_by_tf = {}
+                combined_extreme_by_tf = {}
+                filtered_watchlist_by_tf = {}
                 for tf in active_timeframes:
                     micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
+                    combined = combine_extreme_regime(macro_extreme, micro_extreme_by_tf[tf])
+                    combined_extreme_by_tf[tf] = combined
+                    # فیلتر «هم‌رژیمی با داشبورد بازار» یک‌بار برای هر تایم‌فریم فعال محاسبه
+                    # می‌شود (نه به‌ازای هر کاربر) تا در فچ داده تکراری صرفه‌جویی شود؛ چون
+                    # واچ‌لیست پایه (LONG/SHORT) در حال حاضر برای همه‌ی کاربران با یک تایم‌فریم یکسان است.
+                    base_watchlist = scan_watchlist_for_timeframe(tf, loose_regime)
+                    filtered_watchlist_by_tf[tf] = await filter_watchlist_by_market_regime(http, base_watchlist, tf, combined)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
                     if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
-                    watchlist = scan_watchlist_for_timeframe(s.get('timeframe','5min'), loose_regime)
                     user_tf = s.get('timeframe', '5min')
-                    combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme_by_tf.get(user_tf))
+                    watchlist = filtered_watchlist_by_tf.get(user_tf) or []
+                    combined_extreme = combined_extreme_by_tf.get(user_tf)
                     for sym in watchlist:
                         tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                 if tasks:
@@ -4112,6 +4251,7 @@ async function load() {
     let p = data.position;
     const sideLabel = p ? (p.side.includes('BUY') ? 'خرید (Long)' : 'فروش (Short)') : '—';
     const sideClass = p && p.side.includes('BUY') ? 'buy' : 'sell';
+    const setupLine = (p && p.setup_tag) ? `<div class="row"><span>ستاپ</span><b>[SETUP ${p.setup_tag}]</b></div>` : '';
     document.getElementById('info').innerHTML = `
       <div class="row"><span>نماد</span><b>${data.symbol} (${tf})</b></div>
       ${p ? `
@@ -4119,6 +4259,7 @@ async function load() {
       <div class="row"><span>ورود</span><b>${p.entry_price}</b></div>
       <div class="row"><span>حد ضرر (SL)</span><b class="sell">${p.sl}</b></div>
       <div class="row"><span>حد سود (TP)</span><b class="buy">${p.tp}</b></div>
+      ${setupLine}
       ` : '<div class="row"><span>پوزیشن باز فعالی برای این نماد نیست</span></div>'}
     `;
     const chartEl = document.getElementById('chart');
@@ -4139,6 +4280,11 @@ async function load() {
       series.createPriceLine({price: p.sl, color:'#ef5350', lineWidth:2, lineStyle:0, title:'SL'});
       series.createPriceLine({price: p.tp, color:'#26a69a', lineWidth:2, lineStyle:0, title:'TP'});
     }
+    // سطح کلیدی (PDH/PDL/P4H/P1L/PWH/PWL/PMH/PML یا لنگر Adaptive) که این معامله
+    // واقعاً روی آن باز شده - دقیقاً مثل چارت PNG تلگرام - روی چارت زنده هم رسم می‌شود.
+    (data.levels || []).forEach(lv => {
+      series.createPriceLine({price: lv.value, color:'#f97316', lineWidth:1, lineStyle:3, title: lv.name});
+    });
     chart.timeScale().fitContent();
     window.addEventListener('resize', () => chart.applyOptions({width: chartEl.clientWidth, height: chartEl.clientHeight}));
   } catch (e) {
@@ -4176,6 +4322,7 @@ def miniapp_api_data():
     ]
     pos = _miniapp_find_position(chat_id, symbol)
     position = None
+    levels = []
     if pos:
         position = {
             'side': pos['side'],
@@ -4184,7 +4331,21 @@ def miniapp_api_data():
             'tp': round(float(pos['tp']), 8),
             'is_real': bool(pos.get('is_real', False)),
         }
-    return {'symbol': symbol, 'candles': candles, 'position': position}, 200
+        # همان سطح دقیقی که معامله روی آن باز شده (PDH/PDL/P4H/P1L/PWH/PWL/PMH/PML یا
+        # لنگر Adaptive) را - دقیقاً مثل چارت PNG تلگرام - روی چارت تعاملی هم رسم کن.
+        try:
+            _d, pdh, pdl, setup_tag, setup_level_name, setup_level_value = compute_trade_setup_levels(df, tf, pos)
+            position['setup_tag'] = setup_tag
+            if setup_level_name is not None and setup_level_value is not None:
+                levels.append({'name': setup_level_name, 'value': round(float(setup_level_value), 8)})
+            else:
+                if pdh is not None:
+                    levels.append({'name': 'PDH', 'value': round(float(pdh), 8)})
+                if pdl is not None:
+                    levels.append({'name': 'PDL', 'value': round(float(pdl), 8)})
+        except Exception:
+            logger.exception('miniapp setup level compute failed symbol=%s', symbol)
+    return {'symbol': symbol, 'candles': candles, 'position': position, 'levels': levels}, 200
 
 
 def miniapp_chart_url(symbol, timeframe='5min'):

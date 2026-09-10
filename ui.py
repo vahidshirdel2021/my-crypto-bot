@@ -8,9 +8,8 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     scan_button = {"text": "🔴 توقف اسکن"} if is_active else {"text": "🟢 شروع اسکن"}
     return {
         "keyboard": [
-            [scan_button, {"text": "🔄 پوزیشن‌ها"}],
-            [{"text": "📊 وضعیت بازار"}, {"text": "🏠 منوی اصلی"}],
-            [{"text": "🆘 بستن اضطراری همه"}],
+            [scan_button, {"text": "📊 وضعیت بازار"}],
+            [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -71,8 +70,15 @@ def get_performance_keyboard():
     ]}
 
 
-def get_positions_keyboard(positions):
-    k = [[{"text": f"{'🟢' if 'BUY' in p['side'] else '🔴'} {p['symbol']} — مدیریت", "callback_data": f"/manage_{p['symbol']}"}] for p in positions]
+def get_positions_keyboard(positions, chart_urls=None):
+    chart_urls = chart_urls or {}
+    k = []
+    for p in positions:
+        sym = p['symbol']
+        k.append([{"text": f"{'🟢' if 'BUY' in p['side'] else '🔴'} {sym} — مدیریت", "callback_data": f"/manage_{sym}"}])
+        chart_url = chart_urls.get(sym)
+        if chart_url:
+            k.append([{"text": f"📊 چارت {sym} با سطوح (MiniApp)", "web_app": {"url": chart_url}}])
     if any("BUY" in p["side"] for p in positions):
         k.append([{"text": "❌ بستن همه خرید", "callback_data": "/close_longs_prompt"}])
     if any("SELL" in p["side"] for p in positions):
