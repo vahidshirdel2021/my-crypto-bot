@@ -34,7 +34,6 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
-    extract_sweep_anchor_target,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -1392,13 +1391,6 @@ def chart(chat_id, symbol, df, trade):
                 anchor_name, anchor_value = extract_adaptive_anchor(trade_reason)
                 if anchor_name is not None and anchor_value is not None:
                     setup_level_name, setup_level_value = anchor_name, float(anchor_value)
-            elif setup_tag == 'Compression':
-                # سقف/کف ناحیه‌ی فشرده که شکسته شده، به‌صورت ANCHOR=<value> در
-                # reason ذخیره شده (بدون سطح مخالف، چون منطق شکست است نه ریورس).
-                anchor_value, _ = extract_sweep_anchor_target(trade_reason)
-                if anchor_value is not None:
-                    setup_level_name = 'Ceiling' if side_long(trade.get('side', 'BUY')) else 'Floor'
-                    setup_level_value = float(anchor_value)
             elif dated_df is not None and setup_tag and setup_tag != 'Daily':
                 # تگ ستاپ مشخص است ولی مقدار عددی سطح در reason نبود (مثلاً مسیر
                 # Adaptive)؛ سطح مربوط به همان تایم‌فریم را مجدداً محاسبه می‌کنیم.

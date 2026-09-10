@@ -195,15 +195,19 @@ STRATEGY_DEFAULTS = {
     "retest_tolerance_atr": 0.25,
     # کدام سطوح کلیدی (ستاپ‌ها) اجازه‌ی تولید سیگنال دارند. حذف یک تگ از این لیست
     # یعنی آن سطح کاملاً از مسیر اسکن مستقیم + مسیر Adaptive + بازیابی Active-Setup
-    # (فقط برای Daily) نادیده گرفته می‌شود. پیش‌فرض: همه فعال.
+    # نادیده گرفته می‌شود (هر سه رفتار روی هر ۵ سطح یکسان اعمال می‌شوند).
+    # پیش‌فرض: همه فعال. سطح «Cluster» جدا از این لیست است (زیر را ببینید): از
+    # ترکیب پویای همین ۵ سطح ساخته می‌شود، نه یک ستاپ ثابت مستقل.
     "enabled_setup_tags": ["Monthly", "Weekly", "Daily", "4h", "1h"],
-    # فشردگی سطوح: وقتی سطوح فعال (بالا) همه در یک بازه‌ی تنگ جمع شوند (دامنه‌ی
-    # سقف تا کف ≤ ضریب زیر × ATR)، به‌جای سویپ تک‌سطحی، کل خوشه یک ناحیه در
-    # نظر گرفته می‌شود و فقط منتظر شکست تأییدشده‌ی سقف/کف همان ناحیه می‌مانیم.
-    "level_compression_enabled": True,
-    "level_compression_max_atr": 1.2,
-    "level_compression_max_wait_candles": 12,
-    "level_compression_breakout_buffer_atr": 0.15,
+    # سطح کلاستر (Cluster): وقتی >= ۲ تا از سطوح فعال (بالا) در یک بازه‌ی تنگ
+    # جمع شوند (دامنه‌ی سقف تا کف ≤ ضریب زیر × ATR)، کل خوشه یک سطح واحد به نام
+    # Cluster در نظر گرفته می‌شود (سقف = بالاترین سطح هم‌پوشان، کف = پایین‌ترین)
+    # و همان ۳ رفتار (سویپ+ریکلیم، شکست+پولبک+ادامه، بازیابی Active-Setup) رویش
+    # اجرا می‌شود — دقیقاً مثل هر سطح دیگر. وقتی Cluster فعال است (سطوح فعلاً
+    # فشرده‌اند)، اسکن تک‌سطحی معمول برای همان کندل موقتاً کنار گذاشته می‌شود تا
+    # از سیگنال‌های متناقضِ چند سطح هم‌پوشان جلوگیری شود.
+    "level_cluster_enabled": True,
+    "level_cluster_max_atr": 1.2,
     # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
     "active_setup_enabled": True,
     "active_setup_lookback_candles": 3,
@@ -675,7 +679,7 @@ LEVEL_SETUP_DEFS = {
 
 _SETUP_TAG_RE = re.compile(r"\[SETUP\s+([A-Za-z0-9]+)\]")
 _LEVEL_TOKEN_RE = re.compile(
-    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
+    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L|CLH|CLL)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
 )
 _LEVEL_TOKEN_TAG = {
     "PMH": "Monthly", "PML": "Monthly",
@@ -683,6 +687,7 @@ _LEVEL_TOKEN_TAG = {
     "PDH": "Daily", "PDL": "Daily",
     "P4H": "4h", "P4L": "4h",
     "P1H": "1h", "P1L": "1h",
+    "CLH": "Cluster", "CLL": "Cluster",
 }
 
 
@@ -917,29 +922,29 @@ def _detect_adaptive_liquidity(d, idx, cfg):
                              f"breakdown acceptance + retest موفق | ADX={adx:.1f} | حجم={vr:.2f}x"), atr
     return None, None, None
 
-def _find_recent_breakout(d, before_idx, pdh, pdl, lookback):
+def _find_recent_breakout(d, before_idx, hi, lo, lookback):
+    """Look back (up to `lookback` candles, no same-day restriction — recency
+    is governed purely by `lookback`, since this is shared across all 6
+    tags now, not just Daily) for the most recent candle that closed beyond
+    either side of the (hi, lo) pair."""
     start = max(0, before_idx - lookback)
     window = d.iloc[start:before_idx]
     if window.empty:
         return None, None
-    today = d.loc[before_idx, "_date"]
-    same_day = window[window["_date"] == today]
-    if same_day.empty:
-        return None, None
-    up = same_day[same_day["close"] > pdh]
-    down = same_day[same_day["close"] < pdl]
+    up = window[window["close"] > hi]
+    down = window[window["close"] < lo]
     up_last = up.index.max() if not up.empty else None
     down_last = down.index.max() if not down.empty else None
     if up_last is not None and (down_last is None or up_last > down_last):
-        return "UP", pdh
+        return "UP", hi
     if down_last is not None:
-        return "DOWN", pdl
+        return "DOWN", lo
     return None, None
 
 
-def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
+def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    direction, level = _find_recent_breakout(d, before_idx, pdh, pdl, lookback)
+    direction, level = _find_recent_breakout(d, before_idx, hi, lo, lookback)
     if direction is None:
         return None, None
     curr = d.iloc[before_idx]
@@ -950,22 +955,25 @@ def _detect_retest_continuation(d, before_idx, pdh, pdl, atr, cfg):
         held = c > level
         bullish = c > o
         if touched and held and bullish:
-            return "BUY", f"شکست معتبر قبلی سقف روز قبل (PDH={level:.6g}) + پولبک موفق + ادامه صعودی"
+            return "BUY", (f"شکست معتبر قبلی {hi_label} ({hi_key}={level:.6g}) + پولبک موفق + ادامه صعودی"
+                           f"|ANCHOR={level:.10g}|TARGET={lo:.10g}")
     else:
         touched = h >= level - tol
         held = c < level
         bearish = c < o
         if touched and held and bearish:
-            return "SELL", f"شکست معتبر قبلی کف روز قبل (PDL={level:.6g}) + پولبک موفق + ادامه نزولی"
+            return "SELL", (f"شکست معتبر قبلی {lo_label} ({lo_key}={level:.6g}) + پولبک موفق + ادامه نزولی"
+                            f"|ANCHOR={level:.10g}|TARGET={hi:.10g}")
     return None, None
 
 
 
-def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
-    """Active setup guard:
-    Only allow recovery entries after a real PDH/PDL breakout with enough distance.
-    Prevents buying below PDH or selling above PDL from random intraday anchors.
-    """
+def _has_confirmed_breakout(d, before_idx, hi, lo, signal, atr, cfg):
+    """Active setup / retest-continuation guard: only allow a recovery entry
+    after a real breakout of `hi`/`lo` with enough distance/confirmation.
+    Prevents buying below the level or selling above it from a random wick.
+    Generic across all 6 tags (Monthly/Weekly/Daily/4h/1h/Cluster) — was
+    Daily-only (`_has_confirmed_daily_breakout`, pdh/pdl-named) before."""
     if not bool(cfg.get("active_setup_require_daily_breakout", True)):
         return True
     if atr <= 0:
@@ -978,18 +986,18 @@ def _has_confirmed_daily_breakout(d, before_idx, pdh, pdl, signal, atr, cfg):
     window = d.iloc[start:before_idx]
 
     if signal == "BUY":
-        # Must have closed above PDH and moved away from it.
+        # Must have closed above hi and moved away from it.
         closes = window["close"].tail(confirms)
         if len(closes) < confirms:
             return False
-        return bool((closes > pdh).all() and float(closes.iloc[-1]) >= pdh + distance)
+        return bool((closes > hi).all() and float(closes.iloc[-1]) >= hi + distance)
 
     else:
-        # Must have closed below PDL and moved away from it.
+        # Must have closed below lo and moved away from it.
         closes = window["close"].tail(confirms)
         if len(closes) < confirms:
             return False
-        return bool((closes < pdl).all() and float(closes.iloc[-1]) <= pdl - distance)
+        return bool((closes < lo).all() and float(closes.iloc[-1]) <= lo - distance)
 
 
 
@@ -1050,35 +1058,12 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
     enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
 
-    def detect_daily_at(idx):
-        """Original Daily-only detection (direct sweep + retest-continuation).
-        Kept separate so the Active-Setup recovery window below (which is
-        specifically a "did we miss the PDH/PDL reclaim" mechanism) keeps its
-        exact original behaviour."""
-        if idx < 0 or idx >= len(d):
-            return None, None, None
-        curr = d.iloc[idx]
-        atr = _safe_float(curr.get("atr"), 0.0)
-        if not np.isfinite(atr) or atr <= 0:
-            return None, None, None
-        sig, reason, _ = _detect_named_level_sweep(
-            d, idx, pdh, pdl, "PDH", "PDL", "سقف روز قبل", "کف روز قبل",
-            cfg, require_reclaim, require_reversal
-        )
-        if sig:
-            return sig, reason, atr
-        if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
-            sig, reason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
-            if sig:
-                return sig, reason, atr
-        return None, None, None
-
     def _active_level_pairs_at(idx):
         """(hi, lo) for every currently-enabled tag, evaluated as of idx.
         Uses the per-candle-correct PDH/PDL (see `_pdh_pdl_at`) rather than the
-        single latest-snapshot `pdh, pdl`, since this helper is also used for
-        the compression age-walk below, which looks back over several
-        candles and can straddle a day rollover."""
+        single latest-snapshot `pdh, pdl`, since this helper also feeds the
+        Cluster zone and the Active-Setup backward scan below, both of which
+        can look back far enough to straddle a day rollover."""
         htf = _compute_prev_htf_levels(d, idx)
         pairs = {}
         for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
@@ -1092,110 +1077,76 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 pairs[tag] = (hi, lo)
         return pairs
 
-    def detect_compression_at(idx):
-        """Level-compression handling: when the enabled key levels are all
-        clustered within `level_compression_max_atr` x ATR of each other, a
-        sweep of any single one of them is unreliable — a small wick can tag
-        two or three overlapping levels at once and whipsaw the mean-reversion
-        logic above. Instead of trading each level independently, treat the
-        whole cluster as one zone (ceiling = highest level, floor = lowest
-        level) and only trade a *confirmed* breakout of either side. While
-        the zone stays compressed (up to `level_compression_max_wait_candles`),
-        the normal per-level scan is suppressed entirely for this candle —
-        once the wait window elapses without a breakout, or the levels spread
-        back out, the lock is released and the normal scan resumes."""
-        if idx < 5 or idx >= len(d) or not bool(cfg.get("level_compression_enabled", True)):
-            return None, None, None, None, False
-        curr = d.iloc[idx]
-        atr = _safe_float(curr.get("atr"), 0.0)
+    def _cluster_ceiling_floor_at(idx):
+        """When >=2 of the currently-enabled levels sit within
+        `level_cluster_max_atr` x ATR of each other, a sweep of any single one
+        of them is unreliable (a small wick can tag two or three overlapping
+        levels at once). Collapse them into one zone — ceiling = highest
+        level, floor = lowest — and return (ceiling, floor, level_count), or
+        None when not currently compressed."""
+        if idx < 0 or idx >= len(d) or not bool(cfg.get("level_cluster_enabled", True)):
+            return None
+        atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
-            return None, None, None, None, False
+            return None
         pairs = _active_level_pairs_at(idx)
         if len(pairs) < 2:
-            return None, None, None, None, False
+            return None
         ceiling = max(p[0] for p in pairs.values())
         floor = min(p[1] for p in pairs.values())
-        domain = ceiling - floor
-        k = max(0.1, float(cfg.get("level_compression_max_atr", 1.2)))
-        if domain > atr * k:
-            return None, None, None, None, False
+        k = max(0.1, float(cfg.get("level_cluster_max_atr", 1.2)))
+        if (ceiling - floor) > atr * k:
+            return None
+        return ceiling, floor, len(pairs)
 
-        # یک شکستِ تأییدشده همیشه قابل معامله است، صرف‌نظر از اینکه فشردگی
-        # از چه زمانی برقرار بوده — محدودیت زمانی (max_wait) فقط برای زمانی
-        # است که هنوز شکستی رخ نداده (وگرنه یک محدوده‌ی آرام و طولانی‌مدت که
-        # بالاخره شکسته می‌شود، به‌اشتباه نادیده گرفته می‌شد).
-        buffer_atr = atr * max(0.0, float(cfg.get("level_compression_breakout_buffer_atr", 0.15)))
-        o, c = float(curr["open"]), float(curr["close"])
-        n_levels = len(pairs)
-        if c >= ceiling + buffer_atr and c > o:
-            reason = (f"شکست تأییدشده‌ی سقف ناحیه‌ی فشرده (Ceiling={ceiling:.6g} | دامنه={domain:.4g} | "
-                      f"{n_levels} سطح هم‌پوشان) + کندل صعودی|ANCHOR={ceiling:.10g}")
-            return "BUY", reason, atr, "Compression", True
-        if c <= floor - buffer_atr and c < o:
-            reason = (f"شکست تأییدشده‌ی کف ناحیه‌ی فشرده (Floor={floor:.6g} | دامنه={domain:.4g} | "
-                      f"{n_levels} سطح هم‌پوشان) + کندل نزولی|ANCHOR={floor:.10g}")
-            return "SELL", reason, atr, "Compression", True
+    def _ordered_candidates_at(idx):
+        """Which (tag, hi, lo, hi_key, lo_key, hi_label, lo_label) tuples to
+        evaluate for this candle, in priority order. When the active levels
+        are currently clustered, ONLY the Cluster zone is offered (this is
+        what suppresses the noisy/overlapping individual-level checks that
+        motivated Cluster in the first place) — otherwise every enabled tag
+        is offered, Monthly > Weekly > Daily > 4h > 1h."""
+        cluster = _cluster_ceiling_floor_at(idx)
+        if cluster is not None:
+            ceiling, floor, n = cluster
+            return [("Cluster", ceiling, floor, "CLH", "CLL",
+                     f"سقف کلاستر ({n} سطح هم‌پوشان)", f"کف کلاستر ({n} سطح هم‌پوشان)")]
+        pairs = _active_level_pairs_at(idx)
+        out = []
+        for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
+            if tag in pairs:
+                hi, lo = pairs[tag]
+                out.append((tag, hi, lo, hi_key, lo_key, hi_label, lo_label))
+        return out
 
-        # هنوز شکستی تأیید نشده — سن این فشردگی (چند کندل پشت‌سرهم برقرار بوده)
-        # را می‌سنجیم؛ اگر از حد انتظار طولانی‌تر شده، قفل را آزاد می‌کنیم تا
-        # اسکن معمول تک‌سطحی دوباره ادامه پیدا کند (به‌جای انتظار بی‌پایان).
-        max_wait = max(1, int(cfg.get("level_compression_max_wait_candles", 12)))
-        lock_age = 0
-        for back in range(1, max_wait + 1):
-            j = idx - back
-            if j < 5:
-                break
-            prev_atr = _safe_float(d.iloc[j].get("atr"), 0.0)
-            prev_pairs = _active_level_pairs_at(j)
-            if prev_atr <= 0 or len(prev_pairs) < 2:
-                break
-            prev_ceiling = max(p[0] for p in prev_pairs.values())
-            prev_floor = min(p[1] for p in prev_pairs.values())
-            if (prev_ceiling - prev_floor) > prev_atr * k:
-                break
-            lock_age = back
-        if lock_age >= max_wait:
-            return None, None, None, None, False  # قفل منقضی شده -> اسکن معمول ادامه یابد
-        # هنوز داخل قفل هستیم اما شکست تأیید نشده -> این کندل بدون سیگنال
-        # می‌ماند و اسکن تک‌سطحی معمول هم برای همین کندل غیرفعال می‌شود.
-        return None, None, None, None, True
-
-    def detect_at(idx):
-        """Multi-timeframe scan: checks Monthly, Weekly, Daily, 4h and 1h
-        levels (in that priority order) for a sweep on this exact candle."""
+    def detect_multi_at(idx):
+        """Unified per-candle detection, shared by the primary scan and the
+        Active-Setup recovery walk below: for each candidate level (or the
+        Cluster zone) in priority order, try a direct sweep+reclaim first,
+        then — if that didn't fire — a breakout+pullback continuation. All
+        six tags (Monthly/Weekly/Daily/4h/1h/Cluster) get identical treatment
+        here; only the (hi, lo) pair and its labels differ."""
         if idx < 0 or idx >= len(d):
             return None, None, None, None
-        curr = d.iloc[idx]
-        atr = _safe_float(curr.get("atr"), 0.0)
+        atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
             return None, None, None, None
-        comp_sig, comp_reason, comp_atr, comp_tag, locked = detect_compression_at(idx)
-        if comp_sig:
-            return comp_sig, comp_reason, comp_atr, comp_tag
-        if locked:
-            # فشردگی برقرار است و هنوز شکست تأیید نشده -> اسکن تک‌سطحی این کندل را رد می‌کنیم
-            return None, None, None, None
-        htf_levels = _compute_prev_htf_levels(d, idx)
-        for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
-            if tag not in enabled_tags:
-                continue
-            if tag == "Daily":
-                hi, lo = pdh, pdl
-            else:
-                hi, lo = htf_levels.get(hi_key), htf_levels.get(lo_key)
-            if hi is None or lo is None:
-                continue
+        for tag, hi, lo, hi_key, lo_key, hi_label, lo_label in _ordered_candidates_at(idx):
             sig, reason, _ = _detect_named_level_sweep(
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
             )
             if sig:
                 return sig, reason, atr, tag
-            if tag == "Daily" and bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
-                rsig, rreason = _detect_retest_continuation(d, idx, pdh, pdl, atr, cfg)
+            if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
+                rsig, rreason = _detect_retest_continuation(
+                    d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
+                )
                 if rsig:
-                    return rsig, rreason, atr, "Daily"
+                    return rsig, rreason, atr, tag
         return None, None, None, None
+
+    detect_at = detect_multi_at
 
     latest_idx = len(d) - 2  # آخرین کندل کاملاً بسته‌شده
     sig, reason, atr, tag = detect_at(latest_idx)
@@ -1203,17 +1154,18 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     # سیگنال روی آخرین کندل بسته‌شده معتبر است، اما اگر قیمت زنده از سطح
     # شناسایی‌شده بیش از حد فاصله گرفته باشد، ورود تعقیبی/FOMO ممنوع است.
     # در این حالت ستاپ وارد مسیر Active Setup می‌شود تا فقط با Pullback/Reclaim دوباره معتبر شود.
-    # (سیگنال «فشردگی» از قبل روی بسته‌شدن قیمت فراتر از سقف/کف ناحیه تأیید شده
-    # است -- برخلاف سویپ میانگین‌گرا، دورشدن قیمت از سطح دقیقاً همان چیزی است
-    # که شکست را تأیید می‌کند، نه نشانه‌ی تعقیب قیمت -- پس این گارد را ندارد.)
-    if sig and tag == "Compression":
-        return sig, tag_setup_reason(tag, reason)
+    # (شامل Cluster هم می‌شود: چون حالا Cluster هم از همان سویپ+ریکلیم / شکست+پولبک
+    # استفاده می‌کند -- نه یک شکست خام بدون گارد -- همین گارد برایش هم معنادار است.)
     try:
         live_for_guard = float(live_price) if live_price is not None else float(d.iloc[latest_idx]["close"])
     except Exception:
         live_for_guard = float(d.iloc[latest_idx]["close"])
     if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
-        hi, lo = _level_pair_for_tag(d, latest_idx, tag, pdh, pdl)
+        if tag == "Cluster":
+            _cl = _cluster_ceiling_floor_at(latest_idx)
+            hi, lo = (_cl[0], _cl[1]) if _cl is not None else (pdh, pdl)
+        else:
+            hi, lo = _level_pair_for_tag(d, latest_idx, tag, pdh, pdl)
         level = (lo if sig == "BUY" else hi)
         if level is None:
             level = pdl if sig == "BUY" else pdh
@@ -1244,7 +1196,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
             # Do not allow adaptive continuation entries inside the previous-day range
             # unless a confirmed PDH/PDL breakout already happened. This prevents
             # buying below PDH or selling above PDL from intraday anchors.
-            if _has_confirmed_daily_breakout(
+            if _has_confirmed_breakout(
                 d, latest_idx, pdh, pdl, adaptive_sig,
                 adaptive_atr if adaptive_atr else guard_atr,
                 cfg
@@ -1253,7 +1205,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 if _adaptive_tag in enabled_tags:
                     return adaptive_sig, tag_setup_reason(_adaptive_tag, adaptive_reason)
 
-    if not bool(cfg.get("active_setup_enabled", True)) or "Daily" not in enabled_tags:
+    if not bool(cfg.get("active_setup_enabled", True)) or not enabled_tags:
         return None, "ستاپ جدیدی ثبت نشد"
 
     try:
@@ -1266,26 +1218,32 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     max_age = max(1, int(cfg.get("active_setup_max_age_candles", cfg.get("active_setup_lookback_candles", 3))))
     lookback = max(max_age, int(cfg.get("active_setup_lookback_candles", 3)))
     min_idx = max(1, latest_idx - lookback)
-    # Newest candidate wins. We intentionally do not search older than the short freshness window.
-    latest_date = d.loc[latest_idx, "_date"] if "_date" in d.columns else None
+    # Newest candidate wins. We intentionally do not search older than the short freshness
+    # window (day-boundary correctness for it is handled by `_pdh_pdl_at`/`_active_level_pairs_at`
+    # already, so no separate same-day restriction is needed here any more).
     current = d.iloc[latest_idx]
     co, cc, ch, cl = (float(current["open"]), float(current["close"]),
                        float(current["high"]), float(current["low"]))
     for idx in range(latest_idx - 1, min_idx - 1, -1):
-        if latest_date is not None and d.loc[idx, "_date"] != latest_date:
+        sig, reason, atr, tag = detect_multi_at(idx)
+        if not sig or not atr or atr <= 0:
             continue
-        sig, reason, atr = detect_daily_at(idx)
-        if not sig or atr <= 0:
+        if tag == "Cluster":
+            _cl = _cluster_ceiling_floor_at(idx)
+            hi, lo = (_cl[0], _cl[1]) if _cl is not None else (None, None)
+        else:
+            hi, lo = _level_pair_for_tag(d, idx, tag, pdh, pdl)
+        if hi is None or lo is None:
             continue
-        if not _has_confirmed_daily_breakout(d, idx, pdh, pdl, sig, atr, cfg):
+        if not _has_confirmed_breakout(d, idx, hi, lo, sig, atr, cfg):
             continue
-        level = pdl if sig == "BUY" else pdh
+        level = lo if sig == "BUY" else hi
         tol = atr * max(0.05, float(cfg.get("retest_tolerance_atr", 0.25)))
         max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
         invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
 
         # IMPORTANT: an old setup is NOT enough by itself. The latest closed candle
-        # must now perform a fresh pullback/reclaim of the original PDH/PDL level.
+        # must now perform a fresh pullback/reclaim of the original level.
         # This prevents entering merely because live price happens to be near the level.
         if sig == "BUY":
             retest = cl <= level + tol
@@ -1311,9 +1269,9 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
                 continue
 
         age = latest_idx - idx
-        return sig, tag_setup_reason("Daily", (
+        return sig, tag_setup_reason(tag, (
                      f"ACTIVE_SETUP_INDEX={idx} | فرصت بازیابی‌شده ({age} کندل قبل) | "
-                     f"Pullback + Reclaim جدید روی سطح روز قبل تأیید شد | {reason} | "
+                     f"Pullback + Reclaim جدید روی سطح تأیید شد | {reason} | "
                      f"ورود با قیمت فعلی، بدون تعقیب قیمت"))
 
     return None, "ستاپ جدیدی ثبت نشد یا ستاپ‌های اخیر بدون Pullback/Reclaim جدید معتبر نیستند"
