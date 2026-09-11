@@ -519,6 +519,10 @@ def audit_trade_record(p):
         'margin': p.get('margin'), 'leverage': p.get('leverage'),
         'planned_rr': p.get('planned_rr'), 'quality_score': p.get('quality_score'),
         'quality_label': p.get('quality_label'), 'risk_usdt': p.get('risk_usdt'),
+        'market_adx_at_entry': p.get('market_adx_at_entry'),
+        'timeframe_bull_pct_at_entry': p.get('timeframe_bull_pct_at_entry'),
+        'timeframe_bear_pct_at_entry': p.get('timeframe_bear_pct_at_entry'),
+        'symbol_adx_at_entry': p.get('symbol_adx_at_entry'),
         'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
         'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
         'entry_reason': p.get('entry_reason'),
@@ -1607,6 +1611,42 @@ def _paper_stop_fill_price(pos, low, high, risk_distance):
     return (sl - charged) if is_long else (sl + charged)
 
 
+def _regime_alignment_snapshot(symbol, timeframe):
+    """
+    عکس‌فوری عددی سه لایه‌ای که در بحث «هم‌جهتی چندلایه» مطرح شد، در لحظه‌ی ورود:
+    ۱) قدرت روند بازار کلی (میانگین ADX لیدرها، از کش refresh_market_regime)
+    ۲) درصد اجماع صعودی/نزولی در تایم‌فریم فعال (از کش refresh_timeframe_regime)
+    ۳) ADX خود نماد در همان تایم‌فریم (محاسبه‌ی سبک، از کش get_klines موجود)
+
+    فقط برای ثبت در رکورد معامله است؛ هیچ تصمیم ورود/خروجی را عوض نمی‌کند.
+    اگر هرکدام در دسترس نبود، None برمی‌گردد تا بعداً به‌اشتباه به‌جای «صفر واقعی»
+    خوانده نشود.
+    """
+    out = {'market_adx': None, 'timeframe_bull_pct': None, 'timeframe_bear_pct': None, 'symbol_adx': None}
+    try:
+        if MARKET_REGIME_CACHE.get('ts', 0) > 0:
+            out['market_adx'] = round(float(MARKET_REGIME_CACHE.get('avg_adx') or 0.0), 2)
+    except Exception:
+        pass
+    try:
+        tf_cache = TIMEFRAME_REGIME_CACHE.get(timeframe)
+        if tf_cache:
+            out['timeframe_bull_pct'] = round(float(tf_cache.get('bull_pct') or 0.0), 1)
+            out['timeframe_bear_pct'] = round(float(tf_cache.get('bear_pct') or 0.0), 1)
+    except Exception:
+        pass
+    try:
+        d = get_klines(symbol, timeframe, 160)
+        if d is not None and not d.empty and len(d) >= 60:
+            x = calculate_indicators(d).iloc[-2]
+            adx = x.get('adx')
+            if adx is not None:
+                out['symbol_adx'] = round(float(adx), 2)
+    except Exception:
+        pass
+    return out
+
+
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
@@ -1710,7 +1750,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 return False
         except Exception:
             pass
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -1849,7 +1890,7 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
     return list(dict.fromkeys(list(long_list) + list(short_list)))
 
 
-MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90}
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90, 'avg_adx': 0.0}
 MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
 # آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
 # انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
@@ -1882,6 +1923,7 @@ async def refresh_market_regime(http):
             return 'NEUTRAL', detail, None
     detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
     unique_dirs = {v[0] for v in states.values()}
+    avg_adx = sum(v[1] for v in states.values())/len(states) if states else 0.0
     if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
         regime = 'BULLISH'
     elif 'BEARISH' in unique_dirs and 'BULLISH' not in unique_dirs:
@@ -1893,7 +1935,7 @@ async def refresh_market_regime(http):
     extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
     extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
     extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
-    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme)
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme, avg_adx=avg_adx)
     return regime, detail, extreme
 
 
@@ -3522,15 +3564,18 @@ async def refresh_timeframe_regime(http, timeframe):
     scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
     scores = [x for x in scores if x is not None]
     extreme = None
+    bull_pct = bear_pct = 0.0
     if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
         bullish = sum(1 for x in scores if x > 0)
         bearish = sum(1 for x in scores if x < 0)
         total = len(scores)
+        bull_pct = bullish/total*100.0
+        bear_pct = bearish/total*100.0
         if bullish > bearish and bullish >= total * 0.5:
             extreme = 'BULLISH'
         elif bearish > bullish and bearish >= total * 0.5:
             extreme = 'BEARISH'
-    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme}
+    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme, 'bull_pct': bull_pct, 'bear_pct': bear_pct}
     return extreme
 
 
