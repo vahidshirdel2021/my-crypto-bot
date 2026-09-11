@@ -61,6 +61,7 @@ def get_performance_keyboard():
         [{"text": "📅 امروز", "callback_data": "/performance_today"}, {"text": "📆 ۷ روز", "callback_data": "/performance_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/performance_month"}, {"text": "📊 کل سابقه", "callback_data": "/performance"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+        [{"text": "🎯 تفکیک کیفیت سیگنال", "callback_data": "/quality_report"}],
         [{"text": "📋 معاملات امروز", "callback_data": "/today_trades"}],
         [{"text": "🧭 ردیابی مسیر معاملات (Pipeline)", "callback_data": "/trade_tracking_menu"}],
         [{"text": "📦 خروجی کامل معاملات", "callback_data": "/export_trade_data"}],

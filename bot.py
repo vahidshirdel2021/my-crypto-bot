@@ -128,6 +128,17 @@ ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0
 PAPER_CONSERVATIVE_OHLC = os.environ.get('PAPER_CONSERVATIVE_OHLC', 'true').lower() not in ('0', 'false', 'no')
 PAPER_ONLY = os.environ.get('PAPER_ONLY', 'true').lower() not in ('0', 'false', 'no')
 PAPER_SLIPPAGE_BPS = max(0.0, float(os.environ.get('PAPER_SLIPPAGE_BPS', '2.0')))
+# --- بستهٔ A: حفظ سرمایه (بدون تغییر منطق سیگنال) -----------------------------
+# وقتی کندل PAPER با فاصلهٔ زیاد از حد ضرر رد می‌شود (ویک شدید، مخصوصاً روی
+# آلت‌کوین‌های کم‌نقدشوندگی)، فرض «فیل دقیقاً روی قیمت SL» خوش‌بینانه است.
+# این دو مقدار، بخشی از آن فاصلهٔ اضافه را به‌عنوان اسلیپیج واقعی‌تر به گزارش
+# اعمال می‌کنند؛ فقط دقتِ ثبتِ نتیجه را بالا می‌برند و روی تصمیم ورود/خروج اثر ندارند.
+PAPER_STOP_SLIPPAGE_FRACTION = max(0.0, min(1.0, float(os.environ.get('PAPER_STOP_SLIPPAGE_FRACTION', '0.5'))))
+PAPER_STOP_SLIPPAGE_MAX_R = max(0.0, float(os.environ.get('PAPER_STOP_SLIPPAGE_MAX_R', '0.5')))
+# سقف مجموع ریسکِ باز (٪ از سرمایه) روی همهٔ پوزیشن‌های هم‌زمان، صرف‌نظر از جهت‌شان.
+# با تنظیمات پیش‌فرض (سقف ۳ پوزیشن، ریسک ثابت هر معامله) عملاً هیچ‌وقت فعال نمی‌شود؛
+# فقط وقتی کاربر سقف پوزیشن یا درصد ریسک را بالا ببرد، به‌عنوان دیوار دوم وارد عمل می‌شود.
+MAX_TOTAL_OPEN_RISK_PCT = max(0.0, float(os.environ.get('MAX_TOTAL_OPEN_RISK_PCT', '8.0')))
 PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
@@ -572,6 +583,7 @@ def default_session():
         'max_open_positions': 3,
         'max_same_direction_positions': 2,
         'same_direction_entry_cooldown_seconds': 120,
+        'max_total_open_risk_pct': MAX_TOTAL_OPEN_RISK_PCT,
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
@@ -623,6 +635,7 @@ def normalize_session(data):
     s['last_direction_entry_ts'] = dict(data.get('last_direction_entry_ts') or {})
     s['max_same_direction_positions'] = int(s.get('max_same_direction_positions', default_session()['max_same_direction_positions']) or 0)
     s['same_direction_entry_cooldown_seconds'] = float(s.get('same_direction_entry_cooldown_seconds', default_session()['same_direction_entry_cooldown_seconds']) or 0)
+    s['max_total_open_risk_pct'] = max(0.0, float(s.get('max_total_open_risk_pct', MAX_TOTAL_OPEN_RISK_PCT) or 0.0))
     stored_symbols = list(data.get('active_symbols') or [])
     if PAPER_ONLY:
         # Paper validation should use a stable, liquid universe by default.
@@ -1571,6 +1584,29 @@ def update_trade_excursions(pos, high, low):
         logger.debug('excursion tracking failed trade=%s symbol=%s: %s', pos.get('trade_id'), pos.get('symbol'), exc)
 
 
+def _paper_stop_fill_price(pos, low, high, risk_distance):
+    """
+    فیل واقع‌بینانه‌تر برای برخورد حد ضرر در PAPER.
+
+    فرض «همیشه دقیقاً روی قیمت SL فیل می‌شویم» خوش‌بینانه است: وقتی کندل با
+    فاصلهٔ زیاد از SL رد شده (ویک شدید، به‌خصوص روی آلت‌کوین‌های کم‌نقدشوندگی)،
+    یک سفارش استاپ-مارکت واقعی احتمالاً بدتر از سطح دقیق SL پر می‌شود. اینجا
+    بخشی از آن فاصلهٔ اضافه (overshoot) را به‌عنوان اسلیپیج به قیمت خروج اعمال
+    می‌کنیم، با یک سقف مشخص تا معاملات با ویک‌های فوق‌العاده شدید هم به‌شکل
+    غیرمنطقی جریمه نشوند. این تابع فقط دقتِ گزارش را بالا می‌برد؛ تصمیم اینکه
+    SL خورده یا نه، جای دیگری (update_positions) گرفته می‌شود.
+    """
+    sl = float(pos.get('sl') or 0.0)
+    if risk_distance <= 0 or PAPER_STOP_SLIPPAGE_FRACTION <= 0:
+        return sl
+    is_long = side_long(pos.get('side'))
+    overshoot = (sl - float(low)) if is_long else (float(high) - sl)
+    if overshoot <= 0:
+        return sl
+    charged = min(overshoot, PAPER_STOP_SLIPPAGE_MAX_R * risk_distance) * PAPER_STOP_SLIPPAGE_FRACTION
+    return (sl - charged) if is_long else (sl + charged)
+
+
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
@@ -1662,6 +1698,18 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return False
+    # سقف مجموع ریسک باز: جمع ریسک دلاری همهٔ پوزیشن‌های باز (صرف‌نظر از جهت) به‌علاوهٔ
+    # این معاملهٔ جدید نباید از درصد مشخصی از سرمایه بگذرد. با تنظیمات پیش‌فرض عملاً
+    # هیچ‌وقت فعال نمی‌شود؛ فقط وقتی سقف پوزیشن یا درصد ریسک بالا برود اثر می‌کند.
+    max_total_risk_pct = float(s.get('max_total_open_risk_pct') or 0.0)
+    if max_total_risk_pct > 0:
+        try:
+            equity = exchange_balance(chat_id) if s['trading_mode'] == 'REAL' else current_paper_equity(s)
+            open_risk = sum(float(p.get('risk_usdt') or 0.0) for p in s.get('paper_positions', []))
+            if equity > 0 and (open_risk + risk_usdt) > equity * (max_total_risk_pct / 100.0):
+                return False
+        except Exception:
+            pass
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
@@ -2461,9 +2509,9 @@ def update_positions(chat_id):
             else:
                 hit_tp=low<=float(p['tp']); hit_sl=high>=float(p['sl'])
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
-                exit_price=float(p['sl']); reason='SL (same candle)'
+                exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL (same candle)'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
-            elif hit_sl: exit_price=float(p['sl']); reason='SL'
+            elif hit_sl: exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL'
 
         if reason is None and s['filters'].get('trailing_stop',True) and risk_distance>0:
             favorable_price=(high if side_long(p['side']) else low) if s['trading_mode']=='PAPER' else (p.get('peak_favorable_price') or price)
@@ -3017,6 +3065,106 @@ def performance_period_report(chat_id, period='all'):
     if rvals:
         lines.append('━━━━━━━━━━━━━━━━━━━━')
         lines.append(f'📐 R واقعی میانگین: `{sum(rvals)/len(rvals):+.2f}R`')
+    return '\n'.join(lines)
+
+
+def _setup_family(reason):
+    """خانواده‌ی ستاپ را از متن reason استخراج می‌کند (برای گزارش تفکیکی کیفیت).
+    فقط برای گزارش‌گیری استفاده می‌شود؛ در هیچ تصمیم ورود/خروجی دخالت ندارد."""
+    r = str(reason or '')
+    if 'ACTIVE_SETUP' in r:
+        return 'بازیابی ستاپ (Active Setup)'
+    if 'ADAPTIVE' in r:
+        return 'سطح تطبیقی (Adaptive)'
+    if 'Cluster' in r or 'کلاستر' in r:
+        return 'خوشه‌ی سطوح (Cluster)'
+    if 'liquidity_sweep' in r:
+        return 'جاروب نقدینگی مستقیم'
+    if 'breakout' in r:
+        return 'شکست (Breakout)'
+    if 'mean_reversion' in r:
+        return 'بازگشت به میانگین'
+    if 'trend' in r:
+        return 'روند (Trend)'
+    return 'سایر/نامشخص'
+
+
+def _quality_bucket(score):
+    if score is None:
+        return 'بدون امتیاز ثبت‌شده'
+    try:
+        score = float(score)
+    except Exception:
+        return 'بدون امتیاز ثبت‌شده'
+    if score >= 85:
+        return 'بالا (۸۵-۱۰۰)'
+    if score >= 70:
+        return 'متوسط (۷۰-۸۴)'
+    return 'زیر ۷۰'
+
+
+def quality_breakdown_report(chat_id, period='all'):
+    """
+    گزارش تفکیکی نرخ برد به‌ازای «بازه‌ی امتیاز کیفیت» و «خانواده‌ی ستاپ»، به‌علاوه‌ی
+    خلاصه‌ی سود ناخالص در مقابل کارمزد کل. این گزارش صرفاً تحلیلی است و روی رفتار
+    ربات اثری ندارد؛ هدفش این است که تصمیم‌های آینده (مثلاً بالابردن آستانه‌ی حداقل
+    امتیاز) بر اساس داده باشد، نه حدس.
+    """
+    s = get_session(chat_id)
+    closed = list(s.get('closed_positions') or [])
+    now = time.time()
+    seconds = {'day': 86400, 'week': 7*86400, 'month': 30*86400}.get(period)
+    if seconds:
+        closed = [p for p in closed if now-float(p.get('close_timestamp', p.get('opened_at', 0)) or 0) <= seconds]
+    label = {'day': 'امروز', 'week': '۷ روز اخیر', 'month': '۳۰ روز اخیر', 'all': 'کل سابقه'}.get(period, 'کل سابقه')
+    n = len(closed)
+    lines = [f'🎯 *گزارش تفکیکی کیفیت سیگنال — {label}*', '━━━━━━━━━━━━━━━━━━━━']
+    if n == 0:
+        lines.append('هنوز معامله‌ی بسته‌شده‌ای برای این بازه ثبت نشده.')
+        return '\n'.join(lines)
+
+    gross = sum(float(p.get('pnl_gross_usdt') or 0.0) for p in closed)
+    net = sum(float(p.get('pnl_usdt') or 0.0) for p in closed)
+    fees = sum(float(p.get('fee_usdt') or 0.0) for p in closed)
+    pfees = sum(float(p.get('platform_fee_usdt') or 0.0) for p in closed)
+    lines.append(f'تعداد معاملات: `{n}`')
+    lines.append(f'سود ناخالص (قبل از کارمزد): `{gross:+.2f} USDT`')
+    lines.append(f'کارمزد صرافی + پلتفرم: `{-(fees+pfees):.2f} USDT`')
+    lines.append(f'سود/زیان خالص: `{net:+.2f} USDT`')
+
+    def _bucket_stats(items):
+        cnt = len(items)
+        wins = sum(1 for p in items if float(p.get('pnl_usdt') or 0) > 0)
+        wr = (wins/cnt*100) if cnt else 0.0
+        rvals = [float(p.get('pnl_usdt') or 0)/float(p['risk_usdt']) for p in items if float(p.get('risk_usdt') or 0) > 0]
+        avg_r = sum(rvals)/len(rvals) if rvals else 0.0
+        pnl = sum(float(p.get('pnl_usdt') or 0) for p in items)
+        return cnt, wr, avg_r, pnl
+
+    lines.append('━━━━━━━━━━━━━━━━━━━━')
+    lines.append('📊 بر اساس بازه‌ی امتیاز کیفیت:')
+    by_bucket = {}
+    for p in closed:
+        by_bucket.setdefault(_quality_bucket(p.get('quality_score')), []).append(p)
+    bucket_order = ['بالا (۸۵-۱۰۰)', 'متوسط (۷۰-۸۴)', 'زیر ۷۰', 'بدون امتیاز ثبت‌شده']
+    for b in bucket_order:
+        items = by_bucket.get(b)
+        if not items:
+            continue
+        cnt, wr, avg_r, pnl = _bucket_stats(items)
+        lines.append(f'• `{b}` → تعداد `{cnt}` | نرخ برد `{wr:.0f}%` | R میانگین `{avg_r:+.2f}` | سود/زیان `{pnl:+.2f}`')
+
+    lines.append('━━━━━━━━━━━━━━━━━━━━')
+    lines.append('🧩 بر اساس خانواده‌ی ستاپ:')
+    by_fam = {}
+    for p in closed:
+        by_fam.setdefault(_setup_family(p.get('entry_reason')), []).append(p)
+    for fam, items in sorted(by_fam.items(), key=lambda kv: -len(kv[1])):
+        cnt, wr, avg_r, pnl = _bucket_stats(items)
+        lines.append(f'• `{fam}` → تعداد `{cnt}` | نرخ برد `{wr:.0f}%` | R میانگین `{avg_r:+.2f}` | سود/زیان `{pnl:+.2f}`')
+
+    lines.append('━━━━━━━━━━━━━━━━━━━━')
+    lines.append('_نمونه هنوز کوچک است؛ این اعداد را برای تصمیم‌های بزرگ (مثل تغییر آستانه‌ی امتیاز) وقتی هر ردیف چند ده معامله داشته باشد در نظر بگیرید._')
     return '\n'.join(lines)
 
 
@@ -3807,12 +3955,13 @@ def process_command(cmd,chat_id,message_id=None):
         for p in s['paper_positions'][:]:
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
         return
-    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm'):
+    if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm','/quality_report'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
         elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
         elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
         elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
         elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
+        elif cl=='/quality_report': send_message(chat_id, quality_breakdown_report(chat_id, 'all'), get_performance_keyboard())
         elif cl=='/export_trade_data': export_trade_data(chat_id)
         elif cl=='/reset_stats_prompt':
             send_message(chat_id,'⚠️ آیا از ریست آمار عملکرد اطمینان دارید؟', {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
