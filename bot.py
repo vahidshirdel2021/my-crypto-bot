@@ -1642,16 +1642,21 @@ def _paper_stop_fill_price(pos, low, high, risk_distance):
 
 def _regime_alignment_snapshot(symbol, timeframe):
     """
-    عکس‌فوری عددی رژیم در لحظه‌ی ورود، فقط برای ثبت در رکورد معامله - هیچ تصمیم
-    ورود/خروجی را عوض نمی‌کند:
-    ۱) درصد اجماع صعودی/نزولی در تایم‌فریم فعال (از کش refresh_timeframe_regime - تنها
-       لایه‌ی رژیم باقی‌مانده، لایه‌ی ماکرو BTC/ETH ۴ساعته حذف شده)
-    ۲) ADX خود نماد در همان تایم‌فریم (محاسبه‌ی سبک، از کش get_klines موجود)
+    عکس‌فوری عددی سه لایه‌ای که در بحث «هم‌جهتی چندلایه» مطرح شد، در لحظه‌ی ورود:
+    ۱) قدرت روند بازار کلی (میانگین ADX لیدرها، از کش refresh_market_regime)
+    ۲) درصد اجماع صعودی/نزولی در تایم‌فریم فعال (از کش refresh_timeframe_regime)
+    ۳) ADX خود نماد در همان تایم‌فریم (محاسبه‌ی سبک، از کش get_klines موجود)
 
+    فقط برای ثبت در رکورد معامله است؛ هیچ تصمیم ورود/خروجی را عوض نمی‌کند.
     اگر هرکدام در دسترس نبود، None برمی‌گردد تا بعداً به‌اشتباه به‌جای «صفر واقعی»
     خوانده نشود.
     """
-    out = {'timeframe_bull_pct': None, 'timeframe_bear_pct': None, 'symbol_adx': None}
+    out = {'market_adx': None, 'timeframe_bull_pct': None, 'timeframe_bear_pct': None, 'symbol_adx': None}
+    try:
+        if MARKET_REGIME_CACHE.get('ts', 0) > 0:
+            out['market_adx'] = round(float(MARKET_REGIME_CACHE.get('avg_adx') or 0.0), 2)
+    except Exception:
+        pass
     try:
         tf_cache = TIMEFRAME_REGIME_CACHE.get(timeframe)
         if tf_cache:
@@ -1905,21 +1910,62 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
 
 
 def scan_watchlist_for_timeframe(timeframe, regime=None):
-    # لایه‌ی رژیم ماکرو (BTC/ETH ۴ساعته) حذف شد و LONG/SHORT WATCHLIST از قبل یک لیست
-    # مشترکند، پس دیگر نیازی به شاخه‌بندی بر اساس جهت نیست؛ کل لیست همیشه برمی‌گردد.
-    # فیلتر واقعی جهت‌دار الان فقط در filter_watchlist_by_market_regime (لایه‌ی دوم:
-    # اجماع فوری تایم‌فریم فعال) اعمال می‌شود.
-    return list(dict.fromkeys(list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min'])) +
-                              list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))))
+    if regime == 'BEARISH':
+        return list(WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min']))
+    if regime == 'BULLISH':
+        return list(WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min']))
+    long_list = WINNING_WATCHLISTS.get(timeframe, WINNING_WATCHLISTS['5min'])
+    short_list = WINNING_SHORT_WATCHLISTS.get(timeframe, WINNING_SHORT_WATCHLISTS['5min'])
+    return list(dict.fromkeys(list(long_list) + list(short_list)))
 
 
-# لایه‌ی «رژیم ماکرو» (BTC/ETH روی ۴ ساعته) عمداً حذف شد: تنها استراتژی فعال (liquidity
-# sweep) ذاتاً خلاف‌جهتِ لحظه‌ای عمل می‌کند و این لایه، حتی بعد از سخت‌گیرتر شدن، یک سیگنال
-# اضافه و تا حد زیادی هم‌بسته با لایه‌ی «اجماع فوری تایم‌فریم فعال» زیر بود. از این به بعد
-# تنها منبع رژیم، همان لایه‌ی دوم (refresh_timeframe_regime) است و فقط در یک نقطه اعمال
-# می‌شود: هرس واچ‌لیست پیش از اسکن سنگین (filter_watchlist_by_market_regime). هیچ فیلتر
-# دیگری بعد از آن، سیگنال خروجی استراتژی را بلاک نمی‌کند.
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90, 'avg_adx': 0.0}
 MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
+# آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
+# انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
+# فعال می‌شود و باعث بلاک‌شدن معاملات خلاف‌جهت (fade/sweep) می‌شود.
+MARKET_REGIME_EXTREME_ADX = float(os.environ.get('MARKET_REGIME_EXTREME_ADX', '30'))
+MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
+
+
+async def refresh_market_regime(http):
+    now = time.time()
+    if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
+        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail'], MARKET_REGIME_CACHE['extreme']
+    tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
+    states = {}
+    for leader in LEADER_SYMBOLS:
+        try:
+            d = await get_klines_async(http, leader, tf, 120)
+            if d is None or d.empty or len(d) < 60:
+                detail = f'داده کافی برای {leader} در دسترس نیست'
+                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+                return 'NEUTRAL', detail, None
+            x = calculate_indicators(d).iloc[-2]
+            adx = float(x.get('adx') or 0)
+            bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            bearish = bool(x['close'] < x['ema20'] < x['ema50'] and x['minus_di'] > x['plus_di'] and adx >= MARKET_REGIME_MIN_ADX)
+            states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
+        except Exception as exc:
+            detail = f'خطا در دریافت داده {leader}: {exc}'
+            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+            return 'NEUTRAL', detail, None
+    detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
+    unique_dirs = {v[0] for v in states.values()}
+    avg_adx = sum(v[1] for v in states.values())/len(states) if states else 0.0
+    if 'BULLISH' in unique_dirs and 'BEARISH' not in unique_dirs:
+        regime = 'BULLISH'
+    elif 'BEARISH' in unique_dirs and 'BULLISH' not in unique_dirs:
+        regime = 'BEARISH'
+    else:
+        regime = 'NEUTRAL'
+    # حالت «شدید»: همه‌ی لیدرها هم‌جهت و با ADX بالای آستانه‌ی سخت‌گیرانه - فقط همین حالت
+    # باعث بلاک شدن معاملات خلاف‌جهت می‌شود، نه regime عادی بالا (که صرفاً برای واچ‌لیست است)
+    extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme, avg_adx=avg_adx)
+    return regime, detail, extreme
 
 
 # --- شبکه سطوح لگاریتمی (بر اساس اسکریپت Pine کاربر) --------------------------------
@@ -2845,36 +2891,30 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
     return '\n'.join(lines)
 
 def _active_tf_regime_status(tf):
-    """رژیم واقعی‌ای که همین الان روی تایم‌فریم فعال کاربر، فیلتر هم‌جهتی واچ‌لیست
-    (filter_watchlist_by_market_regime) را فعال/غیرفعال می‌کند. این فیلتر فقط پیش از
-    اسکن نمادهای واچ‌لیست اعمال می‌شود - نمادهای غیرهم‌جهت اصلاً اسکن نمی‌شوند؛ جای
-    دیگری سیگنال خروجی استراتژی را بلاک نمی‌کند."""
+    """رژیم واقعی‌ای که همین الان روی تایم‌فریم فعال کاربر، فیلتر ورود خلاف‌جهت را
+    فعال/غیرفعال می‌کند (همان چیزی که scan_loop به get_signal_with_reason پاس می‌دهد) —
+    مجزا از «وضعیت کلی بازار» که فقط بر اساس BTC/ETH ۴ساعته است و صرفاً واچ‌لیست را
+    انتخاب می‌کند، نه فیلتر ورود را."""
+    macro_extreme = MARKET_REGIME_CACHE.get('extreme')
     micro_cache = TIMEFRAME_REGIME_CACHE.get(tf) or {}
-    extreme = micro_cache.get('extreme')
-    if extreme == 'BULLISH':
-        return '🟢 صعودی قوی — فقط نمادهای هم‌جهت صعودی وارد اسکن می‌شوند'
-    if extreme == 'BEARISH':
-        return '🔴 نزولی قوی — فقط نمادهای هم‌جهت نزولی وارد اسکن می‌شوند'
-    return '➡️ بدون فیلتر جهت‌دار (کل واچ‌لیست اسکن می‌شود)'
+    micro_extreme = micro_cache.get('extreme')
+    combined = combine_extreme_regime(macro_extreme, micro_extreme)
+    if combined == 'BULLISH':
+        return '🟢 صعودی قوی — ورود فروش مسدود'
+    if combined == 'BEARISH':
+        return '🔴 نزولی قوی — ورود خرید مسدود'
+    return '➡️ بدون فیلتر جهت‌دار (هر دو جهت مجاز)'
 
 
 def _simple_status_report(chat_id):
     """گزارش دوره‌ای ساده: وضعیت کلی بازار، قیمت لحظه‌ای BTC/ETH، موجودی کیف پول
     و سود/زیان لحظه‌ای پوزیشن‌های باز — به‌جای داشبورد طولانی تشخیصی."""
     s = get_session(chat_id)
+    regime = MARKET_REGIME_CACHE.get('regime', 'NEUTRAL')
+    regime_label = {'BULLISH': '📈 صعودی', 'BEARISH': '📉 نزولی', 'NEUTRAL': '➡️ رنج'}.get(regime, '➡️ رنج')
     tf = s.get('timeframe', '5min')
-    tf_cache = TIMEFRAME_REGIME_CACHE.get(tf) or {}
-    bull_pct = float(tf_cache.get('bull_pct') or 0.0)
-    bear_pct = float(tf_cache.get('bear_pct') or 0.0)
-    if bull_pct > bear_pct and bull_pct >= 50.0:
-        regime_label = '📈 صعودی'
-    elif bear_pct > bull_pct and bear_pct >= 50.0:
-        regime_label = '📉 نزولی'
-    else:
-        regime_label = '➡️ رنج'
     tf_label = TF_DISPLAY.get(tf, tf)
     active_tf_status = _active_tf_regime_status(tf)
-
 
     btc_price = latest_price('BTC')
     eth_price = latest_price('ETH')
@@ -3020,9 +3060,8 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    # لایه‌ی رژیم دیگر اینجا هیچ بلاکی اعمال نمی‌کند - فیلتر جهت‌دار فقط یک‌بار، پیش از
-    # رسیدن به این نقطه (هرس واچ‌لیست در scan_loop)، اعمال شده. پارامتر regime دیگر مصرف
-    # نمی‌شود؛ get_signal_with_reason هم دیگر آن را برای بلاک کردن سیگنال استفاده نمی‌کند.
+    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
+    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
@@ -3547,23 +3586,15 @@ def _market_snapshot(symbol, tf):
 
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
-# --- رژیم «اجماع فوری» - تنها لایه‌ی رژیم باقی‌مانده (لایه‌ی ماکرو BTC/ETH ۴ساعته حذف شد) --
-# این همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را می‌بیند - یعنی دقیقاً همان چیزی
-# که خودِ کاربر در «وضعیت بازار» می‌بیند. توجه مهم: مقدار نمایشی «وضعیت بازار»
-# (bull_pct/bear_pct پایین، همان چیزی که market_report() نشان می‌دهد) هنوز با همان اکثریت
-# ساده‌ی >=۵۰٪ محاسبه می‌شود و تغییری نکرده.
-#
-# ولی مقدار `extreme` (که تنها اثرش هرس واچ‌لیست پیش از اسکن است - filter_watchlist_by_
-# market_regime؛ جای دیگری هیچ‌چیزی را بلاک نمی‌کند) قبلاً از همان آستانه‌ی ۵۰٪ استفاده
-# می‌کرد - یک اکثریت شل و معمولی. چون استراتژی فعال (liquidity sweep) ذاتاً خلاف‌جهتِ
-# لحظه‌ای عمل می‌کند (سوییپ + بازگشت)، این اکثریت شل عملاً همان چیزی را که استراتژی برای
-# شکارش ساخته شده بود مرتب هرس می‌کرد. الان `extreme` فقط وقتی صادر می‌شود که هم اکثریت
-# خیلی قوی‌تر (TIMEFRAME_REGIME_EXTREME_PCT) باشد و هم آن نمادها با ADX
-# (TIMEFRAME_REGIME_EXTREME_ADX) واقعاً روند‌دار باشند، نه صرفاً یک EMA alignment ساده.
+# --- رژیم «اجماع فوری» - همان روش و همان آستانه‌ی گزارش «وضعیت بازار»، ولی وصل به --------
+# تصمیم‌گیری معامله. برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی
+# خیلی سخت‌گیرانه می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را
+# می‌بیند - یعنی دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند، و با همان قانون
+# اکثریت ساده (>=۵۰٪) که آنجا هم استفاده می‌شود. یعنی هر وقت «وضعیت بازار» صعودی/نزولی
+# اعلام شود، دقیقاً همان لحظه ورود خلاف‌جهت روی همه‌ی نمادها بلاک می‌شود؛ فقط وقتی بازار
+# رنج/نامشخص باشد (نه اکثریت صعودی نه نزولی) هر دو جهت آزاد هستند.
 TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
 TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
-TIMEFRAME_REGIME_EXTREME_PCT = float(os.environ.get('TIMEFRAME_REGIME_EXTREME_PCT', '0.75'))
-TIMEFRAME_REGIME_EXTREME_ADX = float(os.environ.get('TIMEFRAME_REGIME_EXTREME_ADX', '25'))
 TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -3573,55 +3604,43 @@ async def _market_snapshot_async(http, symbol, tf):
         if d is None or d.empty or len(d) < 60: return None
         d = calculate_indicators(d); c = d.iloc[-2]
         close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50)
-        adx = float(c.get('adx') or 0.0)
         score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
-        # trend_confirmed یعنی این نماد صرفاً هم‌جهت نیست بلکه واقعاً روند‌دار هم هست
-        # (ADX بالای آستانه) - برای تشخیص extreme از این استفاده می‌شود، نه از score خام،
-        # چون score خام هیچ اطلاعی از قدرت روند ندارد و می‌تواند در بازار رنج هم مرتب
-        # عوض جهت بدهد.
-        trend_confirmed_score = score if adx >= TIMEFRAME_REGIME_EXTREME_ADX else 0
-        return {'score': score, 'trend_confirmed_score': trend_confirmed_score}
+        return score
     except Exception:
         return None
 
 
 async def refresh_timeframe_regime(http, timeframe):
     """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده).
-
-    bull_pct/bear_pct نمایشی (برای گزارش/دیباگ) هنوز دقیقاً همان فرمول market_report()
-    است: اکثریت ساده (>=۵۰٪) بر اساس هم‌جهتی EMA خام، بدون فیلتر ADX - یعنی «وضعیت بازار»
-    که کاربر می‌بیند تغییر نکرده.
-
-    ولی `extreme` (مقداری که واقعاً معامله را بلاک می‌کند) دیگر از همان bull_pct/bear_pct
-    ساده گرفته نمی‌شود. الان فقط نمادهایی که هم هم‌جهت‌اند و هم با ADX واقعاً روند‌دار
-    هستند (trend_confirmed_score) شمرده می‌شوند، و برای extreme باید حداقل
-    TIMEFRAME_REGIME_EXTREME_PCT از کل نمادها (نه فقط اکثریت ساده) این شرط را داشته باشند.
-    این یعنی extreme واقعاً همان «روند بسیار قوی و گسترده» است که اسمش می‌گوید، نه یک
-    تمایل معمولی ۵۰٪+۱.
-    """
+    دقیقاً همان فرمول market_report(): اکثریت ساده (>=۵۰٪) از همان ۱۰ ارز، نه اجماع افراطی."""
     tf = timeframe
     now = time.time()
     c = TIMEFRAME_REGIME_CACHE.get(tf)
     if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
         return c['extreme']
-    results = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
-    results = [x for x in results if x is not None]
+    scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
+    scores = [x for x in scores if x is not None]
     extreme = None
     bull_pct = bear_pct = 0.0
-    if len(results) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
-        total = len(results)
-        bullish = sum(1 for x in results if x['score'] > 0)
-        bearish = sum(1 for x in results if x['score'] < 0)
+    if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
+        bullish = sum(1 for x in scores if x > 0)
+        bearish = sum(1 for x in scores if x < 0)
+        total = len(scores)
         bull_pct = bullish/total*100.0
         bear_pct = bearish/total*100.0
-        confirmed_bull = sum(1 for x in results if x['trend_confirmed_score'] > 0)
-        confirmed_bear = sum(1 for x in results if x['trend_confirmed_score'] < 0)
-        if confirmed_bull >= total * TIMEFRAME_REGIME_EXTREME_PCT:
+        if bullish > bearish and bullish >= total * 0.5:
             extreme = 'BULLISH'
-        elif confirmed_bear >= total * TIMEFRAME_REGIME_EXTREME_PCT:
+        elif bearish > bullish and bearish >= total * 0.5:
             extreme = 'BEARISH'
     TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme, 'bull_pct': bull_pct, 'bear_pct': bear_pct}
     return extreme
+
+
+def combine_extreme_regime(macro, micro):
+    """اگر با هم تناقض داشتند (نادر) به‌جای بلاک‌کردن اشتباه، خنثی در نظر گرفته می‌شود."""
+    if macro and micro and macro != micro:
+        return None
+    return macro or micro
 
 
 # --- فیلتر «هم‌رژیمی با داشبورد بازار» - پیش از رسیدن به مرحله‌ی اسکن سطوح -------------
@@ -3643,8 +3662,7 @@ async def _cached_symbol_regime_score(http, symbol, tf):
     c = per_tf.get(symbol)
     if c and now - c['ts'] < SYMBOL_REGIME_SCORE_TTL:
         return c['score']
-    result = await _market_snapshot_async(http, symbol, tf)
-    score = result['score'] if result is not None else None
+    score = await _market_snapshot_async(http, symbol, tf)
     per_tf[symbol] = {'ts': now, 'score': score}
     return score
 
@@ -3783,9 +3801,10 @@ async def _check_entry_coro(chat_id, symbol):
     timeout = aiohttp.ClientTimeout(total=15)
     conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        # بررسی دستی تک‌نماد («بررسی و ورود سریع») دیگر با رژیم فیلتر نمی‌شود - فیلتر
-        # رژیم فقط یک‌بار، پیش از اسکن دوره‌ای کل واچ‌لیست اعمال می‌شود، نه اینجا.
-        return await scan_symbol(http, chat_id, symbol)
+        macro_extreme = MARKET_REGIME_CACHE['extreme']
+        micro_extreme = await refresh_timeframe_regime(http, tf)
+        combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme)
+        return await scan_symbol(http, chat_id, symbol, combined_extreme)
 
 
 def check_entry_now(chat_id, symbol):
@@ -4443,24 +4462,34 @@ async def scan_loop():
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
                 tasks=[]
-                # رژیم ماکرو (BTC/ETH ۴ساعته) حذف شده. تنها لایه‌ی رژیم باقی‌مانده «اجماع
-                # فوری» همان ۱۰ نماد لیدر روی تایم‌فریم معاملاتی خودِ کاربر است، و تنها
-                # جایی که اثر می‌گذارد همین‌جاست: هرس واچ‌لیست پیش از اسکن سنگین. بعد از
-                # این نقطه (scan_symbol/get_signal_with_reason) هیچ فیلتر جهت‌داری روی
-                # سیگنال خروجی اعمال نمی‌شود.
+                need_regime = any(
+                    s.get('is_bot_active') and not s.get('daily_stopped')
+                    for s in USER_SESSIONS.values()
+                )
+                if need_regime:
+                    await refresh_market_regime(http)
+                loose_regime = MARKET_REGIME_CACHE['regime']
+                macro_extreme = MARKET_REGIME_CACHE['extreme']
+                # رژیم اجماع فوری (همان روش «وضعیت بازار») را برای هر تایم‌فریمی که واقعاً
+                # در حال استفاده است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم
+                # متفاوتی داشته باشد و این سیگنال برخلاف رژیم ماکرو، به تایم‌فریم وابسته است.
                 active_timeframes = {
                     s.get('timeframe', '5min')
                     for s in USER_SESSIONS.values()
                     if s.get('is_bot_active') and not s.get('daily_stopped')
                 }
+                micro_extreme_by_tf = {}
+                combined_extreme_by_tf = {}
                 filtered_watchlist_by_tf = {}
                 for tf in active_timeframes:
-                    extreme = await refresh_timeframe_regime(http, tf)
+                    micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
+                    combined = combine_extreme_regime(macro_extreme, micro_extreme_by_tf[tf])
+                    combined_extreme_by_tf[tf] = combined
                     # فیلتر «هم‌رژیمی با داشبورد بازار» یک‌بار برای هر تایم‌فریم فعال محاسبه
                     # می‌شود (نه به‌ازای هر کاربر) تا در فچ داده تکراری صرفه‌جویی شود؛ چون
                     # واچ‌لیست پایه (LONG/SHORT) در حال حاضر برای همه‌ی کاربران با یک تایم‌فریم یکسان است.
-                    base_watchlist = scan_watchlist_for_timeframe(tf)
-                    filtered_watchlist_by_tf[tf] = await filter_watchlist_by_market_regime(http, base_watchlist, tf, extreme)
+                    base_watchlist = scan_watchlist_for_timeframe(tf, loose_regime)
+                    filtered_watchlist_by_tf[tf] = await filter_watchlist_by_market_regime(http, base_watchlist, tf, combined)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
@@ -4469,13 +4498,13 @@ async def scan_loop():
                         continue
                     user_tf = s.get('timeframe', '5min')
                     watchlist = filtered_watchlist_by_tf.get(user_tf) or []
+                    combined_extreme = combined_extreme_by_tf.get(user_tf)
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym))
+                        tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                     # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
                     # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
-                    # شوند، مستقل از واچ‌لیست معمولی (و بدون فیلتر رژیم، چون آن فیلتر فقط
-                    # روی اسکن دوره‌ای اعمال می‌شود) هر چرخه دوباره بررسی می‌شوند تا
-                    # به‌محض مهیا شدن شرایط بلافاصله وارد شوند.
+                    # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
+                    # دوباره بررسی می‌شوند تا به‌محض مهیا شدن شرایط بلافاصله وارد شوند.
                     pw = s.get('priority_watch') or {}
                     if pw:
                         stale_cutoff = time.time() - PRIORITY_WATCH_TTL_SECONDS
@@ -4483,7 +4512,7 @@ async def scan_loop():
                             if float((meta or {}).get('added_at', 0)) < stale_cutoff:
                                 pw.pop(sym, None); continue
                             if sym in watchlist: continue
-                            tasks.append(scan_symbol(http,cid,sym))
+                            tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
