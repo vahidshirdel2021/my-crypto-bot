@@ -139,6 +139,10 @@ PAPER_STOP_SLIPPAGE_MAX_R = max(0.0, float(os.environ.get('PAPER_STOP_SLIPPAGE_M
 # با تنظیمات پیش‌فرض (سقف ۳ پوزیشن، ریسک ثابت هر معامله) عملاً هیچ‌وقت فعال نمی‌شود؛
 # فقط وقتی کاربر سقف پوزیشن یا درصد ریسک را بالا ببرد، به‌عنوان دیوار دوم وارد عمل می‌شود.
 MAX_TOTAL_OPEN_RISK_PCT = max(0.0, float(os.environ.get('MAX_TOTAL_OPEN_RISK_PCT', '8.0')))
+# اگر روی true تنظیم شود، سیگنال Liquidity Sweep به‌جای صدور فوری روی کندل ریکلیم، یک
+# کندل دیگر صبر می‌کند تا مطمئن شود جهت ریکلیم نقض نشده - قیمت ورود کمی بدتر می‌شود در
+# ازای فیلتر شدن فیک‌اوت‌های زودهنگام. پیش‌فرض خاموش است.
+SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIRMATION_CANDLE', 'false').strip().lower() not in ('0', 'false', 'off', '')
 PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
@@ -610,7 +614,7 @@ def default_session():
         'user_state': None,
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
-        'strategy_config': get_timeframe_preset('5min'),
+        'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT},
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
         'risk_per_trade_pct': RISK_PER_TRADE_PCT,
         'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT,
@@ -3326,9 +3330,13 @@ def trade_tracking_keyboard(chat_id):
     enabled = bool(s.get('trade_pipeline_enabled', False))
     icon = '🟢' if enabled else '🔴'
     state = 'روشن' if enabled else 'خاموش'
+    sweep_confirm = bool((s.get('strategy_config') or {}).get('sweep_require_confirmation_candle', False))
+    sweep_icon = '🟢' if sweep_confirm else '🔴'
+    sweep_state = 'روشن' if sweep_confirm else 'خاموش'
     return {
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
+            [{'text': f'{sweep_icon} تاییدیه یک کندل اضافه Sweep: {sweep_state}', 'callback_data': '/toggle_sweep_confirm'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
@@ -3837,7 +3845,11 @@ def check_entry_now(chat_id, symbol):
     send_message(chat_id, f'🔎 در حال بررسی سطوح و شرایط ورود `{symbol}`...')
     try:
         future = asyncio.run_coroutine_threadsafe(_check_entry_coro(chat_id, symbol), SCANNER_LOOP)
-        result = future.result(timeout=25)
+        # بررسی کامل یک نماد شامل چند درخواست شبکه‌ای پشت‌سرهم است (کندل اصلی + تایم‌فریم
+        # بالاتر + سطوح گرید + همبستگی با BTC/ETH)؛ هرکدام تا ۷ ثانیه مهلت دارند و در صورت
+        # کندی صرافی اصلی به KuCoin هم fallback می‌کنند. سقف قبلی (۲۵ ثانیه) در شرایط کندی
+        # صرافی به‌راحتی رد می‌شد و باعث خطای بی‌ربط «TimeoutError» (با متن خالی) می‌شد.
+        result = future.result(timeout=55)
     except Exception as exc:
         logger.exception('check_entry_now failed for %s/%s', chat_id, symbol)
         send_message(chat_id, f'❌ بررسی `{symbol}` با خطا مواجه شد: `{exc}`')
@@ -4181,6 +4193,18 @@ def process_command(cmd,chat_id,message_id=None):
         s['trade_pipeline_enabled'] = not s.get('trade_pipeline_enabled', False)
         save_session(chat_id)
         send_message(chat_id, f"🧭 ردیابی معاملات: {'🟢 روشن' if s['trade_pipeline_enabled'] else '🔴 خاموش'}", trade_tracking_keyboard(chat_id))
+        return
+    if cl=='/toggle_sweep_confirm':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('sweep_require_confirmation_candle', False))
+        s['strategy_config']['sweep_require_confirmation_candle'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، سیگنال Sweep فقط وقتی صادر می‌شود که یک کندل بعد از ریکلیم هم جهتش را تایید کند - ورود کمی دیرتر و با قیمت بدتر، ولی فیک‌اوت‌های زودهنگام فیلتر می‌شوند.'
+            if not current else 'برگشت به حالت قبلی: سیگنال Sweep دوباره بلافاصله روی کندل ریکلیم صادر می‌شود.'
+        )
+        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
         return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)

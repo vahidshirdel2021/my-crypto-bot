@@ -237,6 +237,12 @@ STRATEGY_DEFAULTS = {
     "early_loss_weakness_exit_enabled": False,
     "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
     "early_loss_weakness_exit_enabled": False,
+    # وقتی True باشد، سیگنال Liquidity Sweep بلافاصله روی کندل ریکلیم صادر نمی‌شود؛
+    # باید یک کندل دیگر هم بسته شود و جهت ریکلیم را نقض نکند (یعنی برنگردد زیر/بالای
+    # سطح سویپ‌شده) تا سیگنال واقعاً صادر شود. قیمت ورود بدتر می‌شود ولی فیک‌اوت‌های
+    # زودهنگام (که در تحلیل معاملات واقعی دیدیم MFE نزدیک صفر داشتند) فیلتر می‌شوند.
+    # پیش‌فرض False است تا هیچ رفتار فعلی بی‌اجازه تغییر نکند.
+    "sweep_require_confirmation_candle": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -1027,7 +1033,7 @@ def _confirm_active_structure(d, idx, signal, cfg):
         recent_low = float(recent["low"].min())
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
-def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min"):
+def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min", _skip_confirmation_wrap=False):
     """Liquidity Sweep scanned across every key level (Monthly/Weekly/Daily/4h/1h),
     with a short-lived active-setup window on the daily level.
 
@@ -1045,6 +1051,31 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     price is still close to the original PDH/PDL level. This avoids both
     missed entries and FOMO/chasing.
     """
+    cfg_peek = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    if not _skip_confirmation_wrap and cfg_peek.get("sweep_require_confirmation_candle", False):
+        # --- پوسته‌ی «تاییدیه یک کندل اضافه» ---
+        # به‌جای صدور سیگنال دقیقاً روی کندل ریکلیم، یک قدم عقب می‌رویم: انگار یک کندل
+        # زودتریم (df بدون آخرین کندل بسته‌شده) و همان تشخیص اصلی (بدون تغییر) را روی
+        # آن اجرا می‌کنیم. اگر آنجا سیگنالی وجود داشت، تازه چک می‌کنیم که کندلِ واقعاً
+        # آخر (که در نسخه‌ی کوتاه‌شده نبود) جهت ریکلیم را نقض نکرده باشد. این‌طوری از
+        # کل منطق تشخیص سطح/ساختار که همین الان هست بدون کپی یا تغییر دوباره استفاده
+        # می‌شود؛ فقط زمان صدور سیگنال یک کندل به عقب می‌افتد.
+        if df is None or len(df) < 4:
+            return None, "داده کافی برای تاییدیه یک کندل اضافه نیست"
+        prior_df = df.iloc[:-1].reset_index(drop=True)
+        prior_sig, prior_reason = strategy_liquidity_sweep_5m(
+            prior_df, filters, strategy_config, live_price=None, timeframe=timeframe, _skip_confirmation_wrap=True
+        )
+        if prior_sig not in ("BUY", "SELL"):
+            return None, "در انتظار کندل تاییدیه (ستاپ تازه‌ای برای تایید وجود ندارد)"
+        ref_candle = prior_df.iloc[-2]   # همان کندل ریکلیمی که سیگنال اصلی از آن صادر شد
+        confirm_candle = df.iloc[-2]     # کندلی که بعد از آن بسته شده - تاییدیه
+        if prior_sig == "BUY" and float(confirm_candle['close']) < float(ref_candle['low']):
+            return None, "سیگنال قبلی توسط کندل بعدی نقض شد (تاییدیه رد شد)"
+        if prior_sig == "SELL" and float(confirm_candle['close']) > float(ref_candle['high']):
+            return None, "سیگنال قبلی توسط کندل بعدی نقض شد (تاییدیه رد شد)"
+        return prior_sig, f"[کندل تاییدیه گذشت] {prior_reason}"
+
     d, pdh, pdl = _compute_prev_day_levels(df)
     if d is None:
         return None, "داده کافی برای محاسبه High/Low روز قبل نیست"
