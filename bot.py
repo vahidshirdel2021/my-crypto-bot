@@ -3363,10 +3363,14 @@ def trade_tracking_keyboard(chat_id):
     sweep_confirm = bool((s.get('strategy_config') or {}).get('sweep_require_confirmation_candle', False))
     sweep_icon = '🟢' if sweep_confirm else '🔴'
     sweep_state = 'روشن' if sweep_confirm else 'خاموش'
+    swing_break = bool((s.get('strategy_config') or {}).get('sweep_require_swing_break', False))
+    swing_icon = '🟢' if swing_break else '🔴'
+    swing_state = 'روشن' if swing_break else 'خاموش'
     return {
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
             [{'text': f'{sweep_icon} تاییدیه یک کندل اضافه Sweep: {sweep_state}', 'callback_data': '/toggle_sweep_confirm'}],
+            [{'text': f'{swing_icon} شکست سوینگ محلی Sweep: {swing_state}', 'callback_data': '/toggle_swing_break'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
@@ -4235,6 +4239,18 @@ def process_command(cmd,chat_id,message_id=None):
             if not current else 'برگشت به حالت قبلی: سیگنال Sweep دوباره بلافاصله روی کندل ریکلیم صادر می‌شود.'
         )
         send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        return
+    if cl=='/toggle_swing_break':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('sweep_require_swing_break', False))
+        s['strategy_config']['sweep_require_swing_break'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، بعد از ریکلیم، سیگنال Sweep صادر نمی‌شود مگر قیمت واقعاً از سقف/کف سوینگِ محلیِ تشکیل‌شده بعد از ریکلیم رد بشه (نه صرفاً عدم نقض) - قوی‌تر از «تاییدیه یک کندل اضافه» است و در صورت روشن‌بودن هر دو، همین یکی ملاک عمل قرار می‌گیرد.'
+            if not current else 'برگشت به حالت قبلی: نیازی به شکست سوینگ محلی نیست.'
+        )
+        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
         return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)

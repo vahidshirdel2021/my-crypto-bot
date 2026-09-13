@@ -243,6 +243,20 @@ STRATEGY_DEFAULTS = {
     # زودهنگام (که در تحلیل معاملات واقعی دیدیم MFE نزدیک صفر داشتند) فیلتر می‌شوند.
     # پیش‌فرض False است تا هیچ رفتار فعلی بی‌اجازه تغییر نکند.
     "sweep_require_confirmation_candle": False,
+    # وقتی True باشد (پیش‌فرض روشن)، اگر سیگنال درست در دقایق پایانی کندلِ تایم‌فریمی
+    # که سطح ازش اومده (مثلاً [SETUP 1h] در ۸ دقیقه‌ی آخر همان ساعت) شکل بگیره،
+    # صادر نمی‌شود؛ چون به‌زودی کندل جدید باز می‌شود و همان سطح (که هنوز میخکوب همون
+    # نقطه‌ی قبلیه) دیگه تازه نیست - منتظر کندل بعدی و ارزیابی نسبت به سطح تازه‌بسته‌شده
+    # می‌مونیم. این قانون برای تمام سطوح (ماهانه تا ۱ساعته) یکسان اعمال می‌شود.
+    "htf_close_guard_enabled": True,
+    "htf_close_guard_minutes": 10,
+    # وقتی True باشد، صرفاً «نقض‌نشدن» کندل بعدی کافی نیست - قیمت باید واقعاً از
+    # سقف/کف نوسانیِ محلی که بین کندل ریکلیم تا الان تشکیل شده رد بشه (شکست ادامه‌دار)
+    # تا سیگنال صادر شود. اگر فعال باشد، جایگزین sweep_require_confirmation_candle
+    # می‌شود (منطق قوی‌تری دارد) و آن تنظیم را نادیده می‌گیرد. پیش‌فرض خاموش - نیاز به
+    # اعتبارسنجی با داده دارد، مثل sweep_require_confirmation_candle.
+    "sweep_require_swing_break": False,
+    "sweep_swing_break_lookback": 6,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -1033,7 +1047,115 @@ def _confirm_active_structure(d, idx, signal, cfg):
         recent_low = float(recent["low"].min())
         return float(last["close"]) < recent_low and swing_high > float(last["close"])
 
+def _minutes_to_htf_close(now_dt, tag):
+    """چند دقیقه تا بسته‌شدن کندلِ جاریِ تایم‌فریمی که سطح `tag` به آن تعلق دارد باقی
+    مانده؟ از همان قرارداد epoch-UTC (floor/to_period با W-MON) استفاده می‌کند که
+    _compute_prev_htf_levels برای خودِ محاسبه‌ی سطوح استفاده می‌کند، تا کاملاً هم‌خوان
+    با تعریف «کندل قبلی» باشد. None یعنی قابل‌محاسبه نیست (fail-open در فراخوان)."""
+    if now_dt is None or pd.isna(now_dt):
+        return None
+    try:
+        now_dt = pd.Timestamp(now_dt)
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.tz_localize("UTC")
+        if tag == "1h":
+            period_end = now_dt.floor("1h") + pd.Timedelta(hours=1)
+        elif tag == "4h":
+            period_end = now_dt.floor("4h") + pd.Timedelta(hours=4)
+        elif tag == "Daily":
+            period_end = now_dt.floor("1D") + pd.Timedelta(days=1)
+        elif tag == "Weekly":
+            p = now_dt.tz_localize(None).to_period("W-MON")
+            period_end = p.end_time.tz_localize("UTC") + pd.Timedelta(microseconds=1)
+        elif tag == "Monthly":
+            p = now_dt.tz_localize(None).to_period("M")
+            period_end = p.end_time.tz_localize("UTC") + pd.Timedelta(microseconds=1)
+        else:
+            return None
+        return max(0.0, (period_end - now_dt).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+def _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, cfg):
+    """به‌جای «نقض‌نشدن» ساده، دنبال جدیدترین ستاپ Sweep در چند کندل اخیر می‌گردد و
+    سقف/کف نوسانیِ محلی (بین کندل ریکلیم تا الان) را می‌سازد. فقط وقتی قیمت واقعاً
+    از آن سقف/کف رد شده باشد (شکست ادامه‌دار، نه صرفاً عدم نقض) سیگنال صادر می‌شود.
+
+    این دقیقاً همان چیزی است که در تحلیل چارت واقعی دیده شد: بعد از ریکلیم، یک
+    سوینگ کوچک محلی تشکیل شده بود که هنوز شکسته نشده بود، ولی ورود انجام شده بود.
+    """
+    max_lookback = max(1, int(cfg.get("sweep_swing_break_lookback", 6)))
+    if df is None or len(df) < max_lookback + 10:
+        return None, "داده کافی برای بررسی شکست سوینگ محلی نیست"
+    n = len(df)
+    for back in range(1, max_lookback + 1):
+        trial_df = df.iloc[:n - back].reset_index(drop=True)
+        if len(trial_df) < 10:
+            break
+        sig, reason = _strategy_liquidity_sweep_5m_impl(
+            trial_df, filters, strategy_config, None, timeframe, _skip_confirmation_wrap=True
+        )
+        if sig not in ("BUY", "SELL"):
+            continue
+        reclaim_idx = n - back - 2  # اندیس کندل ریکلیم در df اصلی
+        if reclaim_idx < 0:
+            continue
+        # پنجره‌ی سوینگ: از کندل ریکلیم تا یکی‌مانده‌به‌کندل‌فعلی - خودِ کندل فعلی
+        # (که داریم چک می‌کنیم آیا سوینگ رو شکسته) عمداً از این پنجره حذف شده، وگرنه
+        # سقف/کفِ خودش باعث می‌شد هیچ‌وقت از خودش رد نشه.
+        window_end = max(reclaim_idx + 1, n - 2)
+        window = df.iloc[reclaim_idx: window_end]
+        last_closed = df.iloc[-2]
+        if sig == "BUY":
+            swing_high = float(window["high"].max())
+            if float(last_closed["close"]) > swing_high:
+                return "BUY", f"[شکست سوینگ محلی بعد از ریکلیم] {reason}"
+        else:
+            swing_low = float(window["low"].min())
+            if float(last_closed["close"]) < swing_low:
+                return "SELL", f"[شکست سوینگ محلی بعد از ریکلیم] {reason}"
+        # ستاپ پیدا شد ولی سوینگ محلی‌اش هنوز شکسته نشده - نه رد قطعی، فقط این چرخه صبر
+        return None, f"سوینگ محلی بعد از ریکلیم هنوز شکسته نشده (منتظر ادامه) | {reason}"
+    return None, "ستاپ Sweep تازه‌ای برای بررسی شکست سوینگ محلی پیدا نشد"
+
+
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min", _skip_confirmation_wrap=False):
+    """پوسته‌ی نهاییِ عمومی: تشخیص اصلی را بدون تغییر از _strategy_liquidity_sweep_5m_impl
+    می‌گیرد (یا در صورت فعال بودن sweep_require_swing_break، از تشخیص شکست سوینگ محلی)
+    و یک گیت آخر روی آن اعمال می‌کند - گیت مرز کندل. اگر سیگنال درست در دقایق پایانیِ
+    کندلِ تایم‌فریمِ سطحِ صادرکننده (طبق تگ [SETUP ...]) شکل گرفته باشد، نادیده گرفته
+    می‌شود تا کندل جدید باز شود و سطوح نسبت به کندل تازه‌بسته‌شده دوباره ارزیابی شوند."""
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    if bool(cfg.get("sweep_require_swing_break", False)) and not _skip_confirmation_wrap:
+        sig, reason = _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, cfg)
+    else:
+        sig, reason = _strategy_liquidity_sweep_5m_impl(df, filters, strategy_config, live_price, timeframe, _skip_confirmation_wrap)
+    if sig not in ("BUY", "SELL"):
+        return sig, reason
+    if not bool(cfg.get("htf_close_guard_enabled", True)):
+        return sig, reason
+    tag = extract_setup_tag(reason)
+    if not tag:
+        return sig, reason
+    try:
+        if df is None or len(df) < 2:
+            return sig, reason
+        ts = pd.to_numeric(df.iloc[-2]["timestamp"], errors="coerce")
+        if pd.isna(ts):
+            return sig, reason
+        unit = "ms" if float(ts) > 1e12 else "s"
+        now_dt = pd.to_datetime(ts, unit=unit, utc=True)
+    except Exception:
+        return sig, reason
+    remaining = _minutes_to_htf_close(now_dt, tag)
+    threshold = float(cfg.get("htf_close_guard_minutes", 10))
+    if remaining is not None and remaining < threshold:
+        return None, f"در {remaining:.0f} دقیقه‌ی پایانی کندل {tag} هستیم - منتظر بسته‌شدن و ارزیابی نسبت به کندل جدید می‌مانیم | {reason}"
+    return sig, reason
+
+
+def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, live_price=None, timeframe="5min", _skip_confirmation_wrap=False):
     """Liquidity Sweep scanned across every key level (Monthly/Weekly/Daily/4h/1h),
     with a short-lived active-setup window on the daily level.
 
@@ -1063,7 +1185,7 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         if df is None or len(df) < 4:
             return None, "داده کافی برای تاییدیه یک کندل اضافه نیست"
         prior_df = df.iloc[:-1].reset_index(drop=True)
-        prior_sig, prior_reason = strategy_liquidity_sweep_5m(
+        prior_sig, prior_reason = _strategy_liquidity_sweep_5m_impl(
             prior_df, filters, strategy_config, live_price=None, timeframe=timeframe, _skip_confirmation_wrap=True
         )
         if prior_sig not in ("BUY", "SELL"):
