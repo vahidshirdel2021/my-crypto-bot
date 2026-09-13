@@ -613,6 +613,10 @@ def default_session():
         'max_same_direction_positions': 2,
         'same_direction_entry_cooldown_seconds': 120,
         'max_total_open_risk_pct': MAX_TOTAL_OPEN_RISK_PCT,
+        # سوییچ مرکزی: وقتی False باشد، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه
+        # محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند.
+        # پیش‌فرض True (روشن).
+        'market_alignment_filters_enabled': True,
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
@@ -3130,9 +3134,10 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
     full_reason = full_reason[:500]
-    guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
-    if not guard_ok:
-        return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
+    if bool(s.get('market_alignment_filters_enabled', True)):
+        guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
+        if not guard_ok:
+            return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
@@ -3366,11 +3371,15 @@ def trade_tracking_keyboard(chat_id):
     swing_break = bool((s.get('strategy_config') or {}).get('sweep_require_swing_break', False))
     swing_icon = '🟢' if swing_break else '🔴'
     swing_state = 'روشن' if swing_break else 'خاموش'
+    align_on = bool(s.get('market_alignment_filters_enabled', True))
+    align_icon = '🟢' if align_on else '🔴'
+    align_state = 'روشن' if align_on else 'خاموش'
     return {
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
             [{'text': f'{sweep_icon} تاییدیه یک کندل اضافه Sweep: {sweep_state}', 'callback_data': '/toggle_sweep_confirm'}],
             [{'text': f'{swing_icon} شکست سوینگ محلی Sweep: {swing_state}', 'callback_data': '/toggle_swing_break'}],
+            [{'text': f'{align_icon} فیلتر هم‌جهتی با بازار (واچ‌لیست+رژیم+BTC/ETH): {align_state}', 'callback_data': '/toggle_market_alignment'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
@@ -3843,9 +3852,12 @@ async def _check_entry_coro(chat_id, symbol):
     timeout = aiohttp.ClientTimeout(total=15)
     conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        macro_extreme = MARKET_REGIME_CACHE['extreme']
-        micro_extreme = await refresh_timeframe_regime(http, tf)
-        combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme)
+        if bool(s.get('market_alignment_filters_enabled', True)):
+            macro_extreme = MARKET_REGIME_CACHE['extreme']
+            micro_extreme = await refresh_timeframe_regime(http, tf)
+            combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme)
+        else:
+            combined_extreme = None
         return await scan_symbol(http, chat_id, symbol, combined_extreme)
 
 
@@ -4252,6 +4264,17 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
         return
+    if cl=='/toggle_market_alignment':
+        current = bool(s.get('market_alignment_filters_enabled', True))
+        s['market_alignment_filters_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند. سیگنال‌ها کاملاً مستقل از وضعیت کلی بازار و بیت‌کوین/اتریوم بررسی و اجرا می‌شوند.'
+            if not current else 'برگشت به حالت قبلی: فیلتر واچ‌لیست، محافظ خلاف‌جهت و گارد همبستگی BTC/ETH دوباره فعال شدند.'
+        )
+        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)
         return
@@ -4551,6 +4574,7 @@ async def scan_loop():
                 micro_extreme_by_tf = {}
                 combined_extreme_by_tf = {}
                 filtered_watchlist_by_tf = {}
+                base_watchlist_by_tf = {}
                 for tf in active_timeframes:
                     micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
                     combined = combine_extreme_regime(macro_extreme, micro_extreme_by_tf[tf])
@@ -4559,6 +4583,7 @@ async def scan_loop():
                     # می‌شود (نه به‌ازای هر کاربر) تا در فچ داده تکراری صرفه‌جویی شود؛ چون
                     # واچ‌لیست پایه (LONG/SHORT) در حال حاضر برای همه‌ی کاربران با یک تایم‌فریم یکسان است.
                     base_watchlist = scan_watchlist_for_timeframe(tf, loose_regime)
+                    base_watchlist_by_tf[tf] = base_watchlist
                     filtered_watchlist_by_tf[tf] = await filter_watchlist_by_market_regime(http, base_watchlist, tf, combined)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
@@ -4567,8 +4592,12 @@ async def scan_loop():
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
                     user_tf = s.get('timeframe', '5min')
-                    watchlist = filtered_watchlist_by_tf.get(user_tf) or []
-                    combined_extreme = combined_extreme_by_tf.get(user_tf)
+                    align_on = bool(s.get('market_alignment_filters_enabled', True))
+                    watchlist = (filtered_watchlist_by_tf if align_on else base_watchlist_by_tf).get(user_tf) or []
+                    # وقتی سوییچ خاموشه، regime رو None پاس می‌دیم تا محافظ خلاف‌جهت بازار
+                    # (داخل get_signal_with_reason) هم غیرفعال بشه - چون اون محافظ فقط وقتی
+                    # regime برابر BULLISH/BEARISH باشه فعال می‌شه.
+                    combined_extreme = combined_extreme_by_tf.get(user_tf) if align_on else None
                     for sym in watchlist:
                         tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                     # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
