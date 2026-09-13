@@ -1112,9 +1112,21 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         """When >=2 of the currently-enabled levels sit within
         `level_cluster_max_atr` x ATR of each other, a sweep of any single one
         of them is unreliable (a small wick can tag two or three overlapping
-        levels at once). Collapse them into one zone — ceiling = highest
-        level, floor = lowest — and return (ceiling, floor, level_count), or
-        None when not currently compressed."""
+        levels at once). Collapse them into one zone - ceiling = highest
+        level, floor = lowest - and return (ceiling, floor, level_count), or
+        None when not currently compressed.
+
+        نکته‌ی مهم (باگ‌فیکس): نسخه‌ی قبلی این تابع «سقف» و «کف» را از میان *همه‌ی*
+        سطوح فعال (معمولاً ۵ تا: ماهانه تا ۱ساعته) محاسبه می‌کرد و اگر کل این بازه
+        از آستانه بیشتر بود None برمی‌گرداند - یعنی اگر فقط یکی از پنج سطح (مثلاً
+        ماهانه) دور از بقیه بود، کل تشخیص خوشه خراب می‌شد، حتی اگر ۴ تای دیگر
+        دقیقاً روی هم بودند. در عمل چون معمولاً حداقل یک سطح بلندمدت (ماهانه/هفتگی)
+        از سطوح کوتاه‌مدت فاصله دارد، این یعنی خوشه تقریباً هیچ‌وقت واقعاً تشخیص داده
+        نمی‌شد. حالا به‌جای «همه‌ی سطوح باید نزدیک هم باشند»، سطوح را بر اساس نقطه‌ی
+        میانی مرتب و بزرگ‌ترین زیرمجموعه‌ی *مجاور* که دامنه‌ی ترکیبی‌شان از آستانه
+        بیشتر نمی‌شود را پیدا می‌کنیم - دقیقاً همان چیزی که در مستندات این تابع
+        همیشه ادعا می‌شد ولی پیاده‌سازی نمی‌شد.
+        """
         if idx < 0 or idx >= len(d) or not bool(cfg.get("level_cluster_enabled", True)):
             return None
         atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
@@ -1123,12 +1135,30 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         pairs = _active_level_pairs_at(idx)
         if len(pairs) < 2:
             return None
-        ceiling = max(p[0] for p in pairs.values())
-        floor = min(p[1] for p in pairs.values())
         k = max(0.1, float(cfg.get("level_cluster_max_atr", 1.2)))
-        if (ceiling - floor) > atr * k:
+        max_span = atr * k
+        items = sorted(pairs.items(), key=lambda kv: (kv[1][0] + kv[1][1]) / 2.0)
+        best = None
+        i, n = 0, len(items)
+        while i < n:
+            group = [items[i]]
+            ceiling, floor = items[i][1]
+            j = i + 1
+            while j < n:
+                _, (hi, lo) = items[j]
+                new_ceiling, new_floor = max(ceiling, hi), min(floor, lo)
+                if (new_ceiling - new_floor) > max_span:
+                    break
+                ceiling, floor = new_ceiling, new_floor
+                group.append(items[j])
+                j += 1
+            if len(group) >= 2 and (best is None or len(group) > len(best[0])):
+                best = (group, ceiling, floor)
+            i = j if j > i + 1 else i + 1
+        if best is None:
             return None
-        return ceiling, floor, len(pairs)
+        group, ceiling, floor = best
+        return ceiling, floor, len(group)
 
     def _ordered_candidates_at(idx):
         """Which (tag, hi, lo, hi_key, lo_key, hi_label, lo_label) tuples to
@@ -1754,6 +1784,21 @@ def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filter
     return break_sig, f"[شکست-قوی] {break_reason}"
 
 
+_REVERSAL_FAMILY_MARKERS = ('liquidity_sweep', 'Liquidity Sweep', 'ADAPTIVE_SWEEP', 'ACTIVE_SETUP')
+
+
+def is_reversal_family_reason(reason):
+    """آیا این reason از خانواده‌ی برگشتی (Liquidity Sweep) است؟
+
+    این دقیقاً همان تشخیصی است که در محافظ خلاف‌جهت بازار (پایین همین فایل) برای
+    معاف‌کردن خانواده‌ی Sweep از فیلتر رژیم استفاده می‌شود. به‌عنوان یک تابع مجزا
+    بیرون کشیده شده تا هم اینجا و هم از بوت.پی (برای ثبت فیلد `regime_filter_exempt`
+    روی هر معامله) از یک منبع واحد استفاده شود، نه دو نسخه‌ی جدا که ممکن است با
+    گذشت زمان از هم واگرا شوند.
+    """
+    return any(marker in (reason or '') for marker in _REVERSAL_FAMILY_MARKERS)
+
+
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None, live_price=None):
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
@@ -1799,8 +1844,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     # جهت کلی) در بوت.پی به‌عهده دارد. خانواده‌های ادامه‌دهنده‌ی روند (Trend/Breakout/
     # Mean-Reversion/ORB) کاملاً تحت این فیلتر باقی می‌مانند، چون معامله‌ی ادامه‌دهنده‌ی
     # خلاف یک روند ماکرو تأییدشده، بر خلاف Sweep، هیچ توجیه استراتژیکی ندارد.
-    _reversal_family_markers = ('liquidity_sweep', 'Liquidity Sweep', 'ADAPTIVE_SWEEP', 'ACTIVE_SETUP')
-    is_reversal_family = any(marker in (reason or '') for marker in _reversal_family_markers)
+    is_reversal_family = is_reversal_family_reason(reason)
     if sig in ("BUY", "SELL") and regime in ("BULLISH", "BEARISH") and not is_reversal_family:
         if regime == "BULLISH" and sig == "SELL":
             return None, f"وضعیت بازار صعودی ارزیابی شده - سیگنال فروش خلاف جهت بازار نادیده گرفته شد | {reason}"

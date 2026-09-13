@@ -34,6 +34,7 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
+    is_reversal_family_reason,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -163,13 +164,22 @@ LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
-LONG_WATCHLIST = ['BTC','ETH','DEFI','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SRM','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','ALPHA','TOMO','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','BZRX','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','NU','GTC','CELO','1000XEC','YFII','CTSI']
+LONG_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC', 'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL', 'LIT', 'BAND', 'SUSHI', 'SNX', 'AVAX', 'ATOM', 'TRB', 'ETC', 'NEO', 'SFP', 'IOTA', 'AXS', 'RLC', 'GRT', 'RUNE', 'ONT', 'KAVA', '1INCH', 'KNC', 'HNT', 'ENJ', 'ICX', 'CRV', 'NEAR', 'LUNA', 'THETA', 'QTUM', 'MANA', 'SAND', 'ADA', 'RVN', 'MTL', 'STORJ', 'ZIL', 'SLP', 'XRP', 'BLZ', 'FET', 'ALGO', 'DODO', 'CHR', 'CVC', 'CELR', 'HBAR', 'SKL', 'RSR', 'CHZ', 'LINK', 'ALICE', 'ZRX', 'COTI', 'ONE', 'XTZ', 'ANKR', 'HOT', 'LRC', 'DOGE', 'DENT', 'DGB', 'WIN', 'IOST', 'TRX', 'BTT', 'BAT', 'VET', 'SHIB', 'ARPA', 'AR', 'C98', 'DYDX', 'TLM', 'GALA', 'MASK', 'OGN', 'RAY', 'ATA', 'GTC', 'CELO', 'CTSI', 'TON', 'APT', 'ARB', 'OP', 'SUI', 'INJ', 'TIA', 'SEI', 'PEPE', 'WIF', 'RENDER', 'JUP', 'WLD', 'ONDO', 'ENA', 'STRK', 'TAO', 'PYTH', 'JTO', 'FLOKI', 'BONK', 'NOT', 'W', 'EIGEN', 'ZK']
+# نکته: ۳۱ نماد قبلی (MKR, SRM, BEL, SXP, REN, ALPHA, TOMO, CTK, OCEAN, EOS, FTM,
+# MATIC, KLAY, NKN, NU, UNFI, XEM, BTS, 1000XEC, YFII, AKRO, BZRX, STMX, REEF, SC,
+# OMG, LINA, TLM-تکراری نبود...) بر اساس گزارش واقعی trade_pipeline_audit حذف شدند؛
+# دقیقاً نیمی از دفعات اسکن‌شان در بازه‌ی ۶.۵ ساعته با خطای «داده بازار خالی دریافت
+# شد» مواجه می‌شدند (به‌احتمال زیاد delist شده یا rebrand شده‌اند، مثل MATIC->POL).
+# نمادهای جایگزین (TON تا ZK) از دانش عمومی من انتخاب شده‌اند، نه از داده‌ی زنده‌ی
+# صرافی - چون این محیط اینترنت ندارد نمی‌توانم قبل از افزودن، وجودشان را روی
+# فیوچرز CoinEx تایید کنم. حتماً بعد از دیپلوی، یک گزارش تازه‌ی «ردیابی معاملات»
+# بگیرید و اگر یکی از این‌ها هم الگوی مشابه (نیمی خطا) نشان داد، همان‌طور حذفش کنید.
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
 
 # لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
 # لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
-SHORT_WATCHLIST = ['BTC','ETH','DEFI','YFI','MKR','BCH','COMP','KSM','LTC','AAVE','ZEC','EGLD','BNB','DASH','FIL','ZEN','WAVES','SOL','UNI','DOT','BAL','LIT','BAND','UNFI','SUSHI','SNX','AVAX','ATOM','TRB','ETC','NEO','SRM','SFP','BEL','IOTA','AXS','RLC','SXP','GRT','RUNE','ONT','KAVA','OCEAN','1INCH','REN','KNC','ALPHA','TOMO','HNT','ENJ','ICX','CRV','NEAR','CTK','LUNA','EOS','THETA','QTUM','MANA','OMG','SAND','ADA','XEM','FTM','RVN','MTL','SC','STORJ','ZIL','SLP','BTS','XRP','BLZ','FET','ALGO','DODO','CHR','AKRO','BZRX','CVC','STMX','CELR','HBAR','SKL','RSR','REEF','CHZ','LINK','ALICE','ZRX','COTI','ONE','MATIC','XTZ','NKN','ANKR','LINA','HOT','LRC','DOGE','DENT','DGB','WIN','IOST','TRX','BTT','FLM','BAT','VET','SHIB','ARPA','AR','C98','DYDX','TLM','GALA','AUDIO','MASK','BAKE','KEEP','OGN','RAY','KLAY','ATA','NU','GTC','CELO','1000XEC','YFII','CTSI']
+SHORT_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC', 'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL', 'LIT', 'BAND', 'SUSHI', 'SNX', 'AVAX', 'ATOM', 'TRB', 'ETC', 'NEO', 'SFP', 'IOTA', 'AXS', 'RLC', 'GRT', 'RUNE', 'ONT', 'KAVA', '1INCH', 'KNC', 'HNT', 'ENJ', 'ICX', 'CRV', 'NEAR', 'LUNA', 'THETA', 'QTUM', 'MANA', 'SAND', 'ADA', 'RVN', 'MTL', 'STORJ', 'ZIL', 'SLP', 'XRP', 'BLZ', 'FET', 'ALGO', 'DODO', 'CHR', 'CVC', 'CELR', 'HBAR', 'SKL', 'RSR', 'CHZ', 'LINK', 'ALICE', 'ZRX', 'COTI', 'ONE', 'XTZ', 'ANKR', 'HOT', 'LRC', 'DOGE', 'DENT', 'DGB', 'WIN', 'IOST', 'TRX', 'BTT', 'BAT', 'VET', 'SHIB', 'ARPA', 'AR', 'C98', 'DYDX', 'TLM', 'GALA', 'MASK', 'OGN', 'RAY', 'ATA', 'GTC', 'CELO', 'CTSI', 'TON', 'APT', 'ARB', 'OP', 'SUI', 'INJ', 'TIA', 'SEI', 'PEPE', 'WIF', 'RENDER', 'JUP', 'WLD', 'ONDO', 'ENA', 'STRK', 'TAO', 'PYTH', 'JTO', 'FLOKI', 'BONK', 'NOT', 'W', 'EIGEN', 'ZK']
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
 # اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
@@ -536,6 +546,8 @@ def audit_trade_record(p):
         'timeframe_bull_pct_at_entry': p.get('timeframe_bull_pct_at_entry'),
         'timeframe_bear_pct_at_entry': p.get('timeframe_bear_pct_at_entry'),
         'symbol_adx_at_entry': p.get('symbol_adx_at_entry'),
+        'regime_filter_exempt': p.get('regime_filter_exempt'),
+        'sl_slippage_r': p.get('sl_slippage_r'),
         'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
         'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
         'entry_reason': p.get('entry_reason'),
@@ -1680,7 +1692,7 @@ def _regime_alignment_snapshot(symbol, timeframe):
     return out
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None):
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -1694,6 +1706,20 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     m_rr=re.search(r'R:R ([0-9.]+)R', reason or '')
     if m_rr:
         planned_rr=float(m_rr.group(1))
+    # منبع درست‌تر: خودِ plan (از build_trade_plan/build_sweep_trade_plan) این سه مقدار
+    # را به‌صورت عددی خام دارد - نیازی به حدس‌زدن از متن نیست و مشکلات فرمت متنی
+    # (مثل مورد بالا) را کلاً کنار می‌زند. وقتی صدا از scan_symbol با plan واقعی می‌آید،
+    # این مقادیر جایگزین استخراج regex می‌شوند؛ برای مسیرهایی که plan ندارند (مثل
+    # معامله‌ی دستی کاربر)، همان استخراج قبلی از متن fallback باقی می‌ماند.
+    if plan_score is not None:
+        quality_score = int(round(float(plan_score)))
+    if plan_quality_label is not None:
+        quality_label = plan_quality_label
+    if plan_rr is not None:
+        planned_rr = float(plan_rr)
+    # آیا این معامله به‌خاطر تعلق به خانواده‌ی برگشتی (Liquidity Sweep) از فیلتر
+    # خلاف‌جهت بازار معاف بوده؟ صرفاً ثبت می‌شود، تصمیم ورود را عوض نمی‌کند.
+    regime_filter_exempt = is_reversal_family_reason(reason)
     level_key = None
     _level_tag, _level_token, _level_value = extract_setup_level(reason)
     if _level_token is not None:
@@ -1784,7 +1810,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -2057,7 +2083,7 @@ async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe,
         return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None):
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     if not s['is_bot_active'] or s['daily_stopped']:
@@ -2067,7 +2093,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         s=get_session(chat_id)
         if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
             return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None):
@@ -2587,6 +2613,10 @@ def update_positions(chat_id):
                 exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL (same candle)'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL'
+            if reason and reason.startswith('SL') and risk_distance > 0:
+                # چقدر از فیل واقعی، بدتر از قیمت دقیق SL شبیه‌سازی شده - جدا از pnl
+                # نهایی ثبت می‌شود تا بشود دید چقدر از ضرر از اسلیپیج آمده، نه قیمت.
+                p['sl_slippage_r'] = round(abs(float(exit_price) - float(p['sl'])) / risk_distance, 4)
 
         if reason is None and s['filters'].get('trailing_stop',True) and risk_distance>0:
             favorable_price=(high if side_long(p['side']) else low) if s['trading_mode']=='PAPER' else (p.get('peak_favorable_price') or price)
@@ -3103,7 +3133,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
     if not guard_ok:
         return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)))
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
