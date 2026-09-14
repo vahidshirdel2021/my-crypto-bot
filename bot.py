@@ -547,6 +547,7 @@ def audit_trade_record(p):
         'timeframe_bear_pct_at_entry': p.get('timeframe_bear_pct_at_entry'),
         'symbol_adx_at_entry': p.get('symbol_adx_at_entry'),
         'regime_filter_exempt': p.get('regime_filter_exempt'),
+        'swing_break_confirmed': p.get('swing_break_confirmed'),
         'sl_slippage_r': p.get('sl_slippage_r'),
         'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
         'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
@@ -1586,6 +1587,7 @@ def chart(chat_id, symbol, df, trade):
             )
         else:
             alignment_line = ""
+        swing_line = "• 📐 تایید شده با شکست سوینگ محلی\n" if trade.get('swing_break_confirmed') else ""
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *پوزیشن معامله [{mode}]*\n"
@@ -1596,6 +1598,7 @@ def chart(chat_id, symbol, df, trade):
             f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
+            + swing_line
             + alignment_line,
             trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf)
         )
@@ -1724,6 +1727,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # آیا این معامله به‌خاطر تعلق به خانواده‌ی برگشتی (Liquidity Sweep) از فیلتر
     # خلاف‌جهت بازار معاف بوده؟ صرفاً ثبت می‌شود، تصمیم ورود را عوض نمی‌کند.
     regime_filter_exempt = is_reversal_family_reason(reason)
+    # شاهد مستقیم (نه استنتاجی) که آیا این معامله واقعاً از مسیر «شکست سوینگ محلی»
+    # رد شده - چون این تگ فقط دقیقاً همان لحظه‌ای که شرط شکست سوینگ برقرار شده به
+    # ابتدای reason اضافه می‌شود، وجودش یعنی این چک واقعاً برای همین معامله اجرا و رد شده.
+    swing_break_confirmed = '[شکست سوینگ محلی بعد از ریکلیم]' in (reason or '')
     level_key = None
     _level_tag, _level_token, _level_value = extract_setup_level(reason)
     if _level_token is not None:
@@ -1814,7 +1821,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'swing_break_confirmed':swing_break_confirmed,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -2395,6 +2402,8 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
     """Fast multi-timeframe position protection; entries remain untouched."""
     try:
         cfg=s.get('strategy_config') or STRATEGY_DEFAULTS
+        if not bool(cfg.get('weakness_exit_enabled', True)):
+            return False, []
         min_profit_r=float(cfg.get('weakness_exit_min_r',1.0))
         min_profit_r=max(1.0, min_profit_r)
         primary_tf=str(p.get('timeframe') or '5min')
@@ -3374,12 +3383,16 @@ def trade_tracking_keyboard(chat_id):
     align_on = bool(s.get('market_alignment_filters_enabled', True))
     align_icon = '🟢' if align_on else '🔴'
     align_state = 'روشن' if align_on else 'خاموش'
+    weakness_on = bool((s.get('strategy_config') or {}).get('weakness_exit_enabled', True))
+    weakness_icon = '🟢' if weakness_on else '🔴'
+    weakness_state = 'روشن' if weakness_on else 'خاموش'
     return {
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
             [{'text': f'{sweep_icon} تاییدیه یک کندل اضافه Sweep: {sweep_state}', 'callback_data': '/toggle_sweep_confirm'}],
             [{'text': f'{swing_icon} شکست سوینگ محلی Sweep: {swing_state}', 'callback_data': '/toggle_swing_break'}],
             [{'text': f'{align_icon} فیلتر هم‌جهتی با بازار (واچ‌لیست+رژیم+BTC/ETH): {align_state}', 'callback_data': '/toggle_market_alignment'}],
+            [{'text': f'{weakness_icon} مدیریت هوشمند ضعف روند: {weakness_state}', 'callback_data': '/toggle_weakness_exit'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
@@ -4274,6 +4287,18 @@ def process_command(cmd,chat_id,message_id=None):
             if not current else 'برگشت به حالت قبلی: فیلتر واچ‌لیست، محافظ خلاف‌جهت و گارد همبستگی BTC/ETH دوباره فعال شدند.'
         )
         send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        return
+    if cl=='/toggle_weakness_exit':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('weakness_exit_enabled', True))
+        s['strategy_config']['weakness_exit_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'برگشت به حالت قبلی: پوزیشن‌ها دیگر بابت ضعف اندیکاتورها یا برگشت از اوج سود زودتر بسته نمی‌شوند - فقط با SL/TP معمولی (و بستن اجباری آخر روز) می‌بندند.'
+            if current else 'مدیریت هوشمند دوباره فعال شد.'
+        )
+        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
         return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)
