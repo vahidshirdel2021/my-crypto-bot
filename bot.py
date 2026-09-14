@@ -618,6 +618,11 @@ def default_session():
         # محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند.
         # پیش‌فرض True (روشن).
         'market_alignment_filters_enabled': True,
+        # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
+        # (یعنی هیچ محدودیتی نیست).
+        'manual_block_buy_entries': False,
+        'manual_block_sell_entries': False,
+        'manual_block_all_entries': False,
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
@@ -3113,6 +3118,12 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    if s.get('manual_block_all_entries'):
+        return _entry_diag_result(chat_id, symbol, 'manual_block', 'توقف کامل ورود به معامله دستی فعال است', 'signal', sig, diagnostics=diagnostics)
+    if sig == 'BUY' and s.get('manual_block_buy_entries'):
+        return _entry_diag_result(chat_id, symbol, 'manual_block', 'بلاک دستی معاملات خرید فعال است', 'signal', sig, diagnostics=diagnostics)
+    if sig == 'SELL' and s.get('manual_block_sell_entries'):
+        return _entry_diag_result(chat_id, symbol, 'manual_block', 'بلاک دستی معاملات فروش فعال است', 'signal', sig, diagnostics=diagnostics)
     grid_levels = await get_log_grid_levels(http, symbol) if is_scalp_strategy else None
     # V2 dynamic must use the same adaptive candidate-selection engine for BOTH
     # signal and plan. The seller build previously forced 5m/15m into the legacy
@@ -3374,28 +3385,45 @@ def trade_tracking_keyboard(chat_id):
     enabled = bool(s.get('trade_pipeline_enabled', False))
     icon = '🟢' if enabled else '🔴'
     state = 'روشن' if enabled else 'خاموش'
-    sweep_confirm = bool((s.get('strategy_config') or {}).get('sweep_require_confirmation_candle', False))
-    sweep_icon = '🟢' if sweep_confirm else '🔴'
-    sweep_state = 'روشن' if sweep_confirm else 'خاموش'
-    swing_break = bool((s.get('strategy_config') or {}).get('sweep_require_swing_break', False))
-    swing_icon = '🟢' if swing_break else '🔴'
-    swing_state = 'روشن' if swing_break else 'خاموش'
-    align_on = bool(s.get('market_alignment_filters_enabled', True))
-    align_icon = '🟢' if align_on else '🔴'
-    align_state = 'روشن' if align_on else 'خاموش'
-    weakness_on = bool((s.get('strategy_config') or {}).get('weakness_exit_enabled', True))
-    weakness_icon = '🟢' if weakness_on else '🔴'
-    weakness_state = 'روشن' if weakness_on else 'خاموش'
     return {
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
-            [{'text': f'{sweep_icon} تاییدیه یک کندل اضافه Sweep: {sweep_state}', 'callback_data': '/toggle_sweep_confirm'}],
-            [{'text': f'{swing_icon} شکست سوینگ محلی Sweep: {swing_state}', 'callback_data': '/toggle_swing_break'}],
-            [{'text': f'{align_icon} فیلتر هم‌جهتی با بازار (واچ‌لیست+رژیم+BTC/ETH): {align_state}', 'callback_data': '/toggle_market_alignment'}],
-            [{'text': f'{weakness_icon} مدیریت هوشمند ضعف روند: {weakness_state}', 'callback_data': '/toggle_weakness_exit'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
+            [{'text': '🧰 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
+            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+        ]
+    }
+
+
+def trade_filter_management_keyboard(chat_id):
+    """همه‌ی دکمه‌های مربوط به محدودیت/فیلتر معاملات، یک‌جا."""
+    s = get_session(chat_id)
+    scfg = s.get('strategy_config') or {}
+
+    def row(flag_val, on_label, cb):
+        icon = '🟢' if flag_val else '🔴'
+        state = 'روشن' if flag_val else 'خاموش'
+        return [{'text': f'{icon} {on_label}: {state}', 'callback_data': cb}]
+
+    sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
+    swing_break = bool(scfg.get('sweep_require_swing_break', False))
+    align_on = bool(s.get('market_alignment_filters_enabled', True))
+    weakness_on = bool(scfg.get('weakness_exit_enabled', True))
+    block_buy = bool(s.get('manual_block_buy_entries', False))
+    block_sell = bool(s.get('manual_block_sell_entries', False))
+    block_all = bool(s.get('manual_block_all_entries', False))
+
+    return {
+        'inline_keyboard': [
+            row(sweep_confirm, 'تاییدیه یک کندل اضافه Sweep', '/toggle_sweep_confirm'),
+            row(swing_break, 'شکست سوینگ محلی Sweep', '/toggle_swing_break'),
+            row(align_on, 'فیلتر هم‌جهتی با بازار (واچ‌لیست+رژیم+BTC/ETH)', '/toggle_market_alignment'),
+            row(weakness_on, 'مدیریت هوشمند ضعف روند', '/toggle_weakness_exit'),
+            row(block_buy, 'بلاک دستی معاملات خرید', '/toggle_block_buy'),
+            row(block_sell, 'بلاک دستی معاملات فروش', '/toggle_block_sell'),
+            row(block_all, 'توقف کامل ورود به معامله (هر دو جهت)', '/toggle_block_all'),
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
     }
@@ -4263,7 +4291,7 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس، سیگنال Sweep فقط وقتی صادر می‌شود که یک کندل بعد از ریکلیم هم جهتش را تایید کند - ورود کمی دیرتر و با قیمت بدتر، ولی فیک‌اوت‌های زودهنگام فیلتر می‌شوند.'
             if not current else 'برگشت به حالت قبلی: سیگنال Sweep دوباره بلافاصله روی کندل ریکلیم صادر می‌شود.'
         )
-        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/toggle_swing_break':
         s.setdefault('strategy_config', {})
@@ -4275,7 +4303,7 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس، بعد از ریکلیم، سیگنال Sweep صادر نمی‌شود مگر قیمت واقعاً از سقف/کف سوینگِ محلیِ تشکیل‌شده بعد از ریکلیم رد بشه (نه صرفاً عدم نقض) - قوی‌تر از «تاییدیه یک کندل اضافه» است و در صورت روشن‌بودن هر دو، همین یکی ملاک عمل قرار می‌گیرد.'
             if not current else 'برگشت به حالت قبلی: نیازی به شکست سوینگ محلی نیست.'
         )
-        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/toggle_market_alignment':
         current = bool(s.get('market_alignment_filters_enabled', True))
@@ -4286,7 +4314,7 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند. سیگنال‌ها کاملاً مستقل از وضعیت کلی بازار و بیت‌کوین/اتریوم بررسی و اجرا می‌شوند.'
             if not current else 'برگشت به حالت قبلی: فیلتر واچ‌لیست، محافظ خلاف‌جهت و گارد همبستگی BTC/ETH دوباره فعال شدند.'
         )
-        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/toggle_weakness_exit':
         s.setdefault('strategy_config', {})
@@ -4298,7 +4326,34 @@ def process_command(cmd,chat_id,message_id=None):
             'برگشت به حالت قبلی: پوزیشن‌ها دیگر بابت ضعف اندیکاتورها یا برگشت از اوج سود زودتر بسته نمی‌شوند - فقط با SL/TP معمولی (و بستن اجباری آخر روز) می‌بندند.'
             if current else 'مدیریت هوشمند دوباره فعال شد.'
         )
-        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_tracking_keyboard(chat_id))
+        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/trade_filter_management':
+        send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nهمه‌ی محدودیت‌ها و فیلترهای مربوط به ورود/مدیریت معاملات این‌جا جمع شده‌اند.", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/toggle_block_buy':
+        current = bool(s.get('manual_block_buy_entries', False))
+        s['manual_block_buy_entries'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = 'از این پس هیچ معامله‌ی خریدی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات خرید دوباره آزادند.'
+        send_message(chat_id, f"🚫 بلاک دستی معاملات خرید: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/toggle_block_sell':
+        current = bool(s.get('manual_block_sell_entries', False))
+        s['manual_block_sell_entries'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = 'از این پس هیچ معامله‌ی فروشی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات فروش دوباره آزادند.'
+        send_message(chat_id, f"🚫 بلاک دستی معاملات فروش: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/toggle_block_all':
+        current = bool(s.get('manual_block_all_entries', False))
+        s['manual_block_all_entries'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = 'از این پس هیچ معامله‌ی جدیدی (نه خرید نه فروش) باز نمی‌شود - این فقط جلوی ورود جدید را می‌گیرد، پوزیشن‌های باز فعلی طبق روال عادی مدیریت می‌شوند.' if not current else 'ورود به معامله برای هر دو جهت دوباره آزاد است.'
+        send_message(chat_id, f"🛑 توقف کامل ورود به معامله: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)

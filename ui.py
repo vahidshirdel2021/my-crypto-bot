@@ -170,6 +170,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
          {"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
         [{"text": "🎛 مدیریت ستاپ‌های معاملاتی", "callback_data": "/setup_management"}],
+        [{"text": "🧰 مدیریت فیلتر معاملات", "callback_data": "/trade_filter_management"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
