@@ -177,8 +177,6 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
          {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
         [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
         [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
-        [{"text": "🧾 ثبت اوردر معاملاتی", "callback_data": "/pending_order_start"},
-         {"text": "📋 اوردرهای معاملاتی", "callback_data": "/list_pending_orders"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
         [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
     ]
@@ -237,19 +235,4 @@ def get_manual_side_keyboard():
         [{"text": "🟢 خرید (Long)", "callback_data": "/manual_side_buy"},
          {"text": "🔴 فروش (Short)", "callback_data": "/manual_side_sell"}],
         [{"text": "❌ انصراف", "callback_data": "/cancel"}],
-    ]}
-
-
-def get_pending_side_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "🟢 خرید (Long)", "callback_data": "/pending_side_buy"},
-         {"text": "🔴 فروش (Short)", "callback_data": "/pending_side_sell"}],
-        [{"text": "❌ انصراف", "callback_data": "/cancel"}],
-    ]}
-
-
-def get_pending_confirm_keyboard():
-    return {"inline_keyboard": [
-        [{"text": "✅ تایید و ثبت اوردر", "callback_data": "/confirm_pending_order"},
-         {"text": "❌ انصراف", "callback_data": "/cancel"}],
     ]}
