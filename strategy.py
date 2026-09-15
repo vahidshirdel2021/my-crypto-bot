@@ -703,7 +703,7 @@ LEVEL_SETUP_DEFS = {
 
 _SETUP_TAG_RE = re.compile(r"\[SETUP\s+([A-Za-z0-9]+)\]")
 _LEVEL_TOKEN_RE = re.compile(
-    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L|CLH|CLL)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
+    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L|CLH|CLL|CRH|CRL|CSH|CSL)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
 )
 _LEVEL_TOKEN_TAG = {
     "PMH": "Monthly", "PML": "Monthly",
@@ -712,6 +712,8 @@ _LEVEL_TOKEN_TAG = {
     "P4H": "4h", "P4L": "4h",
     "P1H": "1h", "P1L": "1h",
     "CLH": "Cluster", "CLL": "Cluster",
+    "CRH": "Cluster", "CRL": "Cluster",
+    "CSH": "Cluster", "CSL": "Cluster",
 }
 
 
@@ -1092,13 +1094,20 @@ def _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, 
     max_lookback = max(1, int(cfg.get("sweep_swing_break_lookback", 6)))
     if df is None or len(df) < max_lookback + 10:
         return None, "داده کافی برای بررسی شکست سوینگ محلی نیست"
+    # نکته‌ی مهم: «بازیابی ستاپ فعال» خودش تا چند کندل به عقب می‌گردد دنبال یک ستاپ
+    # قدیمی‌تر که هنوز معتبر مانده. اگر همین‌جا هم فعال بماند، جست‌وجوی رو-به-عقبِ
+    # خودمان (برای پیدا کردن «کندل ریکلیم واقعی») گمراه می‌شود - چون حتی روی یک
+    # trial_df خیلی کوچک هم ممکن است بازیابی ستاپ یک سیگنال قدیمی را زودتر از موعد
+    # واقعی‌اش پیدا کند و اندیس ریکلیم را اشتباه محاسبه کنیم. برای همین در این جست‌وجو
+    # مسیر بازیابی را موقتاً خاموش می‌کنیم تا فقط سیگنال‌های تازه/مستقیم را ببینیم.
+    probe_config = {**(_cfg(strategy_config) or {}), "active_setup_enabled": False}
     n = len(df)
     for back in range(1, max_lookback + 1):
         trial_df = df.iloc[:n - back].reset_index(drop=True)
         if len(trial_df) < 10:
             break
         sig, reason = _strategy_liquidity_sweep_5m_impl(
-            trial_df, filters, strategy_config, None, timeframe, _skip_confirmation_wrap=True
+            trial_df, filters, probe_config, None, timeframe, _skip_confirmation_wrap=True
         )
         if sig not in ("BUY", "SELL"):
             continue
@@ -1286,13 +1295,74 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
         group, ceiling, floor = best
         return ceiling, floor, len(group)
 
+    def _directional_clusters_at(idx):
+        """خوشه‌بندی جداگانه‌ی سقف‌ها و کف‌ها.
+
+        _cluster_ceiling_floor_at فقط وقتی خوشه تشخیص می‌دهد که کل بازه‌ی هر
+        ۵ سطح فعال (سقف تا کف) با هم تنگ باشد. این یعنی وقتی مثلاً PDH و P4H
+        (دو سقف) خیلی به‌هم نزدیک‌اند ولی PDL خیلی پایین‌تر است، اصلاً به چشم
+        نمی‌آید - چون کف دورِ PDL کل بازه را باز نگه می‌دارد. اینجا سقف‌ها و
+        کف‌ها را جدا از هم می‌بینیم: اگر ≥۲ سقفِ سطوحِ مختلف نزدیک هم باشند،
+        یک «خوشه‌ی مقاومت» تشکیل می‌شود (برای سویپ+ریکلیم یا شکست+پولبک روی
+        همان ناحیه)؛ همین‌طور برای کف‌ها یک «خوشه‌ی حمایت» جداگانه.
+        """
+        if idx < 0 or idx >= len(d) or not bool(cfg.get("level_cluster_enabled", True)):
+            return []
+        atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
+        if not np.isfinite(atr) or atr <= 0:
+            return []
+        pairs = _active_level_pairs_at(idx)
+        if len(pairs) < 2:
+            return []
+        max_span = atr * max(0.1, float(cfg.get("level_cluster_max_atr", 1.2)))
+
+        def _best_adjacent_group(points):
+            items = sorted(points, key=lambda x: x[1])
+            best, i, n = None, 0, len(items)
+            while i < n:
+                group = [items[i]]
+                lo_v = hi_v = items[i][1]
+                j = i + 1
+                while j < n:
+                    v = items[j][1]
+                    new_hi, new_lo = max(hi_v, v), min(lo_v, v)
+                    if (new_hi - new_lo) > max_span:
+                        break
+                    hi_v, lo_v = new_hi, new_lo
+                    group.append(items[j])
+                    j += 1
+                if len(group) >= 2 and (best is None or len(group) > len(best[0])):
+                    best = (group, hi_v, lo_v)
+                i = j if j > i + 1 else i + 1
+            if best is None:
+                return None
+            group, hi_v, lo_v = best
+            return [t for t, _ in group], hi_v, lo_v
+
+        out = []
+        res = _best_adjacent_group([(tag, hi) for tag, (hi, lo) in pairs.items()])
+        if res:
+            tags, hi_v, lo_v = res
+            names = "+".join(tags)
+            out.append(("ResistanceCluster", hi_v, lo_v, "CRH", "CRL",
+                        f"سقف خوشه‌ی مقاومت ({names})", f"کف خوشه‌ی مقاومت ({names})", set(tags)))
+        sup = _best_adjacent_group([(tag, lo) for tag, (hi, lo) in pairs.items()])
+        if sup:
+            tags, hi_v, lo_v = sup
+            names = "+".join(tags)
+            out.append(("SupportCluster", hi_v, lo_v, "CSH", "CSL",
+                        f"سقف خوشه‌ی حمایت ({names})", f"کف خوشه‌ی حمایت ({names})", set(tags)))
+        return out
+
     def _ordered_candidates_at(idx):
         """Which (tag, hi, lo, hi_key, lo_key, hi_label, lo_label) tuples to
-        evaluate for this candle, in priority order. When the active levels
-        are currently clustered, ONLY the Cluster zone is offered (this is
-        what suppresses the noisy/overlapping individual-level checks that
-        motivated Cluster in the first place) — otherwise every enabled tag
-        is offered, Monthly > Weekly > Daily > 4h > 1h."""
+        evaluate for this candle, in priority order. When every active level
+        is tightly compressed together, ONLY the whole-range Cluster zone is
+        offered. Otherwise, resistance-only and/or support-only sub-clusters
+        (levels close to their own side, even if the opposite side is far
+        away - e.g. PDH next to P4H while PDL sits far below) take priority
+        over their individual member tags, and every remaining unclustered
+        tag is still offered on its own, Monthly > Weekly > Daily > 4h > 1h."""
         cluster = _cluster_ceiling_floor_at(idx)
         if cluster is not None:
             ceiling, floor, n = cluster
@@ -1300,8 +1370,12 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                      f"سقف کلاستر ({n} سطح هم‌پوشان)", f"کف کلاستر ({n} سطح هم‌پوشان)")]
         pairs = _active_level_pairs_at(idx)
         out = []
+        consumed = set()
+        for tag, hi, lo, hi_key, lo_key, hi_label, lo_label, member_tags in _directional_clusters_at(idx):
+            out.append((tag, hi, lo, hi_key, lo_key, hi_label, lo_label))
+            consumed |= member_tags
         for tag, (hi_key, lo_key, hi_label, lo_label) in LEVEL_SETUP_DEFS.items():
-            if tag in pairs:
+            if tag in pairs and tag not in consumed:
                 hi, lo = pairs[tag]
                 out.append((tag, hi, lo, hi_key, lo_key, hi_label, lo_label))
         return out

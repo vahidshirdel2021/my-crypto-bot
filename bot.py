@@ -2343,7 +2343,12 @@ def close_position(chat_id,pos,price=None,reason='manual'):
     est=' تقریبی' if pos.get('pnl_is_estimate') else ''
     fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
     platform_line = f'\n• سهم پلتفرم: `{platform_fee:.2f} USDT` ({get_user_fee_rate(chat_id):.2f}%)' if platform_fee > 0 else ''
-    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}`\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
+    setup_tag = extract_setup_tag(pos.get('entry_reason') or '')
+    setup_line = f"\n• ستاپ: `[SETUP {setup_tag}]`" if setup_tag else ''
+    side_fa = 'خرید (Long)' if side_long(pos.get('side')) else 'فروش (Short)'
+    entry_time_line = f"\n• زمان ورود: `{fmt_scan_time(pos.get('opened_at'))}`"
+    close_time_line = f"\n• زمان خروج: `{fmt_scan_time(pos.get('close_timestamp'))}`"
+    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
     return True
 
 
