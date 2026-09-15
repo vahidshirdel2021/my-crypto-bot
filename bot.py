@@ -44,6 +44,7 @@ from ui import (
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_learn_menu_keyboard,
     get_confirm_emergency_close_keyboard,
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
+    get_pending_side_keyboard, get_pending_confirm_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
     get_setup_management_keyboard,
@@ -623,6 +624,7 @@ def default_session():
         'manual_block_buy_entries': False,
         'manual_block_sell_entries': False,
         'manual_block_all_entries': False,
+        'pending_orders': [],
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
@@ -1364,11 +1366,15 @@ def trade_action_keyboard(symbol, chart_url=None, timeframe='5min'):
     if chart_url:
         rows.append([{'text':'🌐 چارت تعاملی (MiniApp)','web_app':{'url':chart_url}}])
     rows.append([
-        {'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, timeframe)}
+        {'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, timeframe)},
+        {'text':'🖼 نمایش تصویر چارت','callback_data':f'/show_chart_{symbol}'}
     ])
     rows.append([
         {'text':'🛑 تغییر حد ضرر (SL)','callback_data':f'/edit_sl_{symbol}'},
         {'text':'🎯 تغییر حد سود (TP)','callback_data':f'/edit_tp_{symbol}'}
+    ])
+    rows.append([
+        {'text':'⚖️ بستن سربه‌سر','callback_data':f'/close_breakeven_{symbol}'},
     ])
     rows.append([
         {'text':'🔴 بستن معامله','callback_data':f'/close_prompt_{symbol}'},
@@ -1382,6 +1388,87 @@ def close_confirm_keyboard(symbol):
     return {'inline_keyboard': [
         [{'text':'✅ بله، ببند','callback_data':f'/confirm_close_{symbol}'}, {'text':'❌ انصراف','callback_data':'/cancel'}]
     ]}
+
+
+def pending_orders_report(chat_id):
+    s = get_session(chat_id)
+    orders = s.get('pending_orders') or []
+    if not orders:
+        return '🧾 *اوردرهای معاملاتی معلق*\n\nهیچ اوردر معلقی ثبت نشده.'
+    lines = ['🧾 *اوردرهای معاملاتی معلق*', '━━━━━━━━━━━━━━━━━━━━']
+    for o in orders:
+        side_fa = 'خرید' if side_long(o.get('side')) else 'فروش'
+        status = 'فعال - در انتظار رسیدن به قیمت ورود' if o.get('triggered') else f"در انتظار رسیدن به تریگر `{fmt(o.get('trigger_price'))}`"
+        lines.append(
+            f"• `{o['symbol']}` ({side_fa}) — ورود `{fmt(o['entry_price'])}` | TP `{fmt(o['tp'])}` | SL `{fmt(o['sl'])}` | مارجین `{o['margin']}` | اهرم `{o['leverage']}x`\n  وضعیت: {status}"
+        )
+    return '\n'.join(lines)
+
+
+def pending_orders_keyboard(chat_id):
+    s = get_session(chat_id)
+    orders = s.get('pending_orders') or []
+    rows = [[{'text': f"🗑 لغو {o['symbol']} ({o['order_id']})", 'callback_data': f"/cancel_pending_{o['order_id']}"}] for o in orders]
+    if orders:
+        rows.append([{'text': '🗑 لغو همه‌ی اوردرها', 'callback_data': '/cancel_pending_all_prompt'}])
+    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
+    return {'inline_keyboard': rows}
+
+
+def check_pending_orders(chat_id):
+    """هر اوردر معلق را با قیمت لحظه‌ای می‌سنجد: اول تریگر (اگر باشد)، بعد قیمت ورود.
+    این تابع هیچ ارتباطی با منطق سیگنال/استراتژی ندارد - صرفاً اوردرهایی که خودِ
+    کاربر دستی با قیمت/مارجین/اهرم دلخواه ثبت کرده را پایش می‌کند."""
+    s = get_session(chat_id)
+    orders = s.get('pending_orders') or []
+    if not orders:
+        return
+    remaining = []
+    changed = False
+    for o in orders:
+        try:
+            live = latest_price(o['symbol'])
+            if not live:
+                remaining.append(o); continue
+            live = float(live)
+            if not o.get('triggered'):
+                trig = o.get('trigger_price')
+                # جهت به‌صورت پویا نسبت به قیمت لحظه‌ای سنجیده می‌شود: اگر تریگر بالای
+                # قیمت فعلی است یعنی منتظر رسیدن قیمت به بالا هستیم، وگرنه به پایین.
+                hit = (live >= trig) if trig >= live else (live <= trig)
+                if hit:
+                    o['triggered'] = True
+                    changed = True
+                    send_message(chat_id, f"🔔 تریگر اوردر `{o['symbol']}` فعال شد؛ حالا منتظر رسیدن قیمت به `{fmt(o['entry_price'])}` است.")
+                else:
+                    remaining.append(o); continue
+            entry = float(o['entry_price'])
+            hit_entry = (live >= entry) if entry >= live else (live <= entry)
+            # اگر اختلاف قیمت لحظه‌ای با ورود خیلی کم بود هم به‌عنوان رسیدن حساب می‌شود
+            if abs(live - entry) / max(entry, 1e-9) < 0.0005:
+                hit_entry = True
+            if not hit_entry:
+                remaining.append(o); continue
+            side_txt = 'BUY (Long)' if side_long(o['side']) else 'SELL (Short)'
+            old_margin, old_lev = s.get('trade_amount_usdt'), s.get('leverage')
+            try:
+                s['trade_amount_usdt'] = float(o['margin'])
+                s['leverage'] = float(o['leverage'])
+                ok, err = execute_manual_trade(chat_id, o['symbol'], side_txt, o['sl'], o['tp'], entry_price=live)
+            finally:
+                s['trade_amount_usdt'] = old_margin
+                s['leverage'] = old_lev
+            changed = True
+            if ok:
+                send_message(chat_id, f"✅ اوردر معاملاتی `{o['symbol']}` فعال و معامله باز شد.")
+            else:
+                send_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}")
+        except Exception:
+            logger.exception('pending order check failed chat_id=%s order=%s', chat_id, o.get('order_id'))
+            remaining.append(o)
+    if changed:
+        s['pending_orders'] = remaining
+        save_session(chat_id)
 
 
 def format_trade_status(p, price=None):
@@ -4193,6 +4280,57 @@ def process_command(cmd,chat_id,message_id=None):
         s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
         live=latest_price(tmp['symbol'])
         send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
+
+    # ============== اوردر معاملاتی معلق (Pending Order) ==============
+    if cl=='/pending_order_start':
+        s['user_state']='WAIT_PENDING_SYMBOL'; s.pop('_pending_tmp',None); save_session(chat_id)
+        send_message(chat_id,'🧾 *ثبت اوردر معاملاتی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
+    if cl in ('/pending_side_buy','/pending_side_sell'):
+        tmp=s.get('_pending_tmp') or {}
+        if not tmp.get('symbol'):
+            send_message(chat_id,'⚠️ ابتدا نماد را ارسال کنید.'); s['user_state']='WAIT_PENDING_SYMBOL'; save_session(chat_id); return
+        tmp['side']='BUY' if cl=='/pending_side_buy' else 'SELL'
+        s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_TRIGGER'; save_session(chat_id)
+        live=latest_price(tmp['symbol'])
+        send_message(chat_id,f"🧾 *اوردر معاملاتی* — `{tmp['symbol']}`\nقیمت لحظه‌ای: `{fmt(live)}`\n\n*کادر ۱ (اختیاری):* اگر می‌خواهید اوردر فقط بعد از رسیدن قیمت به یک سطح خاص فعال شود، آن قیمت را بفرستید. اگر نیازی نیست، بنویسید `ندارد`."); return
+    if cl=='/list_pending_orders':
+        send_message(chat_id, pending_orders_report(chat_id), pending_orders_keyboard(chat_id)); return
+    if cl.startswith('/cancel_pending_') and cl!='/cancel_pending_all':
+        oid=cl.replace('/cancel_pending_',''); 
+        before=len(s.get('pending_orders') or [])
+        s['pending_orders']=[o for o in (s.get('pending_orders') or []) if o.get('order_id')!=oid]
+        save_session(chat_id)
+        if len(s['pending_orders'])<before:
+            send_message(chat_id, f'✅ اوردر `{oid}` لغو شد.', pending_orders_keyboard(chat_id))
+        else:
+            send_message(chat_id, '❌ اوردر پیدا نشد.', pending_orders_keyboard(chat_id))
+        return
+    if cl=='/cancel_pending_all_prompt':
+        if not (s.get('pending_orders') or []):
+            send_message(chat_id, 'اوردر معلقی برای لغو وجود ندارد.'); return
+        send_message(chat_id, f"⚠️ آیا از لغو *همه‌ی* {len(s['pending_orders'])} اوردر معلق اطمینان دارید؟", {
+            'inline_keyboard': [[{'text':'✅ بله، همه را لغو کن','callback_data':'/cancel_pending_all'},{'text':'❌ انصراف','callback_data':'/cancel'}]]
+        }); return
+    if cl=='/cancel_pending_all':
+        n=len(s.get('pending_orders') or [])
+        s['pending_orders']=[]; save_session(chat_id)
+        send_message(chat_id, f'✅ همه‌ی {n} اوردر معلق لغو شد.'); return
+    if cl=='/confirm_pending_order':
+        tmp=s.get('_pending_tmp') or {}
+        required=('symbol','side','entry','tp','sl','margin','leverage')
+        if not all(k in tmp for k in required):
+            send_message(chat_id,'⚠️ اطلاعات اوردر ناقص است، از اول شروع کنید.'); return
+        order={
+            'order_id': f"{tmp['symbol']}-{int(time.time())}",
+            'symbol': tmp['symbol'], 'side': tmp['side'],
+            'trigger_price': tmp.get('trigger'), 'entry_price': tmp['entry'],
+            'tp': tmp['tp'], 'sl': tmp['sl'], 'margin': tmp['margin'], 'leverage': tmp['leverage'],
+            'created_at': time.time(), 'triggered': tmp.get('trigger') is None,
+        }
+        s.setdefault('pending_orders', []).append(order)
+        s['user_state']=None; s.pop('_pending_tmp',None); save_session(chat_id)
+        send_message(chat_id, f"✅ اوردر `{order['symbol']}` ثبت شد و در حال پایش است.", pending_orders_keyboard(chat_id))
+        return
     if cl in ('/open_positions','/positions','positions') or any(x in c.replace('\u200c','') for x in ('پوزیشنها','پوزیشنهای باز','پوزیشن باز','پوزیشن')):
         _send_or_edit_positions_view(chat_id, message_id=message_id)
         return
@@ -4222,6 +4360,23 @@ def process_command(cmd,chat_id,message_id=None):
             if p['symbol']==sym:
                 send_message(chat_id,format_trade_status(p)+'\n\n⚠️ آیا از بستن با قیمت بازار اطمینان دارید؟',close_confirm_keyboard(sym)); return
         send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl.startswith('/close_breakeven_'):
+        sym=cl.replace('/close_breakeven_','').upper()
+        for p in s['paper_positions'][:]:
+            if p['symbol']==sym:
+                close_position(chat_id,p,price=float(p['entry_price']),reason='بستن سربه‌سر (دستی)'); return
+        send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl.startswith('/show_chart_'):
+        sym=cl.replace('/show_chart_','').upper()
+        pos=next((p for p in s['paper_positions'] if p['symbol']==sym), None)
+        if not pos:
+            send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+        tf=pos.get('timeframe','5min')
+        d=get_klines(sym, tf, 160)
+        if d is None or d.empty:
+            send_message(chat_id,f'❌ دریافت داده‌ی نمودار `{sym}` ناموفق بود.'); return
+        chart(chat_id, sym, calculate_indicators(d), pos)
+        return
     if cl.startswith('/confirm_close_') and cl not in ('/confirm_close_all','/confirm_close_longs','/confirm_close_shorts'):
         sym=cl.replace('/confirm_close_','').upper()
         for p in s['paper_positions'][:]:
@@ -4412,6 +4567,7 @@ def handle_text(chat_id,text):
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
+        '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
@@ -4575,6 +4731,67 @@ def handle_text(chat_id,text):
         if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
         else: send_message(chat_id,f'❌ باز نشد: {err}')
         return
+
+    if current_state == 'WAIT_PENDING_TRIGGER':
+        tmp=s.get('_pending_tmp') or {}
+        if raw.strip() in ('ندارد','نداره','skip','ندارم','-'):
+            tmp['trigger']=None
+        else:
+            try: tmp['trigger']=float(raw.replace(',','').strip())
+            except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست، یا بنویسید `ندارد`.'); return
+        s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_ENTRY'; save_session(chat_id)
+        trig_txt = f"وقتی قیمت به `{fmt(tmp['trigger'])}` رسید، " if tmp.get('trigger') is not None else ""
+        send_message(chat_id, f"*کادر ۲:* {trig_txt}معامله در چه قیمتی باز شود؟"); return
+    if current_state == 'WAIT_PENDING_ENTRY':
+        tmp=s.get('_pending_tmp') or {}
+        try: tmp['entry']=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_TP'; save_session(chat_id)
+        send_message(chat_id,'*کادر ۳:* حد سود (TP) را ارسال کنید:'); return
+    if current_state == 'WAIT_PENDING_TP':
+        tmp=s.get('_pending_tmp') or {}
+        try: tmp['tp']=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_SL'; save_session(chat_id)
+        send_message(chat_id,'*کادر ۴:* حد ضرر (SL) را ارسال کنید:'); return
+    if current_state == 'WAIT_PENDING_SL':
+        tmp=s.get('_pending_tmp') or {}
+        try: sl=float(raw.replace(',','').strip())
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
+        entry=tmp.get('entry'); tp=tmp.get('tp'); is_long = tmp.get('side')=='BUY'
+        if not ((is_long and sl<entry<tp) or ((not is_long) and tp<entry<sl)):
+            send_message(chat_id, f"⚠️ نسبت SL/TP/ورود با جهت {'خرید' if is_long else 'فروش'} همخوانی ندارد (باید {'SL < ورود < TP' if is_long else 'TP < ورود < SL'} باشد). دوباره SL را بفرستید:"); return
+        tmp['sl']=sl; s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_MARGIN'; save_session(chat_id)
+        send_message(chat_id,'*کادر ۵:* مارجین معامله (USDT) را ارسال کنید:'); return
+    if current_state == 'WAIT_PENDING_MARGIN':
+        tmp=s.get('_pending_tmp') or {}
+        try:
+            margin=float(raw.replace(',','').strip())
+            if margin<=0: raise ValueError
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر و مثبت نیست.'); return
+        tmp['margin']=margin; s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_LEVERAGE'; save_session(chat_id)
+        send_message(chat_id,'*کادر ۶:* اهرم (ضریب) را ارسال کنید، مثال `10`:'); return
+    if current_state == 'WAIT_PENDING_LEVERAGE':
+        tmp=s.get('_pending_tmp') or {}
+        try:
+            lev=float(raw.replace(',','').strip())
+            if lev<=0: raise ValueError
+        except Exception: send_message(chat_id,'⚠️ عدد معتبر و مثبت نیست.'); return
+        tmp['leverage']=lev; s['_pending_tmp']=tmp; s['user_state']=None; save_session(chat_id)
+        trig_line = f"• اگر قیمت به `{fmt(tmp['trigger'])}` برسد\n" if tmp.get('trigger') is not None else ""
+        side_fa='خرید (Long)' if tmp.get('side')=='BUY' else 'فروش (Short)'
+        summary = (
+            f"🧾 *خلاصه‌ی اوردر معاملاتی*\n"
+            f"• نماد: `{tmp.get('symbol')}` ({side_fa})\n"
+            f"{trig_line}"
+            f"• ورود: `{fmt(tmp.get('entry'))}`\n"
+            f"• حد سود: `{fmt(tmp.get('tp'))}`\n"
+            f"• حد ضرر: `{fmt(tmp.get('sl'))}`\n"
+            f"• مارجین: `{tmp.get('margin')} USDT`\n"
+            f"• اهرم: `{tmp.get('leverage')}x`\n\n"
+            f"تایید می‌کنید؟"
+        )
+        send_message(chat_id, summary, get_pending_confirm_keyboard()); return
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()):
         atext, akeyboard = analyze(chat_id,val)
         send_message(chat_id,atext,akeyboard)
@@ -4947,6 +5164,19 @@ def _live_positions_loop():
             logger.exception('live position refresh failed')
         time.sleep(10)
 
+
+def _pending_orders_loop():
+    """مستقل از پوزیشن‌های باز اجرا می‌شود - چون ممکن است کاربری اوردر معلق داشته
+    باشد بدون این‌که پوزیشن بازی داشته باشد."""
+    while True:
+        try:
+            for chat_id, s in list(USER_SESSIONS.items()):
+                if s.get('pending_orders'):
+                    check_pending_orders(chat_id)
+        except Exception:
+            logger.exception('pending orders check failed')
+        time.sleep(10)
+
 TELEGRAM_COMMANDS = [{'command':'menu','description':'منوی اصلی'}]
 
 def configure_telegram_native_menu():
@@ -4968,6 +5198,7 @@ def main():
     Thread(target=telegram_listener, daemon=True, name='telegram').start()
     Thread(target=lambda: (time.sleep(3), asyncio.run(scan_loop())), daemon=True, name='scanner').start()
     Thread(target=lambda: (time.sleep(5), _live_positions_loop()), daemon=True, name='live-pnl').start()
+    Thread(target=lambda: (time.sleep(7), _pending_orders_loop()), daemon=True, name='pending-orders').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 
