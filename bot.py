@@ -45,6 +45,7 @@ from ui import (
     get_confirm_emergency_close_keyboard,
     get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_pending_side_keyboard, get_pending_confirm_keyboard,
+    get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
     get_setup_management_keyboard,
@@ -4198,6 +4199,12 @@ def process_command(cmd,chat_id,message_id=None):
         sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
         return
     if cl in ('/menu','☰ منو','🏠 منوی اصلی'): s['user_state']=None; menu(chat_id,message_id); return
+    if cl=='/menu_trading':
+        send_message(chat_id, '💹 *معاملات و اوردرها*', get_trading_menu_keyboard()); return
+    if cl=='/menu_settings':
+        send_message(chat_id, '🎛 *تنظیمات و مدیریت*', get_settings_menu_keyboard()); return
+    if cl=='/menu_reports':
+        send_message(chat_id, '📊 *گزارش‌ها و آمار*', get_reports_menu_keyboard()); return
     if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id, message_id); return
     if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
         stop_scan(chat_id, 'manual'); menu(chat_id,message_id)
