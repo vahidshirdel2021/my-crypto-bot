@@ -149,6 +149,17 @@ SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIR
 PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
+# --- کانال اعلام برخورد سطوح (کاملاً مستقل از منطق معاملاتی ربات) -------------
+# هیچ فیلتر/تاییدیه/کیفیتی اعمال نمی‌شود؛ صرفاً هر بار که آخرین کندلِ بسته‌شده‌ی
+# یک نماد از واچ‌لیست، وارد بازه‌ی یکی از سطوح فعال (ماهانه/هفتگی/روزانه/۴ساعته/
+# ۱ساعته) بشود، یک پیام ساده به کانال ارسال می‌شود. تصمیم ورود/خروج معاملات
+# ربات به هیچ‌وجه به این بخش وابسته نیست و برعکس.
+SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
+SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()
+SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
+_SIGNAL_CHANNEL_LEVEL_TAGS = [t.strip() for t in os.environ.get('SIGNAL_CHANNEL_LEVEL_TAGS', 'Monthly,Weekly,Daily,4h,1h').split(',') if t.strip()]
+_SIGNAL_CHANNEL_SEEN = set()  # {(symbol, tag, hi/lo, candle_ts)} - جلوگیری از تکرار پیام برای همان کندل
+
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
 try:
     COINEX_ACCOUNTS = json.loads(COINEX_ACCOUNTS_JSON) if COINEX_ACCOUNTS_JSON else {}
@@ -1467,6 +1478,95 @@ def check_pending_orders(chat_id):
     if changed:
         s['pending_orders'] = remaining
         save_session(chat_id)
+
+
+def send_channel_message(channel_id, text):
+    """ارسال مستقیم به کانال - بدون session، بدون کیبورد پایین، بدون هیچ منطق
+    کاربری. عمداً از send_message جدا نگه داشته شده چون send_message فرض می‌کند
+    chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند."""
+    try:
+        res = tg('sendMessage', {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}, 10)
+        return bool(res and res.get('ok'))
+    except Exception:
+        logger.exception('failed to post to signal channel')
+        return False
+
+
+def _signal_channel_touch_scan_symbol(symbol, timeframe):
+    """صرفاً می‌گوید آخرین کندلِ بسته‌شده‌ی این نماد وارد بازه‌ی کدام سطوحِ فعال
+    شده یا نه - هیچ تشخیص جهت/کیفیت/ریکلیمی در کار نیست. مستقل از strategy.py
+    استفاده می‌شود؛ فقط از همان توابع محاسبه‌ی خام سطوح (که ربات هم برای سطوحش
+    استفاده می‌کند) بهره می‌برد."""
+    try:
+        df = get_klines(symbol, timeframe, 320)
+        if df is None or df.empty or len(df) < 110:
+            return []
+        dated_df, pdh, pdl = _compute_prev_day_levels(df)
+        if dated_df is None:
+            return []
+        idx = len(dated_df) - 2
+        last = dated_df.iloc[idx]
+        candle_ts = last.get('timestamp')
+        levels = {}
+        if pdh is not None and pdl is not None:
+            levels['Daily'] = (float(pdh), float(pdl))
+        htf = _compute_prev_htf_levels(dated_df, idx)
+        for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
+            if tag == 'Daily':
+                continue
+            if hi_key in htf and lo_key in htf:
+                levels[tag] = (htf[hi_key], htf[lo_key])
+        hi_candle, lo_candle = float(last['high']), float(last['low'])
+        hits = []
+        for tag, (hi, lo) in levels.items():
+            if tag not in _SIGNAL_CHANNEL_LEVEL_TAGS:
+                continue
+            if lo_candle <= hi <= hi_candle:
+                hits.append((tag, 'سقف', hi, candle_ts))
+            if lo_candle <= lo <= hi_candle:
+                hits.append((tag, 'کف', lo, candle_ts))
+        return hits
+    except Exception:
+        logger.exception('signal channel touch scan failed symbol=%s', symbol)
+        return []
+
+
+def _signal_channel_scan_once():
+    if not SIGNAL_CHANNEL_ID:
+        return
+    watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
+    for symbol in watchlist:
+        for tag, side_fa, level_value, candle_ts in _signal_channel_touch_scan_symbol(symbol, SIGNAL_CHANNEL_TIMEFRAME):
+            key = (symbol, tag, side_fa, candle_ts)
+            if key in _SIGNAL_CHANNEL_SEEN:
+                continue
+            _SIGNAL_CHANNEL_SEEN.add(key)
+            text = (
+                f"📡 *برخورد با سطح*\n\n"
+                f"نماد: `{symbol}`\n"
+                f"تایم‌فریم: `{SIGNAL_CHANNEL_TIMEFRAME}`\n"
+                f"سطح: `{tag}` ({side_fa} = `{fmt(level_value)}`)\n\n"
+                f"_صرفاً اعلام برخورد؛ بدون تایید جهت یا کیفیت - بررسی با شماست._"
+            )
+            send_channel_message(SIGNAL_CHANNEL_ID, text)
+    # جلوگیری از رشد بی‌پایان حافظه - فقط چند هزار مورد اخیر نگه داشته می‌شود
+    if len(_SIGNAL_CHANNEL_SEEN) > 5000:
+        _SIGNAL_CHANNEL_SEEN.clear()
+
+
+def _signal_channel_loop():
+    """کاملاً جدا از scan_loop اصلی ربات - نه پوزیشنی باز/بسته می‌کند، نه از
+    session هیچ کاربری چیزی می‌خواند یا می‌نویسد. فقط قیمت را می‌خواند و پیام
+    می‌فرستد."""
+    if not SIGNAL_CHANNEL_ID:
+        logger.info('SIGNAL_CHANNEL_ID تنظیم نشده - کانال اعلام برخورد سطوح غیرفعال است.')
+        return
+    while True:
+        try:
+            _signal_channel_scan_once()
+        except Exception:
+            logger.exception('signal channel scan loop failed')
+        time.sleep(SIGNAL_CHANNEL_INTERVAL_SECONDS)
 
 
 def format_trade_status(p, price=None):
@@ -5259,6 +5359,7 @@ def main():
     Thread(target=lambda: (time.sleep(3), asyncio.run(scan_loop())), daemon=True, name='scanner').start()
     Thread(target=lambda: (time.sleep(5), _live_positions_loop()), daemon=True, name='live-pnl').start()
     Thread(target=lambda: (time.sleep(7), _pending_orders_loop()), daemon=True, name='pending-orders').start()
+    Thread(target=lambda: (time.sleep(9), _signal_channel_loop()), daemon=True, name='signal-channel').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 
