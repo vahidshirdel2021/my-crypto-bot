@@ -165,10 +165,14 @@ def get_setup_management_keyboard(session=None):
 
 def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
     rows = [
-        [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"}],
-        [{"text": "💹 معاملات و اوردرها", "callback_data": "/menu_trading"}],
-        [{"text": "🎛 تنظیمات و مدیریت", "callback_data": "/menu_settings"}],
-        [{"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"}],
+        [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},
+         {"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
+        [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
+         {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
+        [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"},
+         {"text": "💹 معاملات و اوردرها", "callback_data": "/menu_trading"}],
+        [{"text": "🎛 تنظیمات و مدیریت", "callback_data": "/menu_settings"},
+         {"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"}],
     ]
     if is_admin_user:
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
@@ -177,8 +181,6 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
 
 def get_trading_menu_keyboard():
     return {"inline_keyboard": [
-        [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"}],
-        [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"}],
         [{"text": "🧾 ثبت اوردر معاملاتی", "callback_data": "/pending_order_start"},
          {"text": "📋 اوردرهای معاملاتی", "callback_data": "/list_pending_orders"}],
         [{"text": "❌ بستن همه", "callback_data": "/close_all_prompt"}],
@@ -188,11 +190,10 @@ def get_trading_menu_keyboard():
 
 def get_settings_menu_keyboard():
     return {"inline_keyboard": [
-        [{"text": "🎛 مدیریت ستاپ‌های معاملاتی", "callback_data": "/setup_management"}],
-        [{"text": "🧰 مدیریت فیلتر معاملات", "callback_data": "/trade_filter_management"}],
-        [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"}],
-        [{"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
-        [{"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
+        [{"text": "🎛 مدیریت ستاپ‌های معاملاتی", "callback_data": "/setup_management"},
+         {"text": "🧰 مدیریت فیلتر معاملات", "callback_data": "/trade_filter_management"}],
+        [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
+         {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
@@ -200,10 +201,9 @@ def get_settings_menu_keyboard():
 def get_reports_menu_keyboard():
     return {"inline_keyboard": [
         [{"text": "📊 وضعیت بازار", "callback_data": "/market_report"},
-         {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
-        [{"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
-        [{"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"}],
-        [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
+         {"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
+        [{"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"},
+         {"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 

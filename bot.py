@@ -619,7 +619,7 @@ def default_session():
         # سوییچ مرکزی: وقتی False باشد، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه
         # محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند.
         # پیش‌فرض True (روشن).
-        'market_alignment_filters_enabled': True,
+        'market_alignment_filters_enabled': False,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
         'manual_block_buy_entries': False,
@@ -2497,7 +2497,7 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
     """Fast multi-timeframe position protection; entries remain untouched."""
     try:
         cfg=s.get('strategy_config') or STRATEGY_DEFAULTS
-        if not bool(cfg.get('weakness_exit_enabled', True)):
+        if not bool(cfg.get('weakness_exit_enabled', False)):
             return False, []
         min_profit_r=float(cfg.get('weakness_exit_min_r',1.0))
         min_profit_r=max(1.0, min_profit_r)
@@ -3244,7 +3244,7 @@ async def scan_symbol(http,chat_id,symbol,regime=None):
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
     full_reason = full_reason[:500]
-    if bool(s.get('market_alignment_filters_enabled', True)):
+    if bool(s.get('market_alignment_filters_enabled', False)):
         guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
         if not guard_ok:
             return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
@@ -3488,48 +3488,64 @@ def trade_tracking_keyboard(chat_id):
 
 
 def trade_filter_management_keyboard(chat_id):
-    """همه‌ی دکمه‌های مربوط به محدودیت/فیلتر معاملات، یک‌جا."""
+    """دکمه‌های محدودیت/فیلتر معاملات (نه خانواده‌ی استراتژی‌ها - آن یک منوی جداست)."""
     s = get_session(chat_id)
     scfg = s.get('strategy_config') or {}
 
-    def row(flag_val, on_label, cb):
+    def cell(flag_val, on_label, cb):
         icon = '🟢' if flag_val else '🔴'
-        state = 'روشن' if flag_val else 'خاموش'
-        return [{'text': f'{icon} {on_label}: {state}', 'callback_data': cb}]
+        return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
     sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
-    swing_break = bool(scfg.get('sweep_require_swing_break', False))
-    align_on = bool(s.get('market_alignment_filters_enabled', True))
-    weakness_on = bool(scfg.get('weakness_exit_enabled', True))
+    swing_break = bool(scfg.get('sweep_require_swing_break', True))
+    align_on = bool(s.get('market_alignment_filters_enabled', False))
+    weakness_on = bool(scfg.get('weakness_exit_enabled', False))
     block_buy = bool(s.get('manual_block_buy_entries', False))
     block_sell = bool(s.get('manual_block_sell_entries', False))
     block_all = bool(s.get('manual_block_all_entries', False))
 
+    return {
+        'inline_keyboard': [
+            [cell(sweep_confirm, 'تاییدیه کندل Sweep', '/toggle_sweep_confirm'),
+             cell(swing_break, 'شکست سوینگ محلی', '/toggle_swing_break')],
+            [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment'),
+             cell(weakness_on, 'مدیریت ضعف روند', '/toggle_weakness_exit')],
+            [cell(block_buy, 'بلاک خرید', '/toggle_block_buy'),
+             cell(block_sell, 'بلاک فروش', '/toggle_block_sell')],
+            [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
+            [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
+            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+        ]
+    }
+
+
+def strategy_families_keyboard(chat_id):
+    """فقط سوییچ‌های فعال/غیرفعال هر خانواده‌ی استراتژی - جدا از فیلترهای دیگر."""
+    s = get_session(chat_id)
+    scfg = s.get('strategy_config') or {}
+
+    def cell(flag_val, on_label, cb):
+        icon = '🟢' if flag_val else '🔴'
+        return {'text': f'{icon} {on_label}', 'callback_data': cb}
+
     sweep_on = bool(scfg.get('strategy_sweep_enabled', True))
-    trend_on = bool(scfg.get('strategy_trend_enabled', False))
-    breakout_on = bool(scfg.get('strategy_breakout_enabled', False))
+    trend_on = bool(scfg.get('strategy_trend_enabled', True))
+    breakout_on = bool(scfg.get('strategy_breakout_enabled', True))
     meanrev_on = bool(scfg.get('strategy_mean_reversion_enabled', False))
     orb_on = bool(scfg.get('strategy_orb_judas_enabled', False))
     htf_on = bool(scfg.get('strategy_htf_reversal_enabled', True))
-    session_on = bool(scfg.get('adaptive_allow_session_swing_anchors', False))
+    session_on = bool(scfg.get('adaptive_allow_session_swing_anchors', True))
 
     return {
         'inline_keyboard': [
-            row(sweep_confirm, 'تاییدیه یک کندل اضافه Sweep', '/toggle_sweep_confirm'),
-            row(swing_break, 'شکست سوینگ محلی Sweep', '/toggle_swing_break'),
-            row(align_on, 'فیلتر هم‌جهتی با بازار (واچ‌لیست+رژیم+BTC/ETH)', '/toggle_market_alignment'),
-            row(weakness_on, 'مدیریت هوشمند ضعف روند', '/toggle_weakness_exit'),
-            row(block_buy, 'بلاک دستی معاملات خرید', '/toggle_block_buy'),
-            row(block_sell, 'بلاک دستی معاملات فروش', '/toggle_block_sell'),
-            row(block_all, 'توقف کامل ورود به معامله (هر دو جهت)', '/toggle_block_all'),
-            [{'text': '━━━ خانواده‌های استراتژی ━━━', 'callback_data': '/noop'}],
-            row(sweep_on, 'استراتژی Sweep (جاروب نقدینگی)', '/toggle_strategy_sweep'),
-            row(trend_on, 'استراتژی Trend Following', '/toggle_strategy_trend'),
-            row(breakout_on, 'استراتژی Breakout', '/toggle_strategy_breakout'),
-            row(meanrev_on, 'استراتژی Mean Reversion', '/toggle_strategy_mean_reversion'),
-            row(orb_on, 'استراتژی ORB/Judas', '/toggle_strategy_orb'),
-            row(htf_on, 'استراتژی HTF Liquidity Reversal (۱س/۴س)', '/toggle_strategy_htf'),
-            row(session_on, 'سطوح سشن‌های معاملاتی (London/NY/Asia)', '/toggle_strategy_sessions'),
+            [cell(sweep_on, 'Sweep', '/toggle_strategy_sweep'),
+             cell(trend_on, 'Trend Following', '/toggle_strategy_trend')],
+            [cell(breakout_on, 'Breakout', '/toggle_strategy_breakout'),
+             cell(meanrev_on, 'Mean Reversion', '/toggle_strategy_mean_reversion')],
+            [cell(orb_on, 'ORB/Judas', '/toggle_strategy_orb'),
+             cell(htf_on, 'HTF Reversal (۱س/۴س)', '/toggle_strategy_htf')],
+            [cell(session_on, 'سطوح سشن‌ها (London/NY/Asia)', '/toggle_strategy_sessions')],
+            [{'text': '🔙 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
     }
@@ -3999,7 +4015,7 @@ async def _check_entry_coro(chat_id, symbol):
     timeout = aiohttp.ClientTimeout(total=15)
     conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        if bool(s.get('market_alignment_filters_enabled', True)):
+        if bool(s.get('market_alignment_filters_enabled', False)):
             macro_extreme = MARKET_REGIME_CACHE['extreme']
             micro_extreme = await refresh_timeframe_regime(http, tf)
             combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme)
@@ -4469,7 +4485,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/toggle_swing_break':
         s.setdefault('strategy_config', {})
-        current = bool(s['strategy_config'].get('sweep_require_swing_break', False))
+        current = bool(s['strategy_config'].get('sweep_require_swing_break', True))
         s['strategy_config']['sweep_require_swing_break'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -4480,7 +4496,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/toggle_market_alignment':
-        current = bool(s.get('market_alignment_filters_enabled', True))
+        current = bool(s.get('market_alignment_filters_enabled', False))
         s['market_alignment_filters_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -4492,7 +4508,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/toggle_weakness_exit':
         s.setdefault('strategy_config', {})
-        current = bool(s['strategy_config'].get('weakness_exit_enabled', True))
+        current = bool(s['strategy_config'].get('weakness_exit_enabled', False))
         s['strategy_config']['weakness_exit_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -4531,17 +4547,19 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/noop':
         return
+    if cl=='/strategy_families_menu':
+        send_message(chat_id, '🧩 *خانواده‌های استراتژی*\n\nهرکدوم رو جدا روشن/خاموش کنید.', strategy_families_keyboard(chat_id)); return
     if cl in ('/toggle_strategy_sweep','/toggle_strategy_trend','/toggle_strategy_breakout',
               '/toggle_strategy_mean_reversion','/toggle_strategy_orb','/toggle_strategy_htf',
               '/toggle_strategy_sessions'):
         key_map = {
             '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'استراتژی Sweep (جاروب نقدینگی)'),
-            '/toggle_strategy_trend': ('strategy_trend_enabled', False, 'استراتژی Trend Following'),
-            '/toggle_strategy_breakout': ('strategy_breakout_enabled', False, 'استراتژی Breakout'),
+            '/toggle_strategy_trend': ('strategy_trend_enabled', True, 'استراتژی Trend Following'),
+            '/toggle_strategy_breakout': ('strategy_breakout_enabled', True, 'استراتژی Breakout'),
             '/toggle_strategy_mean_reversion': ('strategy_mean_reversion_enabled', False, 'استراتژی Mean Reversion'),
             '/toggle_strategy_orb': ('strategy_orb_judas_enabled', False, 'استراتژی ORB/Judas'),
             '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'استراتژی HTF Liquidity Reversal'),
-            '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', False, 'سطوح سشن‌های معاملاتی'),
+            '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', True, 'سطوح سشن‌های معاملاتی'),
         }
         cfg_key, default_val, label = key_map[cl]
         s.setdefault('strategy_config', {})
@@ -4549,7 +4567,7 @@ def process_command(cmd,chat_id,message_id=None):
         s['strategy_config'][cfg_key] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        send_message(chat_id, f"🧩 {label}: {new_state}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🧩 {label}: {new_state}", strategy_families_keyboard(chat_id))
         return
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)
@@ -4936,7 +4954,7 @@ async def scan_loop():
                         _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                         continue
                     user_tf = s.get('timeframe', '5min')
-                    align_on = bool(s.get('market_alignment_filters_enabled', True))
+                    align_on = bool(s.get('market_alignment_filters_enabled', False))
                     watchlist = (filtered_watchlist_by_tf if align_on else base_watchlist_by_tf).get(user_tf) or []
                     # وقتی سوییچ خاموشه، regime رو None پاس می‌دیم تا محافظ خلاف‌جهت بازار
                     # (داخل get_signal_with_reason) هم غیرفعال بشه - چون اون محافظ فقط وقتی

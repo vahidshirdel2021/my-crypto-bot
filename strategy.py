@@ -235,7 +235,7 @@ STRATEGY_DEFAULTS = {
     # سوییچ اصلی: وقتی False باشد، «مدیریت هوشمند (ضعف روند)» کاملاً غیرفعال می‌شود -
     # نه قفل سود پله‌ای زودهنگام، نه خروج زودهنگام به‌خاطر ضعف اندیکاتورها. پوزیشن‌ها
     # فقط با SL/TP معمولی بسته می‌شوند (به‌علاوه‌ی بستن اجباری آخر روز، که جداست).
-    "weakness_exit_enabled": True,
+    "weakness_exit_enabled": False,
     "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
     "weakness_profit_lock_min_r": 1.0,
     "early_loss_weakness_exit_enabled": False,
@@ -259,8 +259,9 @@ STRATEGY_DEFAULTS = {
     # تا سیگنال صادر شود. اگر فعال باشد، جایگزین sweep_require_confirmation_candle
     # می‌شود (منطق قوی‌تری دارد) و آن تنظیم را نادیده می‌گیرد. پیش‌فرض خاموش - نیاز به
     # اعتبارسنجی با داده دارد، مثل sweep_require_confirmation_candle.
-    "sweep_require_swing_break": False,
+    "sweep_require_swing_break": True,
     "sweep_swing_break_lookback": 6,
+    "adaptive_allow_session_swing_anchors": True,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -2093,8 +2094,8 @@ V2_DEFAULTS = {
     # سوییچ‌های مستقل - جایگزین only_liquidity_sweep برای کنترل تک‌به‌تک هر خانواده.
     # پیش‌فرض‌ها دقیقاً همان رفتار فعلی (فقط Sweep روشن) را حفظ می‌کنند.
     "strategy_sweep_enabled": True,
-    "strategy_trend_enabled": False,
-    "strategy_breakout_enabled": False,
+    "strategy_trend_enabled": True,
+    "strategy_breakout_enabled": True,
     "strategy_mean_reversion_enabled": False,
     "strategy_orb_judas_enabled": False,
     "strategy_htf_reversal_enabled": True,
