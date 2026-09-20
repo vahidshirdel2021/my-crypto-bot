@@ -157,7 +157,31 @@ TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() 
 SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
 SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
-_SIGNAL_CHANNEL_LEVEL_TAGS = [t.strip() for t in os.environ.get('SIGNAL_CHANNEL_LEVEL_TAGS', 'Monthly,Weekly,Daily,4h,1h').split(',') if t.strip()]
+_SIGNAL_CHANNEL_SETTINGS_FILE = os.environ.get('SIGNAL_CHANNEL_SETTINGS_FILE', 'signal_channel_settings.json')
+_ALL_SIGNAL_CHANNEL_TAGS = ['Monthly', 'Weekly', 'Daily', '4h', '1h']
+
+
+def _load_signal_channel_level_tags():
+    default_tags = [t.strip() for t in os.environ.get('SIGNAL_CHANNEL_LEVEL_TAGS', 'Monthly,Weekly,Daily,4h,1h').split(',') if t.strip()]
+    try:
+        with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f).get('level_tags')
+            if isinstance(saved, list) and saved:
+                return [t for t in saved if t in _ALL_SIGNAL_CHANNEL_TAGS]
+    except Exception:
+        pass
+    return default_tags
+
+
+def _save_signal_channel_level_tags(tags):
+    try:
+        with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'level_tags': tags}, f)
+    except Exception:
+        logger.exception('failed to persist signal channel settings')
+
+
+_SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
 _SIGNAL_CHANNEL_SEEN = set()  # {(symbol, tag, hi/lo, candle_ts)} - جلوگیری از تکرار پیام برای همان کندل
 
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
@@ -802,8 +826,13 @@ def configure_telegram_native_menu():
         logger.warning('setChatMenuButton failed')
 
 
-def answer_callback(cid):
-    if cid: tg('answerCallbackQuery', {'callback_query_id':cid}, 5)
+def answer_callback(cid, text=None, show_alert=False):
+    if cid:
+        payload = {'callback_query_id': cid}
+        if text:
+            payload['text'] = text
+            payload['show_alert'] = show_alert
+        tg('answerCallbackQuery', payload, 5)
 
 
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
@@ -1480,12 +1509,15 @@ def check_pending_orders(chat_id):
         save_session(chat_id)
 
 
-def send_channel_message(channel_id, text):
+def send_channel_message(channel_id, text, reply_markup=None):
     """ارسال مستقیم به کانال - بدون session، بدون کیبورد پایین، بدون هیچ منطق
     کاربری. عمداً از send_message جدا نگه داشته شده چون send_message فرض می‌کند
     chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند."""
     try:
-        res = tg('sendMessage', {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}, 10)
+        payload = {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}
+        if reply_markup:
+            payload['reply_markup'] = reply_markup
+        res = tg('sendMessage', payload, 10)
         return bool(res and res.get('ok'))
     except Exception:
         logger.exception('failed to post to signal channel')
@@ -1548,7 +1580,11 @@ def _signal_channel_scan_once():
                 f"سطح: `{tag}` ({side_fa} = `{fmt(level_value)}`)\n\n"
                 f"_صرفاً اعلام برخورد؛ بدون تایید جهت یا کیفیت - بررسی با شماست._"
             )
-            send_channel_message(SIGNAL_CHANNEL_ID, text)
+            markup = {'inline_keyboard': [[
+                {'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, SIGNAL_CHANNEL_TIMEFRAME)},
+                {'text': '🖐 معامله دستی', 'callback_data': f'/quick_manual_trade_{symbol}'},
+            ]]}
+            send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
     # جلوگیری از رشد بی‌پایان حافظه - فقط چند هزار مورد اخیر نگه داشته می‌شود
     if len(_SIGNAL_CHANNEL_SEEN) > 5000:
         _SIGNAL_CHANNEL_SEEN.clear()
@@ -1567,6 +1603,27 @@ def _signal_channel_loop():
         except Exception:
             logger.exception('signal channel scan loop failed')
         time.sleep(SIGNAL_CHANNEL_INTERVAL_SECONDS)
+
+
+def signal_channel_settings_keyboard():
+    rows = []
+    for tag in _ALL_SIGNAL_CHANNEL_TAGS:
+        on = tag in _SIGNAL_CHANNEL_LEVEL_TAGS
+        rows.append([{'text': f"{'🟢' if on else '🔴'} {tag}", 'callback_data': f'/toggle_signal_tag_{tag}'}])
+    rows.append([{'text': '👑 بازگشت به پنل مدیریت', 'callback_data': '/admin_panel'}])
+    return {'inline_keyboard': rows}
+
+
+def signal_channel_settings_report():
+    status = 'فعال ✅' if SIGNAL_CHANNEL_ID else 'غیرفعال (SIGNAL_CHANNEL_ID تنظیم نشده) ❌'
+    tags_txt = '، '.join(_SIGNAL_CHANNEL_LEVEL_TAGS) if _SIGNAL_CHANNEL_LEVEL_TAGS else 'هیچ‌کدام (کانال چیزی ارسال نمی‌کند)'
+    return (
+        f"📡 *تنظیمات کانال اعلام برخورد سطوح*\n\n"
+        f"وضعیت: {status}\n"
+        f"تایم‌فریم بررسی: `{SIGNAL_CHANNEL_TIMEFRAME}`\n"
+        f"سطوح فعال برای ارسال: {tags_txt}\n\n"
+        f"هرکدوم از سطوح زیر رو بزنید تا روشن/خاموش بشه - فقط برخورد با سطوح روشن به کانال ارسال می‌شه."
+    )
 
 
 def format_trade_status(p, price=None):
@@ -4223,6 +4280,24 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
         edit_page(chat_id, admin_users_report(), get_admin_panel_keyboard(), message_id)
         return
+    if cmd == '/signal_channel_settings':
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
+        return
+    if cmd.startswith('/toggle_signal_tag_'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        tag = cmd.replace('/toggle_signal_tag_', '')
+        if tag in _ALL_SIGNAL_CHANNEL_TAGS:
+            global _SIGNAL_CHANNEL_LEVEL_TAGS
+            if tag in _SIGNAL_CHANNEL_LEVEL_TAGS:
+                _SIGNAL_CHANNEL_LEVEL_TAGS = [t for t in _SIGNAL_CHANNEL_LEVEL_TAGS if t != tag]
+            else:
+                _SIGNAL_CHANNEL_LEVEL_TAGS = _SIGNAL_CHANNEL_LEVEL_TAGS + [tag]
+            _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
+        edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
+        return
     if cmd == '/admin_set_fee_prompt':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
@@ -4406,16 +4481,33 @@ def process_command(cmd,chat_id,message_id=None):
             lines.append('موردی یافت نشد.')
         edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
     if cl in ('/manual_trade','🖐 معامله دستی'):
-        s['user_state']='WAIT_MANUAL_SYMBOL'; s.pop('_manual_tmp',None); save_session(chat_id)
-        send_message(chat_id,'🖐 *معامله دستی*\n\nنماد را ارسال کنید، مثال `BTC`'); return
-    if cl in ('/manual_side_buy','/manual_side_sell'):
+        s['user_state']='WAIT_MANUAL_ONESHOT'; s.pop('_manual_tmp',None); save_session(chat_id)
+        send_message(chat_id,
+            '🖐 *معامله دستی*\n\n'
+            'همه‌ی اطلاعات رو تو یه پیام، هرکدوم تو یه خط، به همین ترتیب بفرستید:\n\n'
+            '`جهت (خرید/فروش)`\n`نماد`\n`قیمت ورود (یا بازار)`\n`حد سود`\n`حد ضرر`\n\n'
+            'مثال:\n`خرید`\n`BTC`\n`بازار`\n`67000`\n`64000`'
+        ); return
+    if cl.startswith('/quick_manual_trade_'):
+        sym = cl.replace('/quick_manual_trade_','').upper()
+        s['user_state']='WAIT_MANUAL_ONESHOT_QUICK'; s['_manual_tmp']={'symbol':sym}; save_session(chat_id)
+        live=latest_price(sym)
+        send_message(chat_id,
+            f"🖐 *معامله دستی سریع* — `{sym}` (قیمت لحظه‌ای: `{fmt(live)}`)\n\n"
+            'باقی اطلاعات رو تو یه پیام، هرکدوم تو یه خط، به همین ترتیب بفرستید:\n\n'
+            '`جهت (خرید/فروش)`\n`قیمت ورود (یا بازار)`\n`حد سود`\n`حد ضرر`\n\n'
+            'مثال:\n`خرید`\n`بازار`\n`67000`\n`64000`'
+        ); return
+    if cl=='/confirm_manual_trade':
         tmp=s.get('_manual_tmp') or {}
-        if not tmp.get('symbol'):
-            send_message(chat_id,'⚠️ ابتدا نماد را ارسال کنید.'); s['user_state']='WAIT_MANUAL_SYMBOL'; save_session(chat_id); return
-        tmp['side']='BUY' if cl=='/manual_side_buy' else 'SELL'
-        s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_ENTRY'; save_session(chat_id)
-        live=latest_price(tmp['symbol'])
-        send_message(chat_id,f"🖐 *معامله دستی* — `{tmp['symbol']}`\nقیمت ورود را ارسال کنید یا کلمه `بازار` را بفرستید (قیمت لحظه‌ای: `{fmt(live)}`):"); return
+        required=('symbol','side','entry','tp','sl')
+        if not all(k in tmp for k in required):
+            send_message(chat_id,'⚠️ اطلاعات ناقص است، از اول شروع کنید.'); return
+        ok,err=execute_manual_trade(chat_id,tmp['symbol'],'BUY (Long)' if tmp['side']=='BUY' else 'SELL (Short)',tmp['sl'],tmp['tp'],entry_price=tmp['entry'])
+        s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id)
+        if ok: send_message(chat_id,f"✅ معامله دستی `{tmp['symbol']}` باز شد.")
+        else: send_message(chat_id,f'❌ باز نشد: {err}')
+        return
 
     # ============== اوردر معاملاتی معلق (Pending Order) ==============
     if cl=='/pending_order_start':
@@ -4849,49 +4941,61 @@ def handle_text(chat_id,text):
         send_message(chat_id, f"✅ حد سود پوزیشن `{sym}` به `{fmt(new_tp)}` تغییر یافت.", trade_action_keyboard(sym, timeframe=pos.get('timeframe','5min')))
         return
 
-    if current_state == 'WAIT_MANUAL_SYMBOL':
-        sym=re.sub(r'[^A-Z0-9]','',val)
-        if not (2<=len(sym)<=12) or latest_price(sym) is None:
-            send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
-        s['_manual_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
-        send_message(chat_id,f'🖐 جهت معامله `{sym}` را انتخاب کنید:',get_manual_side_keyboard()); return
     if current_state == 'WAIT_PENDING_SYMBOL':
         sym=re.sub(r'[^A-Z0-9]','',val)
         if not (2<=len(sym)<=12) or latest_price(sym) is None:
             send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
         s['_pending_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
         send_message(chat_id,f'🧾 جهت اوردر `{sym}` را انتخاب کنید:',get_pending_side_keyboard()); return
-    if current_state == 'WAIT_MANUAL_ENTRY':
-        tmp=s.get('_manual_tmp') or {}
-        symbol=tmp.get('symbol')
-        live=latest_price(symbol)
-        if raw.strip() in ('بازار','بازاری','market','Market'):
+    if current_state in ('WAIT_MANUAL_ONESHOT', 'WAIT_MANUAL_ONESHOT_QUICK'):
+        lines=[ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
+        quick = current_state == 'WAIT_MANUAL_ONESHOT_QUICK'
+        need = 4 if quick else 5
+        if len(lines) < need:
+            send_message(chat_id, f'⚠️ باید {need} خط بفرستید (هرکدوم تو یه خط جدا). دوباره امتحان کنید.'); return
+        tmp = dict(s.get('_manual_tmp') or {})
+        if quick:
+            side_txt, entry_txt, tp_txt, sl_txt = lines[0], lines[1], lines[2], lines[3]
+        else:
+            side_txt, symbol_txt, entry_txt, tp_txt, sl_txt = lines[0], lines[1], lines[2], lines[3], lines[4]
+            sym=re.sub(r'[^A-Z0-9]','',symbol_txt.upper())
+            if not (2<=len(sym)<=12) or latest_price(sym) is None:
+                send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست. از اول بفرستید.'); return
+            tmp['symbol']=sym
+        if side_txt in ('خرید','buy','Buy','BUY','long','Long'):
+            tmp['side']='BUY'
+        elif side_txt in ('فروش','sell','Sell','SELL','short','Short'):
+            tmp['side']='SELL'
+        else:
+            send_message(chat_id,'⚠️ خط اول باید `خرید` یا `فروش` باشد. از اول بفرستید.'); return
+        live=latest_price(tmp['symbol'])
+        if entry_txt in ('بازار','بازاری','market','Market'):
             entry=live
         else:
-            try: entry=float(raw.replace(',','').strip())
-            except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
-        tmp['entry']=entry; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_SL'; save_session(chat_id)
-        send_message(chat_id,f'✅ قیمت ورود: `{fmt(entry)}`\nقیمت حد ضرر (SL) را ارسال کنید:'); return
-    if current_state == 'WAIT_MANUAL_SL':
-        tmp=s.get('_manual_tmp') or {}
-        try: sl=float(raw.replace(',','').strip())
-        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
-        tmp['sl']=sl; s['_manual_tmp']=tmp; s['user_state']='WAIT_MANUAL_TP'; save_session(chat_id)
-        send_message(chat_id,'قیمت حد سود (TP) را ارسال کنید:'); return
-    if current_state == 'WAIT_MANUAL_TP':
-        tmp=s.get('_manual_tmp') or {}
-        try: tp=float(raw.replace(',','').strip())
-        except Exception: send_message(chat_id,'⚠️ عدد معتبر نیست.'); return
-        symbol=tmp.get('symbol'); side=tmp.get('side'); sl=tmp.get('sl'); entry=tmp.get('entry')
-        s['user_state']=None; s.pop('_manual_tmp',None); save_session(chat_id)
-        is_long = side=='BUY'
+            try: entry=float(entry_txt.replace(',',''))
+            except Exception: send_message(chat_id,'⚠️ قیمت ورود عدد معتبر نیست. از اول بفرستید.'); return
+        try:
+            tp=float(tp_txt.replace(',','')); sl=float(sl_txt.replace(',',''))
+        except Exception:
+            send_message(chat_id,'⚠️ حد سود/ضرر عدد معتبر نیست. از اول بفرستید.'); return
+        is_long = tmp['side']=='BUY'
         if not ((is_long and sl<entry<tp) or ((not is_long) and tp<entry<sl)):
-            send_message(chat_id,'⚠️ نسبت SL و TP با جهت معامله همخوانی ندارد.'); return
-        ok,err=execute_manual_trade(chat_id,symbol,'BUY (Long)' if is_long else 'SELL (Short)',sl,tp,entry_price=entry)
-        if ok: send_message(chat_id,f'✅ معامله دستی `{symbol}` باز شد.')
-        else: send_message(chat_id,f'❌ باز نشد: {err}')
-        return
-
+            send_message(chat_id, f"⚠️ نسبت SL/TP/ورود با جهت {'خرید' if is_long else 'فروش'} همخوانی ندارد (باید {'SL < ورود < TP' if is_long else 'TP < ورود < SL'} باشد). از اول بفرستید."); return
+        tmp['entry']=entry; tmp['tp']=tp; tmp['sl']=sl
+        s['_manual_tmp']=tmp; s['user_state']=None; save_session(chat_id)
+        side_fa='خرید (Long)' if is_long else 'فروش (Short)'
+        summary=(
+            f"🖐 *خلاصه‌ی معامله دستی*\n"
+            f"• نماد: `{tmp['symbol']}` ({side_fa})\n"
+            f"• ورود: `{fmt(entry)}`\n"
+            f"• حد سود: `{fmt(tp)}`\n"
+            f"• حد ضرر: `{fmt(sl)}`\n\n"
+            f"تایید می‌کنید؟"
+        )
+        send_message(chat_id, summary, {'inline_keyboard': [[
+            {'text':'✅ تایید و معامله', 'callback_data':'/confirm_manual_trade'},
+            {'text':'❌ انصراف', 'callback_data':'/cancel'},
+        ]]}); return
     if current_state == 'WAIT_PENDING_TRIGGER':
         tmp=s.get('_pending_tmp') or {}
         if raw.strip() in ('ندارد','نداره','skip','ندارم','-'):
@@ -4989,13 +5093,25 @@ def telegram_listener():
                     callback=u.get('callback_query') or {}
                     msg=callback.get('message') or u.get('message') or {}
                     chat=(msg.get('chat') or {}).get('id')
+                    is_channel_post = (msg.get('chat') or {}).get('type') == 'channel'
                     telegram_user=callback.get('from') or (u.get('message') or {}).get('from') or {}
+                    if callback and is_channel_post:
+                        # این کلیک از زیر یه پست کانالِ (مثلاً کانال اعلام برخورد سطوح) اومده -
+                        # chat اینجا آیدی خودِ کانال است، نه کاربری که کلیک کرده. پاسخ باید
+                        # خصوصی برای همون کاربر (callback['from']) ارسال بشه، و چون این یک
+                        # پیام تازه است نه ویرایش پست کانال، message_id هم نباید پاس داده بشه.
+                        chat = telegram_user.get('id')
+                        message_id_for_reply = None
+                    else:
+                        message_id_for_reply = msg.get('message_id')
                     if not chat: continue
                     upsert_telegram_user(telegram_user, chat)
-                    if callback.get('id'): answer_callback(callback['id'])
+                    if callback.get('id'):
+                        alert_text = 'پاسخ به‌صورت خصوصی در چت ربات ارسال می‌شود. اگر قبلاً ربات را استارت نکرده‌اید، لطفاً اول در چت خصوصی /start را بزنید.' if is_channel_post else None
+                        answer_callback(callback['id'], text=alert_text)
                     if not is_allowed(chat): continue
                     data=callback.get('data') or (u.get('message') or {}).get('text')
-                    if callback: process_command(data,chat,msg.get('message_id'))
+                    if callback: process_command(data,chat,message_id_for_reply)
                     elif data: handle_text(chat,data)
                 except Exception:
                     logger.exception('Telegram update %s processing failed',upd)

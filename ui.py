@@ -220,6 +220,7 @@ def get_admin_panel_keyboard():
     return {"inline_keyboard": [
         [{"text": "💰 گزارش کارمزد پلتفرم", "callback_data": "/admin_fee_menu"}],
         [{"text": "👥 لیست کاربران", "callback_data": "/admin_users_list"}],
+        [{"text": "📡 تنظیمات کانال سیگنال", "callback_data": "/signal_channel_settings"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
