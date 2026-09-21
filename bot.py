@@ -1701,11 +1701,129 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
 
         if hits:
             regime_val = _signal_channel_symbol_regime(df)
-            hits = [h + (regime_val,) for h in hits]
+            ind_row = None
+            try:
+                ind_df = calculate_indicators(df)
+                if ind_df is not None and not ind_df.empty and len(ind_df) >= 2:
+                    ind_row = ind_df.iloc[-2].to_dict()  # آخرین کندل بسته‌شده، هم‌راستا با ci
+            except Exception:
+                logger.exception('signal channel indicator calc failed symbol=%s', symbol)
+            hits = [h + (regime_val, ind_row) for h in hits]
         return hits
     except Exception:
         logger.exception('signal channel touch scan failed symbol=%s', symbol)
         return []
+
+
+def _signal_channel_implied_side(pattern, side_fa):
+    """جهتی که این الگو به‌طور طبیعی پیشنهاد می‌دهد (برای مقایسه با اندیکاتورها).
+    rejection: رد سقف => فروش، رد کف => خرید.
+    breakout_retest: ادامه‌ی صعودی از سقف => خرید، ادامه‌ی نزولی از کف => فروش.
+    touch: جهت مشخصی ندارد."""
+    if pattern == 'rejection':
+        return 'SELL' if side_fa == 'سقف' else 'BUY'
+    if pattern == 'breakout_retest':
+        return 'BUY' if side_fa == 'سقف' else 'SELL'
+    return None
+
+
+def _signal_channel_indicator_summary(ind_row, implied_side):
+    """خلاصه‌ی ساده و خوانا از مهم‌ترین اندیکاتورها (RSI، MACD، ADX/DI و حجم) برای پیغام کانال،
+    به‌علاوه یک خط جمع‌بندی نهایی بر اساس اجماع (رأی‌گیری) بین این اندیکاتورها.
+    اگر جهتی که الگو پیشنهاد می‌دهد (implied_side) با اندیکاتور همخوانی نداشته باشد،
+    این ناهمخوانی صریحاً در متن اعلام می‌شود؛ در غیر این صورت فقط وضعیت اندیکاتور گفته می‌شود."""
+    if ind_row is None:
+        return []
+    verb = {'BUY': 'خرید', 'SELL': 'فروش'}.get(implied_side)
+    lines = []
+    votes = []  # فقط اندیکاتورهایی که جهت‌دار هستند رأی می‌دهند (نه حجم)
+
+    rsi = ind_row.get('rsi')
+    if rsi is not None and pd.notna(rsi):
+        rsi = float(rsi)
+        if rsi >= 70:
+            txt, bias = f"RSI در منطقه اشباع خرید هست ({rsi:.0f})", 'SELL'
+        elif rsi <= 30:
+            txt, bias = f"RSI در منطقه اشباع فروش هست ({rsi:.0f})", 'BUY'
+        elif rsi >= 55:
+            txt, bias = f"RSI رو به بالا هست ({rsi:.0f})", 'BUY'
+        elif rsi <= 45:
+            txt, bias = f"RSI رو به پایین هست ({rsi:.0f})", 'SELL'
+        else:
+            txt, bias = f"RSI خنثیه ({rsi:.0f})", None
+        if verb and bias:
+            txt += (f" و معامله {verb} رو خوب نمی‌بینه" if bias != implied_side
+                    else f" و با معامله {verb} همسوئه")
+        if bias:
+            votes.append(bias)
+        lines.append(f"📊 {txt}")
+
+    macd_hist = ind_row.get('macd_hist')
+    if macd_hist is not None and pd.notna(macd_hist):
+        macd_hist = float(macd_hist)
+        bias = 'BUY' if macd_hist > 0 else ('SELL' if macd_hist < 0 else None)
+        txt = "MACD مثبته (مومنتوم صعودی)" if macd_hist > 0 else (
+            "MACD منفیه (مومنتوم نزولی)" if macd_hist < 0 else "MACD نزدیک خط صفره (مومنتوم خنثی)")
+        if verb and bias:
+            txt += (f" و معامله {verb} رو خوب نمی‌بینه" if bias != implied_side
+                    else f" و با معامله {verb} همسوئه")
+        if bias:
+            votes.append(bias)
+        lines.append(f"📉 {txt}")
+
+    adx = ind_row.get('adx')
+    plus_di = ind_row.get('plus_di')
+    minus_di = ind_row.get('minus_di')
+    if adx is not None and pd.notna(adx):
+        adx = float(adx)
+        strength = "روند قوی" if adx >= 25 else ("روند در حال شکل‌گیری" if adx >= 20 else "روند ضعیف/رنج")
+        txt = f"ADX {strength} رو نشون می‌ده ({adx:.0f})"
+        bias = None
+        if plus_di is not None and minus_di is not None and pd.notna(plus_di) and pd.notna(minus_di):
+            plus_di, minus_di = float(plus_di), float(minus_di)
+            if adx >= 20:
+                bias = 'BUY' if plus_di > minus_di else ('SELL' if minus_di > plus_di else None)
+                if bias:
+                    txt += f" و جهتش {'صعودیه' if bias == 'BUY' else 'نزولیه'}"
+        if verb and bias:
+            txt += (f" و معامله {verb} رو خوب نمی‌بینه" if bias != implied_side
+                    else f" و با معامله {verb} همسوئه")
+        if bias:
+            votes.append(bias)
+        lines.append(f"📈 {txt}")
+
+    vol_ratio = ind_row.get('volume_ratio')
+    vol_confirms = None  # None=نامشخص، True=حجم بالا (تاییدکننده)، False=حجم پایین (تضعیف‌کننده)
+    if vol_ratio is not None and pd.notna(vol_ratio):
+        vol_ratio = float(vol_ratio)
+        if vol_ratio >= 1.5:
+            txt, vol_confirms = f"حجم معاملات بالاست و این سیگنال رو تایید می‌کنه ({vol_ratio:.1f}x)", True
+        elif vol_ratio <= 0.7:
+            txt, vol_confirms = f"حجم معاملات پایینه و اعتبار سیگنال رو کم می‌کنه ({vol_ratio:.1f}x)", False
+        else:
+            txt = f"حجم معاملات عادیه ({vol_ratio:.1f}x)"
+        lines.append(f"📦 {txt}")
+
+    if votes:
+        buy_votes = votes.count('BUY')
+        sell_votes = votes.count('SELL')
+        if buy_votes == sell_votes:
+            consensus_txt = f"اندیکاتورها ({buy_votes} به {sell_votes}) اجماع مشخصی ندارن، جهت روشنی پیشنهاد نمیشه"
+        else:
+            overall = 'BUY' if buy_votes > sell_votes else 'SELL'
+            overall_fa = 'خرید' if overall == 'BUY' else 'فروش'
+            n_vote, n_total = max(buy_votes, sell_votes), buy_votes + sell_votes
+            consensus_txt = f"اجماع کلی اندیکاتورها ({n_vote} از {n_total}) به سمت {overall_fa}ه"
+            if vol_confirms is True:
+                consensus_txt += " و حجم معاملات هم این جهت رو تایید می‌کنه"
+            elif vol_confirms is False:
+                consensus_txt += " ولی حجم معاملات پایینه، پس با احتیاط"
+            if verb:
+                consensus_txt += (f" — با معامله {verb} همسوئه" if overall == implied_side
+                                   else f" — با معامله {verb} در تضاده")
+        lines.append(f"🧠 جمع‌بندی: {consensus_txt}")
+
+    return lines
 
 
 def _signal_channel_pattern_label(pattern, side_fa):
@@ -1722,7 +1840,7 @@ def _signal_channel_scan_once():
     timeframe = _signal_channel_timeframe()
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
-        for tag, side_fa, level_value, candle_ts, pattern, forming, regime in _signal_channel_touch_scan_symbol(symbol, timeframe):
+        for tag, side_fa, level_value, candle_ts, pattern, forming, regime, ind_row in _signal_channel_touch_scan_symbol(symbol, timeframe):
             key = (symbol, timeframe, tag, side_fa, pattern, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
@@ -1740,6 +1858,8 @@ def _signal_channel_scan_once():
                 lines.append(f"🧭 رژیم نماد: {regime_label}")
             if pattern == 'touch':
                 lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
+            implied_side = _signal_channel_implied_side(pattern, side_fa)
+            lines.extend(_signal_channel_indicator_summary(ind_row, implied_side))
             text = "\n".join(lines)
             markup = {'inline_keyboard': [
                 [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)}],
@@ -4336,6 +4456,80 @@ def market_report(chat_id):
     )
 
 
+# --- داشبورد بازار روی همه‌ی تایم‌فریم‌ها (دکمه‌ی «وضعیت بازار») -------------------------
+# ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به CoinEx/KuCoin پاس داده می‌شود
+# (چون در TIMEFRAME_MAP نیستند، get_klines/get_klines_async آن‌ها را دست‌نخورده رد می‌کنند؛
+# اگر CoinEx این پریودها را پشتیبانی نکند، همان fallback موجود به KuCoin کار را انجام می‌دهد).
+MARKET_DASHBOARD_TIMEFRAMES = [
+    ('1month', 'ماهانه'),
+    ('1week', 'هفتگی'),
+    ('1day', 'روزانه'),
+    ('4hour', '۴ ساعته'),
+    ('1hour', '۱ ساعته'),
+    ('15min', '۱۵ دقیقه'),
+    ('5min', '۵ دقیقه'),
+]
+
+
+async def _market_dashboard_scores_async(timeframes, symbols):
+    global ASYNC_SEMAPHORE
+    if ASYNC_SEMAPHORE is None:
+        ASYNC_SEMAPHORE = asyncio.Semaphore(MAX_ASYNC_REQUESTS)
+    scores = {tf: [] for tf in timeframes}
+    timeout = aiohttp.ClientTimeout(total=12)
+    conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
+        async def one(tf, sym):
+            score = await _market_snapshot_async(http, sym, tf)
+            return tf, score
+        tasks = [one(tf, sym) for tf in timeframes for sym in symbols]
+        for tf, score in await asyncio.gather(*tasks):
+            if score is not None:
+                scores[tf].append(score)
+    return scores
+
+
+def _market_dashboard_line(tf_label, scores):
+    total = len(scores)
+    if total == 0:
+        return f"⏱ *{tf_label}*: داده کافی دریافت نشد."
+    bullish = sum(1 for x in scores if x > 0)
+    bearish = sum(1 for x in scores if x < 0)
+    ranged = total - bullish - bearish
+    if bullish > bearish and bullish >= total * 0.5:
+        overall = '📈 صعودی'
+    elif bearish > bullish and bearish >= total * 0.5:
+        overall = '📉 نزولی'
+    else:
+        overall = '➡️ رنج'
+    return f"⏱ *{tf_label}*: {overall} ({bullish} صعودی، {bearish} نزولی، {ranged} رنج از {total})"
+
+
+def market_dashboard_all_timeframes(chat_id=None):
+    """داشبورد بازار روی تمام تایم‌فریم‌ها (ماهانه تا ۵ دقیقه) هم‌زمان - فقط برای دکمه‌ی
+    «📊 وضعیت بازار»؛ نسخه‌ی تک‌تایم‌فریمی قدیمی (market_report) دست‌نخورده باقی مانده و
+    جای دیگری هنوز از آن استفاده می‌کند (مثل گزارش‌های داخلی تک‌تایم‌فریمی، اگر باشند)."""
+    symbols = MARKET_REPORT_SYMBOLS
+    timeframes = [tf for tf, _ in MARKET_DASHBOARD_TIMEFRAMES]
+
+    async def _run():
+        return await _market_dashboard_scores_async(timeframes, symbols)
+
+    try:
+        scores_by_tf = asyncio.run(_run())
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            scores_by_tf = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+
+    lines = ['🌐 *داشبورد بازار*', f'📊 از بین {len(symbols)} ارز شاخص، در هر تایم‌فریم:', '']
+    for tf, label in MARKET_DASHBOARD_TIMEFRAMES:
+        lines.append(_market_dashboard_line(label, scores_by_tf.get(tf, [])))
+    return "\n".join(lines)
+
+
 def runtime_audit(chat_id):
     s=get_session(chat_id)
     return (
@@ -4700,7 +4894,8 @@ def process_command(cmd,chat_id,message_id=None):
             s['strategy_config']['enabled_setup_tags'] = s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys())
             save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
-        send_message(chat_id, market_report(chat_id)); return
+        send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...')
+        send_message(chat_id, market_dashboard_all_timeframes(chat_id)); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)

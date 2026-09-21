@@ -358,6 +358,12 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / (avg_loss + 1e-12)
     df["rsi"] = 100 - (100 / (1 + rs))
 
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema12 - ema26
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+
     df["channel_high"] = df["high"].rolling(20, min_periods=20).max().shift(1)
     df["channel_low"] = df["low"].rolling(20, min_periods=20).min().shift(1)
     df["volume_ma20"] = df["volume"].rolling(20, min_periods=20).mean()
