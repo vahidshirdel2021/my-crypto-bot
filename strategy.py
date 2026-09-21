@@ -1702,6 +1702,106 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     return plan, plan["reason"]
 
 
+# --- ورود سریع از دکمه‌ی کانال: جهت را کاربر می‌دهد، SL/TP را ربات می‌سازد -------------
+QUICK_TRADE_MIN_SL_ATR = 1.0   # کف فاصله‌ی استاپ (ATR) تا استاپِ خیلی نزدیک به سوینگ زود شکار نشود
+QUICK_TRADE_TP_BUFFER_ATR = 0.10  # هدف کمی قبل از سطح مقابل بسته می‌شود، نه دقیقاً روی آن
+
+
+def _quick_opposing_levels(df, entry, is_long, grid_levels=None):
+    """سطوح مقابلِ مسیر معامله: PDH/PDL و سقف/کف ۱س/۴س/هفته/ماه قبل + سطوح شبکه‌ی لگاریتمی."""
+    prices = []
+    try:
+        d, pdh, pdl = _compute_prev_day_levels(df)
+        if d is not None:
+            for v in (pdh, pdl):
+                if v is not None:
+                    prices.append(float(v))
+            prices.extend(float(v) for v in _compute_prev_htf_levels(d, len(d) - 2).values())
+    except Exception:
+        pass
+    for lv in grid_levels or []:
+        try:
+            prices.append(float(lv["price"]))
+        except Exception:
+            continue
+    return [p for p in prices if np.isfinite(p) and ((p > entry) if is_long else (p < entry))]
+
+
+def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, live_price=None):
+    """
+    طرح معامله برای ورود فوری با قیمت بازار وقتی فقط «جهت» را کاربر مشخص کرده.
+    ورودی df باید قبلاً با calculate_indicators پردازش شده باشد. هیچ فیلتر امتیاز/کیفیتی
+    اعمال نمی‌شود (تصمیم ورود با کاربر است)؛ فقط SL/TP منطقی ساخته می‌شود:
+
+    - SL: زیر/بالای آخرین سوینگ تأییدشده (compute_swing_stop)، وگرنه sl_multiplier × ATR.
+      فاصله‌ی نهایی بین [max(min_sl_percent، QUICK_TRADE_MIN_SL_ATR × ATR) ، max_sl_atr × ATR] نگه داشته می‌شود.
+    - TP: R ثابت (quick_trade_rr، پیش‌فرض همان sweep_risk_reward)؛ اگر نزدیک‌ترین سطح مقابل
+      (PDH/PDL/سطوح HTF/شبکه‌ی لگاریتمی) قبل از آن باشد و حداقل min_rr را بدهد، هدف کمی قبل از آن سطح می‌آید.
+    خروجی: (plan, reason) یا (None, دلیل خطا).
+    """
+    if df is None or len(df) < 60 or signal not in ("BUY", "SELL"):
+        return None, "داده کافی برای طراحی معامله وجود ندارد"
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    is_long = signal == "BUY"
+    c = df.iloc[-2]
+    atr = _safe_float(c.get("atr"), 0)
+    try:
+        entry = float(live_price) if live_price else float(c["close"])
+    except Exception:
+        return None, "قیمت ورود نامعتبر است"
+    if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
+        return None, "ATR یا قیمت ورود نامعتبر است"
+
+    min_rr = float(cfg.get("min_rr", 1.35))
+    target_rr = max(min_rr, float(cfg.get("quick_trade_rr", cfg.get("sweep_risk_reward", 1.8))))
+    max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
+    min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
+    base_mult = float(cfg.get("sl_multiplier", 1.5))
+
+    swing_sl, swing_level = compute_swing_stop(
+        df, is_long, int(cfg.get("swing_lookback", 12)),
+        float(cfg.get("swing_buffer_atr", 0.40)), int(cfg.get("swing_confirm_candles", 2)),
+    )
+    swing_ok = swing_sl is not None and ((swing_sl < entry) if is_long else (swing_sl > entry))
+    dist = abs(entry - swing_sl) if swing_ok else atr * base_mult
+    sl_source = "سوینگ" if swing_ok else "ATR"
+
+    min_dist = max(entry * min_sl_pct, atr * QUICK_TRADE_MIN_SL_ATR)
+    max_dist = atr * max_sl_atr
+    if dist < min_dist:
+        dist, sl_source = min_dist, sl_source + " (کف فاصله)"
+    elif dist > max_dist:
+        dist, sl_source = max_dist, sl_source + " (سقف فاصله)"
+    if dist <= 0 or not np.isfinite(dist):
+        return None, "فاصله حد ضرر معتبر نیست"
+
+    direction = 1 if is_long else -1
+    sl = entry - direction * dist
+    tp = entry + direction * dist * target_rr
+    tp_source = f"{target_rr:.2f}R"
+
+    candidates = sorted(abs(p - entry) for p in _quick_opposing_levels(df, entry, is_long, grid_levels))
+    buf = atr * QUICK_TRADE_TP_BUFFER_ATR
+    for gap in candidates:
+        capped_gap = gap - buf
+        if capped_gap / dist < min_rr:
+            continue          # این سطح خیلی نزدیک است؛ سراغ سطح بعدی
+        if capped_gap < abs(tp - entry):
+            tp = entry + direction * capped_gap
+            tp_source = "قبل از سطح مقابل"
+        break                 # نزدیک‌ترین سطحِ معتبر تصمیم می‌گیرد
+
+    rr = abs(tp - entry) / dist
+    plan = {
+        "entry": entry, "sl": float(sl), "tp": float(tp), "rr": float(rr),
+        "risk_atr": float(dist / atr), "atr": atr,
+        "sl_source": sl_source, "tp_source": tp_source,
+        "swing_level": float(swing_level) if swing_level is not None and np.isfinite(swing_level) else None,
+        "reason": f"ورود سریع کانال | R:R {rr:.2f}R | SL: {sl_source} | TP: {tp_source}",
+    }
+    return plan, plan["reason"]
+
+
 def evaluate_trend_weakness(df, side, strategy_config=None):
     """
     بررسی می‌کند که آیا روند معامله باز، در حال از دست دادن قدرت است یا نه.
