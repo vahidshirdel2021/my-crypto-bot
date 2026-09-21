@@ -156,17 +156,72 @@ def _lock_env(m, net_of_fees=False, move_ok=True):
     return moves
 
 
-def test_profit_lock_long_and_short():
+def test_profit_lock_first_step_long_and_short():
     m = _Restore()
     try:
         _lock_env(m)
         p = _pos('BUY', 98.0)
         assert bot._apply_profit_lock(1, {}, p, 101.9) is False and p['sl'] == 98.0  # هنوز ۵ دلار نشده
         assert bot._apply_profit_lock(1, {}, p, 102.1) is True
-        assert abs(p['sl'] - 102.0) < 1e-6 and p['profit_lock_active'] and p['sl_moved_ts'] > 0
-        assert bot._apply_profit_lock(1, {}, p, 110.0) is False and abs(p['sl'] - 102.0) < 1e-6  # فقط یک‌بار
+        assert abs(p['sl'] - 102.0) < 1e-6 and p['profit_lock_usdt'] == 5.0 and p['sl_moved_ts'] > 0
         q = _pos('SELL', 102.0)
         assert bot._apply_profit_lock(1, {}, q, 97.9) is True and abs(q['sl'] - 98.0) < 1e-6
+    finally:
+        m.undo()
+
+
+def test_profit_lock_ladder_steps_up_5_10_15():
+    m = _Restore()
+    try:
+        moves = _lock_env(m, move_ok=True)
+        p = _pos('BUY', 98.0, real=True)
+        # مارجین ۵۰ × لوریج ۵ = ۲۵۰ => هر ۵ دلار = ۲٪ حرکت قیمت
+        assert bot._apply_profit_lock(1, {}, p, 102.1) and abs(p['sl'] - 102.0) < 1e-6 and p['profit_lock_usdt'] == 5.0
+        assert bot._apply_profit_lock(1, {}, p, 103.9) is False           # هنوز به ۱۰ نرسیده
+        assert bot._apply_profit_lock(1, {}, p, 104.1) and abs(p['sl'] - 104.0) < 1e-6 and p['profit_lock_usdt'] == 10.0
+        assert bot._apply_profit_lock(1, {}, p, 104.9) is False           # هنوز همان پله‌ی ۱۰
+        assert bot._apply_profit_lock(1, {}, p, 106.2) and abs(p['sl'] - 106.0) < 1e-6 and p['profit_lock_usdt'] == 15.0
+        assert len(moves) == 3                                            # هر پله فقط یک‌بار روی صرافی
+        # پرش مستقیم چند پله‌ای: بالاترین پله‌ی رسیده‌شده قفل می‌شود (۲۶ دلار => پله‌ی ۲۵)
+        assert bot._apply_profit_lock(1, {}, p, 110.5) and abs(p['sl'] - 110.0) < 1e-6 and p['profit_lock_usdt'] == 25.0
+    finally:
+        m.undo()
+
+
+def test_profit_lock_ladder_short():
+    m = _Restore()
+    try:
+        _lock_env(m)
+        q = _pos('SELL', 102.0)
+        assert bot._apply_profit_lock(1, {}, q, 97.9) and abs(q['sl'] - 98.0) < 1e-6
+        assert bot._apply_profit_lock(1, {}, q, 95.9) and abs(q['sl'] - 96.0) < 1e-6 and q['profit_lock_usdt'] == 10.0
+    finally:
+        m.undo()
+
+
+def test_profit_lock_retrace_keeps_last_level():
+    """سناریوی واقعی: سود تا ۱۱ دلار می‌رود و برمی‌گردد؛ پله‌ی ۱۰ باید قفل مانده باشد."""
+    m = _Restore()
+    try:
+        _lock_env(m)
+        p = _pos('BUY', 98.0)
+        for price in (102.1, 104.4):                 # ۵ و بعد ~۱۱ دلار
+            bot._apply_profit_lock(1, {}, p, price)
+        assert p['profit_lock_usdt'] == 10.0 and abs(p['sl'] - 104.0) < 1e-6
+        bot._apply_profit_lock(1, {}, p, 102.4)      # برگشت به ~۶ دلار: SL نباید عقب برود
+        assert abs(p['sl'] - 104.0) < 1e-6
+    finally:
+        m.undo()
+
+
+def test_profit_lock_backward_compatible_with_single_step_positions():
+    m = _Restore()
+    try:
+        _lock_env(m)
+        p = _pos('BUY', 102.0)
+        p['profit_lock_active'] = True               # پوزیشن قفل‌شده با نسخه‌ی قبلی (بدون profit_lock_usdt)
+        assert bot._apply_profit_lock(1, {}, p, 102.5) is False   # پله‌ی ۵ دوباره اعمال نمی‌شود
+        assert bot._apply_profit_lock(1, {}, p, 104.1) is True and p['profit_lock_usdt'] == 10.0
     finally:
         m.undo()
 
@@ -177,7 +232,7 @@ def test_profit_lock_never_loosens_existing_stop():
         _lock_env(m)
         p = _pos('BUY', 102.4)  # مکانیزم دیگری قبلاً سود بیشتری قفل کرده
         assert bot._apply_profit_lock(1, {}, p, 102.5) is False
-        assert p['sl'] == 102.4 and p['profit_lock_active'] is True
+        assert p['sl'] == 102.4 and p['profit_lock_active'] is True and p['profit_lock_usdt'] == 5.0
     finally:
         m.undo()
 
