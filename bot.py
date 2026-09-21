@@ -32,7 +32,7 @@ from strategy import (
     strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
-    _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
+    _compute_prev_htf_levels, LEVEL_SETUP_DEFS,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
     is_reversal_family_reason,
 )
@@ -150,15 +150,12 @@ PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PC
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
 # --- کانال اعلام برخورد سطوح (کاملاً مستقل از منطق معاملاتی ربات) -------------
-# هیچ فیلتر/تاییدیه/کیفیتی اعمال نمی‌شود؛ صرفاً هر بار که کندلِ در حال تشکیل (و برای
-# اطمینان، آخرین کندلِ بسته‌شده) یک نماد از واچ‌لیست وارد بازه‌ی یکی از سطوح فعال
-# (ماهانه/هفتگی/روزانه/۴ساعته/۱ساعته) بشود، فقط یک‌بار به‌ازای هر کندل برای هر سطح، یک
-# پیام ساده به کانال ارسال می‌شود. تایم‌فریم بررسی همان تایم‌فریم فعال کاربر ادمینِ
-# SIGNAL_CHANNEL_TF_CHAT_ID است. تصمیم ورود/خروج معاملات ربات به هیچ‌وجه به این بخش
-# وابسته نیست و برعکس.
-SIGNAL_CHANNEL_TF_CHAT_ID = int(os.environ.get('SIGNAL_CHANNEL_TF_CHAT_ID', '1878257830'))
+# هیچ فیلتر/تاییدیه/کیفیتی اعمال نمی‌شود؛ صرفاً هر بار که آخرین کندلِ بسته‌شده‌ی
+# یک نماد از واچ‌لیست، وارد بازه‌ی یکی از سطوح فعال (ماهانه/هفتگی/روزانه/۴ساعته/
+# ۱ساعته) بشود، یک پیام ساده به کانال ارسال می‌شود. تصمیم ورود/خروج معاملات
+# ربات به هیچ‌وجه به این بخش وابسته نیست و برعکس.
 SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
-SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()  # فقط fallback اگر تایم‌فریم ادمین در دسترس نباشد
+SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
 _SIGNAL_CHANNEL_SETTINGS_FILE = os.environ.get('SIGNAL_CHANNEL_SETTINGS_FILE', 'signal_channel_settings.json')
 _ALL_SIGNAL_CHANNEL_TAGS = ['Monthly', 'Weekly', 'Daily', '4h', '1h']
@@ -185,7 +182,7 @@ def _save_signal_channel_level_tags(tags):
 
 
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
-_SIGNAL_CHANNEL_SEEN = {}  # {(symbol, timeframe, tag, hi/lo, candle_ts): True} - یک پیام به‌ازای هر کندل/سطح؛ به ترتیب درج نگه‌داری می‌شود
+_SIGNAL_CHANNEL_SEEN = set()  # {(symbol, tag, hi/lo, candle_ts)} - جلوگیری از تکرار پیام برای همان کندل
 
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
 try:
@@ -654,10 +651,9 @@ def default_session():
         'max_same_direction_positions': 2,
         'same_direction_entry_cooldown_seconds': 120,
         'max_total_open_risk_pct': MAX_TOTAL_OPEN_RISK_PCT,
-        # سوییچ «هم‌جهتی با بازار» - فقط یک منطق دارد (گیت جهت بازار، refresh_market_gate):
-        # وقتی True باشد، ۱۰ نماد شاخص روی تایم‌فریم فعال بررسی می‌شوند؛ اگر ≥۷ نماد صعودی
-        # باشند ورود فروش، اگر ≥۷ نماد نزولی باشند ورود خرید مسدود می‌شود و اگر هیچ‌کدام
-        # (رنج) باشد اصلاً ورودی انجام نمی‌شود. پیش‌فرض False (خاموش).
+        # سوییچ مرکزی: وقتی False باشد، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه
+        # محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند.
+        # پیش‌فرض True (روشن).
         'market_alignment_filters_enabled': False,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
@@ -1528,71 +1524,39 @@ def send_channel_message(channel_id, text, reply_markup=None):
         return False
 
 
-def _signal_channel_timeframe():
-    """تایم‌فریم فعال کاربر ادمینِ SIGNAL_CHANNEL_TF_CHAT_ID؛ اگر session او وجود نداشت
-    یا تایم‌فریمش نامعتبر بود، به SIGNAL_CHANNEL_TIMEFRAME برمی‌گردد. (session جدید نمی‌سازد.)"""
-    s = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
-    tf = (s or {}).get('timeframe')
-    return tf if tf in TIMEFRAME_MAP else SIGNAL_CHANNEL_TIMEFRAME
-
-
-def _signal_channel_symbol_regime(df):
-    """رژیم خودِ نماد روی همان تایم‌فریم: 'BULLISH' / 'BEARISH' / 'RANGE' (یا None اگر محاسبه نشد).
-    دقیقاً همان معیار «داشبورد بازار» و گیت جهت بازار، روی آخرین کندل بسته‌شده (نه کندل در
-    حال تشکیل - تا رژیم وسط کندل مدام تغییر نکند)."""
-    try:
-        c = calculate_indicators(df).iloc[-2]
-        close, ema20, ema50 = float(c.close), float(c.ema20), float(c.ema50)
-        if close > ema50 and ema20 >= ema50:
-            return 'BULLISH'
-        if close < ema50 and ema20 <= ema50:
-            return 'BEARISH'
-        return 'RANGE'
-    except Exception:
-        return None
-
-
 def _signal_channel_touch_scan_symbol(symbol, timeframe):
-    """می‌گوید کندلِ در حال تشکیلِ این نماد (و برای اطمینان آخرین کندلِ بسته‌شده - تا اگر
-    برخوردی درست پیش از بسته‌شدنِ کندل و بین دو اسکن رخ داد از دست نرود) وارد بازه‌ی کدام
-    سطوحِ فعال شده یا نه. سطوح هر کندل، مخصوص همان کندل محاسبه می‌شود. هیچ تشخیص
-    جهت/کیفیت/ریکلیمی در کار نیست و مستقل از strategy.py استفاده می‌شود؛ فقط از همان
-    توابع محاسبه‌ی خام سطوح بهره می‌برد.
-    خروجی: [(tag, 'سقف'/'کف', level, candle_ts, forming, symbol_regime)]"""
+    """صرفاً می‌گوید آخرین کندلِ بسته‌شده‌ی این نماد وارد بازه‌ی کدام سطوحِ فعال
+    شده یا نه - هیچ تشخیص جهت/کیفیت/ریکلیمی در کار نیست. مستقل از strategy.py
+    استفاده می‌شود؛ فقط از همان توابع محاسبه‌ی خام سطوح (که ربات هم برای سطوحش
+    استفاده می‌کند) بهره می‌برد."""
     try:
         df = get_klines(symbol, timeframe, 320)
         if df is None or df.empty or len(df) < 110:
             return []
-        dated_df, _, _ = _compute_prev_day_levels(df)
+        dated_df, pdh, pdl = _compute_prev_day_levels(df)
         if dated_df is None:
             return []
-        last_idx = len(dated_df) - 1          # کندل در حال تشکیل
+        idx = len(dated_df) - 2
+        last = dated_df.iloc[idx]
+        candle_ts = last.get('timestamp')
+        levels = {}
+        if pdh is not None and pdl is not None:
+            levels['Daily'] = (float(pdh), float(pdl))
+        htf = _compute_prev_htf_levels(dated_df, idx)
+        for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
+            if tag == 'Daily':
+                continue
+            if hi_key in htf and lo_key in htf:
+                levels[tag] = (htf[hi_key], htf[lo_key])
+        hi_candle, lo_candle = float(last['high']), float(last['low'])
         hits = []
-        for idx in (last_idx, last_idx - 1):  # در حال تشکیل + آخرین بسته‌شده
-            candle = dated_df.iloc[idx]
-            candle_ts = candle.get('timestamp')
-            forming = (idx == last_idx)
-            levels = {}
-            pdh, pdl = _pdh_pdl_at(dated_df, idx)
-            if pdh is not None and pdl is not None:
-                levels['Daily'] = (float(pdh), float(pdl))
-            htf = _compute_prev_htf_levels(dated_df, idx)
-            for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
-                if tag == 'Daily':
-                    continue
-                if hi_key in htf and lo_key in htf:
-                    levels[tag] = (htf[hi_key], htf[lo_key])
-            hi_candle, lo_candle = float(candle['high']), float(candle['low'])
-            for tag, (hi, lo) in levels.items():
-                if tag not in _SIGNAL_CHANNEL_LEVEL_TAGS:
-                    continue
-                if lo_candle <= hi <= hi_candle:
-                    hits.append((tag, 'سقف', hi, candle_ts, forming))
-                if lo_candle <= lo <= hi_candle:
-                    hits.append((tag, 'کف', lo, candle_ts, forming))
-        if hits:
-            regime = _signal_channel_symbol_regime(df)
-            hits = [h + (regime,) for h in hits]
+        for tag, (hi, lo) in levels.items():
+            if tag not in _SIGNAL_CHANNEL_LEVEL_TAGS:
+                continue
+            if lo_candle <= hi <= hi_candle:
+                hits.append((tag, 'سقف', hi, candle_ts))
+            if lo_candle <= lo <= hi_candle:
+                hits.append((tag, 'کف', lo, candle_ts))
         return hits
     except Exception:
         logger.exception('signal channel touch scan failed symbol=%s', symbol)
@@ -1602,36 +1566,28 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
 def _signal_channel_scan_once():
     if not SIGNAL_CHANNEL_ID:
         return
-    timeframe = _signal_channel_timeframe()
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
-        for tag, side_fa, level_value, candle_ts, forming, regime in _signal_channel_touch_scan_symbol(symbol, timeframe):
-            key = (symbol, timeframe, tag, side_fa, candle_ts)
+        for tag, side_fa, level_value, candle_ts in _signal_channel_touch_scan_symbol(symbol, SIGNAL_CHANNEL_TIMEFRAME):
+            key = (symbol, tag, side_fa, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
-            _SIGNAL_CHANNEL_SEEN[key] = True
-            defs = LEVEL_SETUP_DEFS.get(tag)
-            level_label = (defs[2] if side_fa == 'سقف' else defs[3]) if defs else f'{side_fa} {tag}'
-            regime_label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime)
-            lines = [
-                f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
-                "",
-                f"🎯 برخورد با {level_label}: `{fmt(level_value)}`",
-            ]
-            if regime_label:
-                lines.append(f"🧭 رژیم نماد: {regime_label}")
-            lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
-            text = "\n".join(lines)
+            _SIGNAL_CHANNEL_SEEN.add(key)
+            text = (
+                f"📡 *برخورد با سطح*\n\n"
+                f"نماد: `{symbol}`\n"
+                f"تایم‌فریم: `{SIGNAL_CHANNEL_TIMEFRAME}`\n"
+                f"سطح: `{tag}` ({side_fa} = `{fmt(level_value)}`)\n\n"
+                f"_صرفاً اعلام برخورد؛ بدون تایید جهت یا کیفیت - بررسی با شماست._"
+            )
             markup = {'inline_keyboard': [[
-                {'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)},
+                {'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, SIGNAL_CHANNEL_TIMEFRAME)},
                 {'text': '🖐 معامله دستی', 'callback_data': f'/quick_manual_trade_{symbol}'},
             ]]}
             send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
-    # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
-    # ارسال دوباره‌ی برخوردهای همین کندل می‌شد)
+    # جلوگیری از رشد بی‌پایان حافظه - فقط چند هزار مورد اخیر نگه داشته می‌شود
     if len(_SIGNAL_CHANNEL_SEEN) > 5000:
-        for k in list(_SIGNAL_CHANNEL_SEEN.keys())[:2000]:
-            _SIGNAL_CHANNEL_SEEN.pop(k, None)
+        _SIGNAL_CHANNEL_SEEN.clear()
 
 
 def _signal_channel_loop():
@@ -1664,7 +1620,7 @@ def signal_channel_settings_report():
     return (
         f"📡 *تنظیمات کانال اعلام برخورد سطوح*\n\n"
         f"وضعیت: {status}\n"
-        f"تایم‌فریم بررسی: `{_signal_channel_timeframe()}` (همان تایم‌فریم فعال ادمین)\n"
+        f"تایم‌فریم بررسی: `{SIGNAL_CHANNEL_TIMEFRAME}`\n"
         f"سطوح فعال برای ارسال: {tags_txt}\n\n"
         f"هرکدوم از سطوح زیر رو بزنید تا روشن/خاموش بشه - فقط برخورد با سطوح روشن به کانال ارسال می‌شه."
     )
@@ -1958,7 +1914,7 @@ def _regime_alignment_snapshot(symbol, timeframe):
     """
     عکس‌فوری عددی سه لایه‌ای که در بحث «هم‌جهتی چندلایه» مطرح شد، در لحظه‌ی ورود:
     ۱) قدرت روند بازار کلی (میانگین ADX لیدرها، از کش refresh_market_regime)
-    ۲) درصد اجماع صعودی/نزولی در تایم‌فریم فعال (از کش refresh_market_gate)
+    ۲) درصد اجماع صعودی/نزولی در تایم‌فریم فعال (از کش refresh_timeframe_regime)
     ۳) ADX خود نماد در همان تایم‌فریم (محاسبه‌ی سبک، از کش get_klines موجود)
 
     فقط برای ثبت در رکورد معامله است؛ هیچ تصمیم ورود/خروجی را عوض نمی‌کند.
@@ -2251,15 +2207,19 @@ def scan_watchlist_for_timeframe(timeframe, regime=None):
     return list(dict.fromkeys(list(long_list) + list(short_list)))
 
 
-MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'ttl': 90, 'avg_adx': 0.0}
+MARKET_REGIME_CACHE = {'ts': 0.0, 'regime': 'NEUTRAL', 'detail': '', 'extreme': None, 'ttl': 90, 'avg_adx': 0.0}
 MARKET_REGIME_MIN_ADX = float(os.environ.get('MARKET_REGIME_MIN_ADX', '18'))
+# آستانه «روند به‌شدت یک‌طرفه»: بسیار سخت‌گیرانه‌تر از MARKET_REGIME_MIN_ADX (که فقط برای
+# انتخاب واچ‌لیست است). این مقدار فقط وقتی هر دو لیدر (BTC/ETH) هم‌جهت و با ADX بالا باشند
+# فعال می‌شود و باعث بلاک‌شدن معاملات خلاف‌جهت (fade/sweep) می‌شود.
+MARKET_REGIME_EXTREME_ADX = float(os.environ.get('MARKET_REGIME_EXTREME_ADX', '30'))
 MARKET_REGIME_TIMEFRAME = os.environ.get('MARKET_REGIME_TIMEFRAME', '4hour')
 
 
 async def refresh_market_regime(http):
     now = time.time()
     if now - MARKET_REGIME_CACHE['ts'] < MARKET_REGIME_CACHE['ttl']:
-        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail']
+        return MARKET_REGIME_CACHE['regime'], MARKET_REGIME_CACHE['detail'], MARKET_REGIME_CACHE['extreme']
     tf = MARKET_REGIME_TIMEFRAME if MARKET_REGIME_TIMEFRAME in TIMEFRAME_MAP else '4hour'
     states = {}
     for leader in LEADER_SYMBOLS:
@@ -2267,8 +2227,8 @@ async def refresh_market_regime(http):
             d = await get_klines_async(http, leader, tf, 120)
             if d is None or d.empty or len(d) < 60:
                 detail = f'داده کافی برای {leader} در دسترس نیست'
-                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
-                return 'NEUTRAL', detail
+                MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+                return 'NEUTRAL', detail, None
             x = calculate_indicators(d).iloc[-2]
             adx = float(x.get('adx') or 0)
             bullish = bool(x['close'] > x['ema20'] > x['ema50'] and x['plus_di'] > x['minus_di'] and adx >= MARKET_REGIME_MIN_ADX)
@@ -2276,8 +2236,8 @@ async def refresh_market_regime(http):
             states[leader] = ('BULLISH' if bullish else 'BEARISH' if bearish else 'NEUTRAL', adx)
         except Exception as exc:
             detail = f'خطا در دریافت داده {leader}: {exc}'
-            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail)
-            return 'NEUTRAL', detail
+            MARKET_REGIME_CACHE.update(ts=now, regime='NEUTRAL', detail=detail, extreme=None)
+            return 'NEUTRAL', detail, None
     detail = ' | '.join(f'{leader}={states[leader][0]} (ADX={states[leader][1]:.1f})' for leader in LEADER_SYMBOLS)
     unique_dirs = {v[0] for v in states.values()}
     avg_adx = sum(v[1] for v in states.values())/len(states) if states else 0.0
@@ -2287,8 +2247,13 @@ async def refresh_market_regime(http):
         regime = 'BEARISH'
     else:
         regime = 'NEUTRAL'
-    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, avg_adx=avg_adx)
-    return regime, detail
+    # حالت «شدید»: همه‌ی لیدرها هم‌جهت و با ADX بالای آستانه‌ی سخت‌گیرانه - فقط همین حالت
+    # باعث بلاک شدن معاملات خلاف‌جهت می‌شود، نه regime عادی بالا (که صرفاً برای واچ‌لیست است)
+    extreme_bull = all(v[0] == 'BULLISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme_bear = all(v[0] == 'BEARISH' and v[1] >= MARKET_REGIME_EXTREME_ADX for v in states.values())
+    extreme = 'BULLISH' if extreme_bull else ('BEARISH' if extreme_bear else None)
+    MARKET_REGIME_CACHE.update(ts=now, regime=regime, detail=detail, extreme=extreme, avg_adx=avg_adx)
+    return regime, detail, extreme
 
 
 # --- شبکه سطوح لگاریتمی (بر اساس اسکریپت Pine کاربر) --------------------------------
@@ -2314,6 +2279,66 @@ async def get_log_grid_levels(http, symbol):
     levels = compute_log_grid_levels(d, LOG_GRID_BASE_STEPS) if d is not None and not d.empty else []
     LOG_GRID_CACHE[symbol] = {'ts': now, 'levels': levels}
     return levels
+
+
+async def leader_correlation_guard(http, chat_id, symbol, primary_df, timeframe, side='BUY'):
+    if symbol.upper() in LEADER_SYMBOLS:
+        return True, 'لیدر بازار است'
+    try:
+        if primary_df is None or primary_df.empty:
+            return False, 'داده کافی برای سنجش همبستگی موجود نیست'
+        leader_frames = {}
+        for leader in LEADER_SYMBOLS:
+            d = await get_klines_async(http, leader, timeframe if timeframe in TIMEFRAME_MAP else '5min', 100)
+            if d is None or d.empty or len(d) < 65:
+                return False, f'داده کافی برای {leader} جهت محافظت بازار دریافت نشد'
+            leader_frames[leader] = calculate_indicators(d)
+
+        alt = primary_df.copy()
+        if len(alt) < 65:
+            return False, 'داده کافی برای محاسبه همبستگی ارز هدف موجود نیست'
+        alt_ret = pd.to_numeric(alt['close'], errors='coerce').pct_change().dropna().tail(60)
+
+        leader_states = []
+        correlations = []
+        for leader, frame in leader_frames.items():
+            c = frame.iloc[-2]
+            ret = pd.to_numeric(frame['close'], errors='coerce').pct_change().dropna().tail(60)
+            corr = float(alt_ret.corr(ret)) if len(alt_ret) >= 20 and len(ret) >= 20 else 0.0
+            if not math.isfinite(corr):
+                corr = 0.0
+            correlations.append((leader, corr))
+            change_1 = (float(c.close) / float(frame.iloc[-3].close) - 1.0) * 100 if float(frame.iloc[-3].close) else 0.0
+            change_3 = (float(c.close) / float(frame.iloc[-5].close) - 1.0) * 100 if float(frame.iloc[-5].close) else 0.0
+            bearish = bool(float(c.close) < float(c.ema20) < float(c.ema50) and float(c.adx) >= 20 and change_3 <= -0.8)
+            bullish = bool(float(c.close) > float(c.ema20) > float(c.ema50) and float(c.adx) >= 20 and change_3 >= 0.8)
+            crash = bool(change_1 <= -1.0 or change_3 <= -2.0)
+            pump = bool(change_1 >= 1.0 or change_3 >= 2.0)
+            leader_states.append((leader, bearish, crash, change_1, change_3, bullish, pump))
+
+        both_bearish = all(x[1] for x in leader_states)
+        both_bullish = all(x[5] for x in leader_states)
+        any_crash = any(x[2] for x in leader_states)
+        any_pump = any(x[6] for x in leader_states)
+        max_corr = max(abs(x[1]) for x in correlations) if correlations else 0.0
+        avg_positive_corr = sum(max(0.0, x[1]) for x in correlations) / len(correlations) if correlations else 0.0
+
+        is_long = side_long(side)
+        detail = ', '.join(f'{k}={v:+.2f}' for k, v in correlations)
+        if is_long:
+            if both_bearish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند نزولی تأییدشده هستند | همبستگی: {detail}'
+            if any_crash and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ سقوط شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+        else:
+            if both_bullish and (max_corr >= 0.40 or avg_positive_corr >= 0.55):
+                return False, f'محافظ بازار فعال شد؛ BTC و ETH در روند صعودی تأییدشده هستند | همبستگی: {detail}'
+            if any_pump and max_corr >= 0.65:
+                return False, f'محافظ بازار فعال شد؛ جهش شدید یکی از لیدرها و همبستگی بالا | همبستگی: {detail}'
+
+        return True, f'محافظ بازار عبور کرد | همبستگی: {detail}'
+    except Exception as exc:
+        return False, f'محافظ بازار به دلیل خطا متوقف شد: {exc}'
 
 
 def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None):
@@ -3015,7 +3040,6 @@ def _entry_diag_label(reason):
     # Keep the explanation at the level a trader actually needs: what is missing,
     # not which indicator number failed.
     rules = [
-        (r'گیت جهت بازار', 'گیت جهت بازار ورود در این جهت را مجاز نمی‌داند'),
         (r'داده کافی|داده بازار خالی|سطوح روز قبل هنوز آماده|یک روز کامل قبلی', 'هنوز داده یا سطح معتبر کافی برای تصمیم‌گیری نداریم'),
         (r'ظرفیت پوزیشن|محدودیت ریسک|ریسک به کارمزد|وضعیت ربات|توقف', 'فعلاً اجازه ورود از سمت مدیریت ریسک/ربات داده نمی‌شود'),
         (r'cooldown|دوره انتظار', 'ربات بعد از معامله قبلی در زمان انتظار است'),
@@ -3165,20 +3189,20 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
         lines.append('\n' + _entry_diag_next_step([x[0] for x in active_items]))
     return '\n'.join(lines)
 
-def _active_tf_regime_status(tf, align_on=False):
-    """وضعیت گیت جهت بازار روی تایم‌فریم فعال (فقط نمایش؛ منطق در refresh_market_gate)."""
-    if not align_on:
-        return '⚪️ خاموش (سوییچ هم‌جهتی با بازار غیرفعال است)'
-    c = TIMEFRAME_REGIME_CACHE.get(tf) or {}
-    gate = c.get('gate')
-    if not gate:
-        return '⏳ هنوز محاسبه نشده'
-    counts = f"{c.get('bull_n', 0)} صعودی / {c.get('bear_n', 0)} نزولی از {c.get('total', 0)} نماد"
-    if gate == 'BULLISH':
-        return f'🟢 صعودی ({counts}) — ورود فروش مسدود'
-    if gate == 'BEARISH':
-        return f'🔴 نزولی ({counts}) — ورود خرید مسدود'
-    return f'⚪️ رنج ({counts}) — هیچ ورودی مجاز نیست'
+def _active_tf_regime_status(tf):
+    """رژیم واقعی‌ای که همین الان روی تایم‌فریم فعال کاربر، فیلتر ورود خلاف‌جهت را
+    فعال/غیرفعال می‌کند (همان چیزی که scan_loop به get_signal_with_reason پاس می‌دهد) —
+    مجزا از «وضعیت کلی بازار» که فقط بر اساس BTC/ETH ۴ساعته است و صرفاً واچ‌لیست را
+    انتخاب می‌کند، نه فیلتر ورود را."""
+    macro_extreme = MARKET_REGIME_CACHE.get('extreme')
+    micro_cache = TIMEFRAME_REGIME_CACHE.get(tf) or {}
+    micro_extreme = micro_cache.get('extreme')
+    combined = combine_extreme_regime(macro_extreme, micro_extreme)
+    if combined == 'BULLISH':
+        return '🟢 صعودی قوی — ورود فروش مسدود'
+    if combined == 'BEARISH':
+        return '🔴 نزولی قوی — ورود خرید مسدود'
+    return '➡️ بدون فیلتر جهت‌دار (هر دو جهت مجاز)'
 
 
 def _simple_status_report(chat_id):
@@ -3189,7 +3213,7 @@ def _simple_status_report(chat_id):
     regime_label = {'BULLISH': '📈 صعودی', 'BEARISH': '📉 نزولی', 'NEUTRAL': '➡️ رنج'}.get(regime, '➡️ رنج')
     tf = s.get('timeframe', '5min')
     tf_label = TF_DISPLAY.get(tf, tf)
-    active_tf_status = _active_tf_regime_status(tf, bool(s.get('market_alignment_filters_enabled', False)))
+    active_tf_status = _active_tf_regime_status(tf)
 
     btc_price = latest_price('BTC')
     eth_price = latest_price('ETH')
@@ -3284,14 +3308,11 @@ def _entry_diag_batch_update(chat_id, results):
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
-async def scan_symbol(http,chat_id,symbol,market_gate=None):
-    """market_gate: None (سوییچ خاموش) یا خروجی refresh_market_gate: 'BULLISH' / 'BEARISH' / 'RANGE'."""
+async def scan_symbol(http,chat_id,symbol,regime=None):
     s=get_session(chat_id)
     _pipeline_start(chat_id, symbol)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
-    if market_gate == 'RANGE':
-        return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason('RANGE', s['timeframe']), 'market_gate')
     scan_generation=int(s.get('scan_generation',0))
     if time.time() < float(s['cooldowns'].get(symbol,0)):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
@@ -3338,12 +3359,12 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], None, live_price=live_entry_price)
+    # regime این‌جا یعنی «روند به‌شدت یک‌طرفه» (EXTREME_ADX) و برای همه‌ی استراتژی‌ها اعمال
+    # می‌شود تا هیچ سیگنال خلاف‌جهتی (نه فقط dynamic/sweep) وسط یک روند شدید باز نشود
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], regime, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
-        return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
     if s.get('manual_block_all_entries'):
         return _entry_diag_result(chat_id, symbol, 'manual_block', 'توقف کامل ورود به معامله دستی فعال است', 'signal', sig, diagnostics=diagnostics)
     if sig == 'BUY' and s.get('manual_block_buy_entries'):
@@ -3380,6 +3401,10 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
     full_reason = full_reason[:500]
+    if bool(s.get('market_alignment_filters_enabled', False)):
+        guard_ok, guard_reason = await leader_correlation_guard(http, chat_id, symbol, primary, primary_tf, side=sig)
+        if not guard_ok:
+            return _entry_diag_result(chat_id, symbol, 'leader_guard_blocked', guard_reason, 'leader_guard', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
@@ -3932,15 +3957,15 @@ def _market_snapshot(symbol, tf):
 
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
-# --- گیت جهت بازار (تنها منطقِ سوییچ «هم‌جهتی با بازار») ---------------------------------
-# روی تایم‌فریم فعال، ۱۰ نماد شاخص (MARKET_REPORT_SYMBOLS) با همان معیار «داشبورد بازار»
-# (close نسبت به EMA50 و EMA20>=EMA50 روی آخرین کندل بسته‌شده) امتیاز می‌گیرند:
-#   ≥ MARKET_GATE_MIN_SYMBOLS نماد صعودی  => BULLISH => ورود فروش مسدود
-#   ≥ MARKET_GATE_MIN_SYMBOLS نماد نزولی  => BEARISH => ورود خرید مسدود
-#   غیر از این (رنج / داده ناکافی)         => RANGE   => هیچ ورودی انجام نمی‌شود
-# فقط ورودهای جدید را تحت تأثیر قرار می‌دهد؛ پوزیشن‌های باز دست‌نخورده می‌مانند.
-MARKET_GATE_MIN_SYMBOLS = int(os.environ.get('MARKET_GATE_MIN_SYMBOLS', '7'))
+# --- رژیم «اجماع فوری» - همان روش و همان آستانه‌ی گزارش «وضعیت بازار»، ولی وصل به --------
+# تصمیم‌گیری معامله. برخلاف MARKET_REGIME_CACHE (که فقط BTC/ETH را روی 4 ساعته با آستانه‌ی
+# خیلی سخت‌گیرانه می‌بیند)، این یکی همان ۱۰ ارز برتر و همان تایم‌فریم معاملاتی کاربر را
+# می‌بیند - یعنی دقیقاً همان چیزی که خودِ کاربر در «وضعیت بازار» می‌بیند، و با همان قانون
+# اکثریت ساده (>=۵۰٪) که آنجا هم استفاده می‌شود. یعنی هر وقت «وضعیت بازار» صعودی/نزولی
+# اعلام شود، دقیقاً همان لحظه ورود خلاف‌جهت روی همه‌ی نمادها بلاک می‌شود؛ فقط وقتی بازار
+# رنج/نامشخص باشد (نه اکثریت صعودی نه نزولی) هر دو جهت آزاد هستند.
 TIMEFRAME_REGIME_TTL = float(os.environ.get('TIMEFRAME_REGIME_TTL_SECONDS', '150'))
+TIMEFRAME_REGIME_MIN_SYMBOLS = int(os.environ.get('TIMEFRAME_REGIME_MIN_SYMBOLS', '8'))
 TIMEFRAME_REGIME_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
@@ -3956,46 +3981,72 @@ async def _market_snapshot_async(http, symbol, tf):
         return None
 
 
-async def refresh_market_gate(http, timeframe):
-    """'BULLISH' / 'BEARISH' / 'RANGE' برای تایم‌فریم داده‌شده (کش‌شده).
-    اگر داده‌ی معتبرِ کمتر از آستانه دریافت شود نتیجه RANGE است (ورود ممنوع) و کش نمی‌شود
-    تا چرخه‌ی بعد دوباره تلاش شود."""
+async def refresh_timeframe_regime(http, timeframe):
+    """رژیم اجماع فوری را برای یک تایم‌فریم مشخص برمی‌گرداند: 'BULLISH'/'BEARISH'/None (کش‌شده).
+    دقیقاً همان فرمول market_report(): اکثریت ساده (>=۵۰٪) از همان ۱۰ ارز، نه اجماع افراطی."""
     tf = timeframe
     now = time.time()
     c = TIMEFRAME_REGIME_CACHE.get(tf)
     if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
-        return c['gate']
+        return c['extreme']
     scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
     scores = [x for x in scores if x is not None]
-    total = len(scores)
-    bull_n = sum(1 for x in scores if x > 0)
-    bear_n = sum(1 for x in scores if x < 0)
-    if bull_n >= MARKET_GATE_MIN_SYMBOLS:
-        gate = 'BULLISH'
-    elif bear_n >= MARKET_GATE_MIN_SYMBOLS:
-        gate = 'BEARISH'
-    else:
-        gate = 'RANGE'
-    entry = {
-        'ts': now, 'gate': gate, 'bull_n': bull_n, 'bear_n': bear_n, 'total': total,
-        # برای ثبت در رکورد معامله (_regime_alignment_snapshot)
-        'bull_pct': (bull_n / total * 100.0) if total else 0.0,
-        'bear_pct': (bear_n / total * 100.0) if total else 0.0,
-    }
-    if total < MARKET_GATE_MIN_SYMBOLS:
-        entry['ts'] = 0.0  # داده‌ی ناکافی: ورود ممنوع، ولی نتیجه کش نمی‌شود و چرخه‌ی بعد دوباره تلاش می‌کند
-    TIMEFRAME_REGIME_CACHE[tf] = entry
-    return gate
+    extreme = None
+    bull_pct = bear_pct = 0.0
+    if len(scores) >= TIMEFRAME_REGIME_MIN_SYMBOLS:
+        bullish = sum(1 for x in scores if x > 0)
+        bearish = sum(1 for x in scores if x < 0)
+        total = len(scores)
+        bull_pct = bullish/total*100.0
+        bear_pct = bearish/total*100.0
+        if bullish > bearish and bullish >= total * 0.5:
+            extreme = 'BULLISH'
+        elif bearish > bullish and bearish >= total * 0.5:
+            extreme = 'BEARISH'
+    TIMEFRAME_REGIME_CACHE[tf] = {'ts': now, 'extreme': extreme, 'bull_pct': bull_pct, 'bear_pct': bear_pct}
+    return extreme
 
 
-def _market_gate_reason(gate, tf):
-    c = TIMEFRAME_REGIME_CACHE.get(tf) or {}
-    counts = f"{c.get('bull_n', 0)} صعودی / {c.get('bear_n', 0)} نزولی از {c.get('total', 0)} نماد شاخص"
-    if gate == 'BULLISH':
-        return f'گیت جهت بازار: {counts} - بازار صعودی است و ورود فروش مسدود است'
-    if gate == 'BEARISH':
-        return f'گیت جهت بازار: {counts} - بازار نزولی است و ورود خرید مسدود است'
-    return f'گیت جهت بازار: {counts} - بازار رنج است و هیچ ورودی مجاز نیست'
+def combine_extreme_regime(macro, micro):
+    """اگر با هم تناقض داشتند (نادر) به‌جای بلاک‌کردن اشتباه، خنثی در نظر گرفته می‌شود."""
+    if macro and micro and macro != micro:
+        return None
+    return macro or micro
+
+
+# --- فیلتر «هم‌رژیمی با داشبورد بازار» - پیش از رسیدن به مرحله‌ی اسکن سطوح -------------
+# هدف: وقتی داشبورد بازار (همان ۱۰ ارز لیدر MARKET_REPORT_SYMBOLS، همان تایم‌فریم معاملاتی)
+# صعودی یا نزولی اعلام می‌کند، از بین کل واچ‌لیست (۱۲۰+ نماد) فقط نمادهایی که خودشان هم
+# در همان جهت هستند (با همان معیار ساده‌ی close/ema20/ema50 که در _market_snapshot استفاده
+# می‌شود) وارد مرحله‌ی سنگین اسکن سطوح (scan_symbol: فچ ۶۵۰ کندل + HTF + شبکه‌ی سطوح +
+# قیمت لحظه‌ای + گارد همبستگی لیدر) می‌شوند. بقیه همین‌جا حذف می‌شوند و اصلاً به آن مرحله
+# نمی‌رسند - این دقیقاً همان چیزی است که سیکل اسکن را کوتاه می‌کند. وقتی داشبورد رنج/نامشخص
+# است (نه صعودی نه نزولی)، هیچ فیلتری اعمال نمی‌شود و کل لیست مثل قبل بررسی می‌شود.
+REGIME_ALIGN_FILTER_ENABLED = os.environ.get('REGIME_ALIGN_FILTER_ENABLED', '1').strip().lower() not in ('0', 'false', 'off')
+SYMBOL_REGIME_SCORE_TTL = float(os.environ.get('SYMBOL_REGIME_SCORE_TTL_SECONDS', '150'))
+SYMBOL_REGIME_SCORE_CACHE: Dict[str, Dict[str, Dict[str, Any]]] = {}  # tf -> symbol -> {'ts':..,'score':..}
+
+
+async def _cached_symbol_regime_score(http, symbol, tf):
+    now = time.time()
+    per_tf = SYMBOL_REGIME_SCORE_CACHE.setdefault(tf, {})
+    c = per_tf.get(symbol)
+    if c and now - c['ts'] < SYMBOL_REGIME_SCORE_TTL:
+        return c['score']
+    score = await _market_snapshot_async(http, symbol, tf)
+    per_tf[symbol] = {'ts': now, 'score': score}
+    return score
+
+
+async def filter_watchlist_by_market_regime(http, watchlist, tf, regime):
+    """فقط نمادهای هم‌جهت با رژیم داشبورد بازار (BULLISH/BEARISH) را نگه می‌دارد.
+    اگر رژیم نامشخص باشد (نه صعودی نه نزولی) یا فیلتر غیرفعال باشد، کل لیست بدون تغییر
+    برمی‌گردد (رفتار فعلی حفظ می‌شود)."""
+    if not REGIME_ALIGN_FILTER_ENABLED or regime not in ('BULLISH', 'BEARISH'):
+        return list(watchlist)
+    want = 1 if regime == 'BULLISH' else -1
+    scores = await asyncio.gather(*[_cached_symbol_regime_score(http, sym, tf) for sym in watchlist])
+    return [sym for sym, sc in zip(watchlist, scores) if sc == want]
 
 
 def market_report(chat_id):
@@ -4121,8 +4172,13 @@ async def _check_entry_coro(chat_id, symbol):
     timeout = aiohttp.ClientTimeout(total=15)
     conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        gate = await refresh_market_gate(http, tf) if bool(s.get('market_alignment_filters_enabled', False)) else None
-        return await scan_symbol(http, chat_id, symbol, gate)
+        if bool(s.get('market_alignment_filters_enabled', False)):
+            macro_extreme = MARKET_REGIME_CACHE['extreme']
+            micro_extreme = await refresh_timeframe_regime(http, tf)
+            combined_extreme = combine_extreme_regime(macro_extreme, micro_extreme)
+        else:
+            combined_extreme = None
+        return await scan_symbol(http, chat_id, symbol, combined_extreme)
 
 
 def check_entry_now(chat_id, symbol):
@@ -4637,8 +4693,8 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس در تایم‌فریم فعال، ۱۰ نماد شاخص بررسی می‌شوند: اگر ۷ نماد یا بیشتر صعودی باشند ورود فروش مسدود می‌شود، اگر ۷ نماد یا بیشتر نزولی باشند ورود خرید مسدود می‌شود، و اگر بازار رنج باشد هیچ ورودی انجام نمی‌شود. پوزیشن‌های باز دست‌نخورده می‌مانند.'
-            if not current else 'گیت جهت بازار خاموش شد: ورودها فقط بر اساس سیگنال استراتژی انجام می‌شوند و هیچ محدودیت جهت بازاری اعمال نمی‌شود.'
+            'از این پس، نه فیلتر واچ‌لیست بر اساس داشبورد بازار، نه محافظ خلاف‌جهت بازار، نه گارد همبستگی BTC/ETH - هیچ‌کدام اعمال نمی‌شوند. سیگنال‌ها کاملاً مستقل از وضعیت کلی بازار و بیت‌کوین/اتریوم بررسی و اجرا می‌شوند.'
+            if not current else 'برگشت به حالت قبلی: فیلتر واچ‌لیست، محافظ خلاف‌جهت و گارد همبستگی BTC/ETH دوباره فعال شدند.'
         )
         send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
         return
@@ -5084,18 +5140,29 @@ async def scan_loop():
                 if need_regime:
                     await refresh_market_regime(http)
                 loose_regime = MARKET_REGIME_CACHE['regime']
-                # گیت جهت بازار (۱۰ نماد شاخص) را برای هر تایم‌فریمی که واقعاً در حال استفاده
-                # است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم متفاوتی داشته باشد.
+                macro_extreme = MARKET_REGIME_CACHE['extreme']
+                # رژیم اجماع فوری (همان روش «وضعیت بازار») را برای هر تایم‌فریمی که واقعاً
+                # در حال استفاده است جداگانه تازه می‌کنیم، چون هر کاربر می‌تواند تایم‌فریم
+                # متفاوتی داشته باشد و این سیگنال برخلاف رژیم ماکرو، به تایم‌فریم وابسته است.
                 active_timeframes = {
                     s.get('timeframe', '5min')
                     for s in USER_SESSIONS.values()
                     if s.get('is_bot_active') and not s.get('daily_stopped')
                 }
-                gate_by_tf = {}
+                micro_extreme_by_tf = {}
+                combined_extreme_by_tf = {}
+                filtered_watchlist_by_tf = {}
                 base_watchlist_by_tf = {}
                 for tf in active_timeframes:
-                    gate_by_tf[tf] = await refresh_market_gate(http, tf)
-                    base_watchlist_by_tf[tf] = scan_watchlist_for_timeframe(tf, loose_regime)
+                    micro_extreme_by_tf[tf] = await refresh_timeframe_regime(http, tf)
+                    combined = combine_extreme_regime(macro_extreme, micro_extreme_by_tf[tf])
+                    combined_extreme_by_tf[tf] = combined
+                    # فیلتر «هم‌رژیمی با داشبورد بازار» یک‌بار برای هر تایم‌فریم فعال محاسبه
+                    # می‌شود (نه به‌ازای هر کاربر) تا در فچ داده تکراری صرفه‌جویی شود؛ چون
+                    # واچ‌لیست پایه (LONG/SHORT) در حال حاضر برای همه‌ی کاربران با یک تایم‌فریم یکسان است.
+                    base_watchlist = scan_watchlist_for_timeframe(tf, loose_regime)
+                    base_watchlist_by_tf[tf] = base_watchlist
+                    filtered_watchlist_by_tf[tf] = await filter_watchlist_by_market_regime(http, base_watchlist, tf, combined)
                 for cid,s in list(USER_SESSIONS.items()):
                     if not s['is_bot_active'] or s['daily_stopped']: continue
                     if not risk_guard(cid): continue
@@ -5104,14 +5171,13 @@ async def scan_loop():
                         continue
                     user_tf = s.get('timeframe', '5min')
                     align_on = bool(s.get('market_alignment_filters_enabled', False))
-                    gate = gate_by_tf.get(user_tf) if align_on else None
-                    if gate == 'RANGE':
-                        # بازار رنج => هیچ ورودی (شامل صف اولویت‌دار) انجام نمی‌شود
-                        _entry_diag_batch_update(cid, [{'status':'blocked','reason':_market_gate_reason('RANGE', user_tf)}])
-                        continue
-                    watchlist = base_watchlist_by_tf.get(user_tf) or []
+                    watchlist = (filtered_watchlist_by_tf if align_on else base_watchlist_by_tf).get(user_tf) or []
+                    # وقتی سوییچ خاموشه، regime رو None پاس می‌دیم تا محافظ خلاف‌جهت بازار
+                    # (داخل get_signal_with_reason) هم غیرفعال بشه - چون اون محافظ فقط وقتی
+                    # regime برابر BULLISH/BEARISH باشه فعال می‌شه.
+                    combined_extreme = combined_extreme_by_tf.get(user_tf) if align_on else None
                     for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,gate))
+                        tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                     # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
                     # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
                     # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
@@ -5123,7 +5189,7 @@ async def scan_loop():
                             if float((meta or {}).get('added_at', 0)) < stale_cutoff:
                                 pw.pop(sym, None); continue
                             if sym in watchlist: continue
-                            tasks.append(scan_symbol(http,cid,sym,gate))
+                            tasks.append(scan_symbol(http,cid,sym,combined_extreme))
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
