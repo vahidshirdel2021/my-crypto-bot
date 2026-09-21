@@ -2797,88 +2797,6 @@ def refresh_live_position_messages():
                 s['positions_message_last_edit'] = now
 
 
-# --- قفل سود پله‌ای (تنها منطقِ «قفل سود»؛ مستقل از SL/TP و مدیریت ضعف روند) ---------------
-# هر وقت سود لحظه‌ای یک معامله (همان «سود/زیان فعلی» ناخالصی که در پوزیشن‌ها نمایش داده می‌شود)
-# به PROFIT_LOCK_STEP_USDT دلار برسد، آن مقدار قفل می‌شود؛ اگر سود بالاتر رفت، قفل به نزدیک‌ترین
-# مضرب بالاتر می‌رود (۵، ۱۰، ۱۵، ...). هر وقت سود به سطح قفل‌شده‌ی فعلی برگشت، پوزیشن با قیمت
-# بازار بسته می‌شود. چرخه‌ی مدیریت اصلی (update_positions) حدود هر یک دقیقه اجرا می‌شود که برای
-# پله‌های ۵ دلاری کند است؛ برای همین این بررسی در یک ترد جدا و هر PROFIT_LOCK_CHECK_SECONDS ثانیه
-# انجام می‌شود. PROFIT_LOCK_STEP_USDT=0 آن را کاملاً خاموش می‌کند.
-PROFIT_LOCK_STEP_USDT = max(0.0, float(os.environ.get('PROFIT_LOCK_STEP_USDT', '5')))
-PROFIT_LOCK_CHECK_SECONDS = max(2, int(os.environ.get('PROFIT_LOCK_CHECK_SECONDS', '5')))
-PROFIT_LOCK_RETRY_SECONDS = 30
-_PROFIT_LOCK_INFLIGHT = set()
-_PROFIT_LOCK_RETRY_AFTER = {}
-
-
-def _profit_lock_pnl(p, price):
-    """سود/زیان ناخالص لحظه‌ای (USDT) - دقیقاً همان فرمول نمایش «سود/زیان فعلی»."""
-    entry = float(p.get('entry_price') or 0)
-    if entry <= 0:
-        return None
-    amount = abs(float(p.get('amount') or 0))
-    long_side = side_long(p.get('side', 'BUY'))
-    if amount > 0:
-        return (price - entry) * amount if long_side else (entry - price) * amount
-    frac = ((price - entry) / entry) if long_side else ((entry - price) / entry)
-    return float(p.get('margin') or 0) * frac * float(p.get('leverage') or 1)
-
-
-def profit_lock_scan_once():
-    step = PROFIT_LOCK_STEP_USDT
-    if step <= 0:
-        return
-    now = time.time()
-    for chat_id, s in list(USER_SESSIONS.items()):
-        for p in list(s.get('paper_positions') or []):
-            try:
-                if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
-                    continue
-                key = p.get('trade_id') or id(p)
-                if key in _PROFIT_LOCK_INFLIGHT or now < _PROFIT_LOCK_RETRY_AFTER.get(key, 0.0):
-                    continue
-                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
-                if not price:
-                    continue
-                pnl = _profit_lock_pnl(p, float(price))
-                if pnl is None:
-                    continue
-                level = float(p.get('profit_lock_level_usdt') or 0.0)
-                new_level = math.floor(pnl / step + 1e-9) * step
-                if new_level >= step and new_level > level:
-                    level = new_level
-                    p['profit_lock_level_usdt'] = level
-                    save_session(chat_id)
-                if level > 0 and pnl <= level:
-                    if p.get('is_real'):
-                        # فقط اگر پوزیشن هنوز روی صرافی وجود دارد (مثلاً SL/TP صرافی قبلاً نبسته باشدش)
-                        try:
-                            if not find_position(chat_id, p['symbol']):
-                                continue
-                        except Exception:
-                            continue
-                    if p not in s.get('paper_positions', []):
-                        continue
-                    _PROFIT_LOCK_INFLIGHT.add(key)
-                    try:
-                        ok = close_position(chat_id, p, float(price), f'قفل سود پله‌ای ({level:g}$)')
-                    finally:
-                        _PROFIT_LOCK_INFLIGHT.discard(key)
-                    if not ok:
-                        _PROFIT_LOCK_RETRY_AFTER[key] = time.time() + PROFIT_LOCK_RETRY_SECONDS
-            except Exception:
-                logger.exception('profit lock check failed chat=%s symbol=%s', chat_id, p.get('symbol'))
-
-
-def _profit_lock_loop():
-    while True:
-        try:
-            profit_lock_scan_once()
-        except Exception:
-            logger.exception('profit lock loop failed')
-        time.sleep(PROFIT_LOCK_CHECK_SECONDS)
-
-
 def update_positions(chat_id):
     s=get_session(chat_id)
     if not s['paper_positions']: return
@@ -5492,7 +5410,6 @@ def main():
     Thread(target=lambda: (time.sleep(5), _live_positions_loop()), daemon=True, name='live-pnl').start()
     Thread(target=lambda: (time.sleep(7), _pending_orders_loop()), daemon=True, name='pending-orders').start()
     Thread(target=lambda: (time.sleep(9), _signal_channel_loop()), daemon=True, name='signal-channel').start()
-    Thread(target=lambda: (time.sleep(11), _profit_lock_loop()), daemon=True, name='profit-lock').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 
