@@ -4458,8 +4458,16 @@ def market_report(chat_id):
 
 # --- داشبورد بازار روی همه‌ی تایم‌فریم‌ها (دکمه‌ی «وضعیت بازار») -------------------------
 # ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به CoinEx/KuCoin پاس داده می‌شود
-# (چون در TIMEFRAME_MAP نیستند، get_klines/get_klines_async آن‌ها را دست‌نخورده رد می‌کنند؛
-# اگر CoinEx این پریودها را پشتیبانی نکند، همان fallback موجود به KuCoin کار را انجام می‌دهد).
+# (چون در TIMEFRAME_MAP نیستند، get_klines آن‌ها را دست‌نخورده رد می‌کند؛ اگر CoinEx این
+# پریودها را پشتیبانی نکند، همان fallback موجود به KuCoin کار را انجام می‌دهد).
+# عمداً sync (ThreadPoolExecutor + get_klines/_market_snapshot) است، نه async: نسخه‌ی اولیه
+# از get_klines_async استفاده می‌کرد که به ASYNC_SEMAPHORE سراسری نیاز دارد؛ آن سمافور توسط
+# scan_loop() در ترد و event-loop جداگانه‌ی خودش ساخته می‌شود، و acquire زدن رویش از
+# event-loopِ دیگری (که اینجا با asyncio.run در ترد هندلر تلگرام ساخته می‌شد) با خطای
+# «Future attached to a different loop» شکست می‌خورد - این خطا توسط except Exception عمومی
+# در _market_snapshot_async بی‌صدا قورت داده می‌شد و باعث می‌شد همه‌ی تایم‌فریم‌ها همزمان
+# «داده کافی دریافت نشد» برگردانند. مسیر sync زیر اصلاً از asyncio/ASYNC_SEMAPHORE استفاده
+# نمی‌کند و همین باگ را کاملاً دور می‌زند.
 MARKET_DASHBOARD_TIMEFRAMES = [
     ('1month', 'ماهانه'),
     ('1week', 'هفتگی'),
@@ -4469,24 +4477,6 @@ MARKET_DASHBOARD_TIMEFRAMES = [
     ('15min', '۱۵ دقیقه'),
     ('5min', '۵ دقیقه'),
 ]
-
-
-async def _market_dashboard_scores_async(timeframes, symbols):
-    global ASYNC_SEMAPHORE
-    if ASYNC_SEMAPHORE is None:
-        ASYNC_SEMAPHORE = asyncio.Semaphore(MAX_ASYNC_REQUESTS)
-    scores = {tf: [] for tf in timeframes}
-    timeout = aiohttp.ClientTimeout(total=12)
-    conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
-    async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        async def one(tf, sym):
-            score = await _market_snapshot_async(http, sym, tf)
-            return tf, score
-        tasks = [one(tf, sym) for tf in timeframes for sym in symbols]
-        for tf, score in await asyncio.gather(*tasks):
-            if score is not None:
-                scores[tf].append(score)
-    return scores
 
 
 def _market_dashboard_line(tf_label, scores):
@@ -4507,22 +4497,17 @@ def _market_dashboard_line(tf_label, scores):
 
 def market_dashboard_all_timeframes(chat_id=None):
     """داشبورد بازار روی تمام تایم‌فریم‌ها (ماهانه تا ۵ دقیقه) هم‌زمان - فقط برای دکمه‌ی
-    «📊 وضعیت بازار»؛ نسخه‌ی تک‌تایم‌فریمی قدیمی (market_report) دست‌نخورده باقی مانده و
-    جای دیگری هنوز از آن استفاده می‌کند (مثل گزارش‌های داخلی تک‌تایم‌فریمی، اگر باشند)."""
+    «📊 وضعیت بازار»؛ نسخه‌ی تک‌تایم‌فریمی قدیمی (market_report) دست‌نخورده باقی مانده."""
     symbols = MARKET_REPORT_SYMBOLS
-    timeframes = [tf for tf, _ in MARKET_DASHBOARD_TIMEFRAMES]
-
-    async def _run():
-        return await _market_dashboard_scores_async(timeframes, symbols)
-
-    try:
-        scores_by_tf = asyncio.run(_run())
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        try:
-            scores_by_tf = loop.run_until_complete(_run())
-        finally:
-            loop.close()
+    scores_by_tf: Dict[str, list] = {tf: [] for tf, _ in MARKET_DASHBOARD_TIMEFRAMES}
+    jobs = [(tf, sym) for tf, _ in MARKET_DASHBOARD_TIMEFRAMES for sym in symbols]
+    with ThreadPoolExecutor(max_workers=min(20, len(jobs))) as ex:
+        futures = {ex.submit(_market_snapshot, sym, tf): tf for tf, sym in jobs}
+        for f in as_completed(futures):
+            tf = futures[f]
+            item = f.result()
+            if item:
+                scores_by_tf[tf].append(item['score'])
 
     lines = ['🌐 *داشبورد بازار*', f'📊 از بین {len(symbols)} ارز شاخص، در هر تایم‌فریم:', '']
     for tf, label in MARKET_DASHBOARD_TIMEFRAMES:
