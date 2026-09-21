@@ -150,18 +150,27 @@ PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PC
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
 # --- کانال اعلام برخورد سطوح (کاملاً مستقل از منطق معاملاتی ربات) -------------
-# هیچ فیلتر/تاییدیه/کیفیتی اعمال نمی‌شود؛ صرفاً هر بار که کندلِ در حال تشکیل (و برای
-# اطمینان، آخرین کندلِ بسته‌شده) یک نماد از واچ‌لیست وارد بازه‌ی یکی از سطوح فعال
-# (ماهانه/هفتگی/روزانه/۴ساعته/۱ساعته) بشود، فقط یک‌بار به‌ازای هر کندل برای هر سطح، یک
-# پیام ساده به کانال ارسال می‌شود. تایم‌فریم بررسی همان تایم‌فریم فعال کاربر ادمینِ
-# SIGNAL_CHANNEL_TF_CHAT_ID است. تصمیم ورود/خروج معاملات ربات به هیچ‌وجه به این بخش
-# وابسته نیست و برعکس.
+# فقط الگوهای روشن‌شده از منوی تنظیمات کانال ارسال می‌شوند (پیش‌فرض: «نفوذ + پولبک + ادامه روند»
+# و «برخورد و برگشت به داخل») روی سطوح فعال (ماهانه/هفتگی/روزانه/۴ساعته/۱ساعته). این الگوها به
+# بسته‌شدن کندل نیاز دارند، پس روی کندل‌های بسته‌شده‌ی تایم‌فریم فعال ادمینِ SIGNAL_CHANNEL_TF_CHAT_ID
+# بررسی می‌شوند و برای هر کندل/سطح/الگو فقط یک‌بار پیام می‌روند. تصمیم ورود/خروج معاملات ربات به
+# هیچ‌وجه به این بخش وابسته نیست و برعکس.
 SIGNAL_CHANNEL_TF_CHAT_ID = int(os.environ.get('SIGNAL_CHANNEL_TF_CHAT_ID', '1878257830'))
 SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
 SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()  # فقط fallback اگر تایم‌فریم ادمین در دسترس نباشد
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
 _SIGNAL_CHANNEL_SETTINGS_FILE = os.environ.get('SIGNAL_CHANNEL_SETTINGS_FILE', 'signal_channel_settings.json')
 _ALL_SIGNAL_CHANNEL_TAGS = ['Monthly', 'Weekly', 'Daily', '4h', '1h']
+# الگوهای قابل ارسال به کانال (هرکدام از منوی تنظیمات کانال روشن/خاموش می‌شود):
+#   breakout_retest : نفوذ (بسته‌شدن کندل بیرون سطح) + پولبک به سطح + کندل تأییدی ادامه‌ی روند
+#   rejection       : برخورد به سطح و برگشت (بسته‌شدن) به داخل، با سایه‌ی رد بلند
+#   touch           : برخورد ساده‌ی قدیمی (کندل در حال تشکیل) - پیش‌فرض خاموش چون پیام زیاد تولید می‌کند
+_ALL_SIGNAL_CHANNEL_PATTERNS = {
+    'breakout_retest': '🚀 نفوذ + پولبک + ادامه روند',
+    'rejection': '↩️ برخورد و برگشت به داخل',
+    'touch': '🎯 برخورد ساده (بدون فیلتر)',
+}
+_DEFAULT_SIGNAL_CHANNEL_PATTERNS = ['breakout_retest', 'rejection']
 
 
 def _load_signal_channel_level_tags():
@@ -176,16 +185,29 @@ def _load_signal_channel_level_tags():
     return default_tags
 
 
+def _load_signal_channel_patterns():
+    try:
+        with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f).get('patterns')
+            if isinstance(saved, list):
+                return [p for p in saved if p in _ALL_SIGNAL_CHANNEL_PATTERNS]
+    except Exception:
+        pass
+    return list(_DEFAULT_SIGNAL_CHANNEL_PATTERNS)
+
+
 def _save_signal_channel_level_tags(tags):
+    # هم سطوح و هم الگوها در یک فایل نگه‌داری می‌شوند؛ نوشتن یکی نباید دیگری را پاک کند.
     try:
         with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'level_tags': tags}, f)
+            json.dump({'level_tags': tags, 'patterns': list(_SIGNAL_CHANNEL_PATTERNS)}, f)
     except Exception:
         logger.exception('failed to persist signal channel settings')
 
 
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
-_SIGNAL_CHANNEL_SEEN = {}  # {(symbol, timeframe, tag, hi/lo, candle_ts): True} - یک پیام به‌ازای هر کندل/سطح؛ به ترتیب درج نگه‌داری می‌شود
+_SIGNAL_CHANNEL_PATTERNS = _load_signal_channel_patterns()
+_SIGNAL_CHANNEL_SEEN = {}  # {(symbol, timeframe, tag, hi/lo, pattern, candle_ts): True} - یک پیام به‌ازای هر کندل/سطح؛ به ترتیب درج نگه‌داری می‌شود
 
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
 try:
@@ -1552,13 +1574,82 @@ def _signal_channel_symbol_regime(df):
         return None
 
 
+# آستانه‌های الگوها (بر حسب ATR یا نسبت) - قابل تنظیم با متغیر محیطی
+SIGNAL_CHANNEL_WICK_RATIO = float(os.environ.get('SIGNAL_CHANNEL_WICK_RATIO', '0.5'))        # حداقل نسبت سایه‌ی رد به کل کندل
+SIGNAL_CHANNEL_BREAK_ATR = float(os.environ.get('SIGNAL_CHANNEL_BREAK_ATR', '0.1'))          # نفوذ معتبر = بسته‌شدن حداقل این‌قدر ATR بیرون سطح
+SIGNAL_CHANNEL_RETEST_ATR = float(os.environ.get('SIGNAL_CHANNEL_RETEST_ATR', '0.15'))       # پهنای ناحیه‌ی پولبک دور سطح
+SIGNAL_CHANNEL_BREAKOUT_LOOKBACK = max(3, int(os.environ.get('SIGNAL_CHANNEL_BREAKOUT_LOOKBACK', '8')))  # حداکثر فاصله‌ی کندل نفوذ تا پولبک
+
+
+def _signal_channel_levels_at(dated_df, idx):
+    """سطوح فعالِ مخصوص همین کندل: {tag: (سقف, کف)}."""
+    levels = {}
+    pdh, pdl = _pdh_pdl_at(dated_df, idx)
+    if pdh is not None and pdl is not None:
+        levels['Daily'] = (float(pdh), float(pdl))
+    htf = _compute_prev_htf_levels(dated_df, idx)
+    for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
+        if tag == 'Daily':
+            continue
+        if hi_key in htf and lo_key in htf:
+            levels[tag] = (float(htf[hi_key]), float(htf[lo_key]))
+    return {tag: v for tag, v in levels.items() if tag in _SIGNAL_CHANNEL_LEVEL_TAGS}
+
+
+def _signal_channel_atr(H, Lo, C, idx, n=14):
+    """ATR ساده (میانگین True Range) روی n کندل منتهی به idx."""
+    start = max(1, idx - n + 1)
+    trs = [max(H[i] - Lo[i], abs(H[i] - C[i - 1]), abs(Lo[i] - C[i - 1])) for i in range(start, idx + 1)]
+    return sum(trs) / len(trs) if trs else 0.0
+
+
+def _signal_channel_is_rejection(o, h, lo, c, level, side_fa):
+    """برخورد به سطح و برگشت (بسته‌شدن) به داخل، همراه با سایه‌ی رد بلند."""
+    rng = h - lo
+    if rng <= 0:
+        return False
+    if side_fa == 'سقف':
+        return h >= level and c < level and (h - max(o, c)) / rng >= SIGNAL_CHANNEL_WICK_RATIO
+    return lo <= level and c > level and (min(o, c) - lo) / rng >= SIGNAL_CHANNEL_WICK_RATIO
+
+
+def _signal_channel_is_breakout_retest(O, H, Lo, C, ci, level, side_fa, atr):
+    """ci = کندل تأییدی (آخرین کندل بسته‌شده)، ci-1 = کندل پولبک، و قبل از آن یک کندل نفوذ.
+    سقف (صعودی): نفوذ = بسته‌شدن بالای سطح؛ پولبک = low کندل به ناحیه‌ی سطح برگشته ولی close بالای سطح مانده؛
+    تأیید = کندل صعودی که بالای high کندل پولبک بسته می‌شود؛ بین نفوذ تا تأیید هیچ closeی به داخل برنگشته.
+    کف (نزولی): آینه‌ی همین."""
+    if atr <= 0 or ci < 3:
+        return False
+    buf = SIGNAL_CHANNEL_BREAK_ATR * atr
+    tol = SIGNAL_CHANNEL_RETEST_ATR * atr
+    j = ci - 1
+    if side_fa == 'سقف':
+        if not (C[ci] > level + buf and C[ci] > O[ci] and C[ci] > H[j]):
+            return False
+        if not (Lo[j] <= level + tol and C[j] >= level - tol):
+            return False
+        for k in range(j - 1, max(j - SIGNAL_CHANNEL_BREAKOUT_LOOKBACK, 0) - 1, -1):
+            if C[k] > level + buf:
+                return all(C[m] >= level - tol for m in range(k + 1, ci + 1))
+        return False
+    if not (C[ci] < level - buf and C[ci] < O[ci] and C[ci] < Lo[j]):
+        return False
+    if not (H[j] >= level - tol and C[j] <= level + tol):
+        return False
+    for k in range(j - 1, max(j - SIGNAL_CHANNEL_BREAKOUT_LOOKBACK, 0) - 1, -1):
+        if C[k] < level - buf:
+            return all(C[m] <= level + tol for m in range(k + 1, ci + 1))
+    return False
+
+
 def _signal_channel_touch_scan_symbol(symbol, timeframe):
-    """می‌گوید کندلِ در حال تشکیلِ این نماد (و برای اطمینان آخرین کندلِ بسته‌شده - تا اگر
-    برخوردی درست پیش از بسته‌شدنِ کندل و بین دو اسکن رخ داد از دست نرود) وارد بازه‌ی کدام
-    سطوحِ فعال شده یا نه. سطوح هر کندل، مخصوص همان کندل محاسبه می‌شود. هیچ تشخیص
-    جهت/کیفیت/ریکلیمی در کار نیست و مستقل از strategy.py استفاده می‌شود؛ فقط از همان
-    توابع محاسبه‌ی خام سطوح بهره می‌برد.
-    خروجی: [(tag, 'سقف'/'کف', level, candle_ts, forming, symbol_regime)]"""
+    """الگوهای روشنِ کانال را روی این نماد بررسی می‌کند.
+    خروجی: [(tag, 'سقف'/'کف', level, candle_ts, pattern, forming, symbol_regime)]
+    - breakout_retest / rejection: فقط روی آخرین کندل بسته‌شده (تأییدی) - forming همیشه False.
+    - touch: رفتار قدیمی؛ کندل در حال تشکیل + آخرین بسته‌شده."""
+    patterns = set(_SIGNAL_CHANNEL_PATTERNS)
+    if not patterns or not _SIGNAL_CHANNEL_LEVEL_TAGS:
+        return []
     try:
         df = get_klines(symbol, timeframe, 320)
         if df is None or df.empty or len(df) < 110:
@@ -1566,37 +1657,63 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
         dated_df, _, _ = _compute_prev_day_levels(df)
         if dated_df is None:
             return []
-        last_idx = len(dated_df) - 1          # کندل در حال تشکیل
+        n = len(dated_df)
+        ci = n - 2  # آخرین کندل بسته‌شده (کندل آخر همان کندل در حال تشکیل است)
+        O = dated_df['open'].astype(float).tolist()
+        H = dated_df['high'].astype(float).tolist()
+        Lo = dated_df['low'].astype(float).tolist()
+        C = dated_df['close'].astype(float).tolist()
         hits = []
-        for idx in (last_idx, last_idx - 1):  # در حال تشکیل + آخرین بسته‌شده
-            candle = dated_df.iloc[idx]
-            candle_ts = candle.get('timestamp')
-            forming = (idx == last_idx)
-            levels = {}
-            pdh, pdl = _pdh_pdl_at(dated_df, idx)
-            if pdh is not None and pdl is not None:
-                levels['Daily'] = (float(pdh), float(pdl))
-            htf = _compute_prev_htf_levels(dated_df, idx)
-            for tag, (hi_key, lo_key, _, _) in LEVEL_SETUP_DEFS.items():
-                if tag == 'Daily':
-                    continue
-                if hi_key in htf and lo_key in htf:
-                    levels[tag] = (htf[hi_key], htf[lo_key])
-            hi_candle, lo_candle = float(candle['high']), float(candle['low'])
-            for tag, (hi, lo) in levels.items():
-                if tag not in _SIGNAL_CHANNEL_LEVEL_TAGS:
-                    continue
-                if lo_candle <= hi <= hi_candle:
-                    hits.append((tag, 'سقف', hi, candle_ts, forming))
-                if lo_candle <= lo <= hi_candle:
-                    hits.append((tag, 'کف', lo, candle_ts, forming))
+
+        if patterns & {'breakout_retest', 'rejection'}:
+            levels_c = _signal_channel_levels_at(dated_df, ci)
+            ts_c = dated_df.iloc[ci].get('timestamp')
+            atr = None
+            regime_box = []
+
+            def regime():
+                if not regime_box:
+                    regime_box.append(_signal_channel_symbol_regime(df))
+                return regime_box[0]
+
+            for tag, (hi, lo) in levels_c.items():
+                for side_fa, level in (('سقف', hi), ('کف', lo)):
+                    if 'rejection' in patterns and _signal_channel_is_rejection(O[ci], H[ci], Lo[ci], C[ci], level, side_fa):
+                        hits.append((tag, side_fa, level, ts_c, 'rejection', False))
+                    if 'breakout_retest' in patterns:
+                        if atr is None:
+                            atr = _signal_channel_atr(H, Lo, C, ci)
+                        if _signal_channel_is_breakout_retest(O, H, Lo, C, ci, level, side_fa, atr):
+                            # «ادامه روند»: جهت رژیم نماد باید با جهت نفوذ یکی باشد
+                            if regime() == ('BULLISH' if side_fa == 'سقف' else 'BEARISH'):
+                                hits.append((tag, side_fa, level, ts_c, 'breakout_retest', False))
+
+        if 'touch' in patterns:
+            for idx in (n - 1, n - 2):
+                levels = _signal_channel_levels_at(dated_df, idx)
+                ts = dated_df.iloc[idx].get('timestamp')
+                forming = (idx == n - 1)
+                for tag, (hi, lo) in levels.items():
+                    if Lo[idx] <= hi <= H[idx]:
+                        hits.append((tag, 'سقف', hi, ts, 'touch', forming))
+                    if Lo[idx] <= lo <= H[idx]:
+                        hits.append((tag, 'کف', lo, ts, 'touch', forming))
+
         if hits:
-            regime = _signal_channel_symbol_regime(df)
-            hits = [h + (regime,) for h in hits]
+            regime_val = _signal_channel_symbol_regime(df)
+            hits = [h + (regime_val,) for h in hits]
         return hits
     except Exception:
         logger.exception('signal channel touch scan failed symbol=%s', symbol)
         return []
+
+
+def _signal_channel_pattern_label(pattern, side_fa):
+    if pattern == 'breakout_retest':
+        return '🚀 نفوذ + پولبک + ادامه روند ' + ('صعودی' if side_fa == 'سقف' else 'نزولی')
+    if pattern == 'rejection':
+        return '↩️ برخورد و برگشت به داخل (' + ('رد سقف' if side_fa == 'سقف' else 'رد کف') + ')'
+    return _ALL_SIGNAL_CHANNEL_PATTERNS.get(pattern, pattern)
 
 
 def _signal_channel_scan_once():
@@ -1605,8 +1722,8 @@ def _signal_channel_scan_once():
     timeframe = _signal_channel_timeframe()
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
-        for tag, side_fa, level_value, candle_ts, forming, regime in _signal_channel_touch_scan_symbol(symbol, timeframe):
-            key = (symbol, timeframe, tag, side_fa, candle_ts)
+        for tag, side_fa, level_value, candle_ts, pattern, forming, regime in _signal_channel_touch_scan_symbol(symbol, timeframe):
+            key = (symbol, timeframe, tag, side_fa, pattern, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
             _SIGNAL_CHANNEL_SEEN[key] = True
@@ -1616,11 +1733,13 @@ def _signal_channel_scan_once():
             lines = [
                 f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
                 "",
-                f"🎯 برخورد با {level_label}: `{fmt(level_value)}`",
+                f"🎯 سطح: {level_label} `{fmt(level_value)}`",
+                f"🧩 الگو: {_signal_channel_pattern_label(pattern, side_fa)}",
             ]
             if regime_label:
                 lines.append(f"🧭 رژیم نماد: {regime_label}")
-            lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
+            if pattern == 'touch':
+                lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
             text = "\n".join(lines)
             markup = {'inline_keyboard': [[
                 {'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)},
@@ -1628,7 +1747,7 @@ def _signal_channel_scan_once():
             ]]}
             send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
-    # ارسال دوباره‌ی برخوردهای همین کندل می‌شد)
+    # ارسال دوباره‌ی همین کندل می‌شد)
     if len(_SIGNAL_CHANNEL_SEEN) > 5000:
         for k in list(_SIGNAL_CHANNEL_SEEN.keys())[:2000]:
             _SIGNAL_CHANNEL_SEEN.pop(k, None)
@@ -1654,6 +1773,9 @@ def signal_channel_settings_keyboard():
     for tag in _ALL_SIGNAL_CHANNEL_TAGS:
         on = tag in _SIGNAL_CHANNEL_LEVEL_TAGS
         rows.append([{'text': f"{'🟢' if on else '🔴'} {tag}", 'callback_data': f'/toggle_signal_tag_{tag}'}])
+    for key, label in _ALL_SIGNAL_CHANNEL_PATTERNS.items():
+        on = key in _SIGNAL_CHANNEL_PATTERNS
+        rows.append([{'text': f"{'🟢' if on else '🔴'} {label}", 'callback_data': f'/toggle_signal_pattern_{key}'}])
     rows.append([{'text': '👑 بازگشت به پنل مدیریت', 'callback_data': '/admin_panel'}])
     return {'inline_keyboard': rows}
 
@@ -1661,12 +1783,15 @@ def signal_channel_settings_keyboard():
 def signal_channel_settings_report():
     status = 'فعال ✅' if SIGNAL_CHANNEL_ID else 'غیرفعال (SIGNAL_CHANNEL_ID تنظیم نشده) ❌'
     tags_txt = '، '.join(_SIGNAL_CHANNEL_LEVEL_TAGS) if _SIGNAL_CHANNEL_LEVEL_TAGS else 'هیچ‌کدام (کانال چیزی ارسال نمی‌کند)'
+    pats_txt = '، '.join(_ALL_SIGNAL_CHANNEL_PATTERNS[p] for p in _SIGNAL_CHANNEL_PATTERNS) if _SIGNAL_CHANNEL_PATTERNS else 'هیچ‌کدام (کانال چیزی ارسال نمی‌کند)'
     return (
         f"📡 *تنظیمات کانال اعلام برخورد سطوح*\n\n"
         f"وضعیت: {status}\n"
         f"تایم‌فریم بررسی: `{_signal_channel_timeframe()}` (همان تایم‌فریم فعال ادمین)\n"
-        f"سطوح فعال برای ارسال: {tags_txt}\n\n"
-        f"هرکدوم از سطوح زیر رو بزنید تا روشن/خاموش بشه - فقط برخورد با سطوح روشن به کانال ارسال می‌شه."
+        f"سطوح فعال برای ارسال: {tags_txt}\n"
+        f"الگوهای فعال: {pats_txt}\n\n"
+        f"هرکدوم از سطوح و الگوهای زیر رو بزنید تا روشن/خاموش بشه - فقط الگوهای روشن روی سطوح روشن به کانال ارسال می‌شن. "
+        f"الگوهای «نفوذ + پولبک» و «برگشت به داخل» به بسته‌شدن کندل نیاز دارن و بعد از بسته‌شدن کندل اعلام می‌شن."
     )
 
 
@@ -3717,6 +3842,8 @@ def trade_filter_management_keyboard(chat_id):
     block_buy = bool(s.get('manual_block_buy_entries', False))
     block_sell = bool(s.get('manual_block_sell_entries', False))
     block_all = bool(s.get('manual_block_all_entries', False))
+    max_same = int(s.get('max_same_direction_positions', 0) or 0)
+    max_same_txt = str(max_same) if max_same > 0 else '∞'
 
     return {
         'inline_keyboard': [
@@ -3727,8 +3854,26 @@ def trade_filter_management_keyboard(chat_id):
             [cell(block_buy, 'بلاک خرید', '/toggle_block_buy'),
              cell(block_sell, 'بلاک فروش', '/toggle_block_sell')],
             [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
+            [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
             [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+        ]
+    }
+
+
+def same_direction_limit_keyboard(chat_id):
+    """انتخاب سقف پوزیشن‌های هم‌جهت هم‌زمان (۲ / ۵ / ۱۰ / بدون محدودیت). مقدار ۰ = بدون محدودیت."""
+    s = get_session(chat_id)
+    cur = int(s.get('max_same_direction_positions', 0) or 0)
+
+    def opt(n, label):
+        return {'text': f"{'✅ ' if cur == n else ''}{label}", 'callback_data': f'/set_max_same_{n}'}
+
+    return {
+        'inline_keyboard': [
+            [opt(2, '2'), opt(5, '5')],
+            [opt(10, '10'), opt(0, 'بدون محدودیت')],
+            [{'text': '⬅️ بازگشت', 'callback_data': '/trade_filter_management'}],
         ]
     }
 
@@ -4324,6 +4469,18 @@ def process_command(cmd,chat_id,message_id=None):
             _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
+    if cmd.startswith('/toggle_signal_pattern_'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        key = cmd.replace('/toggle_signal_pattern_', '')
+        if key in _ALL_SIGNAL_CHANNEL_PATTERNS:
+            if key in _SIGNAL_CHANNEL_PATTERNS:
+                _SIGNAL_CHANNEL_PATTERNS[:] = [p for p in _SIGNAL_CHANNEL_PATTERNS if p != key]
+            else:
+                _SIGNAL_CHANNEL_PATTERNS.append(key)
+            _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
+        edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
+        return
     if cmd == '/admin_set_fee_prompt':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
@@ -4445,7 +4602,12 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
     if cl.startswith('/set_max_same_'):
         s['max_same_direction_positions']=max(0,int(cl.replace('/set_max_same_',''))); save_session(chat_id)
-        send_message(chat_id, f"✅ حداکثر پوزیشن هم‌جهت هم‌زمان: `{s['max_same_direction_positions'] or '∞'}`"); menu(chat_id); return
+        cur = s['max_same_direction_positions']
+        overall = int(s.get('max_open_positions', 0) or 0)
+        msg = f"✅ حداکثر پوزیشن هم‌جهت هم‌زمان: `{cur or '∞'}`"
+        if overall > 0 and (cur == 0 or cur > overall):
+            msg += f"\n\n⚠️ سقف کل پوزیشن‌های باز روی `{overall}` است و همان همچنان اعمال می‌شود. برای بالاتر رفتن، «حداکثر پوزیشن» را هم افزایش دهید."
+        send_message(chat_id, msg, trade_filter_management_keyboard(chat_id)); return
     if cl.startswith('/set_dir_cooldown_'):
         s['same_direction_entry_cooldown_seconds']=max(0.0,float(cl.replace('/set_dir_cooldown_',''))); save_session(chat_id)
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
@@ -4738,6 +4900,18 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/trade_filter_management':
         send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nهمه‌ی محدودیت‌ها و فیلترهای مربوط به ورود/مدیریت معاملات این‌جا جمع شده‌اند.", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/same_dir_menu':
+        cur = int(s.get('max_same_direction_positions', 0) or 0)
+        overall = int(s.get('max_open_positions', 0) or 0)
+        send_message(
+            chat_id,
+            "👥 *حداکثر معاملات هم‌جهت هم‌زمان*\n\n"
+            "یعنی حداکثر چند پوزیشن Long (یا چند Short) هم‌زمان باز بماند.\n\n"
+            f"مقدار فعلی: `{cur or '∞'}`\n"
+            f"سقف کل پوزیشن‌های باز: `{overall or '∞'}` (تنظیم جدا؛ اگر کمتر از انتخاب شما باشد همان اعمال می‌شود)",
+            same_direction_limit_keyboard(chat_id),
+        )
         return
     if cl=='/toggle_block_buy':
         current = bool(s.get('manual_block_buy_entries', False))
