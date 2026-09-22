@@ -933,20 +933,14 @@ def normalize_klines(data):
 
 
 def get_klines(symbol, tf='5min', limit=200):
+    """کندل‌ها را می‌گیرد. اول KuCoin امتحان می‌شود (چون CoinEx در حال تعطیلی تدریجی است
+    و ممکن است به‌جای خطای سریع، فقط تا سررسید timeout معطل بماند - آزمایش کردن اول
+    CoinEx یعنی این تأخیر روی *هر* درخواست تحمیل می‌شود)؛ CoinEx فقط به‌عنوان fallback
+    و با timeout کوتاه‌تر باقی مانده، برای نمادی که احتمالاً روی KuCoin نیست."""
     period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
     with DATA_LOCK:
         c=DATA_CACHE.get(key)
         if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
-    try:
-        r=requests.get(f'{COINEX_PUBLIC}/futures/kline', params={'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, timeout=7)
-        if r.ok:
-            p=r.json()
-            if p.get('code')==0:
-                df=normalize_klines(p.get('data'))
-                if len(df)>=60:
-                    with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
-                    return df
-    except Exception as exc: logger.debug('CoinEx kline %s: %s', symbol, exc)
     try:
         r=requests.get(f'{KUCOIN_PUBLIC}/market/candles', params={'symbol':f'{symbol}-USDT','type':period}, timeout=7)
         if r.ok and r.json().get('code')=='200000':
@@ -957,19 +951,37 @@ def get_klines(symbol, tf='5min', limit=200):
                 with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
                 return df
     except Exception as exc: logger.debug('KuCoin kline %s: %s', symbol, exc)
+    try:
+        r=requests.get(f'{COINEX_PUBLIC}/futures/kline', params={'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, timeout=4)
+        if r.ok:
+            p=r.json()
+            if p.get('code')==0:
+                df=normalize_klines(p.get('data'))
+                if len(df)>=60:
+                    with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
+                    return df
+    except Exception as exc: logger.debug('CoinEx kline %s: %s', symbol, exc)
     return pd.DataFrame()
 
 
 async def get_klines_async(http, symbol, tf='5min', limit=200):
+    """نسخه‌ی async - همان ترتیب اولویت get_klines (اول KuCoin، بعد CoinEx به‌عنوان
+    fallback با timeout کوتاه‌تر ۴ثانیه‌ای، نه ۷ثانیه‌ی مشترک قبلی)."""
     period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
     with DATA_LOCK:
         c=DATA_CACHE.get(key)
         if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
     await ASYNC_SEMAPHORE.acquire()
     try:
-        for base, params in [(f'{COINEX_PUBLIC}/futures/kline',{'market':market_name(symbol),'period':period,'limit':min(limit,1000)}),(f'{KUCOIN_PUBLIC}/market/candles',{'symbol':f'{symbol}-USDT','type':period})]:
+        sources = [
+            (f'{KUCOIN_PUBLIC}/market/candles', {'symbol':f'{symbol}-USDT','type':period}, None),
+            (f'{COINEX_PUBLIC}/futures/kline', {'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, aiohttp.ClientTimeout(total=4)),
+        ]
+        for base, params, timeout in sources:
             try:
-                async with http.get(base, params=params) as r:
+                req_kwargs = {'params': params}
+                if timeout is not None: req_kwargs['timeout'] = timeout
+                async with http.get(base, **req_kwargs) as r:
                     if r.status != 200: continue
                     p=await r.json()
                     good = p.get('code')==0 if 'coinex.com' in base else p.get('code')=='200000'
@@ -985,13 +997,25 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
 
 
 def latest_price(symbol):
-    """Public CoinEx price for PAPER/non-exchange-specific operations."""
+    """قیمت لحظه‌ای عمومی برای PAPER/عملیات غیرمرتبط با اکانت صرافی خاص.
+    اول KuCoin امتحان می‌شود (همان دلیل get_klines: CoinEx در حال تعطیلی تدریجی است و
+    ممکن است به‌جای خطای سریع فقط معطل بماند)، و CoinEx فقط به‌عنوان fallback با
+    timeout کوتاه‌تر باقی مانده."""
     key=symbol.upper(); now=time.time()
     with DATA_LOCK:
         c=PRICE_CACHE.get(key)
         if c and now-c['ts']<5: return c['price']
     try:
-        r=requests.get(f'{COINEX_PUBLIC}/futures/ticker', params={'market':market_name(symbol)}, timeout=5)
+        r=requests.get(f'{KUCOIN_PUBLIC}/market/orderbook/level1', params={'symbol':f'{symbol.upper()}-USDT'}, timeout=5)
+        if r.ok and r.json().get('code')=='200000':
+            item=r.json().get('data') or {}
+            price=float(item.get('price') or 0)
+            if price>0:
+                with DATA_LOCK: PRICE_CACHE[key]={'ts':now,'price':price}
+                return price
+    except Exception as exc: logger.debug('price kucoin %s: %s',symbol,exc)
+    try:
+        r=requests.get(f'{COINEX_PUBLIC}/futures/ticker', params={'market':market_name(symbol)}, timeout=3)
         if r.ok and r.json().get('code')==0:
             data=r.json().get('data')
             item=data[0] if isinstance(data,list) else data
@@ -999,7 +1023,7 @@ def latest_price(symbol):
             if price>0:
                 with DATA_LOCK: PRICE_CACHE[key]={'ts':now,'price':price}
                 return price
-    except Exception as exc: logger.debug('price %s',symbol,exc)
+    except Exception as exc: logger.debug('price coinex %s: %s',symbol,exc)
     return None
 
 
@@ -2813,84 +2837,93 @@ def admin_set_fee_command(chat_id, text):
 
 
 def close_position(chat_id,pos,price=None,reason='manual'):
-    s=get_session(chat_id)
-    if pos not in s['paper_positions']: return False
-    fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
-    fee_note=''
-    if pos.get('is_real'):
-        ex=get_exchange(chat_id)
-        if not ex: send_message(chat_id,'❌ اتصال CoinEx در دسترس نیست.'); return False
-        try:
-            sym=ccxt_symbol(pos['symbol']); amount=float(pos.get('amount') or 0)
-            live=find_position(chat_id,pos['symbol']); amount=float(live['amount']) if live else amount
-            if amount<=0: return False
-            order=ex.close_position(sym,None,{'type':'market','amount':amount})
-            price=float(order.get('average') or order.get('price') or latest_price(pos['symbol']) or pos['entry_price'])
-            await_until=time.time()+12
-            while time.time()<await_until:
-                try:
-                    if not find_position(chat_id,pos['symbol']): break
-                except ExchangeStateError:
-                    time.sleep(.5); continue
-                time.sleep(.5)
-            realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
-            if realized is None:
-                entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
-                pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
-                realized=pnl_gross-fee
-                pos['pnl_is_estimate']=True
-                pos['pnl_gross_usdt']=pnl_gross
-                fee_note=' (کسر شده در برآورد)'
-            else:
-                pos['pnl_is_estimate']=False
-                fee_note=' (لحاظ شده در صرافی)'
-            pnl=realized; pos['close_price']=price
-        except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
-    else:
-        if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
-        # Conservative paper exit slippage.
-        if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
-            slip = PAPER_SLIPPAGE_BPS / 10000.0
-            price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
-        entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
-        pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
-        hours=max(0.0, time.time()-float(pos.get('opened_at',time.time()))) / 3600.0
-        funding_intervals=hours/8.0
-        funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
-        pnl=pnl_gross-fee-funding_cost
-        s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
-        pos['pnl_gross_usdt']=pnl_gross
-        pos['funding_usdt']=funding_cost
-        fee_note=f' (کارمزد + فاندینگ کسر شد: {funding_cost:.2f} USDT)'
-    # Exchange/trading costs are already represented by `pnl`; platform fee is a separate layer.
-    platform_fee = settle_platform_fee(chat_id, pos, float(pnl)) if float(pnl) > PLATFORM_FEE_MIN_PROFIT_USDT else 0.0
-    if platform_fee > 0:
-        pos['pnl_before_platform_fee_usdt'] = float(pnl)
-        pnl = float(pnl) - platform_fee
-        if not pos.get('is_real'):
-            s['paper_balance'] -= platform_fee
-    pos['platform_fee_usdt'] = platform_fee
-    pos['fee_usdt']=fee
-    if not pos.get('risk_usdt'):
-        try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
-        except Exception: pos['risk_usdt']=0.0
-    pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
-    pos['duration_seconds']=max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])))
-    pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
-    update_trade_excursions(pos, float(price), float(price))
-    audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
-    cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
-    s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
-    est=' تقریبی' if pos.get('pnl_is_estimate') else ''
-    fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
-    platform_line = f'\n• سهم پلتفرم: `{platform_fee:.2f} USDT` ({get_user_fee_rate(chat_id):.2f}%)' if platform_fee > 0 else ''
-    setup_tag = extract_setup_tag(pos.get('entry_reason') or '')
-    setup_line = f"\n• ستاپ: `[SETUP {setup_tag}]`" if setup_tag else ''
-    side_fa = 'خرید (Long)' if side_long(pos.get('side')) else 'فروش (Short)'
-    entry_time_line = f"\n• زمان ورود: `{fmt_scan_time(pos.get('opened_at'))}`"
-    close_time_line = f"\n• زمان خروج: `{fmt_scan_time(pos.get('close_timestamp'))}`"
-    send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
-    return True
+    # قفل سراسری هر چت (همان قفلی که execute_trade/execute_manual_trade برای باز کردن
+    # معامله استفاده می‌کنند): چند حلقه‌ی پس‌زمینه‌ی جدا (اسکنر هر ۴۵ث، پروفیت‌لاک هر ۵ث،
+    # دستور دستی کاربر) هرکدام می‌توانند مستقل تشخیص بدهند همین پوزیشن باید بسته شود و
+    # بدون این قفل، close_position را هم‌زمان از چند ترد برای یک پوزیشن صدا بزنند - روی
+    # پوزیشن REAL یعنی دو بار سفارش close به صرافی، پیام تکراری به کاربر و محاسبه‌ی
+    # نادرست/دوباره‌ی PnL. RLock است، پس اگر این تابع از جایی که خودش قبلاً همین قفل را
+    # گرفته صدا زده شود (تئوری، نه در کد فعلی) باز هم قفل نمی‌شود.
+    lock = get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if pos not in s['paper_positions']: return False
+        fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
+        fee_note=''
+        if pos.get('is_real'):
+            ex=get_exchange(chat_id)
+            if not ex: send_message(chat_id,'❌ اتصال CoinEx در دسترس نیست.'); return False
+            try:
+                sym=ccxt_symbol(pos['symbol']); amount=float(pos.get('amount') or 0)
+                live=find_position(chat_id,pos['symbol']); amount=float(live['amount']) if live else amount
+                if amount<=0: return False
+                order=ex.close_position(sym,None,{'type':'market','amount':amount})
+                price=float(order.get('average') or order.get('price') or latest_price(pos['symbol']) or pos['entry_price'])
+                await_until=time.time()+12
+                while time.time()<await_until:
+                    try:
+                        if not find_position(chat_id,pos['symbol']): break
+                    except ExchangeStateError:
+                        time.sleep(.5); continue
+                    time.sleep(.5)
+                realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
+                if realized is None:
+                    entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+                    pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+                    realized=pnl_gross-fee
+                    pos['pnl_is_estimate']=True
+                    pos['pnl_gross_usdt']=pnl_gross
+                    fee_note=' (کسر شده در برآورد)'
+                else:
+                    pos['pnl_is_estimate']=False
+                    fee_note=' (لحاظ شده در صرافی)'
+                pnl=realized; pos['close_price']=price
+            except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
+        else:
+            if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
+            # Conservative paper exit slippage.
+            if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+                slip = PAPER_SLIPPAGE_BPS / 10000.0
+                price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
+            entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
+            pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
+            hours=max(0.0, time.time()-float(pos.get('opened_at',time.time()))) / 3600.0
+            funding_intervals=hours/8.0
+            funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
+            pnl=pnl_gross-fee-funding_cost
+            s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+            pos['pnl_gross_usdt']=pnl_gross
+            pos['funding_usdt']=funding_cost
+            fee_note=f' (کارمزد + فاندینگ کسر شد: {funding_cost:.2f} USDT)'
+        # Exchange/trading costs are already represented by `pnl`; platform fee is a separate layer.
+        platform_fee = settle_platform_fee(chat_id, pos, float(pnl)) if float(pnl) > PLATFORM_FEE_MIN_PROFIT_USDT else 0.0
+        if platform_fee > 0:
+            pos['pnl_before_platform_fee_usdt'] = float(pnl)
+            pnl = float(pnl) - platform_fee
+            if not pos.get('is_real'):
+                s['paper_balance'] -= platform_fee
+        pos['platform_fee_usdt'] = platform_fee
+        pos['fee_usdt']=fee
+        if not pos.get('risk_usdt'):
+            try: pos['risk_usdt']=abs(float(pos['entry_price'])-float(pos['sl']))/max(float(pos['entry_price']),1e-12)*float(pos['margin'])*float(pos['leverage'])
+            except Exception: pos['risk_usdt']=0.0
+        pos['pnl_usdt']=float(pnl); pos['close_timestamp']=time.time(); pos['close_reason']=reason
+        pos['duration_seconds']=max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])))
+        pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
+        update_trade_excursions(pos, float(price), float(price))
+        audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
+        cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
+        s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
+        est=' تقریبی' if pos.get('pnl_is_estimate') else ''
+        fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
+        platform_line = f'\n• سهم پلتفرم: `{platform_fee:.2f} USDT` ({get_user_fee_rate(chat_id):.2f}%)' if platform_fee > 0 else ''
+        setup_tag = extract_setup_tag(pos.get('entry_reason') or '')
+        setup_line = f"\n• ستاپ: `[SETUP {setup_tag}]`" if setup_tag else ''
+        side_fa = 'خرید (Long)' if side_long(pos.get('side')) else 'فروش (Short)'
+        entry_time_line = f"\n• زمان ورود: `{fmt_scan_time(pos.get('opened_at'))}`"
+        close_time_line = f"\n• زمان خروج: `{fmt_scan_time(pos.get('close_timestamp'))}`"
+        send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
+        return True
 
 
 def reconcile_real(chat_id):
@@ -4545,33 +4578,52 @@ def apply_user_profile(s, profile):
 
 
 
+async def _manual_signal_scan_coro(chat_id, symbols, tf):
+    s = get_session(chat_id)
+    results = []
+    timeout = aiohttp.ClientTimeout(total=15)
+    conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
+        for sym in symbols:
+            try:
+                df = await get_klines_async(http, sym, tf, 180)
+                if df is None or df.empty or len(df) < 80:
+                    continue
+                ind = calculate_indicators(df)
+                sig, reason = get_signal_with_reason(ind, s.get('strategy_config', STRATEGY_DEFAULTS))
+                if sig not in ('BUY','SELL'):
+                    continue
+                plan = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_timeframe=tf)
+                if plan:
+                    results.append((sym, sig, plan, reason))
+            except Exception:
+                logger.debug('manual_signal_scan symbol %s failed', sym, exc_info=True)
+                continue
+    return results
+
+
 def manual_signal_scan(chat_id, symbol=None):
-    """بررسی دستی یک نماد انتخابی کاربر با منطق سیگنال فعلی."""
+    """بررسی دستی یک نماد انتخابی کاربر با منطق سیگنال فعلی.
+    باید حتماً روی SCANNER_LOOP اجرا شود (دقیقاً مثل _check_entry_coro/check_entry_now)
+    نه با یک asyncio.run() جداگانه: ASYNC_SEMAPHORE/get_klines_async به SCANNER_LOOP
+    متصل‌اند و await زدنشان از یک event loop دیگر با خطای cross-loop شکست می‌خورد.
+    نسخه‌ی قبلی دقیقاً همین باگ را داشت (همانی که در داشبورد چندتایم‌فریمی پیدا و رفع
+    شد) و چون آن خطا با except Exception بی‌صدا قورت داده می‌شد، این قابلیت اغلب
+    «نمادی پیدا نشد» برمی‌گرداند - مگر وقتی کش اسکنر تصادفاً تازه بود."""
     s = get_session(chat_id)
     tf = s.get('timeframe', '5min')
     symbols = [symbol.upper()] if symbol else scan_watchlist_for_timeframe(tf)
-    results = []
     send_message(chat_id, f"⏳ لطفاً منتظر بمانید...\nدر حال بررسی {len(symbols)} نماد با تایم‌فریم {TF_DISPLAY.get(tf, tf)}")
-    async def _run():
-        async with aiohttp.ClientSession() as http:
-            for sym in symbols:
-                try:
-                    df = await get_klines_async(http, sym, tf, 180)
-                    if df is None or df.empty or len(df) < 80:
-                        continue
-                    ind = calculate_indicators(df)
-                    sig, reason = get_signal_with_reason(ind, s.get('strategy_config', STRATEGY_DEFAULTS))
-                    if sig not in ('BUY','SELL'):
-                        continue
-                    plan = build_trade_plan(ind, sig, s.get('strategy_config', STRATEGY_DEFAULTS), strategy_timeframe=tf)
-                    if plan:
-                        results.append((sym, sig, plan, reason))
-                except Exception:
-                    continue
+    if SCANNER_LOOP is None:
+        send_message(chat_id, '⏳ موتور اسکن هنوز کاملاً بالا نیامده؛ چند ثانیه دیگر دوباره امتحان کن.')
+        return
     try:
-        asyncio.run(_run())
-    except RuntimeError:
-        loop = asyncio.new_event_loop(); loop.run_until_complete(_run()); loop.close()
+        future = asyncio.run_coroutine_threadsafe(_manual_signal_scan_coro(chat_id, symbols, tf), SCANNER_LOOP)
+        results = future.result(timeout=max(30, len(symbols) * 4))
+    except Exception as exc:
+        logger.exception('manual_signal_scan failed for chat_id=%s', chat_id)
+        send_message(chat_id, f'❌ بررسی دستی با خطا مواجه شد: `{exc}`')
+        return
     if not results:
         send_message(chat_id, '❌ در بررسی فعلی، نمادی مطابق شرایط استراتژی آماده ورود پیدا نشد.')
         return
