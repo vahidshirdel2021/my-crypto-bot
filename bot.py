@@ -249,7 +249,8 @@ SHARED_LONG_WATCHLIST = LONG_WATCHLIST
 SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
-KUCOIN_PUBLIC = 'https://api.kucoin.com/api/v1'
+KUCOIN_PUBLIC = 'https://api-futures.kucoin.com/api/v1'  # فیوچرز پرپچوال (نه اسپات) - هم‌جنس با CoinEx swap
+KUCOIN_GRANULARITY_MAP = {'5min':5,'15min':15,'1hour':60,'4hour':240,'1day':1440}  # دقیقه، برای /kline/query
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
@@ -918,6 +919,11 @@ def fmt(v):
 
 def market_name(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}USDT"
 def ccxt_symbol(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}/USDT:USDT"
+def kucoin_futures_symbol(symbol):
+    """نماد قرارداد پرپچوال USDT-margined کوکوین. BTC استثناست: کوکوین همیشه از XBT به‌جای BTC استفاده می‌کند."""
+    base=symbol.upper().replace('USDT','').replace('/','')
+    if base=='BTC': base='XBT'
+    return f'{base}USDTM'
 
 
 def normalize_klines(data):
@@ -932,21 +938,40 @@ def normalize_klines(data):
     return df.dropna(subset=['open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
 
 
+def _kucoin_futures_kline_params(symbol, tf, limit):
+    """پارامترهای /kline/query فیوچرز کوکوین. from/to اجباری نیستند ولی برای گرفتن
+    تعداد کندل کافی (حداکثر ۵۰۰ در هر درخواست طبق مستندات) باید بازه‌ی زمانی داد."""
+    granularity=KUCOIN_GRANULARITY_MAP.get(tf, 5)
+    now_ms=int(time.time()*1000)
+    span_ms=granularity*60_000*min(max(limit,60)+10, 500)
+    return {'symbol':kucoin_futures_symbol(symbol),'granularity':granularity,'from':now_ms-span_ms,'to':now_ms}
+
+
+def _kucoin_futures_kline_df(rows):
+    """رَدیف‌های فیوچرز کوکوین به ترتیب [time, open, high, low, close, volume] هستند
+    (برخلاف اسپات که [time, open, close, high, low, volume, turnover] بود) و از قبل
+    صعودی (قدیم به جدید) مرتب‌اند - نیازی به reverse نیست."""
+    if not rows: return pd.DataFrame()
+    df=pd.DataFrame(rows, columns=['timestamp','open','high','low','close','volume'])
+    for c in ['timestamp','open','high','low','close','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
+    return df.dropna(subset=['open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
+
+
 def get_klines(symbol, tf='5min', limit=200):
-    """کندل‌ها را می‌گیرد. اول KuCoin امتحان می‌شود (چون CoinEx در حال تعطیلی تدریجی است
-    و ممکن است به‌جای خطای سریع، فقط تا سررسید timeout معطل بماند - آزمایش کردن اول
+    """کندل‌ها را می‌گیرد. اول KuCoin Futures امتحان می‌شود (چون CoinEx در حال تعطیلی تدریجی
+    است و ممکن است به‌جای خطای سریع، فقط تا سررسید timeout معطل بماند - آزمایش کردن اول
     CoinEx یعنی این تأخیر روی *هر* درخواست تحمیل می‌شود)؛ CoinEx فقط به‌عنوان fallback
-    و با timeout کوتاه‌تر باقی مانده، برای نمادی که احتمالاً روی KuCoin نیست."""
+    و با timeout کوتاه‌تر باقی مانده، برای نمادی که احتمالاً روی KuCoin نیست.
+    نکته: از KuCoin Futures (api-futures.kucoin.com) استفاده می‌شود نه اسپات، چون معامله‌ی
+    واقعی هم روی فیوچرز/پرپچوال CoinEx انجام می‌شود و قیمت اسپات می‌تواند از پرپچوال فاصله بگیرد."""
     period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
     with DATA_LOCK:
         c=DATA_CACHE.get(key)
         if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
     try:
-        r=requests.get(f'{KUCOIN_PUBLIC}/market/candles', params={'symbol':f'{symbol}-USDT','type':period}, timeout=7)
+        r=requests.get(f'{KUCOIN_PUBLIC}/kline/query', params=_kucoin_futures_kline_params(symbol,tf,limit), timeout=7)
         if r.ok and r.json().get('code')=='200000':
-            data=r.json().get('data') or []
-            df=pd.DataFrame(data, columns=['timestamp','open','close','high','low','volume','turnover']).iloc[::-1].reset_index(drop=True)
-            for c in ['timestamp','open','close','high','low','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
+            df=_kucoin_futures_kline_df(r.json().get('data') or [])
             if len(df)>=60:
                 with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
                 return df
@@ -965,7 +990,7 @@ def get_klines(symbol, tf='5min', limit=200):
 
 
 async def get_klines_async(http, symbol, tf='5min', limit=200):
-    """نسخه‌ی async - همان ترتیب اولویت get_klines (اول KuCoin، بعد CoinEx به‌عنوان
+    """نسخه‌ی async - همان ترتیب اولویت get_klines (اول KuCoin Futures، بعد CoinEx به‌عنوان
     fallback با timeout کوتاه‌تر ۴ثانیه‌ای، نه ۷ثانیه‌ی مشترک قبلی)."""
     period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
     with DATA_LOCK:
@@ -974,7 +999,7 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
     await ASYNC_SEMAPHORE.acquire()
     try:
         sources = [
-            (f'{KUCOIN_PUBLIC}/market/candles', {'symbol':f'{symbol}-USDT','type':period}, None),
+            (f'{KUCOIN_PUBLIC}/kline/query', _kucoin_futures_kline_params(symbol,tf,limit), None),
             (f'{COINEX_PUBLIC}/futures/kline', {'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, aiohttp.ClientTimeout(total=4)),
         ]
         for base, params, timeout in sources:
@@ -986,8 +1011,7 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
                     p=await r.json()
                     good = p.get('code')==0 if 'coinex.com' in base else p.get('code')=='200000'
                     if not good: continue
-                    df=normalize_klines(p.get('data')) if 'coinex.com' in base else pd.DataFrame(p.get('data') or [], columns=['timestamp','open','close','high','low','volume','turnover']).iloc[::-1].reset_index(drop=True)
-                    for c in ['timestamp','open','close','high','low','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
+                    df=normalize_klines(p.get('data')) if 'coinex.com' in base else _kucoin_futures_kline_df(p.get('data') or [])
                     if len(df)>=60:
                         with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
                         return df
@@ -998,15 +1022,16 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
 
 def latest_price(symbol):
     """قیمت لحظه‌ای عمومی برای PAPER/عملیات غیرمرتبط با اکانت صرافی خاص.
-    اول KuCoin امتحان می‌شود (همان دلیل get_klines: CoinEx در حال تعطیلی تدریجی است و
+    اول KuCoin Futures امتحان می‌شود (همان دلیل get_klines: CoinEx در حال تعطیلی تدریجی است و
     ممکن است به‌جای خطای سریع فقط معطل بماند)، و CoinEx فقط به‌عنوان fallback با
-    timeout کوتاه‌تر باقی مانده."""
+    timeout کوتاه‌تر باقی مانده. از تیکر فیوچرز استفاده می‌شود (نه اسپات) تا با قیمت
+    پرپچوالی که معامله‌ی واقعی روی آن انجام می‌شود هم‌خوان بماند."""
     key=symbol.upper(); now=time.time()
     with DATA_LOCK:
         c=PRICE_CACHE.get(key)
         if c and now-c['ts']<5: return c['price']
     try:
-        r=requests.get(f'{KUCOIN_PUBLIC}/market/orderbook/level1', params={'symbol':f'{symbol.upper()}-USDT'}, timeout=5)
+        r=requests.get(f'{KUCOIN_PUBLIC}/ticker', params={'symbol':kucoin_futures_symbol(symbol)}, timeout=5)
         if r.ok and r.json().get('code')=='200000':
             item=r.json().get('data') or {}
             price=float(item.get('price') or 0)
