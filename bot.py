@@ -250,7 +250,16 @@ SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
 COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = 'https://api-futures.kucoin.com/api/v1'  # فیوچرز پرپچوال (نه اسپات) - هم‌جنس با CoinEx swap
-KUCOIN_GRANULARITY_MAP = {'5min':5,'15min':15,'1hour':60,'4hour':240,'1day':1440}  # دقیقه، برای /kline/query
+KUCOIN_GRANULARITY_MAP = {'1min':1,'5min':5,'15min':15,'30min':30,'1hour':60,'4hour':240,'1day':1440,'1week':10080}  # دقیقه، برای /kline/query (ماهانه پشتیبانی نمی‌شود)
+# منابع داده‌ی بازار (V19): CoinEx بسته شد، پس داده از Binance/Bybit/KuCoin Futures می‌آید.
+BINANCE_FAPI = os.environ.get('BINANCE_FAPI_URL', 'https://fapi.binance.com').rstrip('/')
+BYBIT_PUBLIC = os.environ.get('BYBIT_PUBLIC_URL', 'https://api.bybit.com').rstrip('/')
+MARKET_DATA_SOURCES = [x.strip().lower() for x in os.environ.get('MARKET_DATA_SOURCES', 'binance,bybit,kucoin').split(',') if x.strip().lower() in ('binance', 'bybit', 'kucoin')] or ['binance', 'bybit', 'kucoin']
+SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOWN_SECONDS', '60')))   # مدت کنارگذاشتن منبعِ بلاک/rate-limit/خراب
+SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
+BINANCE_SYMBOLS_TTL = 6 * 3600
+BINANCE_INTERVAL_MAP = {'1min':'1m','5min':'5m','15min':'15m','30min':'30m','1hour':'1h','4hour':'4h','1day':'1d','1week':'1w','1month':'1M'}
+BYBIT_INTERVAL_MAP = {'1min':'1','5min':'5','15min':'15','30min':'30','1hour':'60','4hour':'240','1day':'D','1week':'W','1month':'M'}
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
@@ -938,117 +947,283 @@ def normalize_klines(data):
     return df.dropna(subset=['open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
 
 
+def _base_asset(symbol):
+    return str(symbol).upper().replace('USDT', '').replace('/', '')
+
+
+# --- منابع داده‌ی بازار (فقط داده‌ی عمومی، بدون API key؛ مخصوص PAPER و اسکن) ----------------
+# ترتیب پیش‌فرض: Binance USDⓈ-M Futures -> Bybit (linear) -> KuCoin Futures. CoinEx حذف شد
+# چون بازار فیوچرزش از ۱۵ سپتامبر ۲۰۲۶ فقط-کاهشی و از ۲۲ سپتامبر کاملاً متوقف است.
+# با MARKET_DATA_SOURCES (مثلاً "bybit,binance") می‌شود ترتیب/لیست را عوض کرد.
+_SOURCE_DOWN_UNTIL = {}
+_SOURCE_FAILS = {}
+_SYMBOL_MISS_UNTIL = {}
+_BINANCE_SYMBOLS = {'map': {}, 'ts': 0.0, 'next_try': 0.0}
+_BINANCE_REFRESH_LOCK = RLock()
+
+
+def _source_available(source):
+    return time.time() >= _SOURCE_DOWN_UNTIL.get(source, 0.0)
+
+
+def _source_trip(source, seconds=None):
+    seconds = SOURCE_COOLDOWN_SECONDS if seconds is None else seconds
+    _SOURCE_DOWN_UNTIL[source] = time.time() + seconds
+    _SOURCE_FAILS[source] = 0
+    logger.warning('market data source %s temporarily disabled for %ss', source, seconds)
+
+
+def _source_fail(source):
+    """شکست‌های شبکه‌ای پیاپی؛ بعد از ۳ بار پشت‌سرهم منبع موقتاً کنار گذاشته می‌شود."""
+    _SOURCE_FAILS[source] = _SOURCE_FAILS.get(source, 0) + 1
+    if _SOURCE_FAILS[source] >= 3:
+        _source_trip(source)
+
+
+def _source_ok(source):
+    _SOURCE_FAILS[source] = 0
+
+
+def _status_trips_source(status):
+    # 403/451: بلاک جغرافیایی، 418/429: rate limit، 5xx: خرابی سرور
+    return status in (403, 418, 429, 451) or status >= 500
+
+
+def _symbol_missing(source, base):
+    return time.time() < _SYMBOL_MISS_UNTIL.get((source, base), 0.0)
+
+
+def _mark_symbol_missing(source, base):
+    _SYMBOL_MISS_UNTIL[(source, base)] = time.time() + SYMBOL_MISS_TTL_SECONDS
+
+
+def _parse_binance_exchange_info(payload):
+    """نقشه‌ی {نام پایه -> نماد فیوچرز باینانس}؛ نمادهای 1000PEPE/1000SHIB/... هم با نام ساده (PEPE/SHIB) پیدا می‌شوند."""
+    exact, alias = {}, {}
+    for s in (payload or {}).get('symbols') or []:
+        if s.get('contractType') != 'PERPETUAL' or s.get('quoteAsset') != 'USDT' or s.get('status') != 'TRADING':
+            continue
+        base = str(s.get('baseAsset', '')).upper(); sym = s.get('symbol')
+        if not base or not sym:
+            continue
+        exact[base] = sym
+        stripped = re.sub(r'^(1000000|1000)', '', base)
+        if stripped and stripped != base:
+            alias[stripped] = sym
+    return {**alias, **exact}
+
+
+def _binance_map_needs_refresh():
+    now = time.time()
+    m = _BINANCE_SYMBOLS
+    return now >= m['next_try'] and (not m['map'] or now - m['ts'] >= BINANCE_SYMBOLS_TTL)
+
+
+def _binance_refresh_symbol_map():
+    with _BINANCE_REFRESH_LOCK:
+        if not _binance_map_needs_refresh():
+            return
+        try:
+            r = requests.get(f'{BINANCE_FAPI}/fapi/v1/exchangeInfo', timeout=10)
+            if _status_trips_source(r.status_code):
+                _source_trip('binance')
+            elif r.ok:
+                parsed = _parse_binance_exchange_info(r.json())
+                if parsed:
+                    _BINANCE_SYMBOLS.update(map=parsed, ts=time.time(), next_try=0.0)
+                    _source_ok('binance')
+                    return
+            _BINANCE_SYMBOLS['next_try'] = time.time() + 60
+        except Exception as exc:
+            logger.debug('binance exchangeInfo: %s', exc)
+            _source_fail('binance')
+            _BINANCE_SYMBOLS['next_try'] = time.time() + 60
+
+
+def _binance_symbol_from_cache(base):
+    m = _BINANCE_SYMBOLS['map']
+    if m:
+        return m.get(base)          # None = روی فیوچرز باینانس لیست نیست
+    return f'{base}USDT'            # exchangeInfo در دسترس نبود: حدس ساده
+
+
 def _kucoin_futures_kline_params(symbol, tf, limit):
-    """پارامترهای /kline/query فیوچرز کوکوین. from/to اجباری نیستند ولی برای گرفتن
-    تعداد کندل کافی (حداکثر ۵۰۰ در هر درخواست طبق مستندات) باید بازه‌ی زمانی داد."""
-    granularity=KUCOIN_GRANULARITY_MAP.get(tf, 5)
-    now_ms=int(time.time()*1000)
-    span_ms=granularity*60_000*min(max(limit,60)+10, 500)
-    return {'symbol':kucoin_futures_symbol(symbol),'granularity':granularity,'from':now_ms-span_ms,'to':now_ms}
+    """پارامترهای /kline/query فیوچرز کوکوین (حداکثر ۵۰۰ کندل در هر درخواست)."""
+    granularity = KUCOIN_GRANULARITY_MAP.get(tf, 5)
+    now_ms = int(time.time() * 1000)
+    span_ms = granularity * 60_000 * min(max(limit, 60) + 10, 500)
+    return {'symbol': kucoin_futures_symbol(symbol), 'granularity': granularity, 'from': now_ms - span_ms, 'to': now_ms}
 
 
 def _kucoin_futures_kline_df(rows):
-    """رَدیف‌های فیوچرز کوکوین به ترتیب [time, open, high, low, close, volume] هستند
-    (برخلاف اسپات که [time, open, close, high, low, volume, turnover] بود) و از قبل
-    صعودی (قدیم به جدید) مرتب‌اند - نیازی به reverse نیست."""
+    """ردیف‌های [time, open, high, low, close, volume] (قدیم به جدید یا برعکس) -> DataFrame مرتب‌شده‌ی صعودی."""
     if not rows: return pd.DataFrame()
-    df=pd.DataFrame(rows, columns=['timestamp','open','high','low','close','volume'])
-    for c in ['timestamp','open','high','low','close','volume']: df[c]=pd.to_numeric(df[c],errors='coerce')
-    return df.dropna(subset=['open','high','low','close']).sort_values('timestamp').reset_index(drop=True)
+    df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    for c in ['timestamp', 'open', 'high', 'low', 'close', 'volume']: df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df.dropna(subset=['open', 'high', 'low', 'close']).sort_values('timestamp').reset_index(drop=True)
+
+
+def _binance_kline_df(payload):
+    if not isinstance(payload, list) or not payload: return pd.DataFrame()
+    return _kucoin_futures_kline_df([row[:6] for row in payload if isinstance(row, (list, tuple)) and len(row) >= 6])
+
+
+def _bybit_kline_df(payload):
+    if not isinstance(payload, dict) or payload.get('retCode') != 0: return pd.DataFrame()
+    rows = ((payload.get('result') or {}).get('list')) or []   # جدید به قدیم؛ در _kucoin_futures_kline_df مرتب می‌شود
+    return _kucoin_futures_kline_df([r[:6] for r in rows if isinstance(r, (list, tuple)) and len(r) >= 6])
+
+
+def _kucoin_payload_df(payload):
+    if not isinstance(payload, dict) or payload.get('code') != '200000': return pd.DataFrame()
+    return _kucoin_futures_kline_df(payload.get('data') or [])
+
+
+def _klines_usable(df, min_rows=60):
+    """داده‌ی خراب/مرده را رد می‌کند تا به منبع بعدی برود: کم‌بودن کندل، high<low، یا ۳۰ کندل آخر بدون هیچ دامنه‌ای."""
+    if df is None or len(df) < min_rows: return False
+    tail = df.tail(30)
+    if (tail['high'] < tail['low']).any(): return False
+    if ((tail['high'] - tail['low']) <= 0).all(): return False
+    return True
+
+
+def _kline_request(source, symbol, tf, limit):
+    """(url, params, parser) یا None اگر این منبع آن تایم‌فریم/نماد را ندارد."""
+    base = _base_asset(symbol)
+    if source == 'binance':
+        interval = BINANCE_INTERVAL_MAP.get(tf); sym = _binance_symbol_from_cache(base)
+        if not interval or not sym: return None
+        return (f'{BINANCE_FAPI}/fapi/v1/klines',
+                {'symbol': sym, 'interval': interval, 'limit': min(max(int(limit), 60), 1500)}, _binance_kline_df)
+    if source == 'bybit':
+        interval = BYBIT_INTERVAL_MAP.get(tf)
+        if not interval: return None
+        return (f'{BYBIT_PUBLIC}/v5/market/kline',
+                {'category': 'linear', 'symbol': f'{base}USDT', 'interval': interval, 'limit': min(max(int(limit), 60), 1000)}, _bybit_kline_df)
+    if source == 'kucoin':
+        if tf not in KUCOIN_GRANULARITY_MAP: return None
+        return (f'{KUCOIN_PUBLIC}/kline/query', _kucoin_futures_kline_params(symbol, tf, limit), _kucoin_payload_df)
+    return None
+
+
+def _price_from_payload(source, payload):
+    try:
+        if source == 'binance':
+            return float(payload['price']) if isinstance(payload, dict) and 'price' in payload else None
+        if source == 'bybit':
+            if not isinstance(payload, dict) or payload.get('retCode') != 0: return None
+            lst = (payload.get('result') or {}).get('list') or []
+            return float(lst[0]['lastPrice']) if lst else None
+        if source == 'kucoin':
+            if not isinstance(payload, dict) or payload.get('code') != '200000': return None
+            return float((payload.get('data') or {}).get('price') or 0) or None
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return None
+
+
+def _price_request(source, symbol):
+    base = _base_asset(symbol)
+    if source == 'binance':
+        sym = _binance_symbol_from_cache(base)
+        return (f'{BINANCE_FAPI}/fapi/v1/ticker/price', {'symbol': sym}) if sym else None
+    if source == 'bybit':
+        return (f'{BYBIT_PUBLIC}/v5/market/tickers', {'category': 'linear', 'symbol': f'{base}USDT'})
+    if source == 'kucoin':
+        return (f'{KUCOIN_PUBLIC}/ticker', {'symbol': kucoin_futures_symbol(symbol)})
+    return None
 
 
 def get_klines(symbol, tf='5min', limit=200):
-    """کندل‌ها را می‌گیرد. اول KuCoin Futures امتحان می‌شود (چون CoinEx در حال تعطیلی تدریجی
-    است و ممکن است به‌جای خطای سریع، فقط تا سررسید timeout معطل بماند - آزمایش کردن اول
-    CoinEx یعنی این تأخیر روی *هر* درخواست تحمیل می‌شود)؛ CoinEx فقط به‌عنوان fallback
-    و با timeout کوتاه‌تر باقی مانده، برای نمادی که احتمالاً روی KuCoin نیست.
-    نکته: از KuCoin Futures (api-futures.kucoin.com) استفاده می‌شود نه اسپات، چون معامله‌ی
-    واقعی هم روی فیوچرز/پرپچوال CoinEx انجام می‌شود و قیمت اسپات می‌تواند از پرپچوال فاصله بگیرد."""
-    period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
+    """کندل‌ها را از اولین منبع سالم می‌گیرد (Binance Futures -> Bybit -> KuCoin Futures).
+    آخرین ردیف کندلِ در حال تشکیل است (استراتژی از iloc[-2] استفاده می‌کند)."""
+    period = TIMEFRAME_MAP.get(tf, tf); key = f'{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
-        c=DATA_CACHE.get(key)
-        if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
-    try:
-        r=requests.get(f'{KUCOIN_PUBLIC}/kline/query', params=_kucoin_futures_kline_params(symbol,tf,limit), timeout=7)
-        if r.ok and r.json().get('code')=='200000':
-            df=_kucoin_futures_kline_df(r.json().get('data') or [])
-            if len(df)>=60:
-                with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
-                return df
-    except Exception as exc: logger.debug('KuCoin kline %s: %s', symbol, exc)
-    try:
-        r=requests.get(f'{COINEX_PUBLIC}/futures/kline', params={'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, timeout=4)
-        if r.ok:
-            p=r.json()
-            if p.get('code')==0:
-                df=normalize_klines(p.get('data'))
-                if len(df)>=60:
-                    with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
-                    return df
-    except Exception as exc: logger.debug('CoinEx kline %s: %s', symbol, exc)
+        c = DATA_CACHE.get(key)
+        if c and now - c['ts'] < DATA_CACHE_SECONDS: return c['df'].copy()
+    base = _base_asset(symbol)
+    for source in MARKET_DATA_SOURCES:
+        if not _source_available(source) or _symbol_missing(source, base): continue
+        if source == 'binance' and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
+        req = _kline_request(source, symbol, tf, limit)
+        if not req: continue
+        url, params, parse = req
+        try:
+            r = requests.get(url, params=params, timeout=7)
+            if _status_trips_source(r.status_code):
+                _source_trip(source); continue
+            df = parse(r.json()) if r.ok else pd.DataFrame()
+            _source_ok(source)
+        except Exception as exc:
+            logger.debug('%s kline %s: %s', source, symbol, exc); _source_fail(source); continue
+        if _klines_usable(df):
+            df = df.tail(max(int(limit), 60)).reset_index(drop=True)
+            with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
+            return df
+        _mark_symbol_missing(source, base)
     return pd.DataFrame()
 
 
 async def get_klines_async(http, symbol, tf='5min', limit=200):
-    """نسخه‌ی async - همان ترتیب اولویت get_klines (اول KuCoin Futures، بعد CoinEx به‌عنوان
-    fallback با timeout کوتاه‌تر ۴ثانیه‌ای، نه ۷ثانیه‌ی مشترک قبلی)."""
-    period=TIMEFRAME_MAP.get(tf,tf); key=f'{symbol}:{period}:{limit}'; now=time.time()
+    """نسخه‌ی async با همان ترتیب منابع get_klines."""
+    period = TIMEFRAME_MAP.get(tf, tf); key = f'{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
-        c=DATA_CACHE.get(key)
-        if c and now-c['ts']<DATA_CACHE_SECONDS: return c['df'].copy()
+        c = DATA_CACHE.get(key)
+        if c and now - c['ts'] < DATA_CACHE_SECONDS: return c['df'].copy()
+    base = _base_asset(symbol)
+    if 'binance' in MARKET_DATA_SOURCES and _source_available('binance') and _binance_map_needs_refresh():
+        try: await asyncio.to_thread(_binance_refresh_symbol_map)   # درخواست sync را از event loop دور نگه می‌دارد
+        except Exception as exc: logger.debug('binance symbol map refresh: %s', exc)
     await ASYNC_SEMAPHORE.acquire()
     try:
-        sources = [
-            (f'{KUCOIN_PUBLIC}/kline/query', _kucoin_futures_kline_params(symbol,tf,limit), None),
-            (f'{COINEX_PUBLIC}/futures/kline', {'market':market_name(symbol),'period':period,'limit':min(limit,1000)}, aiohttp.ClientTimeout(total=4)),
-        ]
-        for base, params, timeout in sources:
+        for source in MARKET_DATA_SOURCES:
+            if not _source_available(source) or _symbol_missing(source, base): continue
+            req = _kline_request(source, symbol, tf, limit)
+            if not req: continue
+            url, params, parse = req
             try:
-                req_kwargs = {'params': params}
-                if timeout is not None: req_kwargs['timeout'] = timeout
-                async with http.get(base, **req_kwargs) as r:
-                    if r.status != 200: continue
-                    p=await r.json()
-                    good = p.get('code')==0 if 'coinex.com' in base else p.get('code')=='200000'
-                    if not good: continue
-                    df=normalize_klines(p.get('data')) if 'coinex.com' in base else _kucoin_futures_kline_df(p.get('data') or [])
-                    if len(df)>=60:
-                        with DATA_LOCK: DATA_CACHE[key]={'ts':now,'df':df.copy()}
-                        return df
-            except Exception as exc: logger.debug('async market data %s: %s',symbol,exc)
+                async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=7)) as r:
+                    if _status_trips_source(r.status):
+                        _source_trip(source); continue
+                    df = parse(await r.json(content_type=None)) if r.status == 200 else pd.DataFrame()
+                _source_ok(source)
+            except Exception as exc:
+                logger.debug('async %s kline %s: %s', source, symbol, exc); _source_fail(source); continue
+            if _klines_usable(df):
+                df = df.tail(max(int(limit), 60)).reset_index(drop=True)
+                with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
+                return df
+            _mark_symbol_missing(source, base)
     finally: ASYNC_SEMAPHORE.release()
     return pd.DataFrame()
 
 
 def latest_price(symbol):
-    """قیمت لحظه‌ای عمومی برای PAPER/عملیات غیرمرتبط با اکانت صرافی خاص.
-    اول KuCoin Futures امتحان می‌شود (همان دلیل get_klines: CoinEx در حال تعطیلی تدریجی است و
-    ممکن است به‌جای خطای سریع فقط معطل بماند)، و CoinEx فقط به‌عنوان fallback با
-    timeout کوتاه‌تر باقی مانده. از تیکر فیوچرز استفاده می‌شود (نه اسپات) تا با قیمت
-    پرپچوالی که معامله‌ی واقعی روی آن انجام می‌شود هم‌خوان بماند."""
-    key=symbol.upper(); now=time.time()
+    """قیمت لحظه‌ای عمومی برای PAPER (از همان منبعی که کندل‌ها می‌آیند: Binance -> Bybit -> KuCoin)."""
+    key = symbol.upper(); now = time.time()
     with DATA_LOCK:
-        c=PRICE_CACHE.get(key)
-        if c and now-c['ts']<5: return c['price']
-    try:
-        r=requests.get(f'{KUCOIN_PUBLIC}/ticker', params={'symbol':kucoin_futures_symbol(symbol)}, timeout=5)
-        if r.ok and r.json().get('code')=='200000':
-            item=r.json().get('data') or {}
-            price=float(item.get('price') or 0)
-            if price>0:
-                with DATA_LOCK: PRICE_CACHE[key]={'ts':now,'price':price}
-                return price
-    except Exception as exc: logger.debug('price kucoin %s: %s',symbol,exc)
-    try:
-        r=requests.get(f'{COINEX_PUBLIC}/futures/ticker', params={'market':market_name(symbol)}, timeout=3)
-        if r.ok and r.json().get('code')==0:
-            data=r.json().get('data')
-            item=data[0] if isinstance(data,list) else data
-            price=float(item.get('last') or item.get('mark_price'))
-            if price>0:
-                with DATA_LOCK: PRICE_CACHE[key]={'ts':now,'price':price}
-                return price
-    except Exception as exc: logger.debug('price coinex %s: %s',symbol,exc)
+        c = PRICE_CACHE.get(key)
+        if c and now - c['ts'] < 5: return c['price']
+    base = _base_asset(symbol)
+    for source in MARKET_DATA_SOURCES:
+        if not _source_available(source) or _symbol_missing(source, base): continue
+        if source == 'binance' and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
+        req = _price_request(source, symbol)
+        if not req: continue
+        url, params = req
+        try:
+            r = requests.get(url, params=params, timeout=5)
+            if _status_trips_source(r.status_code):
+                _source_trip(source); continue
+            price = _price_from_payload(source, r.json()) if r.ok else None
+            _source_ok(source)
+        except Exception as exc:
+            logger.debug('price %s %s: %s', source, symbol, exc); _source_fail(source); continue
+        if price and price > 0:
+            with DATA_LOCK: PRICE_CACHE[key] = {'ts': now, 'price': price}
+            return price
+        _mark_symbol_missing(source, base)
     return None
 
 
