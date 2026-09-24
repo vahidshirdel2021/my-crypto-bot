@@ -264,6 +264,9 @@ SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOW
 SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
 BINANCE_SYMBOLS_TTL = 6 * 3600
 WATCHLIST_AUTO_PRUNE = os.environ.get('WATCHLIST_AUTO_PRUNE', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+# لینک TradingView همیشه *اسپات* است (بدون .P). صرافی: همانی که داده‌ی آن نماد از آن آمده؛ با TRADINGVIEW_EXCHANGE می‌شود اجبارش کرد.
+TRADINGVIEW_EXCHANGE = os.environ.get('TRADINGVIEW_EXCHANGE', '').strip().upper()
+TV_EXCHANGE_MAP = {'binance': 'BINANCE', 'binancevision': 'BINANCE', 'bybit': 'BYBIT', 'kucoin': 'KUCOIN'}
 BINANCE_INTERVAL_MAP = {'1min':'1m','5min':'5m','15min':'15m','30min':'30m','1hour':'1h','4hour':'4h','1day':'1d','1week':'1w','1month':'1M'}
 BYBIT_INTERVAL_MAP = {'1min':'1','5min':'5','15min':'15','30min':'30','1hour':'60','4hour':'240','1day':'D','1week':'W','1month':'M'}
 KUCOIN_TYPE_MAP = {'1min':'1min','5min':'5min','15min':'15min','30min':'30min','1hour':'1hour','4hour':'4hour','1day':'1day','1week':'1week','1month':'1month'}
@@ -965,6 +968,7 @@ def _base_asset(symbol):
 _SOURCE_DOWN_UNTIL = {}
 _SOURCE_FAILS = {}
 _SYMBOL_MISS_UNTIL = {}
+_DATA_SOURCE_USED = {}      # base -> منبعی که آخرین کندل موفق از آن آمد (برای لینک TradingView)
 _DATA_NOTES = {}            # base -> آخرین دلایل شکست به تفکیک منبع (در گزارش «داده بازار خالی» می‌آید)
 _BINANCE_SYMBOLS = {'map': {}, 'ts': 0.0, 'next_try': 0.0}
 _BINANCE_REFRESH_LOCK = RLock()
@@ -1189,7 +1193,7 @@ def get_klines(symbol, tf='5min', limit=200):
         if _klines_usable(df):
             df = df.tail(max(int(limit), 60)).reset_index(drop=True)
             with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
-            _DATA_NOTES.pop(base, None)
+            _DATA_NOTES.pop(base, None); _DATA_SOURCE_USED[base] = source
             return df
         notes.append(_fail_note(source, r.status_code, payload) if len(df) < 60 or df.empty else f'{source}:bad_data')
         _mark_symbol_missing(source, base)
@@ -1228,7 +1232,7 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
             if _klines_usable(df):
                 df = df.tail(max(int(limit), 60)).reset_index(drop=True)
                 with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
-                _DATA_NOTES.pop(base, None)
+                _DATA_NOTES.pop(base, None); _DATA_SOURCE_USED[base] = source
                 return df
             notes.append(_fail_note(source, status, payload) if len(df) < 60 or df.empty else f'{source}:bad_data')
             _mark_symbol_missing(source, base)
@@ -1676,17 +1680,23 @@ def expected_trade_metrics(trade):
 TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1day': 'D'}
 
 
+def tradingview_symbol(symbol):
+    """نماد *اسپات* برای TradingView، مثلاً BINANCE:FILUSDT (بدون .P پرپچوال).
+    صرافی = منبعی که داده‌ی همین نماد از آن آمده (Binance/Bybit/KuCoin)؛ پیش‌فرض BINANCE."""
+    base = _base_asset(symbol)
+    exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(_DATA_SOURCE_USED.get(base, ''), 'BINANCE')
+    return f'{exchange}:{base}USDT'
+
+
 def tradingview_chart_url(symbol, timeframe='5min'):
     """
-    لینک چارت TradingView برای نماد/تایم‌فریم فعال می‌سازد (نماد پرپچوال روی CoinEx،
-    همان صرافی‌ای که ربات معامله می‌کند: COINEX:{SYMBOL}USDT.P).
+    لینک چارت TradingView برای نماد/تایم‌فریم فعال (بازار اسپات، هم‌جنس با داده‌ی اسکنر).
     این یک لینک معمولی tradingview.com است؛ تلگرام و سیستم‌عامل موبایل به‌صورت خودکار
     اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
     وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
     """
-    sym = symbol.upper().replace('USDT', '').replace('/', '')
     interval = TV_INTERVAL_MAP.get(timeframe, '15')
-    tv_symbol = urlparse.quote(f'COINEX:{sym}USDT.P', safe='')
+    tv_symbol = urlparse.quote(tradingview_symbol(symbol), safe='')
     return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
 
 
