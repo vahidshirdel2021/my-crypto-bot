@@ -6,7 +6,7 @@
     python check_market_data.py            # BTC و SOL
     python check_market_data.py ETH XRP    # نمادهای دلخواه
 
-برای هر منبع (Binance Futures / Bybit / KuCoin Futures) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
+برای هر منبع *اسپات* (Binance / آینه‌ی Binance Vision / Bybit / KuCoin) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
 و مقدار ATRx (نسبت ATR کندل آخرِ بسته‌شده به میانه‌ی ATRهای قبل؛ در حالت سالم حدود ۱ است) را چاپ می‌کند.
 """
 import sys
@@ -27,34 +27,39 @@ def _df(rows):
     return df.dropna(subset=["open", "high", "low", "close"]).sort_values("timestamp").reset_index(drop=True)
 
 
-def binance(base):
-    r = requests.get("https://fapi.binance.com/fapi/v1/klines",
+def binance(base, host="https://api.binance.com"):
+    r = requests.get(f"{host}/api/v3/klines",
                      params={"symbol": f"{base}USDT", "interval": "5m", "limit": 650}, timeout=TIMEOUT)
-    return r.status_code, (_df(r.json()) if r.ok and isinstance(r.json(), list) else None), r.text[:120]
+    j = r.json() if r.ok else None
+    return r.status_code, (_df(j) if isinstance(j, list) and j else None), r.text[:120]
+
+
+def binance_vision(base):
+    return binance(base, "https://data-api.binance.vision")
 
 
 def bybit(base):
     r = requests.get("https://api.bybit.com/v5/market/kline",
-                     params={"category": "linear", "symbol": f"{base}USDT", "interval": "5", "limit": 650}, timeout=TIMEOUT)
+                     params={"category": "spot", "symbol": f"{base}USDT", "interval": "5", "limit": 650}, timeout=TIMEOUT)
     j = r.json() if r.ok else {}
     rows = (j.get("result") or {}).get("list") or []
     return r.status_code, (_df(rows) if j.get("retCode") == 0 and rows else None), r.text[:120]
 
 
 def kucoin(base):
-    sym = ("XBT" if base == "BTC" else base) + "USDTM"
-    now = int(time.time() * 1000)
-    r = requests.get("https://api-futures.kucoin.com/api/v1/kline/query",
-                     params={"symbol": sym, "granularity": 5, "from": now - 500 * 300000, "to": now}, timeout=TIMEOUT)
+    now = int(time.time())
+    r = requests.get("https://api.kucoin.com/api/v1/market/candles",
+                     params={"symbol": f"{base}-USDT", "type": "5min", "startAt": now - 300 * 510, "endAt": now}, timeout=TIMEOUT)
     j = r.json() if r.ok else {}
-    rows = j.get("data") or []
+    # KuCoin Spot: [time(sec), open, close, high, low, volume, turnover]، جدید به قدیم
+    rows = [[int(float(x[0])) * 1000, x[1], x[3], x[4], x[2], x[5]] for x in (j.get("data") or []) if len(x) >= 6]
     return r.status_code, (_df(rows) if j.get("code") == "200000" and rows else None), r.text[:120]
 
 
 def main(symbols):
     for base in symbols:
         print(f"\n===== {base} =====")
-        for name, fn in (("binance", binance), ("bybit", bybit), ("kucoin", kucoin)):
+        for name, fn in (("binance-spot", binance), ("binance-vision", binance_vision), ("bybit-spot", bybit), ("kucoin-spot", kucoin)):
             try:
                 status, df, body = fn(base)
             except Exception as exc:
