@@ -1999,13 +1999,25 @@ def _signal_channel_implied_side(pattern, side_fa):
     return None
 
 
+def _signal_channel_verdict(implied_side, buy_votes, sell_votes):
+    """حکم نهایی و کوتاه: 'BUY' / 'SELL' / None (معامله نکن).
+    اگر الگو جهتی پیشنهاد نمی‌دهد (implied_side=None، مثل touch)، فقط از رأی اندیکاتورها استفاده می‌شود.
+    اگر الگو جهتی پیشنهاد می‌دهد ولی اندیکاتورها اجماع ندارند یا خلاف آن رأی می‌دهند، حکم می‌شود «معامله نکن»."""
+    if buy_votes == sell_votes:
+        overall = None  # بدون رأی یا تساوی رأی‌ها: اجماعی نیست
+    else:
+        overall = 'BUY' if buy_votes > sell_votes else 'SELL'
+    if implied_side is None:
+        return overall
+    return implied_side if overall == implied_side else None
+
+
 def _signal_channel_indicator_summary(ind_row, implied_side):
-    """خلاصه‌ی ساده و خوانا از مهم‌ترین اندیکاتورها (RSI، MACD، ADX/DI و حجم) برای پیغام کانال،
-    به‌علاوه یک خط جمع‌بندی نهایی بر اساس اجماع (رأی‌گیری) بین این اندیکاتورها.
-    اگر جهتی که الگو پیشنهاد می‌دهد (implied_side) با اندیکاتور همخوانی نداشته باشد،
-    این ناهمخوانی صریحاً در متن اعلام می‌شود؛ در غیر این صورت فقط وضعیت اندیکاتور گفته می‌شود."""
+    """(lines, buy_votes, sell_votes) - خلاصه‌ی خوانای RSI/MACD/ADX/حجم برای پیغام کانال + رأی‌های
+    جهت‌دار هر اندیکاتور. رأی‌ها برای خط حکم بالای پیام (_signal_channel_verdict) هم استفاده می‌شوند.
+    اگر implied_side (جهت پیشنهادیِ الگو) با اندیکاتور همخوانی نداشته باشد، در متن اعلام می‌شود."""
     if ind_row is None:
-        return []
+        return [], 0, 0
     verb = {'BUY': 'خرید', 'SELL': 'فروش'}.get(implied_side)
     lines = []
     votes = []  # فقط اندیکاتورهایی که جهت‌دار هستند رأی می‌دهند (نه حجم)
@@ -2095,12 +2107,14 @@ def _signal_channel_indicator_summary(ind_row, implied_side):
                                    else f" — با معامله {verb} در تضاده")
         lines.append(f"🧠 جمع‌بندی: {consensus_txt}")
 
-    return lines
+    return lines, votes.count('BUY'), votes.count('SELL')
 
 
 def _signal_channel_pattern_label(pattern, side_fa):
     if pattern == 'breakout_retest':
-        return '🚀 نفوذ + پولبک + ادامه روند ' + ('صعودی' if side_fa == 'سقف' else 'نزولی')
+        # رنگ هم‌جنس با گیت بازار/رژیم نماد (🟢 صعودی، 🔴 نزولی)؛ قبلاً 🚀 بود که فقط برای صعودی معنی داشت.
+        dot = '🟢' if side_fa == 'سقف' else '🔴'
+        return dot + ' نفوذ + پولبک + ادامه روند ' + ('صعودی' if side_fa == 'سقف' else 'نزولی')
     if pattern == 'rejection':
         return '↩️ برخورد و برگشت به داخل (' + ('رد سقف' if side_fa == 'سقف' else 'رد کف') + ')'
     return _ALL_SIGNAL_CHANNEL_PATTERNS.get(pattern, pattern)
@@ -2120,8 +2134,13 @@ def _signal_channel_scan_once():
             defs = LEVEL_SETUP_DEFS.get(tag)
             level_label = (defs[2] if side_fa == 'سقف' else defs[3]) if defs else f'{side_fa} {tag}'
             regime_label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime)
+            implied_side = _signal_channel_implied_side(pattern, side_fa)
+            detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, implied_side)
+            verdict = _signal_channel_verdict(implied_side, buy_votes, sell_votes)
+            verdict_label = {'BUY': '🟢 مناسب خرید', 'SELL': '🔴 مناسب فروش'}.get(verdict, '⚪️ معامله نکن (سیگنال ضعیف/متضاد)')
             lines = [
                 f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
+                f"*{verdict_label}*",
                 "",
                 f"🎯 سطح: {level_label} `{fmt(level_value)}`",
                 f"🧩 الگو: {_signal_channel_pattern_label(pattern, side_fa)}",
@@ -2130,8 +2149,7 @@ def _signal_channel_scan_once():
                 lines.append(f"🧭 رژیم نماد: {regime_label}")
             if pattern == 'touch':
                 lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
-            implied_side = _signal_channel_implied_side(pattern, side_fa)
-            lines.extend(_signal_channel_indicator_summary(ind_row, implied_side))
+            lines.extend(detail_lines)
             text = "\n".join(lines)
             markup = {'inline_keyboard': [
                 [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)}],
@@ -4723,9 +4741,9 @@ def market_report(chat_id):
     bearish = sum(1 for x in results if x['score'] < 0)
     ranged = total - bullish - bearish
 
-    if bullish > bearish and bullish >= total * 0.5:
+    if bullish >= MARKET_GATE_MIN_SYMBOLS:
         overall = '📈 بازار در مجموع در این تایم‌فریم تمایل صعودی دارد.'
-    elif bearish > bullish and bearish >= total * 0.5:
+    elif bearish >= MARKET_GATE_MIN_SYMBOLS:
         overall = '📉 بازار در مجموع در این تایم‌فریم تمایل نزولی دارد.'
     else:
         overall = '➡️ بازار در مجموع در این تایم‌فریم رنج و بدون روند مشخص است.'
@@ -4762,15 +4780,19 @@ MARKET_DASHBOARD_TIMEFRAMES = [
 
 
 def _market_dashboard_line(tf_label, scores):
+    """همان آستانه‌ی گیت جهت بازار (MARKET_GATE_MIN_SYMBOLS از N)؛ عمداً هم‌جهت با
+    refresh_market_gate است تا برچسب داشبورد با «رژیم تایم‌فریم فعال» تناقض نداشته باشد
+    (قبلاً اکثریت ساده‌ی ۵۰٪ بود و مثلاً ۶ از ۱۰ را «صعودی» می‌گفت، ولی گیت با همان ۶ از ۱۰
+    چون به آستانه‌ی ۷ نمی‌رسید «رنج» اعلام می‌کرد)."""
     total = len(scores)
     if total == 0:
         return f"⏱ *{tf_label}*: داده کافی دریافت نشد."
     bullish = sum(1 for x in scores if x > 0)
     bearish = sum(1 for x in scores if x < 0)
     ranged = total - bullish - bearish
-    if bullish > bearish and bullish >= total * 0.5:
+    if bullish >= MARKET_GATE_MIN_SYMBOLS:
         overall = '📈 صعودی'
-    elif bearish > bullish and bearish >= total * 0.5:
+    elif bearish >= MARKET_GATE_MIN_SYMBOLS:
         overall = '📉 نزولی'
     else:
         overall = '➡️ رنج'
