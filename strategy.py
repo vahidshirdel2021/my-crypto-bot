@@ -374,20 +374,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def get_strategy_params(strategy_config=None):
-    # توجه: این تابع فقط بر اساس strategy_config کار می‌کند (که خودش قبلاً بر اساس
-    # تایم‌فریم واقعی جلسه، در get_timeframe_preset ساخته شده)؛ به همین دلیل دیگر
-    # آرگومان جداگانه‌ی timeframe نمی‌گیرد تا در فراخوانی‌ها گمراه‌کننده نباشد.
-    c = _cfg(strategy_config)
-    return {
-        "adx": float(c.get("min_adx", 20.0)),
-        "sl": float(c.get("sl_multiplier", 1.5)),
-        "tp": float(c.get("tp_multiplier", 2.0)),
-        "volume_ratio": float(c.get("min_volume_ratio", 1.05)),
-        "body_ratio": float(c.get("min_body_ratio", 0.45)),
-    }
-
-
 def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
@@ -1875,146 +1861,11 @@ def evaluate_trend_weakness(df, side, strategy_config=None):
     return is_weak, int(round(score)), reasons
 
 
-def check_volume(df, index=-2, filters=None, minimum_ratio=1.0):
-    f = _flt(filters)
-    if not f.get("volume_filter", True):
-        return True, "فیلتر حجم خاموش است"
-    if "volume_ratio" not in df.columns:
-        return True, "داده حجم در دسترس نیست"
-    ratio = _safe_float(df.iloc[index].get("volume_ratio"), 0)
-    if ratio < minimum_ratio:
-        return False, f"حجم کم است ({ratio:.2f}x)"
-    return True, f"حجم تأیید شد ({ratio:.2f}x)"
-
-
-def check_candlestick_confirmation(df, filters=None, strategy_config=None):
-    f = _flt(filters)
-    curr = df.iloc[-2]
-    prev = df.iloc[-3]
-    min_ratio = float(_cfg(strategy_config).get("min_volume_ratio", 1.0)) if strategy_config else 1.0
-    vol_ok, vol_reason = check_volume(df, -2, f, min_ratio)
-    if not vol_ok:
-        return None, vol_reason
-    if not f.get("candlestick_filter", True):
-        return "CONFIRMED", "فیلتر کندلی خاموش است"
-
-    body = _safe_float(curr["candle_body"], abs(curr["close"] - curr["open"]))
-    rng = max(_safe_float(curr["candle_range"], curr["high"] - curr["low"]), 1e-12)
-    upper = curr["high"] - max(curr["close"], curr["open"])
-    lower = min(curr["close"], curr["open"]) - curr["low"]
-    bullish_pin = lower >= 2 * max(body, 1e-12) and upper <= max(body * 1.2, 1e-12) and curr["close"] > curr["open"]
-    bearish_pin = upper >= 2 * max(body, 1e-12) and lower <= max(body * 1.2, 1e-12) and curr["close"] < curr["open"]
-    prev_body = abs(prev["close"] - prev["open"])
-    bull_engulf = prev["close"] < prev["open"] and curr["close"] > curr["open"] and curr["close"] >= prev["open"] and curr["open"] <= prev["close"] and body > prev_body
-    bear_engulf = prev["close"] > prev["open"] and curr["close"] < curr["open"] and curr["close"] <= prev["open"] and curr["open"] >= prev["close"] and body > prev_body
-    strong_bull = curr["close"] > curr["open"] and body / rng >= 0.60
-    strong_bear = curr["close"] < curr["open"] and body / rng >= 0.60
-
-    if bullish_pin or strong_bull:
-        name = "پین‌بار صعودی" if bullish_pin else "کندل صعودی قدرتمند"
-        return "BUY_CONFIRMED", name
-    if bearish_pin or strong_bear:
-        name = "پین‌بار نزولی" if bearish_pin else "کندل نزولی قدرتمند"
-        return "SELL_CONFIRMED", name
-    return None, "کندل تأیید معتبر نبود"
-
-
-def strategy_trend_following(df, timeframe="5min", filters=None, strategy_config=None):
-    curr, prev = df.iloc[-2], df.iloc[-3]
-    p = get_strategy_params(strategy_config)
-    adx, atr = _safe_float(curr.get("adx")), _safe_float(curr.get("atr"))
-    if atr <= 0 or adx < p["adx"]:
-        return None, f"روند ضعیف است (ADX={adx:.1f})"
-    up = curr["close"] > curr["ema50"] and curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
-    down = curr["close"] < curr["ema50"] and curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    ema = _safe_float(prev["ema20"])
-    touch_buy = prev["low"] <= ema + atr * 0.25 and prev["high"] >= ema - atr * 0.5
-    touch_sell = prev["high"] >= ema - atr * 0.25 and prev["low"] <= ema + atr * 0.5
-    f = _flt(filters)
-
-    if up and touch_buy and curr["close"] > curr["ema20"]:
-        if not f.get("candlestick_filter", True):
-            ok, reason = check_volume(df, -2, f, float(p["volume_ratio"]))
-            return ("BUY", f"روندی خرید | {reason}") if ok else (None, reason)
-        sig, reason = check_candlestick_confirmation(df, f, strategy_config)
-        return ("BUY", f"روندی خرید + {reason}") if sig in ("BUY_CONFIRMED", "CONFIRMED") else (None, reason)
-    if down and touch_sell and curr["close"] < curr["ema20"]:
-        if not f.get("candlestick_filter", True):
-            ok, reason = check_volume(df, -2, f, float(p["volume_ratio"]))
-            return ("SELL", f"روندی فروش | {reason}") if ok else (None, reason)
-        sig, reason = check_candlestick_confirmation(df, f, strategy_config)
-        return ("SELL", f"روندی فروش + {reason}") if sig in ("SELL_CONFIRMED", "CONFIRMED") else (None, reason)
-    return None, "شرایط روندی برقرار نیست"
-
-
-def strategy_breakout(df, filters=None, strategy_config=None):
-    curr, prev = df.iloc[-2], df.iloc[-3]
-    if pd.isna(curr.get("channel_high")) or pd.isna(curr.get("channel_low")):
-        return None, "کانال آماده نیست"
-    f = _flt(filters)
-    p = get_strategy_params(strategy_config)
-    adx = _safe_float(curr.get("adx"))
-    if adx < max(15.0, p["adx"] - 5):
-        return None, f"ADX پایین است ({adx:.1f})"
-    vr = _safe_float(curr.get("volume_ratio"), 0)
-    if f.get("volume_filter", True) and vr < p["volume_ratio"]:
-        return None, f"حجم شکست کافی نیست ({vr:.2f}x)"
-    if _safe_float(curr.get("body_ratio"), 0) < p["body_ratio"]:
-        return None, "قدرت بدنه کافی نیست"
-    trend_buy = curr["close"] > curr["ema20"] > curr["ema50"] and curr["plus_di"] > curr["minus_di"]
-    trend_sell = curr["close"] < curr["ema20"] < curr["ema50"] and curr["minus_di"] > curr["plus_di"]
-    bull = curr["close"] > curr["channel_high"] and prev["close"] <= prev.get("channel_high", np.inf) and trend_buy and adx >= p["adx"]
-    bear = curr["close"] < curr["channel_low"] and prev["close"] >= prev.get("channel_low", -np.inf) and trend_sell and adx >= p["adx"]
-    if not (bull or bear):
-        return None, "شکست جدیدی ثبت نشد"
-    if not f.get("candlestick_filter", True):
-        return ("BUY", "شکست صعودی تأیید شد") if bull else ("SELL", "شکست نزولی تأیید شد")
-    sig, reason = check_candlestick_confirmation(df, f, strategy_config)
-    if bull and sig in ("BUY_CONFIRMED", "CONFIRMED"):
-        return "BUY", f"شکست صعودی + {reason}"
-    if bear and sig in ("SELL_CONFIRMED", "CONFIRMED"):
-        return "SELL", f"شکست نزولی + {reason}"
-    return None, reason
-
-
-def strategy_mean_reversion(df, filters=None, strategy_config=None):
-    curr = df.iloc[-2]
-    rsi, adx = _safe_float(curr.get("rsi"), 50), _safe_float(curr.get("adx"), 50)
-    p = get_strategy_params(strategy_config)
-    if adx >= p["adx"]:
-        return None, f"روند برای Mean Reversion قوی است (ADX={adx:.1f})"
-    atr = _safe_float(curr.get("atr"), 0)
-    if abs(curr["close"] - curr["ema20"]) > max(atr * 1.5, 1e-12):
-        return None, "قیمت از محدوده میانگین دور است"
-    ok, reason = check_volume(df, -2, _flt(filters), 0.8)
-    if not ok:
-        return None, reason
-    f = _flt(filters)
-    if rsi < 30:
-        if f.get("candlestick_filter", True):
-            sig, desc = check_candlestick_confirmation(df, f)
-            if sig not in ("BUY_CONFIRMED", "CONFIRMED"):
-                return None, f"RSI اشباع فروش ولی برگشت تأیید نشده ({desc})"
-        return "BUY", f"بازگشت به میانگین خرید | RSI={rsi:.1f}"
-    if rsi > 70:
-        if f.get("candlestick_filter", True):
-            sig, desc = check_candlestick_confirmation(df, f)
-            if sig not in ("SELL_CONFIRMED", "CONFIRMED"):
-                return None, f"RSI اشباع خرید ولی برگشت تأیید نشده ({desc})"
-        return "SELL", f"بازگشت به میانگین فروش | RSI={rsi:.1f}"
-    return None, f"RSI خنثی است ({rsi:.1f})"
-
-
-def _htf_trend_aligned(df, want_bullish):
-    if df is None or df.empty or len(df) < 55:
-        return None
-    try:
-        c = df.iloc[-2]
-        if want_bullish:
-            return bool(c["close"] > c["ema20"] > c["ema50"] and c["plus_di"] > c["minus_di"])
-        return bool(c["close"] < c["ema20"] < c["ema50"] and c["minus_di"] > c["plus_di"])
-    except Exception:
-        return None
+# V3.19: strategy_trend_following / strategy_breakout / strategy_mean_reversion حذف شدند.
+# طبق درخواست کاربر، تنها استراتژی معاملاتی همان Liquidity Sweep پنج‌سطحی (Monthly/Weekly/
+# Daily/4h/1h، تابع strategy_liquidity_sweep_5m) به‌علاوه‌ی نسخه‌ی هم‌مفهومش برای تایم‌فریم بالا
+# (strategy_htf_liquidity_reversal) است. Trend Following، Breakout و Mean Reversion موتورهای
+# جداگانه‌ای بودند که کاربر هرگز نمی‌خواسته روشن باشند؛ کدشان کامل حذف شد، نه فقط غیرفعال.
 
 
 def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
@@ -2069,28 +1920,6 @@ def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe
     return None, "HTF: ستاپ نقدینگی تشکیل نشده"
 
 
-def strategy_dynamic(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None):
-    break_sig, break_reason = strategy_breakout(df_primary, filters, strategy_config)
-    if break_sig not in ("BUY", "SELL"):
-        return None, break_reason
-    want_bullish = break_sig == "BUY"
-
-    if isinstance(market_data_dict, dict) and any(k in market_data_dict for k in ("4h", "1h", "1d")):
-        checks = []
-        for key in ("1d", "4h", "1h"):
-            aligned = _htf_trend_aligned(market_data_dict.get(key), want_bullish)
-            if aligned is not None:
-                checks.append((key, aligned))
-        if checks:
-            not_aligned = [k for k, ok in checks if not ok]
-            if not_aligned:
-                return None, f"شکست تأیید نشد چون روند {', '.join(not_aligned)} هم‌جهت نیست"
-            confirmed = ", ".join(k for k, _ in checks)
-            return break_sig, f"[شکست-قوی + تأیید {confirmed}] {break_reason}"
-
-    return break_sig, f"[شکست-قوی] {break_reason}"
-
-
 _REVERSAL_FAMILY_MARKERS = ('liquidity_sweep', 'Liquidity Sweep', 'ADAPTIVE_SWEEP', 'ACTIVE_SETUP')
 
 
@@ -2103,36 +1932,27 @@ def is_reversal_family_reason(reason):
     return any(marker in (reason or '') for marker in _REVERSAL_FAMILY_MARKERS)
 
 
-def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="trend", filters=None, strategy_config=None, regime=None, live_price=None):
+def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None):
+    """تنها دو مسیر معاملاتی وجود دارد (V3.19): Liquidity Sweep پنج‌سطحی روی ۵/۱۵ دقیقه
+    (از طریق strategy_dynamic_v2 -> _select_v2_setup -> _select_enhanced_v1_setup) و
+    HTF Liquidity Reversal روی ۱h/۴h. strategy_type='trend'/'breakout'/'mean_reversion' دیگر
+    وجود ندارد (آن موتورها کامل حذف شدند)؛ هر مقداری غیر از این دو مسیر هم مثل 'dynamic' اجرا
+    می‌شود تا اگر جایی (مثلاً backtest.py) هنوز مقدار قدیمی پاس بدهد خطا نگیرد."""
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
-    st = strategy_type
     cfg_top = get_v2_config(strategy_config)
-    only_sweep = bool(cfg_top.get("only_liquidity_sweep", False))
-    if st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour") and only_sweep:
-        # liquidity_sweep is only implemented for 5m/15m candles; on higher timeframes,
-        # with only_liquidity_sweep enabled, no other family is allowed to trade.
-        sig, reason = None, "فقط خانواده Liquidity Sweep فعال است و روی این تایم‌فریم قابل اجرا نیست (فقط ۵ و ۱۵ دقیقه پشتیبانی می‌شود)"
-    elif st == "dynamic" and timeframe in ("1h", "4h", "1hour", "4hour"):
+    if timeframe in ("1h", "4h", "1hour", "4hour"):
         if not bool(cfg_top.get("strategy_htf_reversal_enabled", True)):
             sig, reason = None, "استراتژی HTF Liquidity Reversal دستی خاموش است"
         else:
             sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
-    elif st == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
+    elif cfg_top.get("v2_enabled", True):
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
-    elif st == "dynamic":
-        if timeframe in ("5min", "15min"):
-            sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price, timeframe=timeframe)
-        else:
-            sig, reason = strategy_dynamic(df_primary, market_data_dict, timeframe, filters, strategy_config, regime)
-    elif st == "trend":
-        sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
-    elif st == "breakout":
-        sig, reason = strategy_breakout(df_primary, filters, strategy_config)
-    elif st == "mean_reversion":
-        sig, reason = strategy_mean_reversion(df_primary, filters, strategy_config)
+    elif timeframe in ("5min", "15min"):
+        sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, strategy_config, live_price=live_price, timeframe=timeframe)
     else:
-        sig, reason = strategy_trend_following(df_primary, timeframe, filters, strategy_config)
+        # V3.19: بدون v2_enabled و خارج از ۵/۱۵/۱h/۴h دیگر هیچ استراتژی‌ای وجود ندارد (Breakout حذف شد).
+        sig, reason = None, "این تایم‌فریم استراتژی معاملاتی ندارد"
 
     return sig, reason
 
@@ -2165,19 +1985,10 @@ V1_ENHANCED_DEFAULTS = {
 
 V2_DEFAULTS = {
     "v2_enabled": True,
-    # وقتی True باشد، فقط خانواده‌ی liquidity_sweep (اسکن چندتایم‌فریمی PMH/PWH/PDH/P4H/P1H)
-    # اجازه‌ی باز کردن معامله دارد؛ trend، breakout، mean_reversion و orb_judas همه غیرفعال
-    # می‌شوند. توجه: liquidity_sweep فقط روی تایم‌فریم ۵ و ۱۵ دقیقه کار می‌کند — اگر تایم‌فریم
-    # فعال ربات روی ۱h/۴h/۱d باشد و این گزینه True باشد، هیچ سیگنالی تولید نخواهد شد.
-    "only_liquidity_sweep": True,
-    # سوییچ‌های مستقل - جایگزین only_liquidity_sweep برای کنترل تک‌به‌تک هر خانواده.
-    # پیش‌فرض‌ها دقیقاً همان رفتار فعلی (فقط Sweep روشن) را حفظ می‌کنند.
-    "strategy_sweep_enabled": True,
-    "strategy_trend_enabled": True,
-    "strategy_breakout_enabled": True,
-    "strategy_mean_reversion_enabled": False,
-    "strategy_orb_judas_enabled": False,
-    "strategy_htf_reversal_enabled": True,
+    # V3.19: تنها دو موتور معاملاتی وجود دارد (کد بقیه حذف شد، این‌ها دیگر سوییچ روشن/خاموش
+    # نیستند، صرفاً برای سازگاری تنظیمات قدیمی نگه داشته شده‌اند و در کد جایی خوانده نمی‌شوند):
+    "strategy_sweep_enabled": True,           # Liquidity Sweep ۵/۱۵ دقیقه‌ای - همیشه فعال
+    "strategy_htf_reversal_enabled": True,    # نسخه‌ی همین مدل برای ۱h/۴h - قابل خاموش‌کردن
     "regime_adx_trend": 23.0,
     "regime_adx_strong": 30.0,
     "regime_atr_high": 1.35,
@@ -2474,53 +2285,6 @@ def _enhanced_scenario(signal, swept, reclaim, structure, retest=False):
     return p + "6", 0.0
 
 
-def _enhanced_orb_judas_candidate(df, signal=None, cfg=None):
-    """Event-driven ORB/Judas: sweep event must occur before MSS confirmation.
-    Disabled by default to preserve V1 behavior unless explicitly opted in.
-    """
-    cfg = cfg or {}
-    if not bool(cfg.get("enhanced_orb_enabled", False)) or df is None or len(df) < 80:
-        return None
-    if "timestamp" not in df.columns:
-        return None
-    ts = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
-    if ts.isna().all(): return None
-    day = ts.dt.floor("D").iloc[-1]
-    today = df.loc[ts.dt.floor("D") == day].copy()
-    if len(today) < 20: return None
-    start_h = int(cfg.get("enhanced_orb_killzone_start", 7)); end_h = int(cfg.get("enhanced_orb_killzone_end", 10))
-    orb_minutes = int(cfg.get("enhanced_orb_minutes", 30))
-    zone = today[(ts.loc[today.index].dt.hour >= start_h) & (ts.loc[today.index].dt.hour < end_h)]
-    if len(zone) < 10: return None
-    zts = ts.loc[zone.index]
-    orb_start = zts.min(); orb_end = orb_start + pd.Timedelta(minutes=orb_minutes)
-    orb = zone[zts < orb_end]
-    post = zone[zts >= orb_end]
-    if len(orb) < 3 or len(post) < 4: return None
-    oh = float(orb["high"].max()); ol = float(orb["low"].min())
-    # Search chronologically for a sweep event, then require a later MSS event.
-    for j in range(1, len(post)):
-        row = post.iloc[j]
-        prev = post.iloc[:j]
-        if signal in (None, "BUY") and float(row["low"]) < ol:
-            if float(row["close"]) <= ol: continue
-            post2 = post.iloc[j+1:]
-            for k in range(1, len(post2)):
-                m = post2.iloc[k]
-                prior_high = float(post2.iloc[:k]["high"].max())
-                if float(m["close"]) > prior_high:
-                    return {"signal":"BUY", "sweep_index":int(df.index.get_loc(row.name)), "mss_index":int(df.index.get_loc(m.name)), "orb_high":oh,"orb_low":ol}
-        if signal in (None, "SELL") and float(row["high"]) > oh:
-            if float(row["close"]) >= oh: continue
-            post2 = post.iloc[j+1:]
-            for k in range(1, len(post2)):
-                m = post2.iloc[k]
-                prior_low = float(post2.iloc[:k]["low"].min())
-                if float(m["close"]) < prior_low:
-                    return {"signal":"SELL", "sweep_index":int(df.index.get_loc(row.name)), "mss_index":int(df.index.get_loc(m.name)), "orb_high":oh,"orb_low":ol}
-    return None
-
-
 def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min", filters=None, strategy_config=None, regime=None, grid_levels=None, live_price=None):
     """V1-first enhancement layer. It enriches and filters existing V1/V2 setups;
     it does not replace V1's execution/risk/position-management path.
@@ -2576,31 +2340,8 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
             )
             consider(sig, "liquidity_sweep", reason, float(cfg.get("sweep_score_bonus",8.0)), plan)
 
-    # 2) Keep V1/V2 trend/breakout/mean-reversion families, each independently toggled
-    #    (پیش‌فرض هر سه خاموش تا رفتار فعلی حفظ شود؛ از منوی «مدیریت فیلتر معاملات»
-    #    قابل روشن‌کردن تک‌به‌تک هستند).
-    for family, fn, flag_key in (
-        ("trend", lambda: strategy_trend_following(df_primary, timeframe, filters, cfg), "strategy_trend_enabled"),
-        ("breakout", lambda: strategy_breakout(df_primary, filters, cfg), "strategy_breakout_enabled"),
-        ("mean_reversion", lambda: strategy_mean_reversion(df_primary, filters, cfg), "strategy_mean_reversion_enabled"),
-    ):
-        if not bool(cfg.get(flag_key, False)):
-            continue
-        sig, reason = fn()
-        if sig in ("BUY","SELL"):
-            plan, _ = build_trade_plan(df_primary, sig, cfg, family, strategy_timeframe=timeframe, grid_levels=grid_levels, live_price=live_price)
-            consider(sig, family, reason, 4.0 if family=="breakout" else 2.0, plan)
-
-    # 3) Optional ORB/Judas family - جدا از بقیه توگل می‌شود.
-    orb = _enhanced_orb_judas_candidate(df_primary, cfg=cfg) if bool(cfg.get("strategy_orb_judas_enabled", False)) else None
-    if orb and orb.get("mss_index") <= idx:
-        sig = orb["signal"]
-        # Only allow a live signal if the causal MSS is the latest closed event or very recent.
-        if idx - int(orb["mss_index"]) <= 2:
-            plan, _ = build_sweep_trade_plan(df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price)
-            if plan:
-                consider(sig, "orb_judas", f"ORB/Judas event-driven sweep={orb['sweep_index']} -> MSS={orb['mss_index']}", 5.0, plan)
-
+    # V3.19: Trend Following، Breakout، Mean Reversion و ORB/Judas اینجا حذف شدند.
+    # تنها منبع کاندید همان بلوک #1 (Liquidity Sweep) بالاست.
     if not candidates:
         return None, None, f"Enhanced V1: ستاپ معتبر نبود | regime={regime_info.get('name')} | ATRx={regime_info.get('atr_ratio',0):.2f}"
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -2688,23 +2429,11 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         })
         candidates.append((score * max(rr, 0.01), plan, sig, f"V2 {rname}/{vol_state} | {family} | {reason} | HTF={htf:.2f} | EdgeProxy={ev:.2f}"))
 
+    # V3.19: تنها منبع کاندید Liquidity Sweep است (Trend/Breakout/Mean Reversion حذف شدند).
     if timeframe in ("5min", "15min") and bool(cfg.get("strategy_sweep_enabled", True)):
         sig, reason = strategy_liquidity_sweep_5m(df_primary, filters, cfg, live_price=live_price, timeframe=timeframe)
         family = "trend" if "ADAPTIVE_CONTINUATION" in (reason or "") else "liquidity_sweep"
         add_candidate(sig, reason, family, float(cfg["sweep_score_bonus"]) if family == "liquidity_sweep" else 3.0)
-    # Strategy selection is driven by trend state, while volatility only changes
-    # strictness. This prevents high-vol trends from being treated as mean-reversion.
-    # هر خانواده مستقل از تایم‌فریم و مستقل از بقیه توگل می‌شود.
-    if trend_state in ("BULL", "BEAR", "NEUTRAL"):
-        if bool(cfg.get("strategy_trend_enabled", False)):
-            sig, reason = strategy_trend_following(df_primary, timeframe, filters, cfg)
-            add_candidate(sig, reason, "trend", 4 if trend_state in ("BULL", "BEAR") else 0)
-        if bool(cfg.get("strategy_breakout_enabled", False)):
-            sig, reason = strategy_breakout(df_primary, filters, cfg)
-            add_candidate(sig, reason, "breakout", 6 if trend_state in ("BULL", "BEAR") else 2)
-    if trend_state in ("RANGE", "NEUTRAL") and bool(cfg.get("strategy_mean_reversion_enabled", False)):
-        sig, reason = strategy_mean_reversion(df_primary, filters, cfg)
-        add_candidate(sig, reason, "mean_reversion", 0)
 
     if not candidates:
         return None, None, (

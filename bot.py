@@ -29,8 +29,7 @@ from backtest import run_backtest, fetch_ohlcv_coinex
 
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
-    strategy_trend_following,
-    strategy_breakout, strategy_mean_reversion, build_trade_plan, get_timeframe_preset,
+    build_trade_plan, get_timeframe_preset,
     _compute_prev_day_levels, evaluate_trend_weakness, compute_swing_stop,
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
@@ -4386,21 +4385,16 @@ def strategy_families_keyboard(chat_id):
         icon = '🟢' if flag_val else '🔴'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
+    # V3.19: تنها یک استراتژی معاملاتی وجود دارد - Liquidity Sweep پنج‌سطحی (۵/۱۵ دقیقه) به‌علاوه‌ی
+    # نسخه‌ی هم‌مفهومش برای ۱h/۴h (HTF Reversal). Trend Following، Breakout، Mean Reversion و
+    # ORB/Judas موتورهای جداگانه‌ای بودند که کامل از کد حذف شدند؛ دیگر دکمه‌ای ندارند.
     sweep_on = bool(scfg.get('strategy_sweep_enabled', True))
-    trend_on = bool(scfg.get('strategy_trend_enabled', True))
-    breakout_on = bool(scfg.get('strategy_breakout_enabled', True))
-    meanrev_on = bool(scfg.get('strategy_mean_reversion_enabled', False))
-    orb_on = bool(scfg.get('strategy_orb_judas_enabled', False))
     htf_on = bool(scfg.get('strategy_htf_reversal_enabled', True))
     session_on = bool(scfg.get('adaptive_allow_session_swing_anchors', True))
 
     return {
         'inline_keyboard': [
-            [cell(sweep_on, 'Sweep', '/toggle_strategy_sweep'),
-             cell(trend_on, 'Trend Following', '/toggle_strategy_trend')],
-            [cell(breakout_on, 'Breakout', '/toggle_strategy_breakout'),
-             cell(meanrev_on, 'Mean Reversion', '/toggle_strategy_mean_reversion')],
-            [cell(orb_on, 'ORB/Judas', '/toggle_strategy_orb'),
+            [cell(sweep_on, 'Sweep (۵/۱۵ دقیقه)', '/toggle_strategy_sweep'),
              cell(htf_on, 'HTF Reversal (۱س/۴س)', '/toggle_strategy_htf')],
             [cell(session_on, 'سطوح سشن‌ها (London/NY/Asia)', '/toggle_strategy_sessions')],
             [{'text': '🔙 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
@@ -4536,9 +4530,10 @@ def analyze(chat_id,symbol):
     if d.empty:
         return f'❌ داده کافی برای تحلیل `{symbol}` پیدا نشد.', None
     d=calculate_indicators(d); c=d.iloc[-2]
-    a,r1=strategy_trend_following(d,tf,s['filters'],s['strategy_config'])
-    b,r2=strategy_breakout(d,s['filters'],s['strategy_config'])
-    m,r3=strategy_mean_reversion(d,s['filters'],s['strategy_config'])
+    live_price=latest_price(symbol)
+    # V3.19: تنها یک استراتژی معاملاتی هست (Liquidity Sweep + HTF Reversal)؛ همان مسیر واقعی
+    # اسکن زنده (get_signal_with_reason) اینجا هم صدا زده می‌شود تا این تحلیل با تصمیم واقعی ربات یکی باشد.
+    sig,reason=get_signal_with_reason(d,None,'single',tf,'dynamic',s['filters'],s['strategy_config'],None,live_price=live_price)
 
     close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
     adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
@@ -4550,14 +4545,12 @@ def analyze(chat_id,symbol):
     else:
         trend_text='➡️ رنج (بدون روند مشخص)'
 
-    good_entry=bool(a or b or m)
+    good_entry=sig in ('BUY','SELL')
     if good_entry:
-        strategy_text='✅ موقعیت مناسب برای ورود بر اساس استراتژی'
+        strategy_text=f'✅ موقعیت مناسب برای ورود ({"خرید" if sig=="BUY" else "فروش"})'
     else:
-        reason=r1 or r2 or r3 or 'شرایط استراتژی هنوز کامل نشده است'
-        strategy_text=f'⚠️ موقعیت مناسب ورود نیست\n_({reason})_'
+        strategy_text=f'⚠️ موقعیت مناسب ورود نیست\n_({reason or "شرایط استراتژی هنوز کامل نشده است"})_'
 
-    live_price=latest_price(symbol)
     price_to_show=live_price if live_price is not None else close
 
     text = (
@@ -5520,16 +5513,10 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/strategy_families_menu':
         send_message(chat_id, '🧩 *خانواده‌های استراتژی*\n\nهرکدوم رو جدا روشن/خاموش کنید.', strategy_families_keyboard(chat_id)); return
-    if cl in ('/toggle_strategy_sweep','/toggle_strategy_trend','/toggle_strategy_breakout',
-              '/toggle_strategy_mean_reversion','/toggle_strategy_orb','/toggle_strategy_htf',
-              '/toggle_strategy_sessions'):
+    if cl in ('/toggle_strategy_sweep', '/toggle_strategy_htf', '/toggle_strategy_sessions'):
         key_map = {
-            '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'استراتژی Sweep (جاروب نقدینگی)'),
-            '/toggle_strategy_trend': ('strategy_trend_enabled', True, 'استراتژی Trend Following'),
-            '/toggle_strategy_breakout': ('strategy_breakout_enabled', True, 'استراتژی Breakout'),
-            '/toggle_strategy_mean_reversion': ('strategy_mean_reversion_enabled', False, 'استراتژی Mean Reversion'),
-            '/toggle_strategy_orb': ('strategy_orb_judas_enabled', False, 'استراتژی ORB/Judas'),
-            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'استراتژی HTF Liquidity Reversal'),
+            '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'استراتژی Sweep (جاروب نقدینگی، ۵/۱۵ دقیقه)'),
+            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'استراتژی HTF Liquidity Reversal (۱h/۴h)'),
             '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', True, 'سطوح سشن‌های معاملاتی'),
         }
         cfg_key, default_val, label = key_map[cl]
