@@ -262,6 +262,20 @@ STRATEGY_DEFAULTS = {
     "sweep_require_swing_break": True,
     "sweep_swing_break_lookback": 6,
     "adaptive_allow_session_swing_anchors": True,
+    # --- ۶ حالت معاملاتی صریح PDH/PDL (طبق تعریف کاربر) ---
+    # ۱: برخورد به PDH بدون نفوذ قطعی + برگشت به داخل = Sell
+    # ۲: برخورد به PDL بدون نفوذ قطعی + برگشت به داخل = Buy
+    # ۳: نفوذ PDH + پولبک + ادامه (با شکست سوینگ) = Buy
+    # ۴: نفوذ PDL + پولبک + ادامه (با شکست سوینگ) = Sell
+    # ۵: نفوذ PDH + پولبک ناموفق (شکست کاذب) + برگشت داخل محدوده = Sell
+    # ۶: نفوذ PDL + پولبک ناموفق (شکست کاذب) + برگشت داخل محدوده = Buy
+    # هرکدام جدا قابل خاموش/روشن‌کردن‌اند. پیش‌فرض: همه فعال.
+    "scenario_1_enabled": True,
+    "scenario_2_enabled": True,
+    "scenario_3_enabled": True,
+    "scenario_4_enabled": True,
+    "scenario_5_enabled": True,
+    "scenario_6_enabled": True,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -732,6 +746,17 @@ def extract_setup_tag(reason):
     return m.group(1) if m else None
 
 
+_SCENARIO_TAG_RE = re.compile(r"\|SCN=([1-6])\b")
+
+
+def extract_scenario_tag(reason):
+    """Return the explicit `SCN=1..6` tag (the user's 6 PDH/PDL scenarios)
+    embedded in a reason string by `detect_multi_at`, or ``None`` if this
+    signal came from a path that doesn't tag one (e.g. Adaptive/HTF/Active-Setup)."""
+    m = _SCENARIO_TAG_RE.search(str(reason or ""))
+    return m.group(1) if m else None
+
+
 def extract_setup_level(reason):
     """Parse the first key-level token (e.g. ``P4H=1.234``) out of a reason
     string. Returns ``(tag, level_key, level_value)`` or ``(None, None, None)``
@@ -986,6 +1011,70 @@ def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label,
     return None, None
 
 
+def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
+    """حالت ۵/۶ کاربر: سطح شکسته شده (نفوذ)، قیمت به سطح پولبک می‌زند، اما پولبک
+    نمی‌تواند سطح را نگه دارد (بر خلاف _detect_retest_continuation که نگه‌داشتن را
+    شرط می‌کند، اینجا دقیقاً عکسش شرط است) و کندل با یک کندل جهت‌دار به داخل محدوده‌ی
+    بین hi/lo برمی‌گردد - یعنی شکست کاذب (fakeout) بوده، پس معامله برعکسِ شکست اولیه
+    گرفته می‌شود."""
+    lookback = int(cfg.get("retest_lookback_candles", 48))
+    direction, level = _find_recent_breakout(d, before_idx, hi, lo, lookback)
+    if direction is None:
+        return None, None
+    curr = d.iloc[before_idx]
+    tol = atr * max(0.0, float(cfg.get("retest_tolerance_atr", 0.25)))
+    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+    if direction == "UP":
+        touched = l <= level + tol
+        failed_to_hold = c < level
+        bearish = c < o
+        if touched and failed_to_hold and bearish:
+            return "SELL", (f"شکست کاذب {hi_label} ({hi_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده"
+                             f"|ANCHOR={level:.10g}|TARGET={lo:.10g}")
+    else:
+        touched = h >= level - tol
+        failed_to_hold = c > level
+        bullish = c > o
+        if touched and failed_to_hold and bullish:
+            return "BUY", (f"شکست کاذب {lo_label} ({lo_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده"
+                            f"|ANCHOR={level:.10g}|TARGET={hi:.10g}")
+    return None, None
+
+
+_SCENARIO_TOGGLE_KEYS = {
+    "1": "scenario_1_enabled", "2": "scenario_2_enabled",
+    "3": "scenario_3_enabled", "4": "scenario_4_enabled",
+    "5": "scenario_5_enabled", "6": "scenario_6_enabled",
+}
+
+
+def _scenario_number(kind, sig):
+    """۶ حالت کاربر: 1=برخورد PDH+برگشت(Sell) 2=برخورد PDL+برگشت(Buy)
+    3=نفوذ PDH+پولبک+ادامه(Buy) 4=نفوذ PDL+پولبک+ادامه(Sell)
+    5=نفوذ PDH+پولبک ناموفق+برگشت(Sell) 6=نفوذ PDL+پولبک ناموفق+برگشت(Buy)"""
+    if kind == "simple":
+        return "1" if sig == "SELL" else "2"
+    if kind == "continuation":
+        return "3" if sig == "BUY" else "4"
+    if kind == "fakeout":
+        return "5" if sig == "SELL" else "6"
+    return None
+
+
+def _scenario_enabled(kind, sig, cfg):
+    n = _scenario_number(kind, sig)
+    if n is None:
+        return True
+    key = _SCENARIO_TOGGLE_KEYS.get(n)
+    return bool(cfg.get(key, True)) if key else True
+
+
+def _tag_scenario(reason, kind, sig):
+    n = _scenario_number(kind, sig)
+    if n is None or reason is None:
+        return reason
+    return f"{reason}|SCN={n}"
+
 
 def _has_confirmed_breakout(d, before_idx, hi, lo, signal, atr, cfg):
     """Active setup / retest-continuation guard: only allow a recovery entry
@@ -1104,6 +1193,12 @@ def _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, 
         )
         if sig not in ("BUY", "SELL"):
             continue
+        # این گیت فقط برای حالت‌های ۳/۴ (نفوذ+پولبک+ادامه) معناداره - حالت‌های ۱/۲/۵/۶
+        # همین که پیدا بشن مستقیم صادر می‌شن (توسط strategy_liquidity_sweep_5m قبل از
+        # رسیدن به اینجا) و نباید اینجا دوباره منتظر شکست سوینگ بمانند.
+        scn = extract_scenario_tag(reason)
+        if scn not in (None, "3", "4"):
+            continue
         reclaim_idx = n - back - 2  # اندیس کندل ریکلیم در df اصلی
         if reclaim_idx < 0:
             continue
@@ -1133,10 +1228,19 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
     کندلِ تایم‌فریمِ سطحِ صادرکننده (طبق تگ [SETUP ...]) شکل گرفته باشد، نادیده گرفته
     می‌شود تا کندل جدید باز شود و سطوح نسبت به کندل تازه‌بسته‌شده دوباره ارزیابی شوند."""
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    if bool(cfg.get("sweep_require_swing_break", False)) and not _skip_confirmation_wrap:
+    # گیت «شکست سوینگ محلی» فقط برای حالت‌های ۳/۴ (نفوذ+پولبک+ادامه) معنا دارد - دقیقاً
+    # همان شرطی که کاربر برایشان تعریف کرد. حالت‌های ۱/۲ (برخورد ساده) و ۵/۶ (شکست کاذب)
+    # خودشان روی همان کندل تأیید نهایی‌اند و نباید منتظر شکست سوینگ بمانند.
+    immediate_sig, immediate_reason = _strategy_liquidity_sweep_5m_impl(
+        df, filters, strategy_config, live_price, timeframe, _skip_confirmation_wrap
+    )
+    immediate_scn = extract_scenario_tag(immediate_reason)
+    if immediate_sig in ("BUY", "SELL") and immediate_scn in ("1", "2", "5", "6"):
+        sig, reason = immediate_sig, immediate_reason
+    elif bool(cfg.get("sweep_require_swing_break", False)) and not _skip_confirmation_wrap:
         sig, reason = _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, cfg)
     else:
-        sig, reason = _strategy_liquidity_sweep_5m_impl(df, filters, strategy_config, live_price, timeframe, _skip_confirmation_wrap)
+        sig, reason = immediate_sig, immediate_reason
     if sig not in ("BUY", "SELL"):
         return sig, reason
     if not bool(cfg.get("htf_close_guard_enabled", True)):
@@ -1181,7 +1285,18 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
     """
     cfg_peek = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     if not _skip_confirmation_wrap and cfg_peek.get("sweep_require_confirmation_candle", False):
-        # --- پوسته‌ی «تاییدیه یک کندل اضافه» ---
+        # حالت‌های ۱/۲ (برخورد ساده) و ۵/۶ (شکست کاذب) طبق تعریف کاربر خودشان روی همان
+        # کندل نهایی‌اند و نباید یک کندل اضافه هم منتظر بمانند - این پوسته فقط برای حالت
+        # ۳/۴ (که ذاتاً دو-کندلی‌اند: کندل شکست + کندل پولبک) و مسیرهای بدون تگ صریح
+        # (Cluster/Adaptive/Active-Setup) معنا دارد. اول بدون این پوسته چک می‌کنیم تا
+        # نوع حالت را ببینیم.
+        immediate_sig, immediate_reason = _strategy_liquidity_sweep_5m_impl(
+            df, filters, strategy_config, live_price, timeframe, _skip_confirmation_wrap=True
+        )
+        immediate_scn = extract_scenario_tag(immediate_reason)
+        if immediate_sig in ("BUY", "SELL") and immediate_scn in ("1", "2", "5", "6"):
+            return immediate_sig, immediate_reason
+        # --- پوسته‌ی «تاییدیه یک کندل اضافه» (فقط برای حالت ۳/۴ یا سیگنال‌های بدون تگ) ---
         # به‌جای صدور سیگنال دقیقاً روی کندل ریکلیم، یک قدم عقب می‌رویم: انگار یک کندل
         # زودتریم (df بدون آخرین کندل بسته‌شده) و همان تشخیص اصلی (بدون تغییر) را روی
         # آن اجرا می‌کنیم. اگر آنجا سیگنالی وجود داشت، تازه چک می‌کنیم که کندلِ واقعاً
@@ -1376,28 +1491,42 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
     def detect_multi_at(idx):
         """Unified per-candle detection, shared by the primary scan and the
         Active-Setup recovery walk below: for each candidate level (or the
-        Cluster zone) in priority order, try a direct sweep+reclaim first,
-        then — if that didn't fire — a breakout+pullback continuation. All
-        six tags (Monthly/Weekly/Daily/4h/1h/Cluster) get identical treatment
-        here; only the (hi, lo) pair and its labels differ."""
+        Cluster zone) in priority order, evaluates the user's 6 explicit
+        PDH/PDL scenarios and returns the first that fires + its scenario tag
+        (`|SCN=1..6`) embedded in reason:
+          - post-breakout context first (needs `_find_recent_breakout`):
+            continuation (۳/۴) vs failed-retest/fakeout (۵/۶) — mutually
+            exclusive on the same candle (held vs failed-to-hold);
+          - otherwise, the plain touch+reject sweep (۱/۲).
+        All six level tags (Monthly/Weekly/Daily/4h/1h/Cluster) get identical
+        treatment here; only the (hi, lo) pair and its labels differ. Each
+        scenario can be toggled independently via scenario_1_enabled..
+        scenario_6_enabled."""
         if idx < 0 or idx >= len(d):
             return None, None, None, None
         atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
             return None, None, None, None
+        allow_continuation = bool(cfg.get("sweep_enable_retest_continuation", True))
         for tag, hi, lo, hi_key, lo_key, hi_label, lo_label in _ordered_candidates_at(idx):
+            if idx >= 1:
+                if allow_continuation:
+                    rsig, rreason = _detect_retest_continuation(
+                        d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
+                    )
+                    if rsig and _scenario_enabled("continuation", rsig, cfg):
+                        return rsig, _tag_scenario(rreason, "continuation", rsig), atr, tag
+                fsig, freason = _detect_failed_retest_reversal(
+                    d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
+                )
+                if fsig and _scenario_enabled("fakeout", fsig, cfg):
+                    return fsig, _tag_scenario(freason, "fakeout", fsig), atr, tag
             sig, reason, _ = _detect_named_level_sweep(
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
             )
-            if sig:
-                return sig, reason, atr, tag
-            if bool(cfg.get("sweep_enable_retest_continuation", True)) and idx >= 1:
-                rsig, rreason = _detect_retest_continuation(
-                    d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
-                )
-                if rsig:
-                    return rsig, rreason, atr, tag
+            if sig and _scenario_enabled("simple", sig, cfg):
+                return sig, _tag_scenario(reason, "simple", sig), atr, tag
         return None, None, None, None
 
     detect_at = detect_multi_at
@@ -1415,14 +1544,27 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
     except Exception:
         live_for_guard = float(d.iloc[latest_idx]["close"])
     if sig and atr and np.isfinite(live_for_guard) and live_for_guard > 0:
-        if tag == "Cluster":
-            _cl = _cluster_ceiling_floor_at(latest_idx)
-            hi, lo = (_cl[0], _cl[1]) if _cl is not None else (pdh, pdl)
+        # نکته‌ی مهم: قبلاً اینجا «سطح مرجع» همیشه از روی جهت سیگنال حدس زده می‌شد
+        # (BUY→lo، SELL→hi) - که برای Sweep+Reclaim ساده (حالت ۱/۲) درست است، اما برای
+        # ادامه‌ی شکست (حالت ۳/۴) و شکست کاذب (حالت ۵/۶) غلط است: مثلاً در یک BUY ادامه‌ی
+        # شکست بالای PDH (حالت ۳)، معامله دور از PDL (که اینجا به‌اشتباه به‌عنوان level
+        # انتخاب می‌شد) است، نه نزدیک آن - همین باعث می‌شد این گارد تقریباً همیشه سیگنال‌های
+        # حالت ۳/۴ را «خیلی دور» تشخیص بدهد و بی‌جهت حذفشان کند. حالا اول از همان
+        # ANCHOR واقعی‌ای که خود تابع تشخیص‌دهنده (برای هر ۶ حالت) توی reason گذاشته
+        # استفاده می‌کنیم؛ فقط اگر ANCHOR در دسترس نبود (مسیرهای قدیمی‌تر بدون تگ)
+        # به همان حدس قدیمی برمی‌گردیم.
+        _anchor_val, _ = extract_sweep_anchor_target(reason)
+        if _anchor_val is not None and np.isfinite(_anchor_val):
+            level = _anchor_val
         else:
-            hi, lo = _level_pair_for_tag(d, latest_idx, tag, pdh, pdl)
-        level = (lo if sig == "BUY" else hi)
-        if level is None:
-            level = pdl if sig == "BUY" else pdh
+            if tag == "Cluster":
+                _cl = _cluster_ceiling_floor_at(latest_idx)
+                hi, lo = (_cl[0], _cl[1]) if _cl is not None else (pdh, pdl)
+            else:
+                hi, lo = _level_pair_for_tag(d, latest_idx, tag, pdh, pdl)
+            level = (lo if sig == "BUY" else hi)
+            if level is None:
+                level = pdl if sig == "BUY" else pdh
         max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
         invalid_dist = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)))
         too_far = (live_for_guard > level + max_dist) if sig == "BUY" else (live_for_guard < level - max_dist)
@@ -1980,7 +2122,12 @@ V1_ENHANCED_DEFAULTS = {
     # V3.20: رده‌های کیفیت B3/S3 (جاروب+ریکلیم بدون هیچ تأیید ساختاری) و B6/S6 (بدون هیچ
     # شاهدی، ته‌مانده) در تحلیل واقعی معاملات ضررده‌ترین بودند (نمونه‌های B1 و S2 کوچک بودند
     # و روی آن‌ها تصمیم گرفته نشد). این دو رده رد می‌شوند؛ برای برگرداندن رفتار قبلی خالی کنید.
-    "enhanced_excluded_scenario_tiers": ["3", "6"],
+    # V3.21: قبلاً این لیست رده‌های B3/S3 و B6/S6 طبقه‌بندی قدیمی را رد می‌کرد - اما
+    # آن رده‌ها دقیقاً روی «حالت ۱/۲» کاربر (برخورد ساده + برگشت) هم می‌افتادند و آن‌ها
+    # را هم مسدود می‌کردند. حالا که ۶ حالت صریح PDH/PDL (SCN=1..6) با سوییچ مستقل خودشان
+    # جایگزین شده‌اند (بالا: scenario_1_enabled..scenario_6_enabled)، این لیست دیگر چیزی
+    # را پیش‌فرض حذف نمی‌کند - کنترل کیفیت از طریق همان سوییچ‌های هر حالت انجام می‌شود.
+    "enhanced_excluded_scenario_tiers": [],
     "enhanced_orb_killzone_start": 7,
     "enhanced_orb_killzone_end": 10,
     "enhanced_orb_minutes": 30,
@@ -2273,9 +2420,18 @@ def _enhanced_structure_context(df, idx, signal, cfg):
     return {"bos": bos, "continuation": lh, "swings": swings, "last_level": prior}
 
 
-def _enhanced_scenario(signal, swept, reclaim, structure, retest=False):
-    """Compact B1..B7/S1..S7 taxonomy, layered over V1's existing setup logic."""
+_SCN_QUALITY_BONUS = {"1": 9.0, "2": 9.0, "3": 12.0, "4": 12.0, "5": 6.0, "6": 6.0}
+
+
+def _enhanced_scenario(signal, swept, reclaim, structure, retest=False, base_reason=None):
+    """اول به تگ صریح SCN=۱..۶ (۶ حالت PDH/PDL که کاربر تعریف کرده) نگاه می‌کند - این‌ها
+    دقیق‌تر از حدس‌زدن روی swept/reclaim/bos هستند چون مستقیماً از همان تابع تشخیص
+    می‌آیند. اگر سیگنال تگی نداشت (مثلاً از مسیر Adaptive/HTF/Active-Setup آمده، که SCN
+    تگ نمی‌زنند)، به طبقه‌بندی قدیمی B1..B7/S1..S7 به‌عنوان fallback برمی‌گردد."""
     p = "B" if signal == "BUY" else "S"
+    scn = extract_scenario_tag(base_reason) if base_reason else None
+    if scn:
+        return f"{p}SCN{scn}", _SCN_QUALITY_BONUS.get(scn, 5.0)
     if swept and reclaim and structure.get("bos"):
         return p + "1", 12.0
     if swept and reclaim and structure.get("continuation"):
@@ -2316,7 +2472,7 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
         structure = _enhanced_structure_context(df_primary, idx, sig, cfg)
         swept = ("Sweep" in (base_reason or "") or "sweep" in (base_reason or ""))
         reclaim = swept and (sig == "BUY" and entry > levels.get("PDL", -np.inf) or sig == "SELL" and entry < levels.get("PDH", np.inf))
-        scenario, scenario_bonus = _enhanced_scenario(sig, swept, reclaim, structure)
+        scenario, scenario_bonus = _enhanced_scenario(sig, swept, reclaim, structure, base_reason=base_reason)
         if scenario[1:] in set(cfg.get("enhanced_excluded_scenario_tiers", [])):
             return
         # Evidence buckets prevent EMA/DI/ADX from being counted repeatedly as independent proof.
