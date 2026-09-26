@@ -1,7 +1,7 @@
 import hashlib
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
-from threading import Thread, RLock
+from threading import Thread, RLock, Timer
 from typing import Dict, Any
 
 try:
@@ -1806,19 +1806,41 @@ def check_pending_orders(chat_id):
         save_session(chat_id)
 
 
-def send_channel_message(channel_id, text, reply_markup=None):
+# مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). صفر = هرگز حذف نشود.
+SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '600')))
+
+
+def _delete_channel_message_later(channel_id, message_id):
+    try:
+        res = tg('deleteMessage', {'chat_id': channel_id, 'message_id': message_id}, 10)
+        if not res or not res.get('ok'):
+            logger.warning('deleteMessage channel=%s message_id=%s failed: %s', channel_id, message_id, res)
+    except Exception:
+        logger.exception('failed to delete channel message %s/%s', channel_id, message_id)
+
+
+def send_channel_message(channel_id, text, reply_markup=None, ttl_seconds=None):
     """ارسال مستقیم به کانال - بدون session، بدون کیبورد پایین، بدون هیچ منطق
     کاربری. عمداً از send_message جدا نگه داشته شده چون send_message فرض می‌کند
-    chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند."""
+    chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند.
+    اگر ttl_seconds (پیش‌فرض SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS) مثبت باشد، پیام بعد از
+    آن مدت خودکار از کانال حذف می‌شود (یک Timer جدا در پس‌زمینه، بدون بلاک‌کردن اسکن).
+    خروجی: message_id در صورت موفقیت، وگرنه None."""
     try:
         payload = {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}
         if reply_markup:
             payload['reply_markup'] = reply_markup
         res = tg('sendMessage', payload, 10)
-        return bool(res and res.get('ok'))
+        if not res or not res.get('ok'):
+            return None
+        message_id = (res.get('result') or {}).get('message_id')
+        ttl = SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
+        if message_id and ttl > 0:
+            Timer(ttl, _delete_channel_message_later, args=(channel_id, message_id)).start()
+        return message_id
     except Exception:
         logger.exception('failed to post to signal channel')
-        return False
+        return None
 
 
 def _signal_channel_timeframe():
@@ -3426,9 +3448,20 @@ def refresh_live_position_messages():
 # بازار بسته می‌شود. چرخه‌ی مدیریت اصلی (update_positions) حدود هر یک دقیقه اجرا می‌شود که برای
 # پله‌های ۵ دلاری کند است؛ برای همین این بررسی در یک ترد جدا و هر PROFIT_LOCK_CHECK_SECONDS ثانیه
 # انجام می‌شود. PROFIT_LOCK_STEP_USDT=0 آن را کاملاً خاموش می‌کند.
+#
+# V3.20 - قفل زودهنگام نسبت به ریسک خود معامله: طبق ممیزی معاملات، نیمی از معاملات بازنده حداقل
+# تا ۰.۵R (نصف ریسک برنامه‌ریزی‌شده) در سود رفته بودند و بعد برگشته و به SL خورده بودند. پله‌ی
+# ۵ دلاریِ ثابت برای پوزیشن‌های کوچک اصلاً به‌موقع نمی‌رسید (۰.۴R آن‌ها ممکن است کمتر از ۵ دلار
+# باشد). پس یک قفل اول، نسبت به ریسک خودِ همان معامله (risk_usdt، از قبل روی هر معامله ذخیره شده)
+# اضافه شد: به محض رسیدن سود به PROFIT_LOCK_EARLY_TRIGGER_R از ریسک، مقدار PROFIT_LOCK_EARLY_LOCK_R
+# آن قفل می‌شود. این فقط «رُند اول» است؛ برای سودهای بزرگ‌تر همان پله‌ی دلاریِ قبلی ادامه پیدا می‌کند
+# (هرکدام از دو مکانیزم بالاتر باشد همان اعمال می‌شود). با صفر کردن PROFIT_LOCK_EARLY_TRIGGER_R این
+# بخش کامل خاموش و رفتار قبلی (فقط پله‌ی دلاری) برمی‌گردد.
 PROFIT_LOCK_STEP_USDT = max(0.0, float(os.environ.get('PROFIT_LOCK_STEP_USDT', '5')))
 PROFIT_LOCK_CHECK_SECONDS = max(2, int(os.environ.get('PROFIT_LOCK_CHECK_SECONDS', '5')))
 PROFIT_LOCK_RETRY_SECONDS = 30
+PROFIT_LOCK_EARLY_TRIGGER_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_TRIGGER_R', '0.4')))
+PROFIT_LOCK_EARLY_LOCK_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_LOCK_R', '0.2')))
 _PROFIT_LOCK_INFLIGHT = set()
 _PROFIT_LOCK_RETRY_AFTER = {}
 
@@ -3466,8 +3499,14 @@ def profit_lock_scan_once():
                 if pnl is None:
                     continue
                 level = float(p.get('profit_lock_level_usdt') or 0.0)
-                new_level = math.floor(pnl / step + 1e-9) * step
-                if new_level >= step and new_level > level:
+                new_level = math.floor(pnl / step + 1e-9) * step if step > 0 else 0.0
+                risk_usdt = float(p.get('risk_usdt') or 0.0)
+                if PROFIT_LOCK_EARLY_TRIGGER_R > 0 and risk_usdt > 0:
+                    early_trigger = risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R
+                    early_lock = risk_usdt * PROFIT_LOCK_EARLY_LOCK_R
+                    if pnl >= early_trigger and early_lock > new_level:
+                        new_level = early_lock
+                if new_level > 0 and new_level > level:
                     level = new_level
                     p['profit_lock_level_usdt'] = level
                     save_session(chat_id)

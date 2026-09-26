@@ -1977,6 +1977,10 @@ V1_ENHANCED_DEFAULTS = {
     "enhanced_min_quality_score": 65.0,
     "enhanced_high_vol_min_quality": 72.0,
     "enhanced_min_rr": 1.35,
+    # V3.20: رده‌های کیفیت B3/S3 (جاروب+ریکلیم بدون هیچ تأیید ساختاری) و B6/S6 (بدون هیچ
+    # شاهدی، ته‌مانده) در تحلیل واقعی معاملات ضررده‌ترین بودند (نمونه‌های B1 و S2 کوچک بودند
+    # و روی آن‌ها تصمیم گرفته نشد). این دو رده رد می‌شوند؛ برای برگرداندن رفتار قبلی خالی کنید.
+    "enhanced_excluded_scenario_tiers": ["3", "6"],
     "enhanced_orb_killzone_start": 7,
     "enhanced_orb_killzone_end": 10,
     "enhanced_orb_minutes": 30,
@@ -2313,6 +2317,8 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
         swept = ("Sweep" in (base_reason or "") or "sweep" in (base_reason or ""))
         reclaim = swept and (sig == "BUY" and entry > levels.get("PDL", -np.inf) or sig == "SELL" and entry < levels.get("PDH", np.inf))
         scenario, scenario_bonus = _enhanced_scenario(sig, swept, reclaim, structure)
+        if scenario[1:] in set(cfg.get("enhanced_excluded_scenario_tiers", [])):
+            return
         # Evidence buckets prevent EMA/DI/ADX from being counted repeatedly as independent proof.
         location = 25.0 if (near or swept) else 8.0
         struct = 25.0 if structure.get("bos") else (17.0 if structure.get("continuation") else 8.0)
