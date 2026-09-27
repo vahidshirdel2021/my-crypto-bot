@@ -188,7 +188,24 @@ def get_scenario_management_keyboard(session=None):
     rows.append([{"text": f"{'🟢' if conf_fake else '🔴'} تاییدیه حالت ۵/۶ (واگرایی حجم)", "callback_data": "/toggle_confirm_fakeout"}])
     exempt56 = bool(cfg.get("scenario_56_market_gate_exempt", True))
     rows.append([{"text": f"{'🟢' if exempt56 else '🔴'} معافیت ۵/۶ از گیت هم‌جهتی بازار", "callback_data": "/toggle_scenario56_exempt"}])
+    exempt12 = bool(cfg.get("scenario_12_market_gate_exempt", True))
+    rows.append([{"text": f"{'🟢' if exempt12 else '🔴'} معافیت ۱/۲ از گیت هم‌جهتی بازار", "callback_data": "/toggle_scenario12_exempt"}])
     rows.append([{"text": "🧰 بازگشت به مدیریت فیلتر", "callback_data": "/trade_filter_management"}])
+    return {"inline_keyboard": rows}
+
+
+def get_my_profile_keyboard(session=None):
+    """«پروفایل من»: ذخیره/اعمال عکس‌فوری تنظیمات فعلی کاربر - چیزی توی این دکمه‌ها
+    ثابت (hardcode) نیست، همه‌چیز از تنظیماتی می‌آید که خود کاربر با بقیه‌ی دکمه‌ها
+    چیده و ذخیره کرده."""
+    s = session or {}
+    has_profile = bool(s.get("my_profile"))
+    apply_label = "📥 اعمال پروفایل من" if has_profile else "📥 اعمال پروفایل من (هنوز چیزی ذخیره نشده)"
+    rows = [
+        [{"text": "💾 ذخیره‌ی تنظیمات فعلی به‌عنوان پروفایل من", "callback_data": "/save_my_profile"}],
+        [{"text": apply_label, "callback_data": "/apply_my_profile"}],
+        [{"text": "🧰 بازگشت به مدیریت فیلتر", "callback_data": "/trade_filter_management"}],
+    ]
     return {"inline_keyboard": rows}
 
 

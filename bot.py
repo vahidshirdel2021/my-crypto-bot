@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
 from threading import Thread, RLock, Timer
@@ -48,7 +49,7 @@ from ui import (
     get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
-    get_setup_management_keyboard, get_scenario_management_keyboard,
+    get_setup_management_keyboard, get_scenario_management_keyboard, get_my_profile_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -125,7 +126,7 @@ REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in (
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
 
-ENTRY_ORDER_TYPE = os.environ.get('ENTRY_ORDER_TYPE', 'limit').lower()
+ENTRY_ORDER_TYPE = os.environ.get('ENTRY_ORDER_TYPE', 'market').lower()
 ORDER_CONFIRM_RETRIES = max(1, int(os.environ.get('ORDER_CONFIRM_RETRIES', '6')))
 ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0')))
 PAPER_CONSERVATIVE_OHLC = os.environ.get('PAPER_CONSERVATIVE_OHLC', 'true').lower() not in ('0', 'false', 'no')
@@ -1808,9 +1809,15 @@ def check_pending_orders(chat_id):
 
 # مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). صفر = هرگز حذف نشود.
 SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '600')))
+# Timer در حال انتظار برای هر message_id - با دکمه‌ی «ذخیره» لغو می‌شود تا آن پیام
+# خاص دیگر خودکار پاک نشود. حافظه‌ی درون‌پردازه‌ای است (با ری‌استارت ربات پاک می‌شود؛
+# مشکلی نیست چون آن پیام‌های قدیمی‌تر معمولاً یا از قبل حذف شده‌اند یا کاربر می‌تواند
+# دستی حذفشان کند).
+_CHANNEL_MSG_TIMERS = {}
 
 
 def _delete_channel_message_later(channel_id, message_id):
+    _CHANNEL_MSG_TIMERS.pop(message_id, None)
     try:
         res = tg('deleteMessage', {'chat_id': channel_id, 'message_id': message_id}, 10)
         if not res or not res.get('ok'):
@@ -1836,11 +1843,32 @@ def send_channel_message(channel_id, text, reply_markup=None, ttl_seconds=None):
         message_id = (res.get('result') or {}).get('message_id')
         ttl = SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
         if message_id and ttl > 0:
-            Timer(ttl, _delete_channel_message_later, args=(channel_id, message_id)).start()
+            timer = Timer(ttl, _delete_channel_message_later, args=(channel_id, message_id))
+            _CHANNEL_MSG_TIMERS[message_id] = timer
+            timer.start()
         return message_id
     except Exception:
         logger.exception('failed to post to signal channel')
         return None
+
+
+def _append_channel_keep_delete_buttons(channel_id, message_id, base_markup):
+    """بعد از ارسال پیام کانال (چون message_id فقط بعد از ارسال معلوم می‌شود)، یک ردیف
+    «💾 ذخیره برای بررسی بعدی» / «🗑 حذف دستی» زیر همان دکمه‌های موجود اضافه می‌کند."""
+    if not message_id:
+        return
+    try:
+        rows = list(((base_markup or {}).get('inline_keyboard')) or [])
+        rows.append([
+            {'text': '💾 ذخیره برای بررسی بعدی', 'callback_data': f'/keep_channel_msg_{message_id}'},
+            {'text': '🗑 حذف دستی', 'callback_data': f'/del_channel_msg_{message_id}'},
+        ])
+        tg('editMessageReplyMarkup', {
+            'chat_id': channel_id, 'message_id': message_id,
+            'reply_markup': {'inline_keyboard': rows},
+        }, 10)
+    except Exception:
+        logger.exception('failed to attach keep/delete buttons to channel message %s', message_id)
 
 
 def _signal_channel_timeframe():
@@ -1944,7 +1972,16 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
     if not patterns or not _SIGNAL_CHANNEL_LEVEL_TAGS:
         return []
     try:
-        df = get_klines(symbol, timeframe, 320)
+        # نکته‌ی مهم: قبلاً اینجا فقط ۳۲۰ کندل (≈۲۶.۷ ساعت روی ۵ دقیقه‌ای) خوانده می‌شد -
+        # کافی برای P4H/P1H اما برای PDH/PDL (که باید کل روز تقویمی قبل را ببیند) ناکافی
+        # بود: هر وقت ساعت فعلی به‌گونه‌ای بود که این پنجره فقط نیمی از روز قبل را
+        # پوشش می‌داد، PDH/PDL از روی داده‌ی ناقص محاسبه می‌شد - نه خطا می‌داد و نه None
+        # برمی‌گرداند، فقط یک مقدار غلط (پایین‌تر از سقف واقعی/بالاتر از کف واقعی) تولید
+        # می‌کرد؛ همین باعث می‌شد کانال گاهی الگویی (نفوذ/پولبک/رد) را نسبت به سطحی که
+        # اصلاً در بازار واقعی وجود نداشت تشخیص بدهد. حالا دقیقاً همان تعداد کندلی که
+        # موتور اصلی معاملات برای همین محاسبه استفاده می‌کند خوانده می‌شود، تا PDH/PDL
+        # همیشه از یک روز تقویمی کامل به‌دست بیاید.
+        df = get_klines(symbol, timeframe, 650 if timeframe in ('5min', '15min') else 200)
         if df is None or df.empty or len(df) < 110:
             return []
         dated_df, _, _ = _compute_prev_day_levels(df)
@@ -2177,7 +2214,8 @@ def _signal_channel_scan_once():
                 [{'text': '🟢 خرید (Long)', 'callback_data': f'/qt_buy_{symbol}'},
                  {'text': '🔴 فروش (Short)', 'callback_data': f'/qt_sell_{symbol}'}],
             ]}
-            send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
+            sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
+            _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
     # ارسال دوباره‌ی همین کندل می‌شد)
     if len(_SIGNAL_CHANNEL_SEEN) > 5000:
@@ -2436,12 +2474,17 @@ def chart(chat_id, symbol, df, trade):
         else:
             alignment_line = ""
         swing_line = "• 📐 تایید شده با شکست سوینگ محلی\n" if trade.get('swing_break_confirmed') else ""
+        scenario_tag = extract_scenario_tag(trade.get('entry_reason') or trade.get('signal_reason') or '')
+        scenario_line = f"• سناریو: `{scenario_tag} - {_SCENARIO_LABELS_PLAIN.get(scenario_tag, '')}`\n" if scenario_tag else ""
+        level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *پوزیشن معامله [{mode}]*\n"
             f"• نماد: `{symbol}` ({trade['side']})\n"
             f"• تایم‌فریم: `{tf_label}`\n"
-            + setup_caption_line +
+            + setup_caption_line
+            + level_line
+            + scenario_line +
             f"• ورود: `{fmt(entry)}`\n"
             f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
             f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
@@ -3336,13 +3379,26 @@ def _build_open_positions_view(chat_id, prices=None):
             risk = float(p.get('risk_usdt') or 0.0)
             r = (pnl/risk) if risk>0 else 0.0
             side_label = '🟢 LONG' if side_long(p['side']) else '🔴 SHORT'
+            _p_reason = p.get('entry_reason') or p.get('signal_reason') or ''
+            _p_setup_tag = extract_setup_tag(_p_reason)
+            _p_scn = extract_scenario_tag(_p_reason)
+            setup_line = ''
+            if _p_setup_tag or _p_scn:
+                bits = []
+                if _p_setup_tag:
+                    bits.append(f'[SETUP {_p_setup_tag}]')
+                if _p_scn:
+                    bits.append(f'سناریو {_p_scn}')
+                setup_line = f"↳ 🧭 {' | '.join(bits)}\n"
             lines += [
                 f'\n{side_label} `{symbol}`',
+                setup_line.rstrip('\n') if setup_line else None,
                 f'↳ ورود: `{fmt(entry)}` | فعلی: `{fmt(live)}`',
                 f'↳ 📈 سود/زیان لحظه‌ای: `{pnl:+.2f} USDT`',
                 f'↳ 📊 بازده: `{pct:+.2f}%` | R: `{r:+.2f}`',
                 f'↳ 🎯 TP: `{fmt(p["tp"])}` | 🛑 SL: `{fmt(p["sl"])}`',
             ]
+            lines = [ln for ln in lines if ln is not None]
         except Exception as exc:
             logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
     chart_urls = {}
@@ -4087,10 +4143,12 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
-        # حالت ۵/۶ (شکست کاذب) طبق تصمیم کاربر از این گیت معاف است: کل هدف این دو حالت
-        # گرفتن برگشت از یک حرکت ناموفق است، حتی اگر آن برگشت خلاف جهت رژیم کلی بازار باشد.
+        # حالت ۵/۶ (شکست کاذب) و حالت ۱/۲ (برخورد ساده) هر دو ذاتاً برگشتی/رنجی‌اند نه
+        # ترندی؛ طبق تصمیم کاربر هر دو جفت می‌توانند جدا از این گیت معاف شوند.
         _scn = extract_scenario_tag(reason)
-        if not (bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True)) and _scn in ('5', '6')):
+        exempt56 = bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True)) and _scn in ('5', '6')
+        exempt12 = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True)) and _scn in ('1', '2')
+        if not (exempt56 or exempt12):
             return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
     if s.get('manual_block_all_entries'):
         return _entry_diag_result(chat_id, symbol, 'manual_block', 'توقف کامل ورود به معامله دستی فعال است', 'signal', sig, diagnostics=diagnostics)
@@ -4404,6 +4462,7 @@ def trade_filter_management_keyboard(chat_id):
             [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
             [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
             [{'text': '🧭 مدیریت ۶ سناریو PDH/PDL', 'callback_data': '/scenario_management'}],
+            [{'text': '👤 پروفایل من', 'callback_data': '/my_profile_menu'}],
             [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
@@ -4892,6 +4951,75 @@ def apply_user_profile(s, profile):
     return label,score,rr,risk
 
 
+# --- «پروفایل من»: برخلاف presetهای بالا (که مقادیرشان توی کد ثابته)، این یکی کاملاً
+# از طریق خود ربات قابل تنظیمه - یک عکس‌فوری (snapshot/restore) از هر چیزی که کاربر
+# همین الان با دکمه‌های موجود چیده، بدون هیچ مقدار hardcode شده‌ای اینجا. ---
+_MY_PROFILE_TOP_LEVEL_KEYS = ('timeframe', 'market_alignment_filters_enabled', 'max_same_direction_positions', 'enabled_setup_tags')
+
+
+def save_my_profile(chat_id):
+    s = get_session(chat_id)
+    snapshot = {
+        'strategy_config': copy.deepcopy(s.get('strategy_config') or {}),
+        'top': {k: copy.deepcopy(s.get(k)) for k in _MY_PROFILE_TOP_LEVEL_KEYS},
+        'saved_at': time.time(),
+    }
+    s['my_profile'] = snapshot
+    save_session(chat_id)
+    return snapshot
+
+
+def apply_my_profile(chat_id):
+    s = get_session(chat_id)
+    snapshot = s.get('my_profile')
+    if not snapshot:
+        return False
+    s['strategy_config'] = copy.deepcopy(snapshot.get('strategy_config') or {})
+    for k in _MY_PROFILE_TOP_LEVEL_KEYS:
+        top = snapshot.get('top') or {}
+        if k in top:
+            s[k] = copy.deepcopy(top[k])
+    # enabled_setup_tags هم سطح‌بالا هم داخل strategy_config آینه می‌شود - سازگاری حفظ شود
+    if s.get('enabled_setup_tags'):
+        s['strategy_config']['enabled_setup_tags'] = s['enabled_setup_tags']
+    save_session(chat_id)
+    return True
+
+
+def my_profile_summary_text(snapshot):
+    if not snapshot:
+        return "هنوز چیزی ذخیره نشده."
+    cfg = snapshot.get('strategy_config') or {}
+    top = snapshot.get('top') or {}
+    _fa_digits = str.maketrans("123456", "۱۲۳۴۵۶")
+    on_scenarios = [n.translate(_fa_digits) for n in '123456' if bool(cfg.get(f'scenario_{n}_enabled', True))]
+    confirms = []
+    if cfg.get('confirm_simple_reject_enabled'):
+        confirms.append('۱/۲')
+    if cfg.get('confirm_continuation_enabled'):
+        confirms.append('۳/۴')
+    if cfg.get('confirm_fakeout_enabled'):
+        confirms.append('۵/۶')
+    exempts = []
+    if cfg.get('scenario_12_market_gate_exempt', True):
+        exempts.append('۱/۲')
+    if cfg.get('scenario_56_market_gate_exempt', True):
+        exempts.append('۵/۶')
+    saved_at = snapshot.get('saved_at')
+    when = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(saved_at)) if saved_at else '-'
+    lines = [
+        f"🕒 آخرین ذخیره: {when}",
+        f"⏱ تایم‌فریم: {TF_DISPLAY.get(top.get('timeframe'), top.get('timeframe'))}",
+        f"🧭 حالت‌های روشن: {', '.join(on_scenarios) or 'هیچ‌کدام'}",
+        f"✅ تاییدیه‌های روشن: {', '.join(confirms) or 'هیچ‌کدام'}",
+        f"🚦 هم‌جهتی بازار: {'روشن' if top.get('market_alignment_filters_enabled') else 'خاموش'}" + (f" (معافیت: {', '.join(exempts)})" if top.get('market_alignment_filters_enabled') and exempts else ""),
+        f"👥 سقف معاملات هم‌جهت: {top.get('max_same_direction_positions')}",
+        f"📐 تاییدیه کندل Sweep: {'روشن' if cfg.get('sweep_require_confirmation_candle') else 'خاموش'}",
+        f"📐 شکست سوینگ محلی (حالت ۳/۴): {'روشن' if cfg.get('sweep_require_swing_break', True) else 'خاموش'}",
+    ]
+    return "\n".join(lines)
+
+
 
 async def _manual_signal_scan_coro(chat_id, symbols, tf):
     s = get_session(chat_id)
@@ -5306,6 +5434,33 @@ def process_command(cmd,chat_id,message_id=None):
         # ورود سریع از دکمه‌های 🟢/🔴 زیر پیام کانال: /qt_<buy|sell>_<SYMBOL>
         _, qt_side, qt_sym = cl.split('_', 2)
         quick_channel_trade(chat_id, qt_sym.upper(), 'BUY' if qt_side == 'buy' else 'SELL'); return
+    if cl.startswith('/keep_channel_msg_'):
+        # دکمه‌ی «ذخیره برای بررسی بعدی» زیر پیام کانال - فقط تایمر حذف خودکار همان
+        # پیام را لغو می‌کند؛ خود پیام و دکمه‌هایش دست‌نخورده در کانال باقی می‌مانند.
+        try:
+            msg_id = int(cl[len('/keep_channel_msg_'):])
+        except ValueError:
+            return
+        timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
+        if timer is not None:
+            timer.cancel()
+            send_message(chat_id, '💾 ذخیره شد - این پیام دیگر خودکار پاک نمی‌شود.')
+        else:
+            send_message(chat_id, 'ℹ️ این پیام از قبل ذخیره شده یا مهلت حذف خودکارش تمام شده بود.')
+        return
+    if cl.startswith('/del_channel_msg_'):
+        # دکمه‌ی «حذف دستی» زیر پیام کانال - همین الان پاک می‌شود، بدون نیاز به صبر
+        # کردن تا پایان مهلت خودکار.
+        try:
+            msg_id = int(cl[len('/del_channel_msg_'):])
+        except ValueError:
+            return
+        timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
+        if timer is not None:
+            timer.cancel()
+        _delete_channel_message_later(SIGNAL_CHANNEL_ID, msg_id)
+        send_message(chat_id, '🗑 پیام از کانال حذف شد.')
+        return
     if cl.startswith('/quick_manual_trade_'):
         # دکمه‌ی قدیمی «معامله دستی» زیر پیام‌های کانال که قبل از این تغییر ارسال شده‌اند
         send_message(chat_id, 'ℹ️ دکمه‌ی «معامله دستی» حذف شده. از دکمه‌های 🟢 خرید / 🔴 فروش زیر پیام‌های جدید کانال استفاده کن.'); return
@@ -5595,6 +5750,43 @@ def process_command(cmd,chat_id,message_id=None):
             if not current else 'حالت ۵/۶ هم مثل بقیه‌ی حالت‌ها زیر گیت «هم‌جهتی با بازار» قرار می‌گیرند (در صورت روشن‌بودن آن گیت).'
         )
         send_message(chat_id, f"🚦 معافیت ۵/۶ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_scenario12_exempt':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True))
+        s['strategy_config']['scenario_12_market_gate_exempt'] = not current
+        save_session(chat_id)
+        new_state = '🟢 معاف' if not current else '🔴 مشمول (مثل بقیه)'
+        note = (
+            'حالت ۱/۲ (برخورد ساده) هم مثل ۵/۶ ذاتاً یک معامله‌ی برگشتی/رنجی است، نه ترندی - حتی اگر خلاف جهت گیت «هم‌جهتی با بازار» باشند، صادر می‌شوند.'
+            if not current else 'حالت ۱/۲ هم مثل حالت‌های ترندی زیر گیت «هم‌جهتی با بازار» قرار می‌گیرند (در صورت روشن‌بودن آن گیت).'
+        )
+        send_message(chat_id, f"🚦 معافیت ۱/۲ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/my_profile_menu':
+        send_message(
+            chat_id,
+            "👤 *پروفایل من*\n\n"
+            "این یه پروفایل ثابت و از‌پیش‌تعیین‌شده نیست - هر وقت تنظیمات (سناریوها، "
+            "تاییدیه‌ها، هم‌جهتی بازار، سقف پوزیشن هم‌جهت، تایم‌فریم، سطوح فعال) رو دقیقاً "
+            "همون‌طوری که می‌خوای چیدی، دکمه‌ی «ذخیره» رو بزن. هر وقت بعداً خواستی برگردی "
+            "به همون حالت (مثلاً بعد از تست چیزهای دیگه)، «اعمال» رو بزن.\n\n"
+            f"وضعیت فعلی پروفایل ذخیره‌شده:\n{my_profile_summary_text(s.get('my_profile'))}",
+            get_my_profile_keyboard(s),
+        )
+        return
+    if cl=='/save_my_profile':
+        save_my_profile(chat_id)
+        s = get_session(chat_id)
+        send_message(chat_id, f"✅ تنظیمات فعلی به‌عنوان «پروفایل من» ذخیره شد.\n\n{my_profile_summary_text(s.get('my_profile'))}", get_my_profile_keyboard(s))
+        return
+    if cl=='/apply_my_profile':
+        ok = apply_my_profile(chat_id)
+        s = get_session(chat_id)
+        if not ok:
+            send_message(chat_id, "هنوز چیزی ذخیره نکردی. اول تنظیمات دلخواهت رو با همین دکمه‌ها بچین، بعد «ذخیره‌ی تنظیمات فعلی» رو بزن.", get_my_profile_keyboard(s))
+            return
+        send_message(chat_id, f"✅ «پروفایل من» اعمال شد.\n\n{my_profile_summary_text(s.get('my_profile'))}", get_my_profile_keyboard(s))
         return
     if cl=='/same_dir_menu':
         cur = int(s.get('max_same_direction_positions', 0) or 0)
