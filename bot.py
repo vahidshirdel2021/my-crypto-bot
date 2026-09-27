@@ -34,7 +34,7 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
-    is_reversal_family_reason, build_quick_trade_plan,
+    is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -48,7 +48,7 @@ from ui import (
     get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
     get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
-    get_setup_management_keyboard,
+    get_setup_management_keyboard, get_scenario_management_keyboard,
 )
 
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
@@ -4087,7 +4087,11 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
-        return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
+        # حالت ۵/۶ (شکست کاذب) طبق تصمیم کاربر از این گیت معاف است: کل هدف این دو حالت
+        # گرفتن برگشت از یک حرکت ناموفق است، حتی اگر آن برگشت خلاف جهت رژیم کلی بازار باشد.
+        _scn = extract_scenario_tag(reason)
+        if not (bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True)) and _scn in ('5', '6')):
+            return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
     if s.get('manual_block_all_entries'):
         return _entry_diag_result(chat_id, symbol, 'manual_block', 'توقف کامل ورود به معامله دستی فعال است', 'signal', sig, diagnostics=diagnostics)
     if sig == 'BUY' and s.get('manual_block_buy_entries'):
@@ -4363,6 +4367,13 @@ def trade_tracking_keyboard(chat_id):
     }
 
 
+_SCENARIO_LABELS_PLAIN = {
+    "1": "برخورد PDH+برگشت (Sell)", "2": "برخورد PDL+برگشت (Buy)",
+    "3": "نفوذ PDH+ادامه (Buy)", "4": "نفوذ PDL+ادامه (Sell)",
+    "5": "شکست کاذب PDH (Sell)", "6": "شکست کاذب PDL (Buy)",
+}
+
+
 def trade_filter_management_keyboard(chat_id):
     """دکمه‌های محدودیت/فیلتر معاملات (نه خانواده‌ی استراتژی‌ها - آن یک منوی جداست)."""
     s = get_session(chat_id)
@@ -4392,6 +4403,7 @@ def trade_filter_management_keyboard(chat_id):
              cell(block_sell, 'بلاک فروش', '/toggle_block_sell')],
             [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
             [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
+            [{'text': '🧭 مدیریت ۶ سناریو PDH/PDL', 'callback_data': '/scenario_management'}],
             [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
@@ -5511,6 +5523,78 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/trade_filter_management':
         send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nهمه‌ی محدودیت‌ها و فیلترهای مربوط به ورود/مدیریت معاملات این‌جا جمع شده‌اند.", trade_filter_management_keyboard(chat_id))
+        return
+    if cl=='/scenario_management':
+        send_message(
+            chat_id,
+            "🧭 *مدیریت ۶ سناریو PDH/PDL*\n\n"
+            "۱: برخورد به PDH بدون نفوذ + برگشت = Sell\n"
+            "۲: برخورد به PDL بدون نفوذ + برگشت = Buy\n"
+            "۳: نفوذ PDH + پولبک موفق + ادامه (با شکست سوینگ) = Buy\n"
+            "۴: نفوذ PDL + پولبک موفق + ادامه (با شکست سوینگ) = Sell\n"
+            "۵: نفوذ PDH + پولبک ناموفق (شکست کاذب) + برگشت = Sell\n"
+            "۶: نفوذ PDL + پولبک ناموفق (شکست کاذب) + برگشت = Buy\n\n"
+            "هر حالت جدا روشن/خاموش می‌شه. سه تاییدیه‌ی اختیاری هم پایین‌تر هست (پیش‌فرض خاموش).",
+            get_scenario_management_keyboard(s),
+        )
+        return
+    if cl.startswith('/toggle_scenario_') and cl.split('_')[-1] in ('1', '2', '3', '4', '5', '6'):
+        n = cl.split('_')[-1]
+        s.setdefault('strategy_config', {})
+        key = f'scenario_{n}_enabled'
+        current = bool(s['strategy_config'].get(key, True))
+        s['strategy_config'][key] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        send_message(chat_id, f"حالت {n} ({_SCENARIO_LABELS_PLAIN.get(n, n)}): {new_state}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_confirm_simple':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('confirm_simple_reject_enabled', False))
+        s['strategy_config']['confirm_simple_reject_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، حالت ۱/۲ (برخورد ساده) فقط وقتی صادر می‌شود که کندل واقعاً یک کندل رد‌کننده (فتیله‌ی بلند) با حجم بالاتر از میانگین باشد.'
+            if not current else 'برگشت به حالت قبلی: حالت ۱/۲ بدون بررسی اضافه‌ی کندل/حجم صادر می‌شود.'
+        )
+        send_message(chat_id, f"🕯 تاییدیه حالت ۱/۲: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_confirm_continuation':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('confirm_continuation_enabled', False))
+        s['strategy_config']['confirm_continuation_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، حالت ۳/۴ (نفوذ+پولبک+ادامه) فقط وقتی صادر می‌شود که پولبک «سالم» باشد: حجم لگ شکست بیشتر از حجم کندل پولبک و بدنه‌ی کندل پولبک کافی.'
+            if not current else 'برگشت به حالت قبلی: حالت ۳/۴ بدون بررسی اضافه‌ی سلامت پولبک صادر می‌شود.'
+        )
+        send_message(chat_id, f"📊 تاییدیه حالت ۳/۴: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_confirm_fakeout':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('confirm_fakeout_enabled', False))
+        s['strategy_config']['confirm_fakeout_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'از این پس، حالت ۵/۶ (شکست کاذب) فقط وقتی صادر می‌شود که واگرایی حجم دیده شود (لگ نفوذ کم‌حجم یا کندل برگشت پرحجم‌تر) و کندل برگشت بدنه‌ی قوی داشته باشد.'
+            if not current else 'برگشت به حالت قبلی: حالت ۵/۶ بدون بررسی اضافه‌ی حجم/بدنه صادر می‌شود.'
+        )
+        send_message(chat_id, f"📉 تاییدیه حالت ۵/۶: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_scenario56_exempt':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True))
+        s['strategy_config']['scenario_56_market_gate_exempt'] = not current
+        save_session(chat_id)
+        new_state = '🟢 معاف' if not current else '🔴 مشمول (مثل بقیه)'
+        note = (
+            'حالت ۵/۶ حتی اگر خلاف جهت گیت «هم‌جهتی با بازار» باشند، صادر می‌شوند - چون هدفشان دقیقاً گرفتن برگشت از حرکت ناموفق است.'
+            if not current else 'حالت ۵/۶ هم مثل بقیه‌ی حالت‌ها زیر گیت «هم‌جهتی با بازار» قرار می‌گیرند (در صورت روشن‌بودن آن گیت).'
+        )
+        send_message(chat_id, f"🚦 معافیت ۵/۶ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/same_dir_menu':
         cur = int(s.get('max_same_direction_positions', 0) or 0)

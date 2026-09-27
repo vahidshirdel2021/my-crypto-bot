@@ -163,6 +163,35 @@ def get_setup_management_keyboard(session=None):
     return {"inline_keyboard": rows}
 
 
+_SCENARIO_LABELS = {
+    "1": "۱ برخورد PDH+برگشت (Sell)", "2": "۲ برخورد PDL+برگشت (Buy)",
+    "3": "۳ نفوذ PDH+ادامه (Buy)", "4": "۴ نفوذ PDL+ادامه (Sell)",
+    "5": "۵ شکست کاذب PDH (Sell)", "6": "۶ شکست کاذب PDL (Buy)",
+}
+
+
+def get_scenario_management_keyboard(session=None):
+    """۶ حالت معاملاتی PDH/PDL + سه تاییدیه‌ی اختیاری هر جفت + معافیت ۵/۶ از گیت
+    هم‌جهتی بازار."""
+    s = session or {}
+    cfg = s.get("strategy_config") or {}
+    rows = []
+    for n in ("1", "2", "3", "4", "5", "6"):
+        is_on = bool(cfg.get(f"scenario_{n}_enabled", True))
+        icon = "🟢" if is_on else "🔴"
+        rows.append([{"text": f"{icon} حالت {_SCENARIO_LABELS[n]}", "callback_data": f"/toggle_scenario_{n}"}])
+    conf_simple = bool(cfg.get("confirm_simple_reject_enabled", False))
+    conf_cont = bool(cfg.get("confirm_continuation_enabled", False))
+    conf_fake = bool(cfg.get("confirm_fakeout_enabled", False))
+    rows.append([{"text": f"{'🟢' if conf_simple else '🔴'} تاییدیه حالت ۱/۲ (کندل رد + حجم)", "callback_data": "/toggle_confirm_simple"}])
+    rows.append([{"text": f"{'🟢' if conf_cont else '🔴'} تاییدیه حالت ۳/۴ (سلامت پولبک)", "callback_data": "/toggle_confirm_continuation"}])
+    rows.append([{"text": f"{'🟢' if conf_fake else '🔴'} تاییدیه حالت ۵/۶ (واگرایی حجم)", "callback_data": "/toggle_confirm_fakeout"}])
+    exempt56 = bool(cfg.get("scenario_56_market_gate_exempt", True))
+    rows.append([{"text": f"{'🟢' if exempt56 else '🔴'} معافیت ۵/۶ از گیت هم‌جهتی بازار", "callback_data": "/toggle_scenario56_exempt"}])
+    rows.append([{"text": "🧰 بازگشت به مدیریت فیلتر", "callback_data": "/trade_filter_management"}])
+    return {"inline_keyboard": rows}
+
+
 def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
     rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},

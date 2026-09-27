@@ -276,6 +276,25 @@ STRATEGY_DEFAULTS = {
     "scenario_4_enabled": True,
     "scenario_5_enabled": True,
     "scenario_6_enabled": True,
+    # --- تاییدیه‌ی اختیاری برای هر جفت سناریو (پیش‌فرض خاموش - همان پیشنهادهایی که
+    # قبلاً درباره‌ی هر حالت باهم صحبت کردیم؛ می‌تونی از دکمه‌های ربات فعال/غیرفعالشون کنی) ---
+    # ۱/۲ (برخورد ساده): کندل رد‌کننده (فتیله‌ی بلند) + حجم بالاتر از میانگین
+    "confirm_simple_reject_enabled": False,
+    "confirm_simple_min_wick_frac": 0.35,
+    "confirm_simple_min_volume_ratio": 1.05,
+    # ۳/۴ (ادامه): پولبک سالم = حجم لگ شکست >= حجم کندل پولبک × ضریب افت + بدنه‌ی کندل پولبک کافی
+    "confirm_continuation_enabled": False,
+    "confirm_continuation_min_body_ratio": 0.40,
+    "confirm_continuation_volume_decay": 0.90,
+    # ۵/۶ (شکست کاذب): واگرایی حجم (لگ نفوذ کم‌حجم یا کندل برگشت پرحجم‌تر) + کندل برگشت قوی
+    "confirm_fakeout_enabled": False,
+    "confirm_fakeout_min_body_ratio": 0.40,
+    "confirm_fakeout_max_breakout_volume_ratio": 1.15,
+    "confirm_fakeout_volume_surge": 1.0,
+    # وقتی گیت «هم‌جهتی با بازار» (market_alignment_filters_enabled در bot.py) روشن است،
+    # این کلید تعیین می‌کند حالت ۵/۶ (شکست کاذب) از آن گیت معاف باشند یا نه - چون هدف
+    # ذاتی این دو حالت گرفتن برگشت از حرکت ناموفق است، حتی خلاف رژیم کلی بازار.
+    "scenario_56_market_gate_exempt": True,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -837,6 +856,67 @@ def _adaptive_anchor_tag(reason):
     return "Intraday"
 
 
+def _rejection_wick_ok(o, c, h, l, sig, min_wick_frac):
+    rng = max(h - l, 1e-12)
+    wick = (h - max(c, o)) if sig == "SELL" else (min(c, o) - l)
+    return (wick / rng) >= min_wick_frac
+
+
+def _confirm_simple_reject(curr, sig, cfg):
+    """تاییدیه‌ی اختیاری حالت ۱/۲ (برخورد ساده + برگشت): طبق چیزی که قبلاً باهم
+    صحبت کردیم - کندل رد‌کننده (فتیله‌ی بلند فراتر از سطح، حداقل confirm_simple_min_wick_frac
+    از کل رنج کندل) + حجم بالاتر از میانگین روی همان کندل."""
+    if not bool(cfg.get("confirm_simple_reject_enabled", False)):
+        return True, None
+    o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
+    min_wick = float(cfg.get("confirm_simple_min_wick_frac", 0.35))
+    min_vr = float(cfg.get("confirm_simple_min_volume_ratio", 1.05))
+    vr = _safe_float(curr.get("volume_ratio"), 1.0)
+    if _rejection_wick_ok(o, c, h, l, sig, min_wick) and vr >= min_vr:
+        return True, "کندل رد + حجم کافی"
+    return False, "بدون کندل رد/حجم کافی"
+
+
+def _confirm_continuation(d, breakout_idx, pullback_idx, cfg):
+    """تاییدیه‌ی اختیاری حالت ۳/۴ (نفوذ+پولبک+ادامه): پولبک «سالم» یعنی حجم لگ شکست
+    از حجم کندل پولبک بیشتر باشد (پولبک کم‌حجم = سالم) + کندل پولبک بدنه‌ی قوی در جهت
+    ادامه داشته باشد - دقیقاً همان دو معیاری که قبلاً برای این حالت پیشنهاد شد."""
+    if not bool(cfg.get("confirm_continuation_enabled", False)):
+        return True, None
+    if breakout_idx is None or not (0 <= breakout_idx < len(d)):
+        return True, None
+    vr_brk = _safe_float(d.iloc[breakout_idx].get("volume_ratio"), 1.0)
+    pb = d.iloc[pullback_idx]
+    vr_pb = _safe_float(pb.get("volume_ratio"), 1.0)
+    pb_body_ratio = _safe_float(pb.get("body_ratio"), 0.0)
+    min_pb_body = float(cfg.get("confirm_continuation_min_body_ratio", 0.40))
+    decay = float(cfg.get("confirm_continuation_volume_decay", 0.90))
+    if (vr_brk >= vr_pb * decay) and (pb_body_ratio >= min_pb_body):
+        return True, "پولبک سالم (حجم رو به کاهش + بدنه‌ی کندل کافی)"
+    return False, "پولبک ضعیف (حجم/بدنه‌ی کندل کافی نیست)"
+
+
+def _confirm_fakeout(d, breakout_idx, pullback_idx, cfg):
+    """تاییدیه‌ی اختیاری حالت ۵/۶ (شکست کاذب): همان معیاری که قبلاً پیشنهاد شد -
+    واگرایی حجم (لگ نفوذ کم‌حجم بوده یا کندل برگشت پرحجم‌تر از آن است) + کندل برگشت
+    با بدنه‌ی قوی (رد شدن قاطع، نه یک دوجی بی‌تصمیم)."""
+    if not bool(cfg.get("confirm_fakeout_enabled", False)):
+        return True, None
+    if breakout_idx is None or not (0 <= breakout_idx < len(d)):
+        return True, None
+    vr_brk = _safe_float(d.iloc[breakout_idx].get("volume_ratio"), 1.0)
+    rev = d.iloc[pullback_idx]
+    vr_rev = _safe_float(rev.get("volume_ratio"), 1.0)
+    rev_body_ratio = _safe_float(rev.get("body_ratio"), 0.0)
+    min_rev_body = float(cfg.get("confirm_fakeout_min_body_ratio", 0.40))
+    max_brk_vr = float(cfg.get("confirm_fakeout_max_breakout_volume_ratio", 1.15))
+    surge = float(cfg.get("confirm_fakeout_volume_surge", 1.0))
+    volume_divergence = (vr_brk <= max_brk_vr) or (vr_rev >= vr_brk * surge)
+    if volume_divergence and (rev_body_ratio >= min_rev_body):
+        return True, "واگرایی حجم + کندل برگشت قوی"
+    return False, "بدون واگرایی حجم/کندل برگشت کافی"
+
+
 def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                                cfg, require_reclaim, require_reversal):
     """Generic single-candle liquidity-sweep detector for a (hi, lo) level pair.
@@ -857,12 +937,18 @@ def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label
         reclaimed = (not require_reclaim) or (c < hi)
         reversal = (not require_reversal) or (c < o)
         if reclaimed and reversal:
-            return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی|ANCHOR={hi:.10g}|TARGET={lo:.10g}", atr
+            ok, note = _confirm_simple_reject(curr, "SELL", cfg)
+            if ok:
+                extra = f" + {note}" if note else ""
+                return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی{extra}|ANCHOR={hi:.10g}|TARGET={lo:.10g}", atr
     if l <= lo - min_sweep:
         reclaimed = (not require_reclaim) or (c > lo)
         reversal = (not require_reversal) or (c > o)
         if reclaimed and reversal:
-            return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی|ANCHOR={lo:.10g}|TARGET={hi:.10g}", atr
+            ok, note = _confirm_simple_reject(curr, "BUY", cfg)
+            if ok:
+                extra = f" + {note}" if note else ""
+                return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی{extra}|ANCHOR={lo:.10g}|TARGET={hi:.10g}", atr
     return None, None, None
 
 
@@ -970,25 +1056,27 @@ def _find_recent_breakout(d, before_idx, hi, lo, lookback):
     """Look back (up to `lookback` candles, no same-day restriction — recency
     is governed purely by `lookback`, since this is shared across all 6
     tags now, not just Daily) for the most recent candle that closed beyond
-    either side of the (hi, lo) pair."""
+    either side of the (hi, lo) pair. Also returns that candle's row index
+    (breakout_idx) so callers can compare its volume against the pullback
+    candle's volume for the ۳/۴ vs ۵/۶ confirmation checks."""
     start = max(0, before_idx - lookback)
     window = d.iloc[start:before_idx]
     if window.empty:
-        return None, None
+        return None, None, None
     up = window[window["close"] > hi]
     down = window[window["close"] < lo]
     up_last = up.index.max() if not up.empty else None
     down_last = down.index.max() if not down.empty else None
     if up_last is not None and (down_last is None or up_last > down_last):
-        return "UP", hi
+        return "UP", hi, int(up_last)
     if down_last is not None:
-        return "DOWN", lo
-    return None, None
+        return "DOWN", lo, int(down_last)
+    return None, None, None
 
 
 def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    direction, level = _find_recent_breakout(d, before_idx, hi, lo, lookback)
+    direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
     if direction is None:
         return None, None
     curr = d.iloc[before_idx]
@@ -999,14 +1087,22 @@ def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label,
         held = c > level
         bullish = c > o
         if touched and held and bullish:
-            return "BUY", (f"شکست معتبر قبلی {hi_label} ({hi_key}={level:.6g}) + پولبک موفق + ادامه صعودی"
+            ok, note = _confirm_continuation(d, breakout_idx, before_idx, cfg)
+            if not ok:
+                return None, None
+            extra = f" + {note}" if note else ""
+            return "BUY", (f"شکست معتبر قبلی {hi_label} ({hi_key}={level:.6g}) + پولبک موفق + ادامه صعودی{extra}"
                            f"|ANCHOR={level:.10g}|TARGET={lo:.10g}")
     else:
         touched = h >= level - tol
         held = c < level
         bearish = c < o
         if touched and held and bearish:
-            return "SELL", (f"شکست معتبر قبلی {lo_label} ({lo_key}={level:.6g}) + پولبک موفق + ادامه نزولی"
+            ok, note = _confirm_continuation(d, breakout_idx, before_idx, cfg)
+            if not ok:
+                return None, None
+            extra = f" + {note}" if note else ""
+            return "SELL", (f"شکست معتبر قبلی {lo_label} ({lo_key}={level:.6g}) + پولبک موفق + ادامه نزولی{extra}"
                             f"|ANCHOR={level:.10g}|TARGET={hi:.10g}")
     return None, None
 
@@ -1018,7 +1114,7 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
     بین hi/lo برمی‌گردد - یعنی شکست کاذب (fakeout) بوده، پس معامله برعکسِ شکست اولیه
     گرفته می‌شود."""
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    direction, level = _find_recent_breakout(d, before_idx, hi, lo, lookback)
+    direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
     if direction is None:
         return None, None
     curr = d.iloc[before_idx]
@@ -1029,14 +1125,22 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
         failed_to_hold = c < level
         bearish = c < o
         if touched and failed_to_hold and bearish:
-            return "SELL", (f"شکست کاذب {hi_label} ({hi_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده"
+            ok, note = _confirm_fakeout(d, breakout_idx, before_idx, cfg)
+            if not ok:
+                return None, None
+            extra = f" + {note}" if note else ""
+            return "SELL", (f"شکست کاذب {hi_label} ({hi_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده{extra}"
                              f"|ANCHOR={level:.10g}|TARGET={lo:.10g}")
     else:
         touched = h >= level - tol
         failed_to_hold = c > level
         bullish = c > o
         if touched and failed_to_hold and bullish:
-            return "BUY", (f"شکست کاذب {lo_label} ({lo_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده"
+            ok, note = _confirm_fakeout(d, breakout_idx, before_idx, cfg)
+            if not ok:
+                return None, None
+            extra = f" + {note}" if note else ""
+            return "BUY", (f"شکست کاذب {lo_label} ({lo_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده{extra}"
                             f"|ANCHOR={level:.10g}|TARGET={hi:.10g}")
     return None, None
 
