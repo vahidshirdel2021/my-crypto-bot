@@ -1656,7 +1656,7 @@ def normalize_price(chat_id,symbol,price):
         return float(price)
 
 
-def safe_size(chat_id,s,entry,sl):
+def safe_size(chat_id,s,entry,sl,force=False):
     try:
         balance=exchange_balance(chat_id) if s['trading_mode']=='REAL' else float(s['paper_balance'])
     except ExchangeStateError as exc:
@@ -1666,7 +1666,8 @@ def safe_size(chat_id,s,entry,sl):
     risk_budget=balance*float(s['risk_per_trade_pct'])/100
     leverage=max(1,int(s['leverage']))
     requested_margin=float(s['trade_amount_usdt'])
-    cap=balance*float(s['max_margin_usage_pct'])/100
+    # force (تایید دستی): سقف درصد مصرف مارجین نادیده گرفته می‌شود؛ فقط موجودی آزاد واقعی محدودکننده است.
+    cap=balance if force else balance*float(s['max_margin_usage_pct'])/100
     available=max(0,cap-reserved_margin(s))
     risk_notional=risk_budget/stop_dist
     risk_margin=risk_notional/leverage
@@ -2393,11 +2394,12 @@ def compute_trade_setup_levels(df, tf, trade):
     return d, pdh, pdl, setup_tag, setup_level_name, setup_level_value
 
 
-def chart(chat_id, symbol, df, trade):
+def render_trade_chart_png(symbol, df, trade):
+    """چارت PNG معامله (کندل‌ها + ENTRY/TP/SL + سطح ستاپ). هم برای پوزیشن باز‌شده و هم برای
+    سیگنال منتظر تایید (trade['assist_pending']=True) استفاده می‌شود. خروجی: (BytesIO, ctx) یا (None, None)."""
     try:
-        if df.empty or len(df) < 5:
-            return
-
+        if df is None or df.empty or len(df) < 5:
+            return None, None
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
         d, pdh, pdl, setup_tag, setup_level_name, setup_level_value = compute_trade_setup_levels(df, tf, trade)
@@ -2453,7 +2455,7 @@ def chart(chat_id, symbol, df, trade):
         entry_y = float(d.loc[entry_idx, 'low'] if is_long else d.loc[entry_idx, 'high'])
         ax.scatter([entry_idx], [entry_y], s=42, color='#60a5fa', edgecolors='white', linewidths=0.8, zorder=6)
 
-        mode = 'REAL' if trade.get('is_real') else 'PAPER'
+        mode = 'PENDING' if trade.get('assist_pending') else ('REAL' if trade.get('is_real') else 'PAPER')
         direction = 'LONG' if is_long else 'SHORT'
         setup_badge = f'  •  [SETUP {setup_tag}]' if setup_tag else ''
         ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}{setup_badge}', loc='left',
@@ -2484,6 +2486,22 @@ def chart(chat_id, symbol, df, trade):
         plt.savefig(b, format='png', dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
         plt.close(fig)
         b.seek(0)
+        ctx = {'tf': tf, 'tf_label': tf_label, 'setup_tag': setup_tag, 'setup_level_name': setup_level_name,
+               'setup_level_value': setup_level_value, 'mode': mode, 'entry': entry, 'tp': tp, 'sl': sl}
+        return b, ctx
+    except Exception:
+        logger.exception('chart render error')
+        return None, None
+
+
+def chart(chat_id, symbol, df, trade):
+    try:
+        b, ctx = render_trade_chart_png(symbol, df, trade)
+        if b is None:
+            return
+        tf = ctx['tf']; tf_label = ctx['tf_label']; setup_tag = ctx['setup_tag']
+        setup_level_name = ctx['setup_level_name']; setup_level_value = ctx['setup_level_value']
+        mode = ctx['mode']; entry = ctx['entry']; tp = ctx['tp']; sl = ctx['sl']
 
         metrics = expected_trade_metrics(trade)
         setup_caption_line = f"• ستاپ: `[SETUP {setup_tag}]`\n" if setup_tag else ""
@@ -2616,7 +2634,17 @@ def _regime_alignment_snapshot(symbol, timeframe):
     return out
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None):
+_LAST_BLOCK_REASON = {}
+
+
+def _blk(chat_id, reason):
+    """دلیل رد شدن ورود را نگه می‌دارد (برای نمایش در حالت دستیار) و False برمی‌گرداند."""
+    _LAST_BLOCK_REASON[chat_id] = reason
+    return False
+
+
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False):
+    _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
@@ -2658,26 +2686,30 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
     setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
     if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
-        return False
-    if setup_id in set(s.get('consumed_setups') or []):
-        return False
-    if (require_active and not s['is_bot_active']) or s['daily_stopped'] or not risk_guard(chat_id):
-        return False
+        return _blk(chat_id, 'همین ستاپ همین الان به‌صورت پوزیشن باز وجود دارد')
+    if setup_id in set(s.get('consumed_setups') or []) and not force:
+        return _blk(chat_id, 'روی همین ستاپ قبلاً معامله انجام شده (ستاپ مصرف‌شده)')
+    if require_active and not force and not s['is_bot_active']:
+        return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
+    if s['daily_stopped'] and not force:
+        return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
+    if not force and not risk_guard(chat_id):
+        return _blk(chat_id, 'محافظ ریسک (حد ضرر/ضرر پیاپی/حد روزانه) اجازه‌ی ورود نمی‌دهد')
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
-    if now<cd:
-        return False
+    if now<cd and not force:
+        return _blk(chat_id, f'کول‌داون نماد {symbol} بعد از معامله‌ی قبلی هنوز {int(cd-now)} ثانیه مانده')
     s['cooldowns'].pop(symbol,None)
-    if level_key and level_key in s.get('traded_levels', {}):
-        return False
+    if level_key and level_key in s.get('traded_levels', {}) and not force:
+        return _blk(chat_id, 'روی همین سطح قبلاً معامله شده و سطح هنوز آزاد نشده')
     is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
-    if not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
-        return False
-    if not is_dynamic_strategy and s['filters'].get('no_buy_filter') and 'BUY' in side:
-        return False
-    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
-        return False
+    if not force and not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
+        return _blk(chat_id, 'فیلتر ممنوعیت فروش فعال است')
+    if not force and not is_dynamic_strategy and s['filters'].get('no_buy_filter') and 'BUY' in side:
+        return _blk(chat_id, 'فیلتر ممنوعیت خرید فعال است')
+    if not force and s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+        return _blk(chat_id, f"سقف تعداد پوزیشن باز ({s['max_open_positions']}) پر است")
     if any(p['symbol']==symbol for p in s['paper_positions']):
-        return False
+        return _blk(chat_id, f'روی {symbol} همین الان پوزیشن باز داریم')
     # Correlated-exposure guard: cap how many positions can be open in the SAME
     # direction at once (e.g. all Long on different alts), and throttle back-to-back
     # same-direction entries opened seconds apart in one scan burst. This prevents a
@@ -2685,15 +2717,15 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # which independent per-trade risk sizing does not account for.
     dir_key = 'BUY' if side_long(side) else 'SELL'
     max_same_dir = int(s.get('max_same_direction_positions', 0) or 0)
-    if max_same_dir > 0:
+    if max_same_dir > 0 and not force:
         same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
         if same_dir_open >= max_same_dir:
-            return False
+            return _blk(chat_id, f"سقف پوزیشن هم‌جهت ({max_same_dir}) پر است؛ {same_dir_open} پوزیشن {'Long' if dir_key=='BUY' else 'Short'} باز است")
     same_dir_cooldown = float(s.get('same_direction_entry_cooldown_seconds', 0) or 0)
-    if same_dir_cooldown > 0:
+    if same_dir_cooldown > 0 and not bypass_burst_cooldown and not force:
         last_dir_ts = float((s.get('last_direction_entry_ts') or {}).get(dir_key, 0))
         if time.time() - last_dir_ts < same_dir_cooldown:
-            return False
+            return _blk(chat_id, f'فاصله‌ی زمانی بین دو ورود هم‌جهت ({int(same_dir_cooldown)} ثانیه) رعایت نشده')
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -2715,26 +2747,26 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         sl=price+gap_sl
         tp=float(tp) if (structural_tp and float(tp)<price) else price-gap_tp
     s['_symbol_tmp']=symbol
-    margin, amount_or_reason=safe_size(chat_id,s,price,sl)
+    margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force)
     s.pop('_symbol_tmp',None)
     if margin<=0:
-        return False
+        return _blk(chat_id, f'محاسبه‌ی حجم/مارجین ناموفق: {amount_or_reason}')
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
     fee_estimate=round_trip_fee_usdt(margin,leverage)
-    if MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
-        return False
+    if not force and MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+        return _blk(chat_id, f'ریسک دلاری ({risk_usdt:.2f}$) نسبت به کارمزد رفت‌وبرگشت ({fee_estimate:.2f}$) کمتر از {MIN_RISK_TO_FEE_RATIO:g} برابر است')
     # سقف مجموع ریسک باز: جمع ریسک دلاری همهٔ پوزیشن‌های باز (صرف‌نظر از جهت) به‌علاوهٔ
     # این معاملهٔ جدید نباید از درصد مشخصی از سرمایه بگذرد. با تنظیمات پیش‌فرض عملاً
     # هیچ‌وقت فعال نمی‌شود؛ فقط وقتی سقف پوزیشن یا درصد ریسک بالا برود اثر می‌کند.
     max_total_risk_pct = float(s.get('max_total_open_risk_pct') or 0.0)
-    if max_total_risk_pct > 0:
+    if max_total_risk_pct > 0 and not force:
         try:
             equity = exchange_balance(chat_id) if s['trading_mode'] == 'REAL' else current_paper_equity(s)
             open_risk = sum(float(p.get('risk_usdt') or 0.0) for p in s.get('paper_positions', []))
             if equity > 0 and (open_risk + risk_usdt) > equity * (max_total_risk_pct / 100.0):
-                return False
+                return _blk(chat_id, f'سقف مجموع ریسک باز ({max_total_risk_pct:g}% سرمایه) رد می‌شود')
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
@@ -2942,17 +2974,27 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False):
+    """force=True (تایید دستی کاربر در حالت دستیار): همه‌ی محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
+    محافظ ریسک، توقف روزانه، فعال‌نبودن ربات، ...) نادیده گرفته می‌شود. فقط موانع فنی می‌مانند
+    (پوزیشن باز روی همان نماد، مارجین/حجم نامعتبر، خطای صرافی)."""
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
-    if not s['is_bot_active'] or s['daily_stopped']:
-        return False
+    _LAST_BLOCK_REASON.pop(chat_id, None)
+    if not force:
+        if not s['is_bot_active']:
+            return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
+        if s['daily_stopped']:
+            return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
     lock=get_entry_lock(chat_id)
     with lock:
         s=get_session(chat_id)
-        if not s['is_bot_active'] or s['daily_stopped'] or int(s.get('scan_generation',0)) != generation:
-            return False
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label)
+        if not force:
+            if not s['is_bot_active'] or s['daily_stopped']:
+                return _blk(chat_id, 'ربات غیرفعال یا متوقف شد')
+            if int(s.get('scan_generation',0)) != generation:
+                return _blk(chat_id, 'تنظیمات ربات همین لحظه تغییر کرد؛ دوباره تایید کنید')
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None):
@@ -4170,7 +4212,44 @@ def _assist_prune_log(s):
     s['assist_log'] = (others[-(ASSIST_LOG_CAP - len(keep_pending)):] + keep_pending)
 
 
-def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
+def _send_photo_get_id(chat_id, img_bytes, caption, markup):
+    """ارسال عکس با کپشن و دکمه‌ها؛ message_id را برمی‌گرداند (None اگر ناموفق)."""
+    if not TELEGRAM_TOKEN:
+        return None
+    try:
+        r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto',
+                          data={'chat_id': chat_id, 'caption': caption[:1000], 'parse_mode': 'Markdown',
+                                'reply_markup': json.dumps(markup, ensure_ascii=False)},
+                          files={'photo': ('chart.png', img_bytes, 'image/png')}, timeout=25)
+        if r.status_code != 200:
+            logger.warning('assist sendPhoto failed: %s %s', r.status_code, r.text[:200])
+            return None
+        return ((r.json() or {}).get('result') or {}).get('message_id')
+    except Exception:
+        logger.exception('assist sendPhoto error')
+        return None
+
+
+def _assist_describe_source(reason, level_token, level_value, scn):
+    """نام سطح و نوع سناریوی سیگنال را برای پیام تایید می‌سازد. سیگنال‌های «آداپتیو» (سوییپ/ادامه
+    روی سطوح سشن، رنج افتتاحیه یا سوینگ) خارج از ۶ سناریوی PDH/PDL‌اند و تگ SCN ندارند."""
+    if level_token is not None and level_value is not None:
+        level_txt = f"{level_token} = {fmt(float(level_value))}"
+    else:
+        a_name, a_val = extract_adaptive_anchor(reason)
+        level_txt = f"{a_name} = {fmt(float(a_val))}" if (a_name and a_val is not None) else '-'
+    if scn:
+        scn_txt = f"{scn} - {_SCENARIO_LABELS_PLAIN.get(scn, '')}"
+    elif 'ADAPTIVE_SWEEP' in (reason or ''):
+        scn_txt = 'آداپتیو: سوییپ روی سطح سشن/سوینگ (خارج از ۶ سناریو)'
+    elif 'ADAPTIVE_CONTINUATION' in (reason or ''):
+        scn_txt = 'آداپتیو: ادامه روی سطح سشن/سوینگ (خارج از ۶ سناریو)'
+    else:
+        scn_txt = 'نامشخص'
+    return level_txt, scn_txt
+
+
+def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=None):
     s = get_session(chat_id)
     now = time.time()
     _tag, level_token, level_value = extract_setup_level(full_reason)
@@ -4193,8 +4272,7 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
         expiry = int(s.get('assist_expiry_seconds', 300) or 300)
         aid = hashlib.sha1(f"{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
         is_long = sig == 'BUY'
-        scn_txt = f"{scn} - {_SCENARIO_LABELS_PLAIN.get(scn, '')}" if scn else 'نامشخص'
-        level_txt = f"{level_token} = {fmt(float(level_value))}" if (level_token is not None and level_value is not None) else '-'
+        level_txt, scn_txt = _assist_describe_source(full_reason, level_token, level_value, scn)
         score = plan.get('score')
         text = (
             f"🤝 *سیگنال منتظر تایید شما*\n"
@@ -4211,14 +4289,26 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
         markup = {'inline_keyboard': [
             [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
             [{'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'},
-             {'text': '📈 چارت', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
+             {'text': '📈 TradingView', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
         ]}
+        _mini = miniapp_chart_url(symbol, s.get('timeframe', '5min'))
+        if _mini:
+            markup['inline_keyboard'].insert(0, [{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': _mini}}])
         if not is_allowed(chat_id):
             return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'کاربر مجاز نیست', 'assist', sig)
-        res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown', 'reply_markup': markup}, 10)
-        if not (res and res.get('ok')):
-            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'ارسال پیام تایید ناموفق بود', 'assist', sig)
-        message_id = (res.get('result') or {}).get('message_id')
+        message_id = None
+        if df is not None:
+            pseudo_trade = {'entry_price': float(entry), 'tp': float(tp), 'sl': float(sl),
+                            'side': 'BUY (Long)' if is_long else 'SELL (Short)', 'timeframe': s.get('timeframe', '5min'),
+                            'entry_reason': full_reason, 'is_real': s.get('trading_mode') == 'REAL', 'assist_pending': True}
+            png, _ctx = render_trade_chart_png(symbol, df, pseudo_trade)
+            if png is not None:
+                message_id = _send_photo_get_id(chat_id, png.getvalue(), text, markup)
+        if message_id is None:
+            res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown', 'reply_markup': markup}, 10)
+            if not (res and res.get('ok')):
+                return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'ارسال پیام تایید ناموفق بود', 'assist', sig)
+            message_id = (res.get('result') or {}).get('message_id')
         rec = {
             'id': aid, 'symbol': symbol, 'sig': sig, 'side_label': 'BUY (Long)' if is_long else 'SELL (Short)',
             'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'rr': round(rr, 3),
@@ -4256,17 +4346,16 @@ def assist_approve(chat_id, aid):
         is_long = rec['sig'] == 'BUY'
         risk_dist = abs(rec['entry'] - rec['sl'])
         crossed = (live <= rec['sl'] or live >= rec['tp']) if is_long else (live >= rec['sl'] or live <= rec['tp'])
+        drift_r = abs(live - rec['entry']) / risk_dist if risk_dist > 0 else 0.0
+        warn = None
         if crossed:
-            rec['status'] = 'invalidated'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'))
-            send_message(chat_id, f"🚫 قیمت فعلی (`{fmt(live)}`) از حد ضرر یا هدف این سیگنال عبور کرده؛ دیگر معتبر نیست.")
-            return
-        drift_r = abs(live - rec['entry']) / risk_dist
-        if drift_r > ASSIST_MAX_DRIFT_R:
-            send_message(chat_id, f"⚠️ قیمت لحظه‌ای (`{fmt(live)}`) به اندازه‌ی `{drift_r:.2f}R` از نقطه‌ی ورود پیشنهادی (`{fmt(rec['entry'])}`) دور شده (سقف مجاز `{ASSIST_MAX_DRIFT_R:g}R`). ورود انجام نشد؛ اگر قیمت برگشت، دوباره تایید کنید.")
-            return
+            warn = f"⚠️ قیمت لحظه‌ای (`{fmt(live)}`) از SL یا TP پیشنهادی عبور کرده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
+        elif drift_r > ASSIST_MAX_DRIFT_R:
+            warn = f"⚠️ قیمت لحظه‌ای `{drift_r:.2f}R` از ورود پیشنهادی دور شده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
     ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
                        structural_tp=rec['structural_tp'], plan_score=rec.get('score'), plan_rr=rec.get('rr'),
-                       plan_quality_label=rec.get('quality_label'))
+                       plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True, force=True)
+    block_reason = _LAST_BLOCK_REASON.pop(chat_id, None)
     s = get_session(chat_id)
     with _ASSIST_LOCK:
         rec = _assist_find(s, aid) or rec
@@ -4282,7 +4371,9 @@ def assist_approve(chat_id, aid):
     save_session(chat_id)
     _assist_strip_buttons(chat_id, rec.get('message_id'))
     if not ok:
-        send_message(chat_id, '🛑 ورود انجام نشد: یکی از محدودیت‌های ریسک/ظرفیت پوزیشن/کول‌داون/فعال‌نبودن ربات اجازه نداد.')
+        send_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}")
+    elif warn:
+        send_message(chat_id, warn)
 
 
 def assist_reject(chat_id, aid):
@@ -4534,7 +4625,7 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     full_reason = full_reason[:500]
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
-        return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
+        return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
