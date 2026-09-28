@@ -47,7 +47,7 @@ import pandas as pd
 
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan,
-    evaluate_trend_weakness,
+    evaluate_trend_weakness, extract_scenario_tag,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
@@ -246,6 +246,7 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
 
         trades.append({
             'side': 'LONG' if is_long else 'SHORT',
+            'scenario': extract_scenario_tag(reason),
             'entry_time': entry_time,
             'entry': entry, 'sl_initial': sl, 'tp': tp,
             'exit': exit_price, 'exit_reason': exit_reason,
@@ -286,6 +287,12 @@ def summarize(trades, initial_balance=1000.0):
     print(f'📉 حداکثر افت سرمایه: {max_dd:+.2f} USDT')
     print(f'🛡️ درصد معاملاتی که تریلینگ‌استاپ فعال شد: {trail_rate:.1f}%')
     print('=' * 50)
+    if 'scenario' in df.columns and df['scenario'].notna().any():
+        print('\n📌 تفکیک بر اساس سناریو:')
+        print(f"{'سناریو':>8} {'تعداد':>6} {'نرخ برد':>8} {'میانگین R':>10} {'سود/زیان':>10}")
+        for scn, g in df.groupby(df['scenario'].fillna('نامشخص')):
+            wr = (g['pnl_usdt'] > 0).mean() * 100
+            print(f"{str(scn):>8} {len(g):>6} {wr:>7.0f}% {g['realized_r'].mean():>+10.2f} {g['pnl_usdt'].sum():>+10.2f}")
     print('\nآخرین ۱۰ معامله:')
     cols = ['entry_time', 'side', 'entry', 'exit', 'exit_reason', 'realized_r', 'pnl_usdt']
     print(df[cols].tail(10).to_string(index=False))
@@ -304,8 +311,17 @@ def main():
     ap.add_argument('--no-trailing', action='store_true', help='تریلینگ‌استاپ را خاموش کن (برای مقایسه)')
     ap.add_argument('--strategy-timeframe', default=None, choices=list(TIMEFRAME_PARAM_ADJUST.keys()),
                      help='کلید تایم‌فریم برای آستانه‌های ADX/امتیاز/R:R (پیش‌فرض: نگاشت خودکار از --timeframe)')
+    ap.add_argument('--disable-scenarios', default='', help='لیست شماره‌ی حالت‌های ۱ تا ۶ که باید خاموش شوند، با کاما جدا (مثال: 5,6)')
     ap.add_argument('--csv', default=None, help='مسیر خروجی CSV اختیاری برای لیست کامل معاملات')
     args = ap.parse_args()
+
+    strategy_config_overrides = {}
+    for n in args.disable_scenarios.split(','):
+        n = n.strip()
+        if n in ('1', '2', '3', '4', '5', '6'):
+            strategy_config_overrides[f'scenario_{n}_enabled'] = False
+    if strategy_config_overrides:
+        print(f'🔕 حالت‌های خاموش‌شده در این بک‌تست: {", ".join(k.split("_")[1] for k in strategy_config_overrides)}')
 
     strategy_tf = args.strategy_timeframe or CCXT_TO_STRATEGY_TF.get(args.timeframe, '1hour')
     print(f'⏳ دریافت داده {args.symbol} | {args.timeframe} | {args.start} تا {args.end} از CoinEx ...')
@@ -317,6 +333,7 @@ def main():
         margin_usdt=args.margin, leverage=args.leverage,
         use_trailing=not args.no_trailing,
         strategy_timeframe=strategy_tf,
+        strategy_config=strategy_config_overrides or None,
     )
     summarize(trades)
 

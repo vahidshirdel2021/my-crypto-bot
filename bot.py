@@ -740,6 +740,11 @@ def default_session():
         'positions_message_id': None,
         'positions_message_last_edit': 0.0,
         'priority_watch': {},
+        # حالت دستیار: وقتی روشن باشد ربات سیگنال را می‌سازد ولی فقط بعد از تایید دستی وارد می‌شود.
+        'assist_mode_enabled': False,
+        'assist_expiry_seconds': 300,
+        'assist_log': [],
+        'assist_seen': {},
     }
 
 
@@ -777,6 +782,18 @@ def normalize_session(data):
     stored_tags = [t for t in (data.get('enabled_setup_tags') or []) if t in valid_tags]
     s['enabled_setup_tags'] = stored_tags or valid_tags
     s['strategy_config'] = get_timeframe_preset(s['timeframe'])
+    # V3.28: قبلاً کانفیگ استراتژی موقع لود کامل از preset ساخته می‌شد، پس هر تنظیمی که کاربر با
+    # دکمه‌ها عوض کرده بود (مثلاً خاموش‌کردن سناریو ۵/۶) با هر ری‌استارت ربات بی‌صدا برمی‌گشت به
+    # پیش‌فرض. حالا فقط همین کلیدهای دکمه‌ای (نه کل کانفیگ، تا پیش‌فرض‌های جدید نسخه‌ها زیر پا
+    # نرود) از مقدار ذخیره‌شده‌ی کاربر روی preset اعمال می‌شوند.
+    _stored_scfg = data.get('strategy_config') or {}
+    _persist_exact = {
+        'weakness_exit_enabled', 'sweep_require_swing_break', 'sweep_require_confirmation_candle',
+        'strategy_sweep_enabled', 'strategy_htf_reversal_enabled', 'adaptive_allow_session_swing_anchors',
+    }
+    for _k, _v in _stored_scfg.items():
+        if _k in _persist_exact or _k.startswith('scenario_') or _k.startswith('confirm_'):
+            s['strategy_config'][_k] = _v
     s['strategy_config']['enabled_setup_tags'] = s['enabled_setup_tags']
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
@@ -788,6 +805,15 @@ def normalize_session(data):
     # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع» درخواست کرده
     # ولی لحظه‌ی درخواست آماده‌ی ورود نبوده‌اند. ورودی‌های خیلی قدیمی (فراتر از
     # PRIORITY_WATCH_TTL_SECONDS) در همین‌جا پاک‌سازی می‌شوند تا صف بی‌نهایت رشد نکند.
+    s['assist_mode_enabled'] = bool(data.get('assist_mode_enabled', False))
+    try:
+        s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 300) or 300)
+    except Exception:
+        s['assist_expiry_seconds'] = 300
+    if s['assist_expiry_seconds'] not in (180, 300, 600, 900):
+        s['assist_expiry_seconds'] = 300
+    s['assist_log'] = list(data.get('assist_log') or [])[-500:]
+    s['assist_seen'] = {k: v for k, v in dict(data.get('assist_seen') or {}).items() if time.time() - float(v or 0) < 6 * 3600}
     raw_pw = dict(data.get('priority_watch') or {})
     cutoff = time.time() - PRIORITY_WATCH_TTL_SECONDS
     s['priority_watch'] = {sym: meta for sym, meta in raw_pw.items() if float((meta or {}).get('added_at', 0)) >= cutoff}
@@ -3516,8 +3542,21 @@ def refresh_live_position_messages():
 PROFIT_LOCK_STEP_USDT = max(0.0, float(os.environ.get('PROFIT_LOCK_STEP_USDT', '5')))
 PROFIT_LOCK_CHECK_SECONDS = max(2, int(os.environ.get('PROFIT_LOCK_CHECK_SECONDS', '5')))
 PROFIT_LOCK_RETRY_SECONDS = 30
-PROFIT_LOCK_EARLY_TRIGGER_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_TRIGGER_R', '0.4')))
-PROFIT_LOCK_EARLY_LOCK_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_LOCK_R', '0.2')))
+PROFIT_LOCK_EARLY_TRIGGER_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_TRIGGER_R', '0.8')))
+PROFIT_LOCK_EARLY_LOCK_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_LOCK_R', '0.4')))
+# V3.27 - مقادیر قبلی (۰.۴R فعال‌سازی / ۰.۲R قفل) طبق ممیزی بعدی بیش‌ازحد زودهنگام بودند:
+# ۵۷.۵٪ کل معاملات با همین قفل زودهنگام بسته می‌شدند، با میانگین R واقعی فقط +۰.۱۰ - درحالی‌که
+# R:R برنامه‌ریزی‌شده‌ی معمول این معاملات ۱.۸ تا ۳R بود؛ یعنی این قفل داشت خیلی از معاملاتی را که
+# مسیر درستی به‌سمت تارگت داشتند، خیلی زود و با سود ناچیز می‌بست. آستانه‌ها به ۰.۸R (فعال‌سازی) و
+# ۰.۴R (مقدار قفل‌شده) افزایش یافت تا فقط معاملاتی که واقعاً نیمی از مسیر را طی کرده‌اند این
+# محافظت را بگیرند، و مقدار قفل‌شده هم سهم به‌مراتب معنادارتری از هدف باشد.
+# V3.26 - طبق ممیزی معاملات: ۱۱ از ۴۰ معامله‌ی بسته‌شده PnL خامشان مثبت بود اما دقیقاً همین
+# قفل زودهنگام (0.2R ریسک) آن‌ها را در سودی قفل می‌کرد که تقریباً برابر یا کمتر از کارمزد
+# رفت‌وبرگشت صرافی (fee_usdt) بود - یعنی معامله را از سود خالص به ضرر خالص می‌برد. این ضریب
+# تضمین می‌کند سطحی که قفل می‌شود (و آستانه‌ای که برای فعال‌شدن قفل لازم است) همیشه حداقل
+# این‌قدر برابر کارمزد تخمینی همان معامله باشد، تا بستن روی سطح قفل‌شده هیچ‌وقت به ضرر خالص
+# نینجامد. با ۱.۰ کردنش این حاشیه‌ی اطمینان خاموش می‌شود (فقط دقیقاً هم‌سطح کارمزد).
+PROFIT_LOCK_MIN_NET_MULT = max(1.0, float(os.environ.get('PROFIT_LOCK_MIN_NET_MULT', '1.3')))
 _PROFIT_LOCK_INFLIGHT = set()
 _PROFIT_LOCK_RETRY_AFTER = {}
 
@@ -3557,9 +3596,13 @@ def profit_lock_scan_once():
                 level = float(p.get('profit_lock_level_usdt') or 0.0)
                 new_level = math.floor(pnl / step + 1e-9) * step if step > 0 else 0.0
                 risk_usdt = float(p.get('risk_usdt') or 0.0)
+                fee_est = round_trip_fee_usdt(p.get('margin'), p.get('leverage')) or 0.0
+                min_lock_after_fee = fee_est * PROFIT_LOCK_MIN_NET_MULT if fee_est > 0 else 0.0
+                if new_level > 0 and 0 < new_level < min_lock_after_fee <= pnl:
+                    new_level = min_lock_after_fee
                 if PROFIT_LOCK_EARLY_TRIGGER_R > 0 and risk_usdt > 0:
-                    early_trigger = risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R
-                    early_lock = risk_usdt * PROFIT_LOCK_EARLY_LOCK_R
+                    early_trigger = max(risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R, min_lock_after_fee)
+                    early_lock = max(risk_usdt * PROFIT_LOCK_EARLY_LOCK_R, min_lock_after_fee)
                     if pnl >= early_trigger and early_lock > new_level:
                         new_level = early_lock
                 if new_level > 0 and new_level > level:
@@ -3843,6 +3886,10 @@ def _entry_diag_stage(item):
     reason = str(item.get('reason') or '')
     if status == 'entry_opened':
         return '🟢', 'سیگنال آماده', 'ورود انجام شد'
+    if status in ('assist_sent', 'assist_waiting'):
+        return '🤝', 'منتظر تایید شما', 'سیگنال آماده است و برای ورود منتظر تایید دستی شماست'
+    if status == 'assist_skipped':
+        return '⏳', 'در انتظار', 'سیگنال آماده بود اما محدودیت‌های معمول ورود (پوزیشن باز/کول‌داون) اجازه‌ی پیشنهاد نمی‌دهد'
     if status in ('data_error', 'insufficient_data'):
         return '⚠️', 'داده ناقص', 'برای تصمیم‌گیری داده کافی نیست'
     if status in ('risk_blocked', 'blocked', 'execute_blocked', 'leader_guard_blocked'):
@@ -4083,6 +4130,305 @@ def _entry_diag_batch_update(chat_id, results):
             logger.warning('ENTRY_DIAG telegram report failed chat=%s error=%s', chat_id, exc)
 
 
+# ============================ حالت دستیار معاملاتی ============================
+# وقتی s['assist_mode_enabled'] روشن باشد، scan_symbol به‌جای ورود خودکار، سیگنال را به شکل
+# یک پیام با دکمه‌ی ✅ ورود / ❌ رد / ⏳ تمدید برای کاربر می‌فرستد. با تایید، همان مسیر
+# execute_trade معمولی اجرا می‌شود (قیمت لحظه‌ای، SL/TP دور قیمت جدید، تمام گیت‌های ریسک).
+# سیگنال‌های ردشده/منقضی‌شده هم «سایه‌ای» ثبت و پیگیری می‌شوند تا بعداً معلوم شود اگر وارد شده
+# بودیم نتیجه چه می‌شد - تنها راه فهمیدن این‌که فیلتر دستی واقعاً کمک می‌کند یا نه.
+ASSIST_MAX_EXTENSIONS = 2
+ASSIST_MAX_DRIFT_R = max(0.05, float(os.environ.get('ASSIST_MAX_DRIFT_R', '0.5')))
+ASSIST_SHADOW_HORIZON_SECONDS = 24 * 3600
+ASSIST_LOG_CAP = 500
+ASSIST_SEEN_TTL_SECONDS = 6 * 3600
+ASSIST_EXPIRY_CHOICES = (180, 300, 600, 900)
+_ASSIST_LOCK = RLock()
+
+
+def _assist_find(s, aid):
+    for rec in (s.get('assist_log') or []):
+        if rec.get('id') == aid:
+            return rec
+    return None
+
+
+def _assist_strip_buttons(chat_id, message_id):
+    if not message_id:
+        return
+    try:
+        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': message_id, 'reply_markup': {'inline_keyboard': []}}, 10)
+    except Exception:
+        logger.exception('assist: failed to strip buttons')
+
+
+def _assist_prune_log(s):
+    log = s.get('assist_log') or []
+    if len(log) <= ASSIST_LOG_CAP:
+        return
+    keep_pending = [r for r in log if r.get('status') == 'pending']
+    others = [r for r in log if r.get('status') != 'pending']
+    s['assist_log'] = (others[-(ASSIST_LOG_CAP - len(keep_pending)):] + keep_pending)
+
+
+def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
+    s = get_session(chat_id)
+    now = time.time()
+    _tag, level_token, level_value = extract_setup_level(full_reason)
+    scn = extract_scenario_tag(full_reason)
+    seen_key = f"{symbol}|{sig}|{level_token}|{level_value}|{scn}"
+    with _ASSIST_LOCK:
+        seen = s.setdefault('assist_seen', {})
+        if now - float(seen.get(seen_key, 0) or 0) < ASSIST_SEEN_TTL_SECONDS:
+            return _entry_diag_result(chat_id, symbol, 'assist_waiting', 'این ستاپ قبلاً برای تایید ارسال شده', 'assist', sig)
+        if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'روی این نماد پوزیشن باز داریم', 'assist', sig)
+        if now < float(s.get('cooldowns', {}).get(symbol, 0) or 0):
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'دوره انتظار بعد از معامله قبلی هنوز تمام نشده', 'assist', sig)
+        if level_token is not None and f"{symbol}:{level_token}:{level_value}" in s.get('traded_levels', {}):
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'روی همین سطح قبلاً معامله شده', 'assist', sig)
+        risk_dist = abs(float(entry) - float(sl))
+        if risk_dist <= 0:
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'فاصله SL نامعتبر', 'assist', sig)
+        rr = float(plan.get('rr') or (abs(float(tp) - float(entry)) / risk_dist))
+        expiry = int(s.get('assist_expiry_seconds', 300) or 300)
+        aid = hashlib.sha1(f"{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
+        is_long = sig == 'BUY'
+        scn_txt = f"{scn} - {_SCENARIO_LABELS_PLAIN.get(scn, '')}" if scn else 'نامشخص'
+        level_txt = f"{level_token} = {fmt(float(level_value))}" if (level_token is not None and level_value is not None) else '-'
+        score = plan.get('score')
+        text = (
+            f"🤝 *سیگنال منتظر تایید شما*\n"
+            f"• نماد: `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'})\n"
+            f"• تایم‌فریم: `{TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))}`\n"
+            f"• سطح: `{level_txt}`\n"
+            f"• سناریو: `{scn_txt}`\n"
+            f"• ورود پیشنهادی: `{fmt(float(entry))}`\n"
+            f"• حد ضرر: `{fmt(float(sl))}` | هدف: `{fmt(float(tp))}`\n"
+            f"• R:R: `{rr:.2f}`" + (f" | کیفیت: `{int(round(float(score)))}/100`" if score is not None else "") + "\n"
+            f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n"
+            f"با تایید، ورود با *قیمت لحظه‌ای* انجام می‌شود."
+        )
+        markup = {'inline_keyboard': [
+            [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
+            [{'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'},
+             {'text': '📈 چارت', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
+        ]}
+        if not is_allowed(chat_id):
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'کاربر مجاز نیست', 'assist', sig)
+        res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown', 'reply_markup': markup}, 10)
+        if not (res and res.get('ok')):
+            return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'ارسال پیام تایید ناموفق بود', 'assist', sig)
+        message_id = (res.get('result') or {}).get('message_id')
+        rec = {
+            'id': aid, 'symbol': symbol, 'sig': sig, 'side_label': 'BUY (Long)' if is_long else 'SELL (Short)',
+            'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'rr': round(rr, 3),
+            'score': (int(round(float(score))) if score is not None else None),
+            'quality_label': plan.get('quality_label'), 'structural_tp': bool(plan.get('structural_target', False)),
+            'reason': full_reason, 'scn': scn, 'level_token': level_token, 'level_value': level_value,
+            'tf': s.get('timeframe'), 'created_at': now, 'expires_at': now + expiry, 'status': 'pending',
+            'ext': 0, 'message_id': message_id,
+        }
+        s.setdefault('assist_log', []).append(rec)
+        seen[seen_key] = now
+        _assist_prune_log(s)
+    save_session(chat_id)
+    return _entry_diag_result(chat_id, symbol, 'assist_sent', 'سیگنال برای تایید ارسال شد', 'assist', sig)
+
+
+def assist_approve(chat_id, aid):
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+        if not rec:
+            send_message(chat_id, 'ℹ️ این سیگنال پیدا نشد (احتمالاً قدیمی شده است).'); return
+        if rec['status'] != 'pending':
+            send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec['status']})."); return
+        now = time.time()
+        if now > rec['expires_at']:
+            rec['status'] = 'expired'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'))
+            send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return
+        try:
+            live = exchange_latest_price(chat_id, rec['symbol']) if s.get('trading_mode') == 'REAL' else latest_price(rec['symbol'])
+        except Exception:
+            live = None
+        if not live or live <= 0:
+            send_message(chat_id, '⚠️ قیمت لحظه‌ای در دسترس نیست؛ چند ثانیه بعد دوباره تایید کنید.'); return
+        is_long = rec['sig'] == 'BUY'
+        risk_dist = abs(rec['entry'] - rec['sl'])
+        crossed = (live <= rec['sl'] or live >= rec['tp']) if is_long else (live >= rec['sl'] or live <= rec['tp'])
+        if crossed:
+            rec['status'] = 'invalidated'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'))
+            send_message(chat_id, f"🚫 قیمت فعلی (`{fmt(live)}`) از حد ضرر یا هدف این سیگنال عبور کرده؛ دیگر معتبر نیست.")
+            return
+        drift_r = abs(live - rec['entry']) / risk_dist
+        if drift_r > ASSIST_MAX_DRIFT_R:
+            send_message(chat_id, f"⚠️ قیمت لحظه‌ای (`{fmt(live)}`) به اندازه‌ی `{drift_r:.2f}R` از نقطه‌ی ورود پیشنهادی (`{fmt(rec['entry'])}`) دور شده (سقف مجاز `{ASSIST_MAX_DRIFT_R:g}R`). ورود انجام نشد؛ اگر قیمت برگشت، دوباره تایید کنید.")
+            return
+    ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
+                       structural_tp=rec['structural_tp'], plan_score=rec.get('score'), plan_rr=rec.get('rr'),
+                       plan_quality_label=rec.get('quality_label'))
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid) or rec
+        if ok:
+            rec['status'] = 'approved'; rec['approved_at'] = time.time()
+            mine = [p for p in s.get('paper_positions', []) if p.get('symbol') == rec['symbol']]
+            if mine:
+                mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
+                mine[-1]['assist_id'] = aid
+                mine[-1]['assist_delay_seconds'] = round(rec['approved_at'] - rec['created_at'], 1)
+        else:
+            rec['status'] = 'blocked'
+    save_session(chat_id)
+    _assist_strip_buttons(chat_id, rec.get('message_id'))
+    if not ok:
+        send_message(chat_id, '🛑 ورود انجام نشد: یکی از محدودیت‌های ریسک/ظرفیت پوزیشن/کول‌داون/فعال‌نبودن ربات اجازه نداد.')
+
+
+def assist_reject(chat_id, aid):
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+        if not rec or rec['status'] != 'pending':
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return
+        rec['status'] = 'rejected'; rec['rejected_at'] = time.time()
+    save_session(chat_id)
+    _assist_strip_buttons(chat_id, rec.get('message_id'))
+    send_message(chat_id, '❌ رد شد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.')
+
+
+def assist_extend(chat_id, aid):
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+        if not rec or rec['status'] != 'pending':
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return
+        if rec.get('ext', 0) >= ASSIST_MAX_EXTENSIONS:
+            send_message(chat_id, f'ℹ️ حداکثر {ASSIST_MAX_EXTENSIONS} بار تمدید مجاز است.'); return
+        step = int(s.get('assist_expiry_seconds', 300) or 300)
+        rec['expires_at'] = max(rec['expires_at'], time.time()) + step
+        rec['ext'] = rec.get('ext', 0) + 1
+    save_session(chat_id)
+    send_message(chat_id, f"⏳ مهلت {step // 60} دقیقه تمدید شد.")
+
+
+def _assist_resolve_shadow(rec, tf, df):
+    """با کندل‌های بعد از لحظه‌ی سیگنال تعیین می‌کند اگر وارد شده بودیم اول SL می‌خورد یا TP.
+    اگر هر دو در یک کندل باشند محافظه‌کارانه SL حساب می‌شود."""
+    try:
+        ts = df['timestamp'].astype('float64')
+        if ts.max() > 1e12:
+            ts = ts / 1000.0
+        is_long = rec['sig'] == 'BUY'
+        for t, hi, lo in zip(ts.values, df['high'].values, df['low'].values):
+            if t < rec['created_at']:
+                continue
+            hit_sl = (lo <= rec['sl']) if is_long else (hi >= rec['sl'])
+            hit_tp = (hi >= rec['tp']) if is_long else (lo <= rec['tp'])
+            if hit_sl:
+                return {'outcome': 'sl', 'r': -1.0, 'ts': float(t)}
+            if hit_tp:
+                return {'outcome': 'tp', 'r': float(rec.get('rr') or 0.0), 'ts': float(t)}
+    except Exception:
+        logger.exception('assist shadow resolve failed')
+    return None
+
+
+def assist_maintenance_once():
+    now = time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        log = s.get('assist_log') or []
+        if not log:
+            continue
+        changed = False
+        for rec in log:
+            if rec.get('status') == 'pending' and now > rec.get('expires_at', 0):
+                with _ASSIST_LOCK:
+                    if rec.get('status') == 'pending':
+                        rec['status'] = 'expired'; changed = True
+                _assist_strip_buttons(chat_id, rec.get('message_id'))
+        todo = [r for r in log if r.get('status') in ('rejected', 'expired', 'invalidated') and not r.get('shadow_done')]
+        by_symbol = {}
+        for r in todo:
+            by_symbol.setdefault(r['symbol'], []).append(r)
+        for sym, recs in by_symbol.items():
+            try:
+                df = get_klines(sym, recs[0].get('tf') or '5min', 300)
+            except Exception:
+                df = None
+            if df is None or getattr(df, 'empty', True):
+                continue
+            for r in recs:
+                res = _assist_resolve_shadow(r, r.get('tf'), df)
+                if res:
+                    r['shadow'] = res; r['shadow_done'] = True; changed = True
+                elif now - r['created_at'] > ASSIST_SHADOW_HORIZON_SECONDS:
+                    r['shadow'] = {'outcome': 'timeout', 'r': None, 'ts': now}; r['shadow_done'] = True; changed = True
+        if changed:
+            save_session(chat_id)
+
+
+def _assist_loop():
+    while True:
+        try:
+            assist_maintenance_once()
+        except Exception:
+            logger.exception('assist maintenance failed')
+        time.sleep(30)
+
+
+def assist_stats_text(s):
+    log = list(s.get('assist_log') or [])
+    if not log:
+        return '📊 هنوز هیچ سیگنالی از حالت دستیار ثبت نشده است.'
+    from collections import Counter
+    c = Counter(r.get('status') for r in log)
+    lines = ['📊 *آمار حالت دستیار*',
+             f"• کل سیگنال‌ها: `{len(log)}` | تاییدشده: `{c.get('approved', 0)}` | ردشده: `{c.get('rejected', 0)}` | منقضی: `{c.get('expired', 0)}` | در انتظار: `{c.get('pending', 0)}`"]
+    ids = {r['id'] for r in log if r.get('status') == 'approved'}
+    trades = [p for p in (s.get('closed_positions') or []) if p.get('assist_id') in ids]
+    open_n = sum(1 for p in (s.get('paper_positions') or []) if p.get('assist_id') in ids)
+    lines.append('\n*معاملات تاییدشده (نتیجه‌ی واقعی):*')
+    if trades:
+        wins = sum(1 for p in trades if float(p.get('pnl_usdt') or 0) > 0)
+        avg_r = sum(float(p.get('realized_r') or 0) for p in trades) / len(trades)
+        net = sum(float(p.get('pnl_usdt') or 0) for p in trades)
+        lines.append(f"• بسته‌شده: `{len(trades)}` | نرخ برد: `{wins / len(trades) * 100:.0f}%` | میانگین R: `{avg_r:+.2f}` | مجموع: `{net:+.2f}` USDT")
+    else:
+        lines.append('• هنوز معامله‌ی بسته‌شده‌ای نداریم.')
+    if open_n:
+        lines.append(f"• باز: `{open_n}`")
+    sh = [r for r in log if r.get('shadow_done') and (r.get('shadow') or {}).get('outcome') in ('tp', 'sl')]
+    lines.append('\n*ردشده/منقضی‌شده‌ها (اگر وارد شده بودیم):*')
+    if sh:
+        w = sum(1 for r in sh if r['shadow']['outcome'] == 'tp')
+        avg_r_sh = sum(float(r['shadow']['r']) for r in sh) / len(sh)
+        lines.append(f"• تعیین‌تکلیف‌شده: `{len(sh)}` | می‌برد: `{w / len(sh) * 100:.0f}%` | میانگین R فرضی: `{avg_r_sh:+.2f}`")
+        if trades:
+            avg_r = sum(float(p.get('realized_r') or 0) for p in trades) / len(trades)
+            verdict = ('✅ تشخیص شما تا الان بهتر از پذیرش کورکورانه‌ی همه‌ی سیگنال‌ها عمل کرده.'
+                       if avg_r > avg_r_sh else '⚠️ تا الان رد کردن‌های شما بهتر از تایید کردن‌ها نبوده.')
+            lines.append(f"\n{verdict}")
+    else:
+        lines.append('• هنوز نتیجه‌ی فرضی‌ای تعیین‌تکلیف نشده (تا ۲۴ ساعت پیگیری می‌شود).')
+    n_small = len(trades) < 30 or len(sh) < 30
+    if n_small:
+        lines.append('\n_توجه: نمونه هنوز کمتر از ۳۰ مورد است؛ نتیجه‌گیری قطعی نکنید._')
+    return '\n'.join(lines)
+
+
+def assist_keyboard(chat_id):
+    s = get_session(chat_id)
+    on = bool(s.get('assist_mode_enabled', False))
+    mins = int(s.get('assist_expiry_seconds', 300) or 300) // 60
+    return {'inline_keyboard': [
+        [{'text': f"{'🟢' if on else '🔴'} حالت دستیار (ورود فقط با تایید من)", 'callback_data': '/toggle_assist_mode'}],
+        [{'text': f'⏱ مهلت تایید: {mins} دقیقه (تغییر)', 'callback_data': '/assist_expiry_cycle'}],
+        [{'text': '📊 آمار دستیار', 'callback_data': '/assist_stats'}],
+        [{'text': '🧰 بازگشت به مدیریت فیلتر', 'callback_data': '/trade_filter_management'}],
+    ]}
+
+
 async def scan_symbol(http,chat_id,symbol,market_gate=None):
     """market_gate: None (سوییچ خاموش) یا خروجی refresh_market_gate: 'BULLISH' / 'BEARISH' / 'RANGE'."""
     s=get_session(chat_id)
@@ -4186,6 +4532,9 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
     full_reason = full_reason[:500]
+    if s.get('assist_mode_enabled'):
+        # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
+        return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
@@ -4462,6 +4811,7 @@ def trade_filter_management_keyboard(chat_id):
             [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
             [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
             [{'text': '🧭 مدیریت ۶ سناریو PDH/PDL', 'callback_data': '/scenario_management'}],
+            [{'text': '🤝 حالت دستیار (ورود با تایید من)', 'callback_data': '/assist_menu'}],
             [{'text': '👤 پروفایل من', 'callback_data': '/my_profile_menu'}],
             [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
@@ -5763,6 +6113,32 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🚦 معافیت ۱/۲ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
+    if cl=='/assist_menu':
+        st = 'روشن 🟢' if s.get('assist_mode_enabled') else 'خاموش 🔴'
+        send_message(chat_id, f"🤝 *حالت دستیار معاملاتی*\n\nوضعیت: {st}\n\nوقتی روشن باشد، ربات همه‌چیز را مثل قبل اسکن و تحلیل می‌کند ولی به‌جای ورود خودکار، هر سیگنال را با دکمه‌ی ✅ ورود / ❌ رد برای شما می‌فرستد. ورود بعد از تایید با قیمت لحظه‌ای انجام می‌شود. سیگنال‌های ردشده هم پیگیری می‌شوند تا معلوم شود تشخیص شما ارزش افزوده دارد یا نه.", assist_keyboard(chat_id))
+        return
+    if cl=='/toggle_assist_mode':
+        s['assist_mode_enabled'] = not bool(s.get('assist_mode_enabled', False))
+        save_session(chat_id)
+        st = 'روشن 🟢 - از این پس ورود فقط با تایید شما انجام می‌شود' if s['assist_mode_enabled'] else 'خاموش 🔴 - ربات دوباره خودکار وارد می‌شود'
+        send_message(chat_id, f"🤝 حالت دستیار: {st}", assist_keyboard(chat_id))
+        return
+    if cl=='/assist_expiry_cycle':
+        cur = int(s.get('assist_expiry_seconds', 300) or 300)
+        nxt = ASSIST_EXPIRY_CHOICES[(ASSIST_EXPIRY_CHOICES.index(cur) + 1) % len(ASSIST_EXPIRY_CHOICES)] if cur in ASSIST_EXPIRY_CHOICES else 300
+        s['assist_expiry_seconds'] = nxt
+        save_session(chat_id)
+        send_message(chat_id, f"⏱ مهلت تایید هر سیگنال: {nxt // 60} دقیقه", assist_keyboard(chat_id))
+        return
+    if cl=='/assist_stats':
+        send_message(chat_id, assist_stats_text(s), assist_keyboard(chat_id))
+        return
+    if cl.startswith('/assist_ok_'):
+        assist_approve(chat_id, cl[len('/assist_ok_'):]); return
+    if cl.startswith('/assist_no_'):
+        assist_reject(chat_id, cl[len('/assist_no_'):]); return
+    if cl.startswith('/assist_ext_'):
+        assist_extend(chat_id, cl[len('/assist_ext_'):]); return
     if cl=='/my_profile_menu':
         send_message(
             chat_id,
@@ -6585,6 +6961,7 @@ def main():
     Thread(target=lambda: (time.sleep(7), _pending_orders_loop()), daemon=True, name='pending-orders').start()
     Thread(target=lambda: (time.sleep(9), _signal_channel_loop()), daemon=True, name='signal-channel').start()
     Thread(target=lambda: (time.sleep(11), _profit_lock_loop()), daemon=True, name='profit-lock').start()
+    Thread(target=lambda: (time.sleep(13), _assist_loop()), daemon=True, name='assist').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
