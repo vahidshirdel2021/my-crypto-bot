@@ -281,10 +281,20 @@ def get_admin_fee_menu_keyboard():
     ]}
 
 
-def get_entry_diag_keyboard(enabled=True):
+ENTRY_REPORT_CHOICES = ((600, "۱۰ دقیقه"), (1800, "۳۰ دقیقه"), (3600, "۱ ساعت"), (14400, "۴ ساعت"))
+
+
+def get_entry_diag_keyboard(enabled=True, interval=600):
+    """interval = فاصله‌ی ارسال گزارش دوره‌ای (ثانیه)؛ گزینه‌ی فعلی با ✅ مشخص می‌شود."""
+    interval_row = [
+        {"text": ("✅ " if int(interval) == sec else "") + label, "callback_data": f"/entry_report_{sec}"}
+        for sec, label in ENTRY_REPORT_CHOICES
+    ]
     return {"inline_keyboard": [
         [{"text": "🟢 فعال است — خاموش کردن" if enabled else "🔴 خاموش است — فعال کردن",
           "callback_data": "/toggle_entry_diag"}],
+        [{"text": "⏱ فاصله‌ی ارسال گزارش:", "callback_data": "/entry_diag"}],
+        interval_row,
         [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}

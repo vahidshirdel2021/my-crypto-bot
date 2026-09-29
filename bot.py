@@ -61,6 +61,20 @@ DB_BACKEND = 'postgres' if DB_URL.lower().startswith(('postgres://', 'postgresql
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
 NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
+# گزینه‌های قابل انتخاب کاربر برای فاصله‌ی گزارش دوره‌ای لاگ: ۱۰ دقیقه / ۳۰ دقیقه / ۱ ساعت / ۴ ساعت
+ENTRY_REPORT_CHOICES = (600, 1800, 3600, 14400)
+_ENTRY_REPORT_LABELS = {600: '۱۰ دقیقه', 1800: '۳۰ دقیقه', 3600: '۱ ساعت', 14400: '۴ ساعت'}
+
+
+def entry_report_interval(s):
+    """فاصله‌ی گزارش دوره‌ای این کاربر (ثانیه)؛ اگر ذخیره نشده باشد پیش‌فرض محیطی (نزدیک‌ترین گزینه‌ی مجاز)."""
+    try:
+        v = int((s or {}).get('entry_report_seconds') or 0)
+    except Exception:
+        v = 0
+    if v in ENTRY_REPORT_CHOICES:
+        return v
+    return min(ENTRY_REPORT_CHOICES, key=lambda c: abs(c - NO_ENTRY_REPORT_SECONDS))
 DATA_CACHE_SECONDS = max(5, int(os.environ.get('DATA_CACHE_SECONDS', '20')))
 MAX_ASYNC_REQUESTS = max(2, int(os.environ.get('MAX_ASYNC_REQUESTS', '10')))
 DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
@@ -158,6 +172,10 @@ TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() 
 # هیچ‌وجه به این بخش وابسته نیست و برعکس.
 SIGNAL_CHANNEL_TF_CHAT_ID = int(os.environ.get('SIGNAL_CHANNEL_TF_CHAT_ID', '1878257830'))
 SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
+# اگر true باشد، سیگنال‌هایی که حکمشان «معامله نکن» است اصلاً به کانال ارسال نمی‌شوند.
+QUICK_TRADE_FALLBACK_SL_PCT = float(os.environ.get('QUICK_TRADE_FALLBACK_SL_PCT', '0.01'))  # فاصله‌ی SL جایگزین اگر طرح ATR/سوینگ ساخته نشود
+QUICK_TRADE_FALLBACK_RR = float(os.environ.get('QUICK_TRADE_FALLBACK_RR', '1.8'))
+SIGNAL_CHANNEL_SKIP_NO_TRADE = os.environ.get('SIGNAL_CHANNEL_SKIP_NO_TRADE', 'true').lower() not in ('0', 'false', 'no')
 SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()  # فقط fallback اگر تایم‌فریم ادمین در دسترس نباشد
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
 _SIGNAL_CHANNEL_SETTINGS_FILE = os.environ.get('SIGNAL_CHANNEL_SETTINGS_FILE', 'signal_channel_settings.json')
@@ -732,6 +750,7 @@ def default_session():
         'created_at': int(time.time()),
         'bottom_menu_open': True,
         'entry_diag_enabled': True,
+        'entry_report_seconds': min(ENTRY_REPORT_CHOICES, key=lambda c: abs(c - NO_ENTRY_REPORT_SECONDS)),
         'trade_pipeline_enabled': False,
         'trade_pipeline_audit': [],
         'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT,
@@ -799,6 +818,7 @@ def normalize_session(data):
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
     s['entry_diag_enabled'] = bool(s.get('entry_diag_enabled', True))
+    s['entry_report_seconds'] = entry_report_interval(s)
     s['platform_fee_rate_pct'] = min(100.0, max(0.0, float(s.get('platform_fee_rate_pct', PLATFORM_FEE_RATE_PCT))))
     s['platform_fee_total_usdt'] = max(0.0, float(s.get('platform_fee_total_usdt', 0.0)))
     s['platform_fee_trade_count'] = max(0, int(s.get('platform_fee_trade_count', 0) or 0))
@@ -874,6 +894,83 @@ def is_allowed(chat_id):
     return (not ALLOWED_CHAT_IDS) or (chat_id in ALLOWED_CHAT_IDS)
 
 
+# ---------------------------------------------------------------------------
+# حذف خودکار پیام‌های ربات در چت کاربران، AUTO_DELETE_SECONDS ثانیه (پیش‌فرض ۱۰ دقیقه) بعد از ارسال.
+# استثنا: پیام‌های سیگنال (کارت‌های تایید «حالت دستیار» - حتی بعد از منقضی‌شدن) و پیام‌های کانال
+# سیگنال (که منطق TTL/ذخیره‌ی جدا دارند) هرگز از این مسیر حذف نمی‌شوند. 0 = خاموش.
+# ---------------------------------------------------------------------------
+AUTO_DELETE_SECONDS = max(0, int(os.environ.get('AUTO_DELETE_SECONDS', '600')))
+_AUTO_DELETE_FILE = os.environ.get('AUTO_DELETE_QUEUE_FILE', 'auto_delete_queue.json')
+_AUTO_DELETE_QUEUE = []          # [[due_ts, chat_id, message_id], ...]
+_AUTO_DELETE_LOCK = RLock()
+_AUTO_DELETE_DIRTY = False
+
+
+def _auto_delete_load():
+    global _AUTO_DELETE_QUEUE
+    try:
+        with open(_AUTO_DELETE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            _AUTO_DELETE_QUEUE = [[float(a), int(b), int(c)] for a, b, c in data]
+    except Exception:
+        _AUTO_DELETE_QUEUE = []
+
+
+def schedule_auto_delete(chat_id, message_id, ttl=None):
+    """پیام تازه‌ارسال‌شده‌ی ربات را برای حذف بعد از ttl ثانیه (پیش‌فرض AUTO_DELETE_SECONDS) ثبت می‌کند."""
+    global _AUTO_DELETE_DIRTY
+    ttl = AUTO_DELETE_SECONDS if ttl is None else int(ttl)
+    if ttl <= 0 or not message_id or not chat_id:
+        return
+    with _AUTO_DELETE_LOCK:
+        _AUTO_DELETE_QUEUE.append([time.time() + ttl, int(chat_id), int(message_id)])
+        _AUTO_DELETE_DIRTY = True
+
+
+def _auto_delete_sweep_once():
+    global _AUTO_DELETE_DIRTY
+    now = time.time()
+    with _AUTO_DELETE_LOCK:
+        due = [x for x in _AUTO_DELETE_QUEUE if x[0] <= now]
+        if due:
+            _AUTO_DELETE_QUEUE[:] = [x for x in _AUTO_DELETE_QUEUE if x[0] > now]
+            _AUTO_DELETE_DIRTY = True
+    for _due, chat_id, message_id in due:
+        try:
+            tg('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, 10)
+        except Exception:
+            logger.exception('auto delete failed chat=%s message=%s', chat_id, message_id)
+        # اگر کارت پوزیشن‌های زنده حذف شد، شناسه‌اش را پاک کن تا رفرش زنده بی‌نتیجه ادامه پیدا نکند
+        try:
+            sess = USER_SESSIONS.get(chat_id)
+            if sess and sess.get('positions_message_id') == message_id:
+                sess['positions_message_id'] = None
+        except Exception:
+            pass
+    with _AUTO_DELETE_LOCK:
+        if _AUTO_DELETE_DIRTY:
+            try:
+                with open(_AUTO_DELETE_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(_AUTO_DELETE_QUEUE, f)
+            except Exception:
+                logger.exception('failed to persist auto delete queue')
+            _AUTO_DELETE_DIRTY = False
+
+
+def _auto_delete_loop():
+    if AUTO_DELETE_SECONDS <= 0:
+        logger.info('AUTO_DELETE_SECONDS=0 - حذف خودکار پیام‌ها خاموش است.')
+        return
+    _auto_delete_load()
+    while True:
+        try:
+            _auto_delete_sweep_once()
+        except Exception:
+            logger.exception('auto delete sweep failed')
+        time.sleep(15)
+
+
 def tg(method, payload=None, timeout=10):
     if not TELEGRAM_TOKEN: return None
     try:
@@ -908,7 +1005,8 @@ def answer_callback(cid, text=None, show_alert=False):
         tg('answerCallbackQuery', payload, 5)
 
 
-def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
+def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown', keep=False):
+    """keep=True: این پیام (مثلاً سیگنال) هرگز خودکار حذف نمی‌شود."""
     if not is_allowed(chat_id): return False
     s = get_session(chat_id)
     if markup is None: markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
@@ -923,7 +1021,10 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     body = {'chat_id':chat_id,'text':text,'reply_markup':markup}
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
-    return bool(res and res.get('ok'))
+    ok = bool(res and res.get('ok'))
+    if ok and not keep:
+        schedule_auto_delete(chat_id, ((res.get('result') or {}).get('message_id')))
+    return ok
 
 
 def edit_page(chat_id, text, markup=None, message_id=None, parse_mode='Markdown'):
@@ -948,6 +1049,9 @@ def send_photo(chat_id, img, caption='', markup=None):
         markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
+        if r.status_code == 200:
+            try: schedule_auto_delete(chat_id, ((r.json() or {}).get('result') or {}).get('message_id'))
+            except Exception: pass
         return r.status_code == 200
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
 
@@ -2215,13 +2319,17 @@ def _signal_channel_scan_once():
             key = (symbol, timeframe, tag, side_fa, pattern, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
-            _SIGNAL_CHANNEL_SEEN[key] = True
             defs = LEVEL_SETUP_DEFS.get(tag)
             level_label = (defs[2] if side_fa == 'سقف' else defs[3]) if defs else f'{side_fa} {tag}'
             regime_label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime)
             implied_side = _signal_channel_implied_side(pattern, side_fa)
             detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, implied_side)
             verdict = _signal_channel_verdict(implied_side, buy_votes, sell_votes)
+            # فیلتر: حکم «معامله نکن» (verdict=None) برای هر سه الگو (touch / rejection / breakout_retest) ارسال نمی‌شود.
+            # کلید فقط بعد از عبور از فیلتر ثبت می‌شود؛ پس اگر روی کندلِ در حال تشکیل حکم بعداً BUY/SELL شد، همان‌موقع یک‌بار ارسال می‌شود.
+            if verdict is None and SIGNAL_CHANNEL_SKIP_NO_TRADE:
+                continue
+            _SIGNAL_CHANNEL_SEEN[key] = True
             verdict_label = {'BUY': '🟢 مناسب خرید', 'SELL': '🔴 مناسب فروش'}.get(verdict, '⚪️ معامله نکن (سیگنال ضعیف/متضاد)')
             lines = [
                 f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
@@ -2870,7 +2978,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             return False
     else:
         if float(s['paper_balance']) - reserved_margin(s) < margin:
-            return False
+            return _blk(chat_id, 'موجودی آزاد پیپر برای مارجین این معامله کافی نیست')
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
@@ -2997,9 +3105,10 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force)
 
 
-def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None):
+def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None,force=False):
+    """force=True (ورود سریع از کانال): همه‌ی محدودیت‌های خودکار نادیده گرفته می‌شود؛ فقط موانع فنی می‌مانند."""
     s=get_session(chat_id)
-    if s['daily_stopped']:
+    if s['daily_stopped'] and not force:
         return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
     live_price=latest_price(symbol)
     if not live_price:
@@ -3009,11 +3118,15 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
     lock=get_entry_lock(chat_id)
     with lock:
         s=get_session(chat_id)
-        if s['daily_stopped']:
+        if s['daily_stopped'] and not force:
             return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
-        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type)
+        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type,force=force)
     if ok:
         return True, ''
+    # دلیل دقیق رد شدن (اگر ثبت شده باشد) به‌جای پیام کلی
+    detail = _LAST_BLOCK_REASON.pop(chat_id, None)
+    if detail:
+        return False, detail
     return False, 'ورود دستی رد شد (ممکن است ظرفیت پوزیشن پر باشد، نماد از قبل باز باشد، یا حجم/ریسک معتبر نباشد).'
 
 
@@ -3045,20 +3158,11 @@ def quick_channel_trade(chat_id, symbol, side):
     side_fa = 'خرید (Long)' if is_long else 'فروش (Short)'
     if not (2 <= len(symbol) <= 12):
         send_message(chat_id, '⚠️ نماد نامعتبر است.'); return
-    # پیش‌بررسی دلایل رایجِ رد شدن، تا به‌جای پیام کلی، دلیل دقیق گفته شود
-    if s['daily_stopped']:
-        send_message(chat_id, '🛑 محدودیت ضرر روزانه فعال است؛ ورود جدید مسدود است.'); return
+    # ورود سریع از کانال بدون هیچ مانع استراتژیک: حد ضرر روزانه، سقف پوزیشن، سقف هم‌جهت، کول‌داون،
+    # محافظ ریسک، ستاپ/سطح مصرف‌شده و ... نادیده گرفته می‌شوند. تنها مانعِ فنیِ غیرقابل‌عبور:
+    # وجود پوزیشن باز روی همین نماد (سیستم پوزیشن‌ها یک پوزیشن به‌ازای هر نماد نگه می‌دارد).
     if any(p['symbol'] == symbol for p in s['paper_positions']):
         send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
-    max_pos = int(s.get('max_open_positions') or 0)
-    if max_pos > 0 and len(s['paper_positions']) >= max_pos:
-        send_message(chat_id, f"⚠️ ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{max_pos})."); return
-    left = float(s['cooldowns'].get(symbol, 0)) - time.time()
-    if left > 0:
-        send_message(chat_id, f'⏳ `{symbol}` در دوره‌ی انتظار پس از معامله‌ی قبلی است ({int(left // 60) + 1} دقیقه‌ی دیگر).'); return
-    max_same = int(s.get('max_same_direction_positions', 0) or 0)
-    if max_same > 0 and sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == is_long) >= max_same:
-        send_message(chat_id, f'⚠️ سقف پوزیشن هم‌جهت ({max_same}) پر است.'); return
 
     try:
         live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
@@ -3067,19 +3171,27 @@ def quick_channel_trade(chat_id, symbol, side):
     if not live:
         send_message(chat_id, f'❌ قیمت لحظه‌ای `{symbol}` دریافت نشد.'); return
     tf = s['timeframe']
-    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
-    if df is None or df.empty:
-        send_message(chat_id, f'❌ داده‌ی بازار `{symbol}` دریافت نشد.'); return
-    plan, why = build_quick_trade_plan(
-        calculate_indicators(df), side, s.get('strategy_config'),
-        grid_levels=_log_grid_levels_sync(symbol), live_price=live,
-    )
+    plan, why = None, 'داده‌ی بازار در دسترس نبود'
+    try:
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        if df is not None and not df.empty:
+            plan, why = build_quick_trade_plan(
+                calculate_indicators(df), side, s.get('strategy_config'),
+                grid_levels=_log_grid_levels_sync(symbol), live_price=live,
+            )
+    except Exception:
+        logger.exception('quick trade plan failed symbol=%s', symbol)
     if not plan:
-        send_message(chat_id, f'⚠️ ورود سریع `{symbol}` انجام نشد: {why}'); return
+        # طرح اصلی (سوینگ/ATR) ساخته نشد؛ ورود متوقف نمی‌شود و SL/TP درصدی ساده ساخته می‌شود.
+        d = float(live) * QUICK_TRADE_FALLBACK_SL_PCT
+        k = 1 if is_long else -1
+        plan = {'sl': float(live) - k * d, 'tp': float(live) + k * d * QUICK_TRADE_FALLBACK_RR,
+                'rr': QUICK_TRADE_FALLBACK_RR, 'sl_source': f'درصدی {QUICK_TRADE_FALLBACK_SL_PCT*100:g}% (جایگزین: {why})',
+                'tp_source': f'{QUICK_TRADE_FALLBACK_RR:g}R', 'reason': 'ورود سریع کانال | SL/TP درصدی جایگزین'}
 
     ok, err = execute_manual_trade(
         chat_id, symbol, 'BUY (Long)' if is_long else 'SELL (Short)', plan['sl'], plan['tp'],
-        entry_price=live, reason=plan['reason'], order_type='market',
+        entry_price=live, reason=plan['reason'], order_type='market', force=True,
     )
     if not ok:
         send_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}'); return
@@ -3524,6 +3636,7 @@ def _send_or_edit_positions_view(chat_id, message_id=None, force_send=False):
     if res and res.get('ok'):
         mid = ((res.get('result') or {}).get('message_id'))
         if mid:
+            schedule_auto_delete(chat_id, mid)
             s['positions_message_id'] = int(mid)
             s['positions_message_last_edit'] = time.time()
             save_session(chat_id)
@@ -3563,6 +3676,8 @@ def refresh_live_position_messages():
             desc = ((res or {}).get('description') or '').lower()
             if 'message is not modified' in desc:
                 s['positions_message_last_edit'] = now
+            elif 'not found' in desc or "can't be edited" in desc:
+                s['positions_message_id'] = None   # پیام حذف شده؛ رفرش بی‌نتیجه متوقف شود
 
 
 # --- قفل سود پله‌ای (تنها منطقِ «قفل سود»؛ مستقل از SL/TP و مدیریت ضعف روند) ---------------
@@ -4159,7 +4274,7 @@ def _entry_diag_batch_update(chat_id, results):
     if not state.get('no_entry_since'):
         state['no_entry_since'] = now
     last_report = float(state.get('last_report_at', 0.0) or 0.0)
-    if (not last_report) or now - last_report >= NO_ENTRY_REPORT_SECONDS:
+    if (not last_report) or now - last_report >= entry_report_interval(get_session(chat_id)):
         try:
             elapsed = now - float(state.get('no_entry_since') or now)
             report_text, report_markup = _simple_status_report(chat_id)
@@ -5016,6 +5131,8 @@ def export_trade_pipeline(chat_id):
         fname = f"trade_pipeline_audit_{s.get('timeframe','5min')}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.json"
         caption = f'🧭 خروجی کامل ممیزی Pipeline | تایم‌فریم: {TF_DISPLAY.get(s.get("timeframe"),s.get("timeframe"))}'
         resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument', data={'chat_id': chat_id, 'caption': caption}, files={'document': (fname, io.BytesIO(raw), 'application/json')}, timeout=30)
+        try: schedule_auto_delete(chat_id, (((resp.json() or {}).get('result') or {}).get('message_id')))
+        except Exception: pass
         if not resp.ok or not (resp.json() or {}).get('ok', False):
             logger.warning('export trade pipeline telegram send failed: %s', resp.text[:500])
             send_message(chat_id, '❌ خروجی JSON ممیزی ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
@@ -5059,6 +5176,8 @@ def export_trade_data(chat_id):
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
         resp=requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        try: schedule_auto_delete(chat_id, (((resp.json() or {}).get('result') or {}).get('message_id')))
+        except Exception: pass
         if not resp.ok or not (resp.json() or {}).get('ok', False):
             logger.warning('export trade data telegram send failed: %s', resp.text[:500])
             send_message(chat_id, '❌ خروجی JSON ساخته شد اما ارسال فایل به تلگرام ناموفق بود.')
@@ -5831,7 +5950,21 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
-        edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}", get_entry_diag_keyboard(enabled), message_id); return
+        edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}\n⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[entry_report_interval(s)]}", get_entry_diag_keyboard(enabled, entry_report_interval(s)), message_id); return
+    if cl.startswith('/entry_report_'):
+        try:
+            sec = int(cl[len('/entry_report_'):])
+        except ValueError:
+            sec = 0
+        if sec in ENTRY_REPORT_CHOICES:
+            s['entry_report_seconds'] = sec
+            # شمارنده از همین لحظه شروع می‌شود تا گزارش بعدی دقیقاً بعد از فاصله‌ی انتخابی بیاید
+            st = ENTRY_DIAG_STATE.get(chat_id)
+            if st is not None:
+                st['last_report_at'] = time.time()
+            save_session(chat_id)
+            edit_page(chat_id, f"⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[sec]}", get_entry_diag_keyboard(s.get('entry_diag_enabled', True), sec), message_id)
+        return
     if cl == '/setup_management':
         edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
     if cl.startswith('/toggle_setup_'):
@@ -5858,11 +5991,11 @@ def process_command(cmd,chat_id,message_id=None):
     if cl == '/toggle_entry_diag':
         s['entry_diag_enabled'] = not s.get('entry_diag_enabled', True)
         save_session(chat_id)
-        edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled']), message_id); return
+        edit_page(chat_id, f"🔍 لاگ تشخیصی: {'🟢 فعال شد' if s['entry_diag_enabled'] else '🔴 خاموش شد'}", get_entry_diag_keyboard(s['entry_diag_enabled'], entry_report_interval(s)), message_id); return
     if cl == '/entry_diag_log':
         window = list((ENTRY_DIAG_STATE.get(chat_id) or {}).get('window_results') or [])
         if not window:
-            edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+            edit_page(chat_id, '📋 هنوز داده‌ی تشخیصی ثبت نشده است.', get_entry_diag_keyboard(s.get('entry_diag_enabled', True), entry_report_interval(s)), message_id); return
         data_errs = [x for x in window if x.get('status') in ('data_error', 'insufficient_data')]
         lines = ['📋 *آخرین موارد خطای داده (نماد مشخص)*', '━━━━━━━━━━━━━━━━━━━━']
         if data_errs:
@@ -5873,7 +6006,7 @@ def process_command(cmd,chat_id,message_id=None):
                 lines.append(f'• `{sym}` — {reason}')
         else:
             lines.append('موردی یافت نشد.')
-        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True)), message_id); return
+        edit_page(chat_id, '\n'.join(lines), get_entry_diag_keyboard(s.get('entry_diag_enabled', True), entry_report_interval(s)), message_id); return
     if cl in ('/manual_trade','🖐 معامله دستی'):
         s['user_state']='WAIT_MANUAL_ONESHOT'; s.pop('_manual_tmp',None); save_session(chat_id)
         send_message(chat_id,
@@ -7064,6 +7197,7 @@ def main():
     Thread(target=lambda: (time.sleep(9), _signal_channel_loop()), daemon=True, name='signal-channel').start()
     Thread(target=lambda: (time.sleep(11), _profit_lock_loop()), daemon=True, name='profit-lock').start()
     Thread(target=lambda: (time.sleep(13), _assist_loop()), daemon=True, name='assist').start()
+    Thread(target=lambda: (time.sleep(15), _auto_delete_loop()), daemon=True, name='auto-delete').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 

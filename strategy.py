@@ -712,6 +712,24 @@ def _compute_prev_htf_levels(d, before_idx):
     return out
 
 
+def _all_active_levels_at(d, idx, pdh, pdl, cfg):
+    """قیمت تمام سطوح فعال (Monthly/Weekly/Daily/4h/1h - هرکدام که در enabled_setup_tags
+    روشن باشند) را در همان کندلِ ستاپ برمی‌گرداند - برای پیدا کردن نزدیک‌ترین سطح واقعی
+    بین قیمت ورود و هدف نرم (soft target)، نه فقط سطح مقابلِ همان جفتی که سیگنال رویش
+    فایر شده. Cluster را عمداً شامل نمی‌شود چون خودش ترکیبی از همین سطوح است."""
+    enabled = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
+    out = {}
+    if "Daily" in enabled and pdh is not None and pdl is not None:
+        out["PDH"] = float(pdh)
+        out["PDL"] = float(pdl)
+    htf = _compute_prev_htf_levels(d, idx)
+    for key, val in htf.items():
+        tag = _LEVEL_TOKEN_TAG.get(key)
+        if tag in enabled:
+            out[key] = float(val)
+    return out
+
+
 # --- Multi-timeframe key-level scanning (Monthly/Weekly/Daily/4h/1h) -------
 #
 # V1 originally only ever looked at the previous day's high/low (PDH/PDL).
@@ -1851,7 +1869,6 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     min_rr = float(cfg.get("min_rr", 1.30))
-    target_rr = max(min_rr, float(cfg.get("sweep_risk_reward", 1.8)))
     buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
@@ -1859,7 +1876,14 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     body_ratio = _safe_float(curr.get("body_ratio"), 0)
     vr = _safe_float(curr.get("volume_ratio"), 1)
 
-    extend_to_structure = bool(cfg.get("extend_tp_to_pdl", True))
+    # طبق تصمیم کاربر: TP دیگر لزوماً «سطح مقابل همان جفتی که سیگنال رویش فایر شده» نیست،
+    # بلکه نزدیک‌ترین سطح فعال (از هر تگی: PDH/PDL, P4H/P4L, P1H/P1L, PWH/PWL, PMH/PML) در
+    # مسیر معامله است - چون قیمت معمولاً پیش از رسیدن به سطح دورتر، به یک سطح نزدیک‌تر واقعی
+    # واکنش نشان می‌دهد. اگر آن نزدیک‌ترین سطح R:R حداقلی را ندهد (یا اصلاً سطحی در مسیر
+    # نباشد)، معامله رد می‌شود - هیچ هدف دلخواه/ضریب‌ ثابتِ ATR جایگزین آن نمی‌شود.
+    all_levels = _all_active_levels_at(d, idx, pdh, pdl, cfg)
+    if target_level is not None:
+        all_levels.setdefault("_target", float(target_level))
 
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
@@ -1873,13 +1897,13 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         if risk_dist > atr * max_sl_atr:
             return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (sweep_extreme - entry) / risk_dist
-        soft_tp = entry - (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdl
-        if extend_to_structure and target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref < entry and (entry - target_ref) / risk_dist >= min_rr:
-            tp = max(tp, target_ref)
+        below = [p for p in all_levels.values() if p < entry]
+        if not below:
+            return None, "هیچ سطح ساختاری‌ای زیر قیمت ورود برای هدف‌گذاری وجود ندارد؛ معامله رد شد"
+        tp = max(below)  # نزدیک‌ترین سطح پایین‌تر از قیمت ورود
+        rr_to_tp = (entry - tp) / risk_dist
+        if rr_to_tp < min_rr:
+            return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
     else:
         sweep_extreme = float(curr["low"])
@@ -1893,13 +1917,13 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         if risk_dist > atr * max_sl_atr:
             return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (entry - sweep_extreme) / risk_dist
-        soft_tp = entry + (risk_dist * target_rr)
-        tp = soft_tp
-        target_ref = float(target_level) if target_level is not None else pdh
-        if extend_to_structure and target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = target_ref
-        elif target_ref > entry and (target_ref - entry) / risk_dist >= min_rr:
-            tp = min(tp, target_ref)
+        above = [p for p in all_levels.values() if p > entry]
+        if not above:
+            return None, "هیچ سطح ساختاری‌ای بالای قیمت ورود برای هدف‌گذاری وجود ندارد؛ معامله رد شد"
+        tp = min(above)  # نزدیک‌ترین سطح بالاتر از قیمت ورود
+        rr_to_tp = (tp - entry) / risk_dist
+        if rr_to_tp < min_rr:
+            return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
 
     # فیلتر کارمزد به ریسک دلاری
@@ -1931,7 +1955,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "score": score,
         "quality_label": quality_label, "rr": float(rr),
-        "pdh": float(pdh), "pdl": float(pdl), "soft_tp": float(soft_tp),
+        "pdh": float(pdh), "pdl": float(pdl),
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
         "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
