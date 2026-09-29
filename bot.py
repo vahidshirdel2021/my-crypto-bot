@@ -4194,11 +4194,22 @@ def _assist_find(s, aid):
     return None
 
 
-def _assist_strip_buttons(chat_id, message_id):
+def _assist_strip_buttons(chat_id, message_id, rec=None):
+    """دکمه‌های عملیاتی (✅ ورود/❌ رد/⏳ تمدید) را بعد از تعیین‌تکلیف سیگنال (منقضی/رد/نامعتبر)
+    حذف می‌کند، اما دکمه‌ی نمایش چارت (TradingView و در صورت وجود MiniApp) را نگه می‌دارد تا کاربر
+    بعداً هم بتواند وضعیت چارت را ببیند."""
     if not message_id:
         return
+    rows = []
+    if rec:
+        sym = rec.get('symbol'); tf = rec.get('tf') or '5min'
+        mini = miniapp_chart_url(sym, tf) if sym else None
+        if mini:
+            rows.append([{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': mini}}])
+        if sym:
+            rows.append([{'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}])
     try:
-        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': message_id, 'reply_markup': {'inline_keyboard': []}}, 10)
+        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': message_id, 'reply_markup': {'inline_keyboard': rows}}, 10)
     except Exception:
         logger.exception('assist: failed to strip buttons')
 
@@ -4335,7 +4346,7 @@ def assist_approve(chat_id, aid):
             send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec['status']})."); return
         now = time.time()
         if now > rec['expires_at']:
-            rec['status'] = 'expired'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'))
+            rec['status'] = 'expired'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
             send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return
         try:
             live = exchange_latest_price(chat_id, rec['symbol']) if s.get('trading_mode') == 'REAL' else latest_price(rec['symbol'])
@@ -4369,7 +4380,7 @@ def assist_approve(chat_id, aid):
         else:
             rec['status'] = 'blocked'
     save_session(chat_id)
-    _assist_strip_buttons(chat_id, rec.get('message_id'))
+    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
     if not ok:
         send_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}")
     elif warn:
@@ -4384,7 +4395,7 @@ def assist_reject(chat_id, aid):
             send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return
         rec['status'] = 'rejected'; rec['rejected_at'] = time.time()
     save_session(chat_id)
-    _assist_strip_buttons(chat_id, rec.get('message_id'))
+    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
     send_message(chat_id, '❌ رد شد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.')
 
 
@@ -4437,7 +4448,7 @@ def assist_maintenance_once():
                 with _ASSIST_LOCK:
                     if rec.get('status') == 'pending':
                         rec['status'] = 'expired'; changed = True
-                _assist_strip_buttons(chat_id, rec.get('message_id'))
+                _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
         todo = [r for r in log if r.get('status') in ('rejected', 'expired', 'invalidated') and not r.get('shadow_done')]
         by_symbol = {}
         for r in todo:
