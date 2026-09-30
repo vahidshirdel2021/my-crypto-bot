@@ -177,6 +177,7 @@ QUICK_TRADE_FALLBACK_SL_PCT = float(os.environ.get('QUICK_TRADE_FALLBACK_SL_PCT'
 QUICK_TRADE_FALLBACK_RR = float(os.environ.get('QUICK_TRADE_FALLBACK_RR', '1.8'))
 SIGNAL_CHANNEL_SKIP_NO_TRADE = os.environ.get('SIGNAL_CHANNEL_SKIP_NO_TRADE', 'true').lower() not in ('0', 'false', 'no')
 # حداقل اجماع اندیکاتورها برای ارسال به کانال: 3 = فقط وقتی RSI و MACD و ADX هر سه هم‌جهت باشند (3 از 3). 0 = خاموش.
+SIGNAL_CHANNEL_DYNAMIC_MARGIN = os.environ.get('SIGNAL_CHANNEL_DYNAMIC_MARGIN', 'true').lower() not in ('0', 'false', 'no')  # مارجینِ پیام کانال بر اساس ریسک و فاصله‌ی SL محاسبه شود (نه مبلغ ثابت)
 SIGNAL_CHANNEL_MIN_CONSENSUS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MIN_CONSENSUS', '3')))
 SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()  # فقط fallback اگر تایم‌فریم ادمین در دسترس نباشد
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
@@ -1661,7 +1662,7 @@ def net_r_estimates(entry, sl, tp):
     return rr - fee_r, -(1.0 + fee_r), fee_r
 
 
-def estimate_session_size(chat_id, symbol, entry, sl):
+def estimate_session_size(chat_id, symbol, entry, sl, dynamic=False):
     """(مارجین، اهرم) که ربات برای این ورود با تنظیمات همین کاربر استفاده می‌کند؛ (0, 0) اگر محاسبه نشد."""
     try:
         s = USER_SESSIONS.get(chat_id)
@@ -1669,7 +1670,7 @@ def estimate_session_size(chat_id, symbol, entry, sl):
             return 0.0, 0
         s['_symbol_tmp'] = symbol
         try:
-            margin, _ = safe_size(chat_id, s, float(entry), float(sl), force=True)
+            margin, _ = safe_size(chat_id, s, float(entry), float(sl), force=True, dynamic=dynamic)
         finally:
             s.pop('_symbol_tmp', None)
         return float(margin or 0.0), int(s.get('leverage') or 0)
@@ -1929,7 +1930,7 @@ def normalize_price(chat_id,symbol,price):
         return float(price)
 
 
-def safe_size(chat_id,s,entry,sl,force=False):
+def safe_size(chat_id,s,entry,sl,force=False,dynamic=False):
     try:
         balance=exchange_balance(chat_id) if s['trading_mode']=='REAL' else float(s['paper_balance'])
     except ExchangeStateError as exc:
@@ -1938,7 +1939,8 @@ def safe_size(chat_id,s,entry,sl,force=False):
     if stop_dist<=0 or not math.isfinite(stop_dist): return 0,'invalid stop distance'
     risk_budget=balance*float(s['risk_per_trade_pct'])/100
     leverage=max(1,int(s['leverage']))
-    requested_margin=float(s['trade_amount_usdt'])
+    # dynamic=True: مارجین ثابتِ تنظیمات نادیده گرفته می‌شود و فقط ریسک هر معامله/فاصله‌ی SL و موجودی آزاد تعیین‌کننده‌اند.
+    requested_margin=float('inf') if dynamic else float(s['trade_amount_usdt'])
     # force (تایید دستی): سقف درصد مصرف مارجین نادیده گرفته می‌شود؛ فقط موجودی آزاد واقعی محدودکننده است.
     cap=balance if force else balance*float(s['max_margin_usage_pct'])/100
     available=max(0,cap-reserved_margin(s))
@@ -2578,7 +2580,7 @@ def _signal_channel_scan_once():
                     f"🛑 حد ضرر: `{fmt(p_sl)}`   🏁 حد سود: `{fmt(p_tp)}`",
                 ]
                 _adm = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
-                _m, _lev = estimate_session_size(SIGNAL_CHANNEL_TF_CHAT_ID, symbol, p_entry, p_sl) if _adm else (0.0, 0)
+                _m, _lev = estimate_session_size(SIGNAL_CHANNEL_TF_CHAT_ID, symbol, p_entry, p_sl, dynamic=SIGNAL_CHANNEL_DYNAMIC_MARGIN) if _adm else (0.0, 0)
                 _pnl = pnl_estimate_lines(p_entry, p_sl, p_tp, trade_side, _m, _lev, compact=True)
                 # TP و SL خالص در یک خط؛ اگر مبلغ USDT قابل محاسبه نباشد فقط خط خالص R می‌آید
                 plan_lines.append("     ".join(_pnl) if len(_pnl) == 2 else "\n".join(_pnl))

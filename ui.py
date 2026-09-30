@@ -9,12 +9,8 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     return {
         "keyboard": [
             [{"text": "📋 سیگنال‌های در انتظار"}],
-            [
-                scan_button,
-                {"text": "🆘 بستن اضطراری"},
-                {"text": "🔄 پوزیشن‌ها"},
-                {"text": "🏠 منوی اصلی"},
-            ],
+            [{"text": "🏠 منوی اصلی"}, scan_button],
+            [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
