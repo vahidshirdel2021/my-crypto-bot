@@ -2434,6 +2434,43 @@ def _signal_channel_verdict(implied_side, buy_votes, sell_votes):
     return implied_side if overall == implied_side else None
 
 
+def _signal_channel_indicator_popup(ind_row, buy_votes, sell_votes):
+    """خلاصه‌ی خیلی کوتاه (زیر ۲۰۰ کاراکتر، حد پنجره‌ی بازشوی تلگرام) از RSI/MACD/ADX/حجم + اجماع.
+    🟢 = به سمت خرید، 🔴 = به سمت فروش، ⚪️ = خنثی. همان آستانه‌های _signal_channel_indicator_summary."""
+    if ind_row is None:
+        return ''
+    dot = {'BUY': '🟢', 'SELL': '🔴', None: '⚪️'}
+    parts = []
+    rsi = ind_row.get('rsi')
+    if rsi is not None and pd.notna(rsi):
+        rsi = float(rsi)
+        bias = 'SELL' if rsi >= 70 else 'BUY' if rsi <= 30 else 'BUY' if rsi >= 55 else 'SELL' if rsi <= 45 else None
+        parts.append(f"{dot[bias]} RSI {rsi:.0f}")
+    mh = ind_row.get('macd_hist')
+    if mh is not None and pd.notna(mh):
+        mh = float(mh)
+        parts.append(f"{dot['BUY' if mh > 0 else 'SELL' if mh < 0 else None]} MACD")
+    adx = ind_row.get('adx')
+    if adx is not None and pd.notna(adx):
+        adx = float(adx)
+        pdi, mdi = ind_row.get('plus_di'), ind_row.get('minus_di')
+        bias = None
+        if adx >= 20 and pdi is not None and mdi is not None and pd.notna(pdi) and pd.notna(mdi):
+            bias = 'BUY' if float(pdi) > float(mdi) else 'SELL' if float(mdi) > float(pdi) else None
+        parts.append(f"{dot[bias]} ADX {adx:.0f}")
+    vr = ind_row.get('volume_ratio')
+    if vr is not None and pd.notna(vr):
+        vr = float(vr)
+        parts.append(f"{'📦' if vr >= 1.5 else '▫️'} حجم {vr:.1f}x")
+    total = buy_votes + sell_votes
+    if total and buy_votes != sell_votes:
+        n, side = (buy_votes, 'خرید') if buy_votes > sell_votes else (sell_votes, 'فروش')
+        cons = f"🧠 {n} از {total} به سمت {side}"
+    else:
+        cons = "🧠 اجماع مشخصی نیست"
+    return ("📊 " + "  ".join(parts) + "\n" + cons)[:200]
+
+
 def _signal_channel_indicator_summary(ind_row, implied_side):
     """(lines, buy_votes, sell_votes) - خلاصه‌ی خوانای RSI/MACD/ADX/حجم برای پیغام کانال + رأی‌های
     جهت‌دار هر اندیکاتور. رأی‌ها برای خط حکم بالای پیام (_signal_channel_verdict) هم استفاده می‌شوند.
@@ -2611,9 +2648,7 @@ def _signal_channel_scan_once():
             # جزئیات اندیکاتورها دیگر داخل متن پیام نیست؛ پشت دکمه‌ی «📊 اندیکاتورها» می‌آید (در کش ذخیره می‌شود)
             text = "\n".join(lines)
             full_text = text
-            ind_text = ""
-            if detail_lines:
-                ind_text = "\n".join([f"📊 *اندیکاتورها · {symbol} · {TF_DISPLAY.get(timeframe, timeframe)}*", ""] + list(detail_lines))
+            ind_text = _signal_channel_indicator_popup(ind_row, buy_votes, sell_votes)
 
             main_buy = trade_side == 'BUY'
             rows = []
@@ -4922,6 +4957,27 @@ def assist_reject(chat_id, aid):
     send_message(chat_id, '❌ رد شد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.')
 
 
+def assist_indicators_popup(chat_id, aid):
+    """متن کوتاه (زیر ۲۰۰ کاراکتر) اندیکاتورهای کارت سیگنال ربات برای پنجره‌ی بازشو - همان قالب پیام کانال."""
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+    if not rec:
+        return 'ℹ️ این سیگنال دیگر پیدا نشد.'
+    symbol = rec['symbol']; tf = rec.get('tf') or '5min'; side = rec['sig']
+    try:
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        ind_df = calculate_indicators(df) if df is not None and not df.empty else None
+        if ind_df is None or ind_df.empty or len(ind_df) < 2:
+            return '⚠️ داده‌ی کافی برای محاسبه‌ی اندیکاتورها نیست.'
+        ind_row = ind_df.iloc[-2].to_dict()      # آخرین کندل بسته‌شده
+        _lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, side)
+        return _signal_channel_indicator_popup(ind_row, buy_votes, sell_votes) or '⚠️ اندیکاتوری برای نمایش نیست.'
+    except Exception:
+        logger.exception('assist indicators popup failed aid=%s', aid)
+        return '⚠️ بررسی اندیکاتورها انجام نشد.'
+
+
 def assist_indicators(chat_id, aid):
     """دکمه‌ی «📊 اندیکاتورها» روی کارت سیگنال: RSI/MACD/ADX/حجم و جمع‌بندی را
     (با همان منطق پیام کانال) برای همین سیگنال و آخرین کندل بسته‌شده‌ی تایم‌فریمش نشان می‌دهد."""
@@ -6752,15 +6808,6 @@ def process_command(cmd,chat_id,message_id=None):
         manual_entry_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
     if cl == '/confirm_manual_entry':
         manual_entry_confirm(chat_id); return
-    if cl.startswith('/chind_'):
-        # دکمه‌ی «📊 اندیکاتورها» زیر پیام کانال - جزئیات RSI/MACD/ADX/حجم را در چت خصوصی همان کاربر نشان می‌دهد
-        try:
-            msg_id = int(cl[len('/chind_'):])
-        except ValueError:
-            return
-        txt = _CHANNEL_IND_CACHE.get(msg_id)
-        send_message(chat_id, txt or 'ℹ️ جزئیات اندیکاتورهای این پیام دیگر در دسترس نیست (مثلاً بعد از ری‌استارت ربات).')
-        return
     if cl.startswith('/keep_channel_msg_'):
         # دکمه‌ی «ذخیره برای بررسی بعدی» زیر پیام کانال - فقط تایمر حذف خودکار همان
         # پیام را لغو می‌کند؛ خود پیام و دکمه‌هایش دست‌نخورده در کانال باقی می‌مانند.
@@ -7549,6 +7596,22 @@ def telegram_listener():
                     else:
                         message_id_for_reply = msg.get('message_id')
                     if not chat: continue
+                    if callback.get('id') and str(callback.get('data') or '').startswith('/chind_'):
+                        # دکمه‌ی «📊 اندیکاتورها» زیر پیام کانال: خلاصه‌ی کوتاه به‌صورت پنجره‌ی بازشو (فقط نمایشی؛ برای همه‌ی بینندگان کانال)
+                        try:
+                            _mid = int(str(callback['data'])[len('/chind_'):])
+                        except ValueError:
+                            _mid = None
+                        answer_callback(callback['id'], text=_CHANNEL_IND_CACHE.get(_mid) or 'ℹ️ جزئیات این سیگنال دیگر در دسترس نیست.', show_alert=True)
+                        continue
+                    if callback.get('id') and str(callback.get('data') or '').startswith('/assist_ind_'):
+                        # دکمه‌ی «📊 اندیکاتورها» روی کارت سیگنال ربات: خلاصه‌ی کوتاه به‌صورت پنجره‌ی بازشو
+                        if is_allowed(chat):
+                            _aid = str(callback['data'])[len('/assist_ind_'):]
+                            answer_callback(callback['id'], text=assist_indicators_popup(chat, _aid), show_alert=True)
+                        else:
+                            answer_callback(callback['id'])
+                        continue
                     upsert_telegram_user(telegram_user, chat)
                     if callback.get('id'):
                         alert_text = 'پاسخ به‌صورت خصوصی در چت ربات ارسال می‌شود. اگر قبلاً ربات را استارت نکرده‌اید، لطفاً اول در چت خصوصی /start را بزنید.' if is_channel_post else None
