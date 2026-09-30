@@ -9,6 +9,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     return {
         "keyboard": [
             [scan_button, {"text": "📊 وضعیت بازار"}],
+            [{"text": "📋 سیگنال‌های در انتظار"}],
             [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
         ],
         "resize_keyboard": True,
@@ -159,6 +160,7 @@ def get_setup_management_keyboard(session=None):
         is_on = tag in enabled
         icon = "🟢" if is_on else "🔴"
         rows.append([{"text": f"{icon} {SETUP_TAG_LABELS[tag]}", "callback_data": SETUP_TAG_CALLBACK[tag]}])
+    rows.append([{"text": "🔙 بازگشت", "callback_data": "/menu_settings"}])
     rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
     return {"inline_keyboard": rows}
 
@@ -258,6 +260,7 @@ def get_fee_menu_keyboard():
     return {"inline_keyboard": [
         [{"text": "📅 امروز", "callback_data": "/fee_today"}, {"text": "📆 ۷ روز", "callback_data": "/fee_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/fee_month"}, {"text": "📊 کل سابقه", "callback_data": "/fee_all"}],
+        [{"text": "🔙 بازگشت", "callback_data": "/menu_reports"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
@@ -296,6 +299,7 @@ def get_entry_diag_keyboard(enabled=True, interval=600):
         [{"text": "⏱ فاصله‌ی ارسال گزارش:", "callback_data": "/entry_diag"}],
         interval_row,
         [{"text": "📋 نمایش آخرین تشخیص‌ها", "callback_data": "/entry_diag_log"}],
+        [{"text": "🔙 بازگشت", "callback_data": "/menu_reports"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
@@ -306,6 +310,7 @@ def get_watchlist_manage_keyboard():
         [{"text":"➕ افزودن Short","callback_data":"/add_short_symbol"},{"text":"➖ حذف Short","callback_data":"/remove_short_symbol"}],
         [{"text":"🧪 تست استراتژی","callback_data":"/backtest_start"}],
         [{"text":"🔍 پیشنهاد نماد با استراتژی فعال","callback_data":"/scan_signal_start"}],
+        [{"text": "🔙 بازگشت", "callback_data": "/menu_settings"}],
         [{"text":"🏠 منوی اصلی","callback_data":"/menu"}]
     ]}
 

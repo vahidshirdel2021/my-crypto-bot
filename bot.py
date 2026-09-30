@@ -1005,11 +1005,51 @@ def answer_callback(cid, text=None, show_alert=False):
         tg('answerCallbackQuery', payload, 5)
 
 
+
+import threading as _threading
+_CB_CTX = _threading.local()
+
+# دکمه‌هایی که «ناوبری منو» هستند: جواب‌شان باید همان پیامِ منو را ویرایش کند نه اینکه پیام جدید بسازد.
+_INPLACE_MENU_PREFIXES = (
+    '/menu', '/open_positions', '/performance', '/trade_audit', '/quality_report', '/today_trades',
+    '/trade_tracking', '/trade_filter', '/list_pending_orders', '/cancel_pending', '/close_all_prompt',
+    '/close_longs_prompt', '/close_shorts_prompt', '/emergency_close_prompt',
+    '/fee_', '/entry_diag', '/entry_report', '/toggle_entry_diag', '/setup_management', '/toggle_setup_',
+    '/check_wizard', '/manage_watchlist', '/market_report', '/learn', '/profile_', '/params',
+    '/admin_', '/signal_channel', '/scenario_management', '/toggle_scenario', '/toggle_confirm_',
+    '/my_profile', '/save_my_profile', '/apply_my_profile', '/set_tf_', '/timeframe', '/set_bal_',
+    '/set_margin_', '/set_lev_', '/set_max_', '/adx_', '/sl_', '/tp_', '/cancel',
+)
+
+
+def _inplace_menu_command(cmd):
+    c = str(cmd or '')
+    return any(c.startswith(pfx) for pfx in _INPLACE_MENU_PREFIXES)
+
+
+def begin_callback_context(chat_id, message_id, cmd):
+    """قبل از process_command برای کلیک روی دکمه‌ی اینلاین صدا زده می‌شود."""
+    if message_id and _inplace_menu_command(cmd):
+        _CB_CTX.data = {'chat_id': chat_id, 'message_id': message_id, 'used': False}
+    else:
+        _CB_CTX.data = None
+
+
+def end_callback_context():
+    _CB_CTX.data = None
+
+
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown', keep=False):
     """keep=True: این پیام (مثلاً سیگنال) هرگز خودکار حذف نمی‌شود."""
     if not is_allowed(chat_id): return False
     s = get_session(chat_id)
     if markup is None: markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
+    # ویرایش درجا: اولین پاسخِ دارای کیبورد اینلاین به کلیک یک دکمه، همان پیام را عوض می‌کند.
+    _ctx = getattr(_CB_CTX, 'data', None)
+    if (not message_id and not keep and _ctx and not _ctx['used'] and _ctx['chat_id'] == chat_id
+            and isinstance(markup, dict) and 'inline_keyboard' in markup):
+        _ctx['used'] = True
+        message_id = _ctx['message_id']
     if message_id:
         body = {'chat_id':chat_id,'message_id':message_id,'text':text,'reply_markup':markup}
         if parse_mode: body['parse_mode'] = parse_mode
@@ -1977,6 +2017,7 @@ def pending_orders_keyboard(chat_id):
     rows = [[{'text': f"🗑 لغو {o['symbol']} ({o['order_id']})", 'callback_data': f"/cancel_pending_{o['order_id']}"}] for o in orders]
     if orders:
         rows.append([{'text': '🗑 لغو همه‌ی اوردرها', 'callback_data': '/cancel_pending_all_prompt'}])
+    rows.append([{'text': '🔙 بازگشت', 'callback_data': '/menu_trading'}])
     rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
     return {'inline_keyboard': rows}
 
@@ -4815,6 +4856,101 @@ def assist_extend(chat_id, aid):
         send_message(chat_id, f"⏳ مهلت روی {ASSIST_EXTEND_SECONDS // 60} دقیقه تنظیم شد.")
 
 
+def _assist_pending_recs(s):
+    """سیگنال‌های در انتظار تصمیمِ منقضی‌نشده، نزدیک‌ترین مهلت اول."""
+    now = time.time()
+    with _ASSIST_LOCK:
+        recs = [r for r in (s.get('assist_log') or [])
+                if r.get('status') == 'pending' and float(r.get('expires_at', 0) or 0) > now]
+    recs.sort(key=lambda r: r['expires_at'])
+    return recs
+
+
+def assist_pending_list(chat_id, message_id=None):
+    """V3.38: لیست همه‌ی سیگنال‌های در انتظار با زمان باقی‌مانده؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
+    s = get_session(chat_id)
+    recs = _assist_pending_recs(s)
+    if not recs:
+        send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
+        return
+    now = time.time()
+    shown = recs[:15]
+    lines = [f"📋 *سیگنال‌های در انتظار ({len(recs)})*", ""]
+    rows = []
+    for n, r in enumerate(shown, 1):
+        is_long = r['sig'] == 'BUY'
+        tf = r.get('tf') or '5min'
+        rem = max(0, int(float(r['expires_at']) - now))
+        rem_txt = f"{rem // 60:02d}:{rem % 60:02d}"
+        side_txt = '🟢 خرید' if is_long else '🔴 فروش'
+        try:
+            live = latest_price(r['symbol'])
+        except Exception:
+            live = None
+        price_txt = ''
+        risk = abs(float(r['entry']) - float(r['sl']))
+        if live and risk > 0:
+            fav = ((float(live) - float(r['entry'])) if is_long else (float(r['entry']) - float(live))) / risk
+            crossed_sl = (live <= r['sl']) if is_long else (live >= r['sl'])
+            crossed_tp = (live >= r['tp']) if is_long else (live <= r['tp'])
+            flag = ' ⚠️ از SL رد شده' if crossed_sl else (' ⚠️ از TP رد شده' if crossed_tp else '')
+            price_txt = f" | لحظه‌ای `{fmt(float(live))}` (`{fav:+.2f}R`){flag}"
+        lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · ⏳ `{rem_txt}`")
+        lines.append(f"    ورود `{fmt(float(r['entry']))}`{price_txt}")
+        rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'} · ⏳ {rem_txt}", 'callback_data': f"/assist_open_{r['id']}"}])
+    if len(recs) > len(shown):
+        lines.append(f"\n… و {len(recs) - len(shown)} سیگنال دیگر (نزدیک‌ترین مهلت‌ها اول نمایش داده شد)")
+    lines.append("\nروی هر ردیف بزنید تا کارت آن سیگنال دوباره پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
+    rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
+    send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
+
+
+def _assist_card_text(rec):
+    """متن کارت سیگنال را از رکورد دوباره می‌سازد (فقط برای حالتی که پیام اصلی دیگر قابل کپی نیست)."""
+    tf = rec.get('tf') or '5min'
+    is_long = rec['sig'] == 'BUY'
+    level_txt, scn_txt = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
+    lines = [
+        _tf_regime_line(tf),
+        f"• `{rec['symbol']}` ({'🟢 خرید' if is_long else '🔴 فروش'}) | تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`",
+        f"• سطح: `{level_txt}` | سناریو: `{scn_txt}`",
+        f"• ورود پیشنهادی: `{fmt(float(rec['entry']))}` | SL: `{fmt(float(rec['sl']))}`",
+        f"• TP: `{fmt(float(rec['tp']))}`",
+        f"• R:R: `{float(rec.get('rr') or 0):.2f}`" + (f" | کیفیت: `{rec['score']}/100`" if rec.get('score') is not None else ""),
+    ]
+    if rec.get('exp_tp_pnl_net') is not None and rec.get('exp_sl_pnl_net') is not None:
+        lines.append(f"• 💰 TP: `{float(rec['exp_tp_pnl_net']):+.2f}` USDT")
+        lines.append(f"• 🛑 SL: `{float(rec['exp_sl_pnl_net']):+.2f}` USDT")
+    return "\n".join(lines)
+
+
+def assist_open(chat_id, aid):
+    """کارت سیگنال در انتظار را با همان دکمه‌ها (و شمارش معکوس فعلی) دوباره پایین چت می‌آورد؛ کارت قبلی فقط دکمه‌ی چارت را نگه می‌دارد."""
+    s = get_session(chat_id)
+    rec = _assist_pending_or_notify(chat_id, s, aid)
+    if not rec:
+        return
+    old_mid = rec.get('message_id')
+    markup = _assist_markup(rec)
+    new_mid = None
+    if old_mid:
+        res = tg('copyMessage', {'chat_id': chat_id, 'from_chat_id': chat_id, 'message_id': old_mid, 'reply_markup': markup}, 15)
+        if res and res.get('ok'):
+            new_mid = (res.get('result') or {}).get('message_id')
+    if new_mid is None:      # پیام اصلی حذف شده/قابل کپی نیست → کارت از روی رکورد ساخته می‌شود
+        res = tg('sendMessage', {'chat_id': chat_id, 'text': _assist_card_text(rec), 'parse_mode': 'Markdown', 'reply_markup': markup}, 10)
+        if res and res.get('ok'):
+            new_mid = (res.get('result') or {}).get('message_id')
+    if new_mid is None:
+        send_message(chat_id, '⚠️ نمایش کارت سیگنال ناموفق بود؛ چند ثانیه بعد دوباره امتحان کنید.'); return
+    with _ASSIST_LOCK:
+        rec['message_id'] = new_mid
+        _ASSIST_CD_LAST.pop(aid, None)
+    save_session(chat_id)
+    if old_mid and old_mid != new_mid:
+        _assist_strip_buttons(chat_id, old_mid, rec)
+
+
 def _assist_pending_or_notify(chat_id, s, aid):
     """rec در انتظار و منقضی‌نشده را برمی‌گرداند؛ وگرنه پیام مناسب می‌فرستد و None برمی‌گرداند."""
     with _ASSIST_LOCK:
@@ -5102,6 +5238,7 @@ def assist_keyboard(chat_id):
     return {'inline_keyboard': [
         [{'text': f"{'🟢' if on else '🔴'} حالت دستیار (ورود فقط با تایید من)", 'callback_data': '/toggle_assist_mode'}],
         [{'text': f'⏱ مهلت تایید: {mins} دقیقه (تغییر)', 'callback_data': '/assist_expiry_cycle'}],
+        [{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'}],
         [{'text': '📊 آمار دستیار', 'callback_data': '/assist_stats'}],
         [{'text': '🧰 بازگشت به مدیریت فیلتر', 'callback_data': '/trade_filter_management'}],
     ]}
@@ -6841,6 +6978,10 @@ def process_command(cmd,chat_id,message_id=None):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
     if cl.startswith('/assist_ext_'):
         assist_extend(chat_id, cl[len('/assist_ext_'):]); return
+    if cl=='/assist_pending':
+        assist_pending_list(chat_id, message_id); return
+    if cl.startswith('/assist_open_'):
+        assist_open(chat_id, cl[len('/assist_open_'):]); return
     if cl.startswith('/assist_cd_'):
         return      # دکمه‌ی شمارش معکوس فقط نمایشی است
     if cl.startswith('/assist_rev_'):
@@ -6978,6 +7119,7 @@ def handle_text(chat_id,text):
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
+        '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
     }
     if raw in fixed_buttons:
@@ -7273,7 +7415,10 @@ def telegram_listener():
                         answer_callback(callback['id'], text=alert_text)
                     if not is_allowed(chat): continue
                     data=callback.get('data') or (u.get('message') or {}).get('text')
-                    if callback: process_command(data,chat,message_id_for_reply)
+                    if callback:
+                        begin_callback_context(chat, message_id_for_reply, data)
+                        try: process_command(data,chat,message_id_for_reply)
+                        finally: end_callback_context()
                     elif data: handle_text(chat,data)
                 except Exception:
                     logger.exception('Telegram update %s processing failed',upd)
