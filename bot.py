@@ -1982,6 +1982,9 @@ def expected_trade_metrics(trade):
 TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1day': 'D'}
 
 
+TRADINGVIEW_BUTTON_INTERVAL = os.environ.get('TRADINGVIEW_BUTTON_INTERVAL', '5').strip() or '5'   # 5 = پنج دقیقه
+
+
 def tradingview_symbol(symbol):
     """نماد *اسپات* برای TradingView، مثلاً BINANCE:FILUSDT (بدون .P پرپچوال).
     صرافی = منبعی که داده‌ی همین نماد از آن آمده (Binance/Bybit/KuCoin)؛ پیش‌فرض BINANCE."""
@@ -1997,7 +2000,8 @@ def tradingview_chart_url(symbol, timeframe='5min'):
     اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
     وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
     """
-    interval = TV_INTERVAL_MAP.get(timeframe, '15')
+    # همیشه تایم‌فریم ثابت (پیش‌فرض ۵ دقیقه) - مستقل از تایم‌فریم فعال ربات/سیگنال؛ با TRADINGVIEW_BUTTON_INTERVAL قابل تغییر است
+    interval = TRADINGVIEW_BUTTON_INTERVAL
     tv_symbol = urlparse.quote(tradingview_symbol(symbol), safe='')
     return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
 
@@ -4721,7 +4725,7 @@ def _assist_markup(rec, remaining=None):
         [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
         [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
         [{'text': '✏️ ورود با قیمت دستی', 'callback_data': f'/assist_man_{aid}'}, ext_btn],
-        [{'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}],
+        [{'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}, {'text': '📊 اندیکاتورها', 'callback_data': f'/assist_ind_{aid}'}],
     ]
     mini = miniapp_chart_url(sym, tf)
     if mini:
@@ -4899,6 +4903,34 @@ def assist_reject(chat_id, aid):
     save_session(chat_id)
     _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
     send_message(chat_id, '❌ رد شد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.')
+
+
+def assist_indicators(chat_id, aid):
+    """دکمه‌ی «📊 اندیکاتورها» روی کارت سیگنال: RSI/MACD/ADX/حجم و جمع‌بندی را
+    (با همان منطق پیام کانال) برای همین سیگنال و آخرین کندل بسته‌شده‌ی تایم‌فریمش نشان می‌دهد."""
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+    if not rec:
+        send_message(chat_id, 'ℹ️ این سیگنال دیگر پیدا نشد.'); return
+    symbol = rec['symbol']; tf = rec.get('tf') or '5min'; side = rec['sig']
+    try:
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        ind_df = calculate_indicators(df) if df is not None and not df.empty else None
+        if ind_df is None or ind_df.empty or len(ind_df) < 2:
+            send_message(chat_id, '⚠️ داده‌ی کافی برای محاسبه‌ی اندیکاتورها نیست.'); return
+        ind_row = ind_df.iloc[-2].to_dict()      # آخرین کندل بسته‌شده
+        detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, side)
+    except Exception:
+        logger.exception('assist indicators failed aid=%s', aid)
+        send_message(chat_id, '⚠️ بررسی اندیکاتورها انجام نشد.'); return
+    verdict = _signal_channel_verdict(side, buy_votes, sell_votes)
+    side_txt = '🟢 خرید' if side == 'BUY' else '🔴 فروش'
+    verdict_txt = ('✅ اندیکاتورها با این سیگنال همسو هستند' if verdict
+                   else '⚠️ اندیکاتورها با این سیگنال همسو نیستند (اجماع ندارند یا خلاف آن‌اند)')
+    lines = [f"📊 *اندیکاتورها · {symbol} · {TF_DISPLAY.get(tf, tf)}*",
+             f"سیگنال: {side_txt}", verdict_txt, ""] + list(detail_lines)
+    send_message(chat_id, "\n".join(lines))
 
 
 def assist_extend(chat_id, aid):
@@ -7058,6 +7090,8 @@ def process_command(cmd,chat_id,message_id=None):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
     if cl.startswith('/assist_ext_'):
         assist_extend(chat_id, cl[len('/assist_ext_'):]); return
+    if cl.startswith('/assist_ind_'):
+        assist_indicators(chat_id, cl[len('/assist_ind_'):]); return
     if cl=='/assist_pending':
         assist_pending_list(chat_id, message_id); return
     if cl.startswith('/assist_open_'):
