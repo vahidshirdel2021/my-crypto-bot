@@ -5,12 +5,16 @@ CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد �
 
 def get_bottom_menu_keyboard(is_active=False, is_open=True):
     # کیبورد سفارشی سبک و ثابت (پایین صفحه) - همیشه در دسترس، مستقل از منوی این‌لاین
-    scan_button = {"text": "🔴 توقف اسکن"} if is_active else {"text": "🟢 شروع اسکن"}
+    scan_button = {"text": "🔴 توقف"} if is_active else {"text": "🟢 اسکن"}
     return {
         "keyboard": [
-            [scan_button],
-            [{"text": "📋 سیگنال‌های در انتظار"}],
-            [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
+            [
+                scan_button,
+                {"text": "📋 سیگنال‌ها"},
+                {"text": "🆘 اضطراری"},
+                {"text": "🔄 پوزیشن‌ها"},
+                {"text": "🏠 منو"},
+            ],
         ],
         "resize_keyboard": True,
         "is_persistent": True,

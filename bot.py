@@ -6580,10 +6580,10 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/menu_reports':
         send_message(chat_id, '📊 *گزارش‌ها و آمار*', get_reports_menu_keyboard()); return
     if cl=='/cancel': s['user_state']=None; save_session(chat_id); menu(chat_id, message_id); return
-    if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن'):
+    if cl in ('/stop_scan',) or c in ('🔴 توقف اسکن','توقف اسکن','🔴 توقف'):
         stop_scan(chat_id, 'manual'); menu(chat_id,message_id)
         sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف شد.\n⚙️ تنظیمات آماده تغییر هستند."); return
-    if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن'): start_scan(chat_id,message_id); return
+    if cl in ('/start_scan',) or c in ('🟢 شروع اسکن','شروع اسکن','🟢 اسکن'): start_scan(chat_id,message_id); return
     if cl == '/reload_and_start': reload_and_restart_scan(chat_id, message_id); return
     if cl=='/mode_paper':
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
@@ -7187,7 +7187,7 @@ def run_user_backtest(chat_id):
 def handle_text(chat_id,text):
     raw=(text or '').strip()
     fixed_buttons={
-        '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu',
+        '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu', '🏠 منو':'/menu',
         '🔄 پوزیشن‌های باز':'/open_positions', 'پوزیشن‌های باز':'/open_positions',
         '🔄 پوزیشن‌ها':'/open_positions', 'پوزیشن‌ها':'/open_positions',
         '📈 گزارش عملکرد کلی':'/performance', 'گزارش عملکرد کلی':'/performance',
@@ -7195,9 +7195,9 @@ def handle_text(chat_id,text):
         '⚙️ تنظیمات معامله':'/check_wizard', 'تنظیمات معامله':'/check_wizard',
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
-        '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all',
+        '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all', '🆘 اضطراری':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
-        '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending',
+        '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
     }
     if raw in fixed_buttons:
