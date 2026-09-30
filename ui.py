@@ -8,7 +8,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     scan_button = {"text": "🔴 توقف اسکن"} if is_active else {"text": "🟢 شروع اسکن"}
     return {
         "keyboard": [
-            [scan_button, {"text": "📊 وضعیت بازار"}],
+            [scan_button],
             [{"text": "📋 سیگنال‌های در انتظار"}],
             [{"text": "🏠 منوی اصلی"}, {"text": "🆘 بستن اضطراری همه"}],
         ],

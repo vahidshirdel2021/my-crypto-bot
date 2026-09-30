@@ -12,7 +12,7 @@ except Exception:
     psycopg = None
     tuple_row = None
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -176,6 +176,8 @@ SIGNAL_CHANNEL_ID = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
 QUICK_TRADE_FALLBACK_SL_PCT = float(os.environ.get('QUICK_TRADE_FALLBACK_SL_PCT', '0.01'))  # فاصله‌ی SL جایگزین اگر طرح ATR/سوینگ ساخته نشود
 QUICK_TRADE_FALLBACK_RR = float(os.environ.get('QUICK_TRADE_FALLBACK_RR', '1.8'))
 SIGNAL_CHANNEL_SKIP_NO_TRADE = os.environ.get('SIGNAL_CHANNEL_SKIP_NO_TRADE', 'true').lower() not in ('0', 'false', 'no')
+# حداقل اجماع اندیکاتورها برای ارسال به کانال: 3 = فقط وقتی RSI و MACD و ADX هر سه هم‌جهت باشند (3 از 3). 0 = خاموش.
+SIGNAL_CHANNEL_MIN_CONSENSUS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MIN_CONSENSUS', '3')))
 SIGNAL_CHANNEL_TIMEFRAME = os.environ.get('SIGNAL_CHANNEL_TIMEFRAME', '5min').strip()  # فقط fallback اگر تایم‌فریم ادمین در دسترس نباشد
 SIGNAL_CHANNEL_INTERVAL_SECONDS = max(20, int(os.environ.get('SIGNAL_CHANNEL_INTERVAL_SECONDS', '60')))
 _SIGNAL_CHANNEL_SETTINGS_FILE = os.environ.get('SIGNAL_CHANNEL_SETTINGS_FILE', 'signal_channel_settings.json')
@@ -900,6 +902,8 @@ def is_allowed(chat_id):
 # سیگنال (که منطق TTL/ذخیره‌ی جدا دارند) هرگز از این مسیر حذف نمی‌شوند. 0 = خاموش.
 # ---------------------------------------------------------------------------
 AUTO_DELETE_SECONDS = max(0, int(os.environ.get('AUTO_DELETE_SECONDS', '180')))
+# V3.38.7: پیام‌هایی که خودِ کاربر در چت خصوصی با ربات می‌فرستد (نماد، قیمت، /menu، دکمه‌های ثابت) هم بعد از AUTO_DELETE_SECONDS حذف شوند.
+AUTO_DELETE_USER_MESSAGES = os.environ.get('AUTO_DELETE_USER_MESSAGES', 'true').lower() not in ('0', 'false', 'no')
 _AUTO_DELETE_FILE = os.environ.get('AUTO_DELETE_QUEUE_FILE', 'auto_delete_queue.json')
 _AUTO_DELETE_QUEUE = []          # [[due_ts, chat_id, message_id], ...]
 _AUTO_DELETE_LOCK = RLock()
@@ -1039,6 +1043,27 @@ def end_callback_context():
     _CB_CTX.data = None
 
 
+
+# --- V3.38.3: کیبورد ثابت پایین چت ---
+# تلگرام کیبورد ثابت (Reply Keyboard) را به «آخرین پیامی که آن را ست کرده» گره می‌زند؛ اگر آن پیام
+# حذف شود (مثلاً با حذف خودکار پیام‌ها) کیبورد هم از چت ناپدید می‌شود. پس آخرین پیامِ حامل کیبورد
+# را از حذف خودکار مستثنا می‌کنیم و پیامِ قبلی را (که دیگر حامل نیست) امن حذف می‌کنیم.
+_KB_ANCHOR = {}
+_KB_ANCHOR_LOCK = RLock()
+
+
+def _register_kb_anchor(chat_id, message_id, markup):
+    """True برمی‌گرداند اگر این پیام حامل کیبورد ثابت است (و نباید خودکار حذف شود)."""
+    if not (isinstance(markup, dict) and 'keyboard' in markup and message_id):
+        return False
+    with _KB_ANCHOR_LOCK:
+        old = _KB_ANCHOR.get(chat_id)
+        _KB_ANCHOR[chat_id] = message_id
+    if old and old != message_id:
+        schedule_auto_delete(chat_id, old)
+    return True
+
+
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown', keep=False):
     """keep=True: این پیام (مثلاً سیگنال) هرگز خودکار حذف نمی‌شود."""
     if not is_allowed(chat_id): return False
@@ -1062,8 +1087,11 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
     ok = bool(res and res.get('ok'))
-    if ok and not keep:
-        schedule_auto_delete(chat_id, ((res.get('result') or {}).get('message_id')))
+    if ok:
+        _mid = (res.get('result') or {}).get('message_id')
+        _is_anchor = _register_kb_anchor(chat_id, _mid, markup)
+        if not keep and not _is_anchor:
+            schedule_auto_delete(chat_id, _mid)
     return ok
 
 
@@ -1090,7 +1118,9 @@ def send_photo(chat_id, img, caption='', markup=None):
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
         if r.status_code == 200:
-            try: schedule_auto_delete(chat_id, ((r.json() or {}).get('result') or {}).get('message_id'))
+            try:
+                _mid = ((r.json() or {}).get('result') or {}).get('message_id')
+                if not _register_kb_anchor(chat_id, _mid, markup): schedule_auto_delete(chat_id, _mid)
             except Exception: pass
         return r.status_code == 200
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
@@ -2509,6 +2539,12 @@ def _signal_channel_scan_once():
             # کلید فقط بعد از عبور از فیلتر ثبت می‌شود؛ پس اگر روی کندلِ در حال تشکیل حکم بعداً BUY/SELL شد، همان‌موقع یک‌بار ارسال می‌شود.
             if verdict is None and SIGNAL_CHANNEL_SKIP_NO_TRADE:
                 continue
+            # فیلتر اجماع: فقط وقتی همه‌ی اندیکاتورهای رأی‌دهنده هم‌جهت باشند و تعدادشان حداقل SIGNAL_CHANNEL_MIN_CONSENSUS (پیش‌فرض ۳) باشد.
+            # ADX زیر ۲۰ رأی نمی‌دهد؛ پس «۲ از ۲» کافی نیست و ارسال نمی‌شود. کلید ثبت نمی‌شود تا اگر روی کندل در حال تشکیل ۳ از ۳ شد ارسال شود.
+            if SIGNAL_CHANNEL_MIN_CONSENSUS > 0:
+                _agree = buy_votes if verdict == 'BUY' else (sell_votes if verdict == 'SELL' else 0)
+                if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
+                    continue
             _SIGNAL_CHANNEL_SEEN[key] = True
             verdict_label = {'BUY': '🟢 مناسب خرید', 'SELL': '🔴 مناسب فروش'}.get(verdict, '⚪️ معامله نکن (سیگنال ضعیف/متضاد)')
             lines = [
@@ -4057,6 +4093,26 @@ def _profit_lock_loop():
         time.sleep(PROFIT_LOCK_CHECK_SECONDS)
 
 
+def _paper_effective_hl(p, c, high, low, price):
+    """V3.38.6: کندلِ در حال تشکیلی که پوزیشن وسطش باز شده شامل قیمت‌های «قبل از ورود» هم هست.
+    اگر high/low کامل آن کندل برای تشخیص TP/SL استفاده شود، ویکِ قبل از ورود می‌تواند TP/SL تازه‌چیده‌شده را
+    همان چرخه‌ی بعد «بزند» و پوزیشن چند دقیقه بعد از ورود بسته شود. برای کندل ورود فقط بازه‌ی قیمت‌های
+    دیده‌شده «بعد از ورود» (ورود + قیمت‌های لحظه‌ای هر چرخه) استفاده می‌شود؛ از کندل بعدی به بعد کندل کامل."""
+    try:
+        ts = float(c.get('timestamp') or 0)
+        if ts > 1e11: ts /= 1000.0          # میلی‌ثانیه -> ثانیه
+        opened = float(p.get('opened_at') or 0)
+        if ts > 0 and opened > 0 and ts <= opened:
+            entry = float(p['entry_price'])
+            hi = max(float(p.get('seen_high') or entry), entry, float(price))
+            lo = min(float(p.get('seen_low') or entry), entry, float(price))
+            p['seen_high'] = hi; p['seen_low'] = lo
+            return hi, lo
+    except Exception:
+        logger.exception('paper effective hl failed')
+    return high, low
+
+
 def update_positions(chat_id):
     s=get_session(chat_id)
     if not s['paper_positions']: return
@@ -4081,6 +4137,7 @@ def update_positions(chat_id):
             high,low,close=float(c['high']),float(c['low']),float(c['close'])
             live_market = latest_price(p['symbol'])
             price = float(live_market) if live_market else close
+            high, low = _paper_effective_hl(p, c, high, low, price)
             # PAPER excursion remains candle-based for deterministic backtests, while
             # current PnL/management decisions use the freshest available market price.
             update_trade_excursions(p,high,low)
@@ -4637,6 +4694,10 @@ def _assist_describe_source(reason, level_token, level_value, scn):
 
 
 ASSIST_EXTEND_SECONDS = max(60, int(os.environ.get('ASSIST_EXTEND_SECONDS', '900')))   # V3.38: با لمس «تمدید مهلت» مهلت روی ۱۵ دقیقه تنظیم می‌شود
+# V3.38.5: لیست «📋 سیگنال‌های در انتظار» فقط سیگنال‌هایی را نشان می‌دهد که حداقل این‌قدر ثانیه از مهلتشان باقی مانده (۳۰۰ = ۵ دقیقه؛ ۰ = همه).
+ASSIST_LIST_MIN_REMAINING_SECONDS = max(0, int(os.environ.get('ASSIST_LIST_MIN_REMAINING_SECONDS', '300')))
+# V3.38.8: کارت سیگنال‌های منقضی/نامعتبر این‌قدر ثانیه بعد از انقضا از چت حذف می‌شوند (۶۰ = ۱ دقیقه؛ ۰ = هرگز).
+ASSIST_EXPIRED_DELETE_AFTER_SECONDS = max(0, int(os.environ.get('ASSIST_EXPIRED_DELETE_AFTER_SECONDS', '60')))
 _ASSIST_CD_LAST = {}   # آخرین برچسب شمارش معکوس ارسال‌شده برای هر سیگنال (جلوگیری از ویرایش تکراری)
 
 
@@ -4869,11 +4930,16 @@ def _assist_pending_recs(s):
 def assist_pending_list(chat_id, message_id=None):
     """V3.38: لیست همه‌ی سیگنال‌های در انتظار با زمان باقی‌مانده؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
-    recs = _assist_pending_recs(s)
-    if not recs:
-        send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
-        return
+    all_recs = _assist_pending_recs(s)
     now = time.time()
+    recs = [r for r in all_recs if float(r['expires_at']) - now >= ASSIST_LIST_MIN_REMAINING_SECONDS]
+    if not recs:
+        if all_recs:
+            send_message(chat_id, f"✅ سیگنالی با حداقل {ASSIST_LIST_MIN_REMAINING_SECONDS // 60} دقیقه مهلت باقی‌مانده نیست.",
+                         {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}]]}, message_id=message_id)
+        else:
+            send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
+        return
     shown = recs[:15]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(recs)})*", ""]
     rows = []
@@ -4944,6 +5010,8 @@ def assist_open(chat_id, aid):
     if new_mid is None:
         send_message(chat_id, '⚠️ نمایش کارت سیگنال ناموفق بود؛ چند ثانیه بعد دوباره امتحان کنید.'); return
     with _ASSIST_LOCK:
+        if old_mid and old_mid != new_mid:
+            rec.setdefault('old_mids', []).append(old_mid)   # V3.38.8: کارت قدیمی هم در پاک‌سازی روز بعد حذف شود
         rec['message_id'] = new_mid
         _ASSIST_CD_LAST.pop(aid, None)
     save_session(chat_id)
@@ -5154,6 +5222,16 @@ def assist_maintenance_once():
                     if rec.get('status') == 'pending':
                         rec['status'] = 'expired'; changed = True
                 _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+        # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر ۱ ساعت بعد از انقضا از چت پاک می‌شوند (خودِ رکورد و آمار سایه می‌ماند).
+        if ASSIST_EXPIRED_DELETE_AFTER_SECONDS > 0:
+            for rec in log:
+                if (rec.get('status') in ('expired', 'invalidated') and not rec.get('msg_deleted')
+                        and now - float(rec.get('expires_at', 0) or 0) >= ASSIST_EXPIRED_DELETE_AFTER_SECONDS):
+                    for mid in ([rec.get('message_id')] + list(rec.get('old_mids') or [])):
+                        if mid:
+                            try: tg('deleteMessage', {'chat_id': chat_id, 'message_id': mid}, 10)
+                            except Exception: logger.exception('assist: expired card delete failed')
+                    rec['msg_deleted'] = True; rec['message_id'] = None; rec['old_mids'] = []; changed = True
         todo = [r for r in log if r.get('status') in ('rejected', 'expired', 'invalidated') and not r.get('shadow_done')]
         by_symbol = {}
         for r in todo:
@@ -7419,7 +7497,12 @@ def telegram_listener():
                         begin_callback_context(chat, message_id_for_reply, data)
                         try: process_command(data,chat,message_id_for_reply)
                         finally: end_callback_context()
-                    elif data: handle_text(chat,data)
+                    elif data:
+                        _um = u.get('message') or {}
+                        if (AUTO_DELETE_USER_MESSAGES and (_um.get('chat') or {}).get('type') == 'private'
+                                and _um.get('message_id')):
+                            schedule_auto_delete(chat, _um['message_id'])
+                        handle_text(chat,data)
                 except Exception:
                     logger.exception('Telegram update %s processing failed',upd)
         except Exception as exc:
