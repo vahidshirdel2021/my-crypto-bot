@@ -2196,13 +2196,32 @@ def send_channel_photo(channel_id, img_bytes, caption, reply_markup=None, ttl_se
         return None
 
 
+_CHANNEL_IND_CACHE = {}   # {message_id: متن کامل اندیکاتورها} برای دکمه‌ی «📊 اندیکاتورها» زیر پیام کانال (فقط در حافظه)
+_CHANNEL_IND_CACHE_MAX = 500
+
+
+def _channel_ind_cache_put(message_id, text):
+    if not message_id or not text:
+        return
+    _CHANNEL_IND_CACHE[message_id] = text
+    while len(_CHANNEL_IND_CACHE) > _CHANNEL_IND_CACHE_MAX:
+        _CHANNEL_IND_CACHE.pop(next(iter(_CHANNEL_IND_CACHE)), None)
+
+
 def _append_channel_keep_delete_buttons(channel_id, message_id, base_markup):
     """بعد از ارسال پیام کانال (چون message_id فقط بعد از ارسال معلوم می‌شود)، یک ردیف
     «💾 ذخیره برای بررسی بعدی» / «🗑 حذف دستی» زیر همان دکمه‌های موجود اضافه می‌کند."""
     if not message_id:
         return
     try:
-        rows = list(((base_markup or {}).get('inline_keyboard')) or [])
+        rows = [list(r) for r in (((base_markup or {}).get('inline_keyboard')) or [])]
+        if message_id in _CHANNEL_IND_CACHE:
+            ind_btn = {'text': '📊 اندیکاتورها', 'callback_data': f'/chind_{message_id}'}
+            for r in rows:
+                if r and str(r[0].get('text', '')).startswith('📈'):
+                    r.append(ind_btn); break
+            else:
+                rows.append([ind_btn])
         keep_row = []
         if SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS > 0:      # وقتی پیام‌ها هرگز حذف خودکار نمی‌شوند، دکمه‌ی «ذخیره» بی‌معنی است
             keep_row.append({'text': '💾 ذخیره برای بررسی بعدی', 'callback_data': f'/keep_channel_msg_{message_id}'})
@@ -2589,15 +2608,12 @@ def _signal_channel_scan_once():
                 # TP و SL خالص در یک خط؛ اگر مبلغ USDT قابل محاسبه نباشد فقط خط خالص R می‌آید
                 plan_lines.append("     ".join(_pnl) if len(_pnl) == 2 else "\n".join(_pnl))
             lines.extend(plan_lines)
-            # خطوط جزئیات اندیکاتورها فقط تا جایی که در کپشن عکس (۱۰۲۴ کاراکتر) جا شود اضافه می‌شوند
-            base_len = len("\n".join(lines)) + 1
-            fit = []
-            for dl in detail_lines:
-                if base_len + sum(len(x) + 1 for x in fit) + len(dl) + 1 > 980:
-                    break
-                fit.append(dl)
-            text = "\n".join(lines + ([""] + fit if fit else []))
-            full_text = "\n".join(lines + ([""] + list(detail_lines) if detail_lines else []))
+            # جزئیات اندیکاتورها دیگر داخل متن پیام نیست؛ پشت دکمه‌ی «📊 اندیکاتورها» می‌آید (در کش ذخیره می‌شود)
+            text = "\n".join(lines)
+            full_text = text
+            ind_text = ""
+            if detail_lines:
+                ind_text = "\n".join([f"📊 *اندیکاتورها · {symbol} · {TF_DISPLAY.get(timeframe, timeframe)}*", ""] + list(detail_lines))
 
             main_buy = trade_side == 'BUY'
             rows = []
@@ -2624,6 +2640,7 @@ def _signal_channel_scan_once():
                     logger.exception('signal channel chart failed symbol=%s', symbol)
             if sent_msg_id is None:
                 sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, full_text, reply_markup=markup)
+            _channel_ind_cache_put(sent_msg_id, ind_text)
             _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
     # ارسال دوباره‌ی همین کندل می‌شد)
@@ -6735,6 +6752,15 @@ def process_command(cmd,chat_id,message_id=None):
         manual_entry_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
     if cl == '/confirm_manual_entry':
         manual_entry_confirm(chat_id); return
+    if cl.startswith('/chind_'):
+        # دکمه‌ی «📊 اندیکاتورها» زیر پیام کانال - جزئیات RSI/MACD/ADX/حجم را در چت خصوصی همان کاربر نشان می‌دهد
+        try:
+            msg_id = int(cl[len('/chind_'):])
+        except ValueError:
+            return
+        txt = _CHANNEL_IND_CACHE.get(msg_id)
+        send_message(chat_id, txt or 'ℹ️ جزئیات اندیکاتورهای این پیام دیگر در دسترس نیست (مثلاً بعد از ری‌استارت ربات).')
+        return
     if cl.startswith('/keep_channel_msg_'):
         # دکمه‌ی «ذخیره برای بررسی بعدی» زیر پیام کانال - فقط تایمر حذف خودکار همان
         # پیام را لغو می‌کند؛ خود پیام و دکمه‌هایش دست‌نخورده در کانال باقی می‌مانند.
