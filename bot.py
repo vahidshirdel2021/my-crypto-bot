@@ -1607,19 +1607,61 @@ def estimate_session_size(chat_id, symbol, entry, sl):
         return 0.0, 0
 
 
-def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rate=None):
-    """خطوط متنی سود/زیان دقیق برای پیام سیگنال. اگر مارجین معلوم باشد به USDT، و همیشه بر حسب R."""
+def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rate=None, compact=False):
+    """خطوط متنی سود/زیان دقیق برای پیام سیگنال. اگر مارجین معلوم باشد به USDT، و همیشه بر حسب R.
+    compact=True: همان اطلاعات، ولی فشرده‌تر (چند مقدار در یک خط) برای کارت تایید سیگنال."""
     lines = []
+    tp_r, sl_r, fee_r = net_r_estimates(entry, sl, tp)
     if margin and leverage:
         est = estimate_trade_pnl(entry, sl, tp, side, margin, leverage)
+        platform_txt = None
+        if platform_rate and platform_rate > 0 and est['tp_net'] > PLATFORM_FEE_MIN_PROFIT_USDT:
+            platform_txt = f"{est['tp_net'] * (1 - platform_rate / 100.0):+.2f}"
+        if compact:
+            lines.append(f"• 💰 TP: `{est['tp_net']:+.2f}` USDT")
+            lines.append(f"• 🛑 SL: `{est['sl_net']:+.2f}` USDT")
+            return lines
         lines.append(f"• 💰 سود در صورت TP: `{est['tp_net']:+.2f} USDT` (ناخالص `{est['tp_gross']:+.2f}` − کارمزد `{est['fee']:.2f}`)")
         lines.append(f"• 🛑 زیان در صورت SL: `{est['sl_net']:+.2f} USDT` (ناخالص `{est['sl_gross']:+.2f}` − کارمزد `{est['fee']:.2f}`)")
-        if platform_rate and platform_rate > 0 and est['tp_net'] > PLATFORM_FEE_MIN_PROFIT_USDT:
-            lines.append(f"• سود خالص پس از سهم پلتفرم ({platform_rate:g}%): `{est['tp_net'] * (1 - platform_rate / 100.0):+.2f} USDT`")
+        if platform_txt is not None:
+            lines.append(f"• سود خالص پس از سهم پلتفرم ({platform_rate:g}%): `{platform_txt} USDT`")
         lines.append(f"• حجم محاسبه‌شده: مارجین `{margin:.2f}` × اهرم `{leverage}`")
-    tp_r, sl_r, fee_r = net_r_estimates(entry, sl, tp)
-    lines.append(f"• خالص بر حسب R (پس از کارمزد): TP `{tp_r:+.2f}R` | SL `{sl_r:+.2f}R`")
+    if compact:
+        lines.append(f"• خالص R: TP `{tp_r:+.2f}R` / SL `{sl_r:+.2f}R`")
+    else:
+        lines.append(f"• خالص بر حسب R (پس از کارمزد): TP `{tp_r:+.2f}R` | SL `{sl_r:+.2f}R`")
     return lines
+
+
+def _tf_regime_line(tf):
+    """یک خط کوتاه: رژیم/جهت بازار روی تایم‌فریم فعال (از کش گیت جهت بازار؛ هر چرخه‌ی اسکن تازه می‌شود)."""
+    gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+    label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(gate, '⏳ نامشخص')
+    return f"🧭 رژیم بازار ({TF_DISPLAY.get(tf, tf)}): *{label}*"
+
+
+def _ensure_tf_gate_sync(tf):
+    """رژیم بازار تایم‌فریم tf را در TIMEFRAME_REGIME_CACHE تازه نگه می‌دارد (نسخه‌ی همگام، برای حلقه‌ی
+    کانال که جدا از اسکن اصلی اجرا می‌شود). همان منطق refresh_market_gate؛ فقط اگر کش نیست/کهنه است محاسبه می‌کند."""
+    try:
+        c = TIMEFRAME_REGIME_CACHE.get(tf)
+        if c and c.get('gate') and time.time() - float(c.get('ts', 0) or 0) < TIMEFRAME_REGIME_TTL:
+            return
+        with ThreadPoolExecutor(max_workers=min(6, len(MARKET_REPORT_SYMBOLS))) as ex:
+            snaps = list(ex.map(lambda sym: _market_snapshot(sym, tf), MARKET_REPORT_SYMBOLS))
+        scores = [x['score'] for x in snaps if x is not None]
+        total = len(scores)
+        bull_n = sum(1 for x in scores if x > 0)
+        bear_n = sum(1 for x in scores if x < 0)
+        gate = 'BULLISH' if bull_n >= MARKET_GATE_MIN_SYMBOLS else ('BEARISH' if bear_n >= MARKET_GATE_MIN_SYMBOLS else 'RANGE')
+        TIMEFRAME_REGIME_CACHE[tf] = {
+            'ts': (time.time() if total >= MARKET_GATE_MIN_SYMBOLS else 0.0), 'gate': gate,
+            'bull_n': bull_n, 'bear_n': bear_n, 'total': total,
+            'bull_pct': (bull_n / total * 100.0) if total else 0.0,
+            'bear_pct': (bear_n / total * 100.0) if total else 0.0,
+        }
+    except Exception:
+        logger.exception('ensure tf gate failed tf=%s', tf)
 
 
 def trailing_locked_r(entry, risk_distance, current_price, is_long):
@@ -2006,8 +2048,8 @@ def check_pending_orders(chat_id):
         save_session(chat_id)
 
 
-# مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). V3.37: پیش‌فرض صفر = سیگنال‌ها هرگز حذف نمی‌شوند.
-SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '0')))
+# مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). V3.38: پیش‌فرض ۶۰۰ (۱۰ دقیقه)؛ با دکمه‌ی «💾 ذخیره» پیام حذف نمی‌شود. ۰ = هرگز حذف نشود.
+SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '600')))
 # Timer در حال انتظار برای هر message_id - با دکمه‌ی «ذخیره» لغو می‌شود تا آن پیام
 # خاص دیگر خودکار پاک نشود. حافظه‌ی درون‌پردازه‌ای است (با ری‌استارت ربات پاک می‌شود؛
 # مشکلی نیست چون آن پیام‌های قدیمی‌تر معمولاً یا از قبل حذف شده‌اند یا کاربر می‌تواند
@@ -2038,7 +2080,7 @@ def send_channel_message(channel_id, text, reply_markup=None, ttl_seconds=None):
     کاربری. عمداً از send_message جدا نگه داشته شده چون send_message فرض می‌کند
     chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند.
     اگر ttl_seconds (پیش‌فرض SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS) مثبت باشد، پیام بعد از
-    آن مدت خودکار از کانال حذف می‌شود؛ پیش‌فرض ۰ = سیگنال‌ها هرگز حذف نمی‌شوند.
+    آن مدت خودکار از کانال حذف می‌شود؛ پیش‌فرض ۶۰۰ ثانیه (۱۰ دقیقه).
     خروجی: message_id در صورت موفقیت، وگرنه None."""
     try:
         payload = {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}
@@ -2389,6 +2431,7 @@ def _signal_channel_indicator_summary(ind_row, implied_side):
             if verb:
                 consensus_txt += (f" — با معامله {verb} همسوئه" if overall == implied_side
                                    else f" — با معامله {verb} در تضاده")
+        lines.append("")
         lines.append(f"🧠 جمع‌بندی: {consensus_txt}")
 
     return lines, votes.count('BUY'), votes.count('SELL')
@@ -2408,6 +2451,7 @@ def _signal_channel_scan_once():
     if not SIGNAL_CHANNEL_ID:
         return
     timeframe = _signal_channel_timeframe()
+    _ensure_tf_gate_sync(timeframe)
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
         for tag, side_fa, level_value, candle_ts, pattern, forming, regime, ind_row in _signal_channel_touch_scan_symbol(symbol, timeframe):
@@ -2427,6 +2471,7 @@ def _signal_channel_scan_once():
             _SIGNAL_CHANNEL_SEEN[key] = True
             verdict_label = {'BUY': '🟢 مناسب خرید', 'SELL': '🔴 مناسب فروش'}.get(verdict, '⚪️ معامله نکن (سیگنال ضعیف/متضاد)')
             lines = [
+                _tf_regime_line(timeframe),
                 f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
                 f"*{verdict_label}*",
                 "",
@@ -2453,25 +2498,23 @@ def _signal_channel_scan_once():
                 plan_lines = [
                     "",
                     f"📍 ورود (قیمت لحظه‌ای): `{fmt(p_entry)}` ({'خرید' if trade_side == 'BUY' else 'فروش'})",
-                    f"🛑 حد ضرر: `{fmt(p_sl)}`",
-                    f"🏁 حد سود: `{fmt(p_tp)}`",
-                    f"🎯 سطح TP: `{plan.get('tp_level_name') or '-'}`",
-                    f"⚖️ R:R: `{float(plan['rr']):.2f}`",
+                    f"🛑 حد ضرر: `{fmt(p_sl)}`   🏁 حد سود: `{fmt(p_tp)}`",
                 ]
                 _adm = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
                 _m, _lev = estimate_session_size(SIGNAL_CHANNEL_TF_CHAT_ID, symbol, p_entry, p_sl) if _adm else (0.0, 0)
-                plan_lines.extend(pnl_estimate_lines(p_entry, p_sl, p_tp, trade_side, _m, _lev))
-                plan_lines.append("_پیش‌بینی با قیمت لحظه‌ی ارسال؛ اسلیپیج و فاندینگ لحاظ نشده._")
+                _pnl = pnl_estimate_lines(p_entry, p_sl, p_tp, trade_side, _m, _lev, compact=True)
+                # TP و SL خالص در یک خط؛ اگر مبلغ USDT قابل محاسبه نباشد فقط خط خالص R می‌آید
+                plan_lines.append("     ".join(_pnl) if len(_pnl) == 2 else "\n".join(_pnl))
             lines.extend(plan_lines)
             # خطوط جزئیات اندیکاتورها فقط تا جایی که در کپشن عکس (۱۰۲۴ کاراکتر) جا شود اضافه می‌شوند
-            base_len = len("\n".join(lines))
+            base_len = len("\n".join(lines)) + 1
             fit = []
             for dl in detail_lines:
                 if base_len + sum(len(x) + 1 for x in fit) + len(dl) + 1 > 980:
                     break
                 fit.append(dl)
-            text = "\n".join(lines + fit)
-            full_text = "\n".join(lines + list(detail_lines))
+            text = "\n".join(lines + ([""] + fit if fit else []))
+            full_text = "\n".join(lines + ([""] + list(detail_lines) if detail_lines else []))
 
             main_buy = trade_side == 'BUY'
             rows = []
@@ -2480,11 +2523,8 @@ def _signal_channel_scan_once():
                 # دکمه‌ی web_app در کانال مجاز نیست؛ لینک ساده‌ی همان چارت تعاملی
                 rows.append([{'text': '🌐 چارت تعاملی (MiniApp)', 'url': mini}])
             rows.append([{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)}])
-            buy_btn = {'text': '🟢 خرید (Long)' + (' · طبق سیگنال' if main_buy else ' · برعکس سیگنال'), 'callback_data': f'/qt_buy_{symbol}'}
-            sell_btn = {'text': '🔴 فروش (Short)' + (' · برعکس سیگنال' if main_buy else ' · طبق سیگنال'), 'callback_data': f'/qt_sell_{symbol}'}
-            rows.append([buy_btn, sell_btn] if main_buy else [sell_btn, buy_btn])
-            rows.append([{'text': '✏️ ورود با قیمت دستی · خرید', 'callback_data': f'/qtm_buy_{symbol}'},
-                         {'text': '✏️ ورود با قیمت دستی · فروش', 'callback_data': f'/qtm_sell_{symbol}'}])
+            rows.append([{'text': '🟢 خرید (Long)', 'callback_data': f'/qt_buy_{symbol}'},
+                         {'text': '🔴 فروش (Short)', 'callback_data': f'/qt_sell_{symbol}'}])
             markup = {'inline_keyboard': rows}
 
             sent_msg_id = None
@@ -4555,6 +4595,68 @@ def _assist_describe_source(reason, level_token, level_value, scn):
     return level_txt, scn_txt
 
 
+ASSIST_EXTEND_SECONDS = max(60, int(os.environ.get('ASSIST_EXTEND_SECONDS', '900')))   # V3.38: با لمس «تمدید مهلت» مهلت روی ۱۵ دقیقه تنظیم می‌شود
+_ASSIST_CD_LAST = {}   # آخرین برچسب شمارش معکوس ارسال‌شده برای هر سیگنال (جلوگیری از ویرایش تکراری)
+
+
+def _assist_countdown_label(remaining):
+    remaining = max(0, int(remaining))
+    return f"⏳ {remaining // 60:02d}:{remaining % 60:02d} باقی‌مانده"
+
+
+def _assist_markup(rec, remaining=None):
+    """کیبورد کارت دستیار. اگر شمارش معکوس فعال باشد، دکمه‌ی «تمدید مهلت» به زمان باقی‌مانده تبدیل می‌شود."""
+    aid = rec['id']; sym = rec['symbol']; tf = rec.get('tf') or '5min'
+    is_long = rec['sig'] == 'BUY'
+    if rec.get('countdown'):
+        rem = remaining if remaining is not None else max(0, float(rec.get('expires_at', 0)) - time.time())
+        ext_btn = {'text': _assist_countdown_label(rem), 'callback_data': f'/assist_cd_{aid}'}
+    else:
+        ext_btn = {'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'}
+    rows = [
+        [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
+        [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
+        [{'text': '✏️ ورود با قیمت دستی', 'callback_data': f'/assist_man_{aid}'}, ext_btn],
+        [{'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}],
+    ]
+    mini = miniapp_chart_url(sym, tf)
+    if mini:
+        rows.insert(0, [{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': mini}}])
+    return {'inline_keyboard': rows}
+
+
+def _assist_edit_markup(chat_id, rec):
+    mid = rec.get('message_id')
+    if not mid:
+        return False
+    rem = float(rec.get('expires_at', 0)) - time.time()
+    markup = _assist_markup(rec, remaining=rem)
+    label = markup['inline_keyboard'][-2][-1]['text']      # ردیف ماقبل آخر (ورود دستی | تمدید/شمارش معکوس)
+    _ASSIST_CD_LAST[rec['id']] = label
+    try:
+        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': mid, 'reply_markup': markup}, 10)
+        return True
+    except Exception:
+        logger.exception('assist: countdown edit failed')
+        return False
+
+
+def assist_countdown_once():
+    """برچسب دکمه‌ی شمارش معکوس سیگنال‌های تمدیدشده را تازه می‌کند (هر ~۱۵ ثانیه از _assist_loop)."""
+    now = time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        for rec in list(s.get('assist_log') or []):
+            if rec.get('status') != 'pending' or not rec.get('countdown'):
+                _ASSIST_CD_LAST.pop(rec.get('id'), None)
+                continue
+            rem = float(rec.get('expires_at', 0)) - now
+            if rem <= 0:
+                continue     # assist_maintenance_once دکمه‌های عملیاتی را برمی‌دارد
+            if _ASSIST_CD_LAST.get(rec['id']) == _assist_countdown_label(rem):
+                continue
+            _assist_edit_markup(chat_id, rec)
+
+
 def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=None):
     s = get_session(chat_id)
     now = time.time()
@@ -4586,31 +4688,18 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             _prate = float(get_user_fee_rate(chat_id))
         except Exception:
             _prate = None
-        pnl_lines = pnl_estimate_lines(float(entry), float(sl), float(tp), sig, _m, _lev, platform_rate=_prate)
+        pnl_lines = pnl_estimate_lines(float(entry), float(sl), float(tp), sig, _m, _lev, platform_rate=_prate, compact=True)
+        _tf_key = s.get('timeframe', '5min')
         text = (
-            f"🤝 *سیگنال منتظر تایید شما*\n"
-            f"• نماد: `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'})\n"
-            f"• تایم‌فریم: `{TF_DISPLAY.get(s.get('timeframe'), s.get('timeframe'))}`\n"
-            f"• سطح: `{level_txt}`\n"
-            f"• سناریو: `{scn_txt}`\n"
-            f"• ورود پیشنهادی: `{fmt(float(entry))}`\n"
-            f"• حد ضرر: `{fmt(float(sl))}`\n"
-            f"• هدف (TP): `{fmt(float(tp))}`" + (f" — سطح: `{tp_level_name}`" if tp_level_name else "") + "\n"
+            f"{_tf_regime_line(_tf_key)}\n"
+            f"• `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'}) | تایم‌فریم: `{TF_DISPLAY.get(_tf_key, _tf_key)}`\n"
+            f"• سطح: `{level_txt}` | سناریو: `{scn_txt}`\n"
+            f"• ورود پیشنهادی: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}`\n"
+            f"• TP: `{fmt(float(tp))}`\n"
             f"• R:R: `{rr:.2f}`" + (f" | کیفیت: `{int(round(float(score)))}/100`" if score is not None else "") + "\n"
-            + "\n".join(pnl_lines) + "\n"
-            f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n"
-            f"با تایید، ورود با *قیمت لحظه‌ای* انجام می‌شود."
+            + "\n".join(pnl_lines)
         )
-        markup = {'inline_keyboard': [
-            [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
-            [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
-            [{'text': '✏️ ورود با قیمت دستی', 'callback_data': f'/assist_man_{aid}'},
-             {'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'}],
-            [{'text': '📈 TradingView', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
-        ]}
-        _mini = miniapp_chart_url(symbol, s.get('timeframe', '5min'))
-        if _mini:
-            markup['inline_keyboard'].insert(0, [{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': _mini}}])
+        markup = _assist_markup({'id': aid, 'symbol': symbol, 'sig': sig, 'tf': s.get('timeframe', '5min')})
         if not is_allowed(chat_id):
             return _entry_diag_result(chat_id, symbol, 'assist_skipped', 'کاربر مجاز نیست', 'assist', sig)
         message_id = None
@@ -4709,18 +4798,21 @@ def assist_reject(chat_id, aid):
 
 
 def assist_extend(chat_id, aid):
+    """V3.38: لمس «تمدید مهلت» → مهلت روی ASSIST_EXTEND_SECONDS (۱۵ دقیقه) از همین لحظه تنظیم می‌شود
+    و خودِ دکمه به شمارش معکوس زمان باقی‌مانده تبدیل می‌شود (در _assist_loop تازه می‌شود)."""
     s = get_session(chat_id)
     with _ASSIST_LOCK:
         rec = _assist_find(s, aid)
         if not rec or rec['status'] != 'pending':
             send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return
-        if rec.get('ext', 0) >= ASSIST_MAX_EXTENSIONS:
-            send_message(chat_id, f'ℹ️ حداکثر {ASSIST_MAX_EXTENSIONS} بار تمدید مجاز است.'); return
-        step = int(s.get('assist_expiry_seconds', 300) or 300)
-        rec['expires_at'] = max(rec['expires_at'], time.time()) + step
+        if rec.get('countdown'):
+            return      # قبلاً تمدید شده؛ دکمه همان شمارش معکوس است
+        rec['expires_at'] = time.time() + ASSIST_EXTEND_SECONDS
         rec['ext'] = rec.get('ext', 0) + 1
+        rec['countdown'] = True
     save_session(chat_id)
-    send_message(chat_id, f"⏳ مهلت {step // 60} دقیقه تمدید شد.")
+    if not _assist_edit_markup(chat_id, rec):
+        send_message(chat_id, f"⏳ مهلت روی {ASSIST_EXTEND_SECONDS // 60} دقیقه تنظیم شد.")
 
 
 def _assist_pending_or_notify(chat_id, s, aid):
@@ -4948,12 +5040,19 @@ def assist_maintenance_once():
 
 
 def _assist_loop():
+    tick = 0
     while True:
         try:
-            assist_maintenance_once()
+            assist_countdown_once()
         except Exception:
-            logger.exception('assist maintenance failed')
-        time.sleep(30)
+            logger.exception('assist countdown failed')
+        if tick % 2 == 0:          # نگهداری اصلی (کندل‌ها/سایه) مثل قبل هر ~۳۰ ثانیه
+            try:
+                assist_maintenance_once()
+            except Exception:
+                logger.exception('assist maintenance failed')
+        tick += 1
+        time.sleep(15)
 
 
 def assist_stats_text(s):
@@ -6742,6 +6841,8 @@ def process_command(cmd,chat_id,message_id=None):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
     if cl.startswith('/assist_ext_'):
         assist_extend(chat_id, cl[len('/assist_ext_'):]); return
+    if cl.startswith('/assist_cd_'):
+        return      # دکمه‌ی شمارش معکوس فقط نمایشی است
     if cl.startswith('/assist_rev_'):
         assist_reverse(chat_id, cl[len('/assist_rev_'):]); return
     if cl.startswith('/assist_man_'):
