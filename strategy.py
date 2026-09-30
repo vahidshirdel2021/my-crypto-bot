@@ -172,16 +172,29 @@ def candle_pattern_score(df, signal, regime="mixed", near_structure=False, max_p
     return max(-max_points, min(max_points, best_weight * max_points)), best_name
 
 
+# حداقل مطلق R:R برای هر معامله/سیگنال (V3.37: از ۱.۳ به ۱.۵). حتی اگر کانفیگ قدیمی
+# ذخیره‌شده‌ی کاربر مقدار کمتری داشته باشد، در زمان اجرا این کف اعمال می‌شود.
+MIN_RR_FLOOR = 1.5
+
+
+def _eff_rr(value, default=MIN_RR_FLOOR):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = float(default)
+    return max(MIN_RR_FLOOR, v)
+
+
 STRATEGY_DEFAULTS = {
     "min_adx": 20.0,
     "sl_multiplier": 1.5,
     "tp_multiplier": 2.0,
     "dynamic_exits": True,
     "min_trade_score": 65.0,
-    "min_rr": 1.35,
+    "min_rr": 1.50,
     "max_sl_atr": 3.00,
     "grid_lookback_candles": 500,
-    "min_target_r": 1.35,
+    "min_target_r": 1.50,
     "max_target_r": 1.8,
     "min_volume_ratio": 1.05,
     "min_body_ratio": 0.45,
@@ -303,24 +316,24 @@ STRATEGY_DEFAULTS = {
 TIMEFRAME_STRATEGY_PRESETS = {
     "5min":  {
         "min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-        "min_trade_score": 60.0, "min_rr": 1.30, "min_target_r": 1.30, "max_target_r": 1.8,
+        "min_trade_score": 60.0, "min_rr": 1.50, "min_target_r": 1.50, "max_target_r": 1.8,
         "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.45, "sweep_min_distance_atr": 0.10,
         "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
     },
     "15min": {
         "min_adx": 20.0, "min_volume_ratio": 1.05, "min_body_ratio": 0.45,
-        "min_trade_score": 60.0, "min_rr": 1.30, "min_target_r": 1.30, "max_target_r": 1.9,
+        "min_trade_score": 60.0, "min_rr": 1.50, "min_target_r": 1.50, "max_target_r": 1.9,
         "sweep_risk_reward": 1.8, "sweep_stop_buffer_atr": 0.40, "sweep_min_distance_atr": 0.10,
         "min_sl_percent": 0.005, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1200
     },
     "1hour": {
         "min_adx": 19.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.42,
-        "min_trade_score": 56.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.2,
+        "min_trade_score": 56.0, "min_rr": 1.50, "min_target_r": 1.50, "max_target_r": 2.2,
         "min_sl_percent": 0.006, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 1800
     },
     "4hour": {
         "min_adx": 18.0, "min_volume_ratio": 1.00, "min_body_ratio": 0.40,
-        "min_trade_score": 54.0, "min_rr": 1.20, "min_target_r": 1.20, "max_target_r": 2.5,
+        "min_trade_score": 54.0, "min_rr": 1.50, "min_target_r": 1.50, "max_target_r": 2.5,
         "min_sl_percent": 0.008, "max_fee_risk_ratio": 0.20, "cooldown_seconds": 3600
     },
 }
@@ -430,8 +443,8 @@ def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", 
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
     min_score = float(cfg.get("min_trade_score", 60.0))
-    min_rr = float(cfg.get("min_rr", 1.30))
-    min_r = max(min_rr, float(cfg.get("min_target_r", 1.30)))
+    min_rr = _eff_rr(cfg.get("min_rr", MIN_RR_FLOOR))
+    min_r = max(min_rr, _eff_rr(cfg.get("min_target_r", MIN_RR_FLOOR)))
     max_r = max(min_r, float(cfg.get("max_target_r", 2.20)))
     max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
@@ -747,6 +760,36 @@ LEVEL_SETUP_DEFS = {
     "4h": ("P4H", "P4L", "سقف ۴ ساعته قبل", "کف ۴ ساعته قبل"),
     "1h": ("P1H", "P1L", "سقف ۱ ساعته قبل", "کف ۱ ساعته قبل"),
 }
+
+# نام فارسی هر توکن سطح (PDH → «سقف روز قبل» ...) - برای نوشتن نام سطحِ انتخاب‌شده به‌عنوان TP در سیگنال.
+_LEVEL_TOKEN_FA = {}
+for _hi, _lo, _fa_hi, _fa_lo in LEVEL_SETUP_DEFS.values():
+    _LEVEL_TOKEN_FA[_hi] = _fa_hi
+    _LEVEL_TOKEN_FA[_lo] = _fa_lo
+
+
+def level_token_label(token):
+    """«سقف روز قبل (PDH)» - یا خود توکن اگر ناشناخته بود."""
+    fa = _LEVEL_TOKEN_FA.get(token)
+    return f"{fa} ({token})" if fa else str(token)
+
+
+def _grid_level_label(grid_levels, price):
+    """نام سطح شبکه‌ی لگاریتمی که قیمتش برابر price است."""
+    try:
+        for lv in grid_levels or []:
+            if abs(float(lv["price"]) - float(price)) <= max(1e-12, abs(float(price)) * 1e-9):
+                return f"سطح شبکه لگاریتمی (گام {float(lv.get('step', 0)):g})"
+    except Exception:
+        pass
+    return "سطح شبکه لگاریتمی"
+
+
+def extract_sweep_target_name(reason):
+    """نام سطح هدف آداپتیو (TARGET_NAME=...) از reason، یا None."""
+    m = re.search(r"\bTARGET_NAME=([^|]+)", str(reason or ""))
+    return m.group(1).strip() if m else None
+
 
 _SETUP_TAG_RE = re.compile(r"\[SETUP\s+([A-Za-z0-9]+)\]")
 _LEVEL_TOKEN_RE = re.compile(
@@ -1845,7 +1888,7 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
-def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False):
+def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False, target_name=None):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
     d, pdh, pdl = _compute_prev_day_levels(df)
@@ -1868,7 +1911,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         return None, "ATR یا قیمت ورود نامعتبر است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    min_rr = float(cfg.get("min_rr", 1.30))
+    min_rr = _eff_rr(cfg.get("min_rr", MIN_RR_FLOOR))
     buffer_atr = max(0.40, float(cfg.get("sweep_stop_buffer_atr", 0.40)))
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
@@ -1904,7 +1947,12 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         rr_to_tp = (entry - tp) / risk_dist
         if rr_to_tp < min_rr:
             return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
+        tp_key = next((k for k, v in all_levels.items() if v == tp), None)
+        tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
+        _tp_before_cap = tp
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
+        if tp != _tp_before_cap:
+            tp_level_name = _grid_level_label(grid_levels, tp)
     else:
         sweep_extreme = float(curr["low"])
         sl = sweep_extreme - (atr * buffer_atr)
@@ -1924,7 +1972,12 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         rr_to_tp = (tp - entry) / risk_dist
         if rr_to_tp < min_rr:
             return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
+        tp_key = next((k for k, v in all_levels.items() if v == tp), None)
+        tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
+        _tp_before_cap = tp
         tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
+        if tp != _tp_before_cap:
+            tp_level_name = _grid_level_label(grid_levels, tp)
 
     # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
@@ -1959,6 +2012,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
         "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
+        "tp_level_name": tp_level_name,
         "risk_atr_source_index": int(risk_idx),
         "setup_index": int(idx),
         "pattern": pattern_name,
@@ -1973,23 +2027,25 @@ QUICK_TRADE_TP_BUFFER_ATR = 0.10  # هدف کمی قبل از سطح مقابل 
 
 
 def _quick_opposing_levels(df, entry, is_long, grid_levels=None):
-    """سطوح مقابلِ مسیر معامله: PDH/PDL و سقف/کف ۱س/۴س/هفته/ماه قبل + سطوح شبکه‌ی لگاریتمی."""
-    prices = []
+    """سطوح مقابلِ مسیر معامله: PDH/PDL و سقف/کف ۱س/۴س/هفته/ماه قبل + سطوح شبکه‌ی لگاریتمی.
+    خروجی: لیست (قیمت، نام فارسی سطح)."""
+    items = []
     try:
         d, pdh, pdl = _compute_prev_day_levels(df)
         if d is not None:
-            for v in (pdh, pdl):
+            for tok, v in (("PDH", pdh), ("PDL", pdl)):
                 if v is not None:
-                    prices.append(float(v))
-            prices.extend(float(v) for v in _compute_prev_htf_levels(d, len(d) - 2).values())
+                    items.append((float(v), level_token_label(tok)))
+            for tok, v in _compute_prev_htf_levels(d, len(d) - 2).items():
+                items.append((float(v), level_token_label(tok)))
     except Exception:
         pass
     for lv in grid_levels or []:
         try:
-            prices.append(float(lv["price"]))
+            items.append((float(lv["price"]), f"سطح شبکه لگاریتمی (گام {float(lv.get('step', 0)):g})"))
         except Exception:
             continue
-    return [p for p in prices if np.isfinite(p) and ((p > entry) if is_long else (p < entry))]
+    return [(p, n) for p, n in items if np.isfinite(p) and ((p > entry) if is_long else (p < entry))]
 
 
 def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, live_price=None):
@@ -2017,7 +2073,7 @@ def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, l
     if not np.isfinite(entry) or entry <= 0 or not np.isfinite(atr) or atr <= 0:
         return None, "ATR یا قیمت ورود نامعتبر است"
 
-    min_rr = float(cfg.get("min_rr", 1.35))
+    min_rr = _eff_rr(cfg.get("min_rr", MIN_RR_FLOOR))
     target_rr = max(min_rr, float(cfg.get("quick_trade_rr", cfg.get("sweep_risk_reward", 1.8))))
     max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
@@ -2045,22 +2101,24 @@ def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, l
     tp = entry + direction * dist * target_rr
     tp_source = f"{target_rr:.2f}R"
 
-    candidates = sorted(abs(p - entry) for p in _quick_opposing_levels(df, entry, is_long, grid_levels))
+    tp_level_name = f"بدون سطح مشخص - هدف {target_rr:.2f}R"
+    candidates = sorted((abs(p - entry), n) for p, n in _quick_opposing_levels(df, entry, is_long, grid_levels))
     buf = atr * QUICK_TRADE_TP_BUFFER_ATR
-    for gap in candidates:
+    for gap, lvl_name in candidates:
         capped_gap = gap - buf
         if capped_gap / dist < min_rr:
             continue          # این سطح خیلی نزدیک است؛ سراغ سطح بعدی
         if capped_gap < abs(tp - entry):
             tp = entry + direction * capped_gap
             tp_source = "قبل از سطح مقابل"
+            tp_level_name = f"قبل از {lvl_name}"
         break                 # نزدیک‌ترین سطحِ معتبر تصمیم می‌گیرد
 
     rr = abs(tp - entry) / dist
     plan = {
         "entry": entry, "sl": float(sl), "tp": float(tp), "rr": float(rr),
         "risk_atr": float(dist / atr), "atr": atr,
-        "sl_source": sl_source, "tp_source": tp_source,
+        "sl_source": sl_source, "tp_source": tp_source, "tp_level_name": tp_level_name,
         "swing_level": float(swing_level) if swing_level is not None and np.isfinite(swing_level) else None,
         "reason": f"ورود سریع کانال | R:R {rr:.2f}R | SL: {sl_source} | TP: {tp_source}",
     }
@@ -2249,7 +2307,7 @@ V1_ENHANCED_DEFAULTS = {
     "enhanced_swing_min_volume_ratio": 0.55,
     "enhanced_min_quality_score": 65.0,
     "enhanced_high_vol_min_quality": 72.0,
-    "enhanced_min_rr": 1.35,
+    "enhanced_min_rr": 1.50,
     # V3.20: رده‌های کیفیت B3/S3 (جاروب+ریکلیم بدون هیچ تأیید ساختاری) و B6/S6 (بدون هیچ
     # شاهدی، ته‌مانده) در تحلیل واقعی معاملات ضررده‌ترین بودند (نمونه‌های B1 و S2 کوچک بودند
     # و روی آن‌ها تصمیم گرفته نشد). این دو رده رد می‌شوند؛ برای برگرداندن رفتار قبلی خالی کنید.
@@ -2614,7 +2672,7 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
         rr_bucket = min(15.0, max(0.0, float(plan.get("rr", 0)) / 2.5 * 15.0)) if plan else 0.0
         quality = min(100.0, location + struct + confirm + regime_bucket + rr_bucket + float(bonus) + scenario_bonus)
         min_q = float(cfg.get("enhanced_high_vol_min_quality",72.0) if regime_info.get("volatility_state")=="HIGH" else cfg.get("enhanced_min_quality_score",65.0))
-        if plan is None or float(plan.get("rr",0)) < float(cfg.get("enhanced_min_rr",1.35)) or quality < min_q:
+        if plan is None or float(plan.get("rr",0)) < _eff_rr(cfg.get("enhanced_min_rr",MIN_RR_FLOOR)) or quality < min_q:
             return
         p = dict(plan)
         p.update({"score": int(round(quality)), "quality_score": int(round(quality)), "score_model":"V1.5 evidence buckets", "scenario":scenario, "structure_bos":bool(structure.get("bos")), "structure_continuation":bool(structure.get("continuation")), "dead_zone":bool(dead), "near_key_level":near, "regime":regime_info.get("name"), "regime_confidence":regime_info.get("confidence"), "volatility_state":regime_info.get("volatility_state"), "setup_family":family, "edge_proxy":None, "model_win_proxy":None})
@@ -2629,7 +2687,8 @@ def _select_enhanced_v1_setup(df_primary, market_data_dict=None, timeframe="5min
             anchor_level, target_level = extract_sweep_anchor_target(reason)
             plan, _ = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels, live_price=live_price,
-                setup_index=active_setup_index, anchor_level=anchor_level, target_level=target_level
+                setup_index=active_setup_index, anchor_level=anchor_level, target_level=target_level,
+                target_name=extract_sweep_target_name(reason)
             )
             consider(sig, "liquidity_sweep", reason, float(cfg.get("sweep_score_bonus",8.0)), plan)
 
@@ -2679,7 +2738,8 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
             plan, plan_reason = build_sweep_trade_plan(
                 df_primary, sig, cfg, grid_levels=grid_levels,
                 setup_index=active_setup_index, live_price=live_price,
-                anchor_level=anchor_level, target_level=target_level
+                anchor_level=anchor_level, target_level=target_level,
+                target_name=extract_sweep_target_name(reason)
             )
         else:
             plan, plan_reason = build_trade_plan(
@@ -2699,10 +2759,10 @@ def _select_v2_setup(df_primary, market_data_dict=None, timeframe="5min", filter
         # merely because volatility is high.
         if vol_state == "HIGH":
             min_score = float(cfg["high_vol_min_score"])
-            min_rr = float(cfg["high_vol_min_rr"])
+            min_rr = _eff_rr(cfg["high_vol_min_rr"])
         else:
             min_score = float(cfg["min_setup_score"])
-            min_rr = float(cfg.get("min_rr", 1.3))
+            min_rr = _eff_rr(cfg.get("min_rr", MIN_RR_FLOOR))
         if score < min_score or rr < min_rr:
             return
         if bool(cfg.get("use_edge_proxy_gate", False)) and ev < float(cfg["min_edge_proxy"]):

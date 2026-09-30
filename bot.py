@@ -35,7 +35,7 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
-    is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag,
+    is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, MIN_RR_FLOOR,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -895,11 +895,11 @@ def is_allowed(chat_id):
 
 
 # ---------------------------------------------------------------------------
-# حذف خودکار پیام‌های ربات در چت کاربران، AUTO_DELETE_SECONDS ثانیه (پیش‌فرض ۱۰ دقیقه) بعد از ارسال.
+# حذف خودکار پیام‌های ربات در چت کاربران، AUTO_DELETE_SECONDS ثانیه (پیش‌فرض ۳ دقیقه) بعد از ارسال.
 # استثنا: پیام‌های سیگنال (کارت‌های تایید «حالت دستیار» - حتی بعد از منقضی‌شدن) و پیام‌های کانال
 # سیگنال (که منطق TTL/ذخیره‌ی جدا دارند) هرگز از این مسیر حذف نمی‌شوند. 0 = خاموش.
 # ---------------------------------------------------------------------------
-AUTO_DELETE_SECONDS = max(0, int(os.environ.get('AUTO_DELETE_SECONDS', '600')))
+AUTO_DELETE_SECONDS = max(0, int(os.environ.get('AUTO_DELETE_SECONDS', '180')))
 _AUTO_DELETE_FILE = os.environ.get('AUTO_DELETE_QUEUE_FILE', 'auto_delete_queue.json')
 _AUTO_DELETE_QUEUE = []          # [[due_ts, chat_id, message_id], ...]
 _AUTO_DELETE_LOCK = RLock()
@@ -1565,6 +1565,63 @@ def round_trip_fee_usdt(margin, leverage):
         return 0.0
 
 
+def estimate_trade_pnl(entry, sl, tp, side, margin, leverage):
+    """سود/زیان مورد انتظار یک معامله در صورت رسیدن به TP یا SL - با کسر کارمزد رفت‌وبرگشت
+    (همان فرمول round_trip_fee_usdt که موقع بسته‌شدن پوزیشن هم استفاده می‌شود).
+    اسلیپیج و فاندینگ (وابسته به زمان/بازار) در این پیش‌بینی لحاظ نمی‌شوند."""
+    entry = float(entry); sl = float(sl); tp = float(tp)
+    notional = abs(float(margin)) * abs(float(leverage))
+    amount = notional / entry if entry > 0 else 0.0
+    is_long = side_long(side)
+    tp_gross = ((tp - entry) if is_long else (entry - tp)) * amount
+    sl_gross = ((sl - entry) if is_long else (entry - sl)) * amount   # منفی
+    fee = round_trip_fee_usdt(margin, leverage)
+    return {'tp_gross': tp_gross, 'sl_gross': sl_gross, 'fee': fee,
+            'tp_net': tp_gross - fee, 'sl_net': sl_gross - fee, 'notional': notional}
+
+
+def net_r_estimates(entry, sl, tp):
+    """سود/زیان بر حسب R پس از کسر کارمزد رفت‌وبرگشت - مستقل از اندازه‌ی پوزیشن.
+    خروجی: (R خالص در TP، R خالص در SL (منفی)، کارمزد بر حسب R)."""
+    entry = float(entry); risk = abs(entry - float(sl))
+    if entry <= 0 or risk <= 0:
+        return 0.0, 0.0, 0.0
+    fee_r = (2.0 * TAKER_FEE_PCT / 100.0) / (risk / entry)
+    rr = abs(float(tp) - entry) / risk
+    return rr - fee_r, -(1.0 + fee_r), fee_r
+
+
+def estimate_session_size(chat_id, symbol, entry, sl):
+    """(مارجین، اهرم) که ربات برای این ورود با تنظیمات همین کاربر استفاده می‌کند؛ (0, 0) اگر محاسبه نشد."""
+    try:
+        s = USER_SESSIONS.get(chat_id)
+        if not s:
+            return 0.0, 0
+        s['_symbol_tmp'] = symbol
+        try:
+            margin, _ = safe_size(chat_id, s, float(entry), float(sl), force=True)
+        finally:
+            s.pop('_symbol_tmp', None)
+        return float(margin or 0.0), int(s.get('leverage') or 0)
+    except Exception:
+        return 0.0, 0
+
+
+def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rate=None):
+    """خطوط متنی سود/زیان دقیق برای پیام سیگنال. اگر مارجین معلوم باشد به USDT، و همیشه بر حسب R."""
+    lines = []
+    if margin and leverage:
+        est = estimate_trade_pnl(entry, sl, tp, side, margin, leverage)
+        lines.append(f"• 💰 سود در صورت TP: `{est['tp_net']:+.2f} USDT` (ناخالص `{est['tp_gross']:+.2f}` − کارمزد `{est['fee']:.2f}`)")
+        lines.append(f"• 🛑 زیان در صورت SL: `{est['sl_net']:+.2f} USDT` (ناخالص `{est['sl_gross']:+.2f}` − کارمزد `{est['fee']:.2f}`)")
+        if platform_rate and platform_rate > 0 and est['tp_net'] > PLATFORM_FEE_MIN_PROFIT_USDT:
+            lines.append(f"• سود خالص پس از سهم پلتفرم ({platform_rate:g}%): `{est['tp_net'] * (1 - platform_rate / 100.0):+.2f} USDT`")
+        lines.append(f"• حجم محاسبه‌شده: مارجین `{margin:.2f}` × اهرم `{leverage}`")
+    tp_r, sl_r, fee_r = net_r_estimates(entry, sl, tp)
+    lines.append(f"• خالص بر حسب R (پس از کارمزد): TP `{tp_r:+.2f}R` | SL `{sl_r:+.2f}R`")
+    return lines
+
+
 def trailing_locked_r(entry, risk_distance, current_price, is_long):
     """
     Profit-protection ladder for an already profitable position.
@@ -1921,12 +1978,23 @@ def check_pending_orders(chat_id):
             try:
                 s['trade_amount_usdt'] = float(o['margin'])
                 s['leverage'] = float(o['leverage'])
-                ok, err = execute_manual_trade(chat_id, o['symbol'], side_txt, o['sl'], o['tp'], entry_price=live)
+                ok, err = execute_manual_trade(chat_id, o['symbol'], side_txt, o['sl'], o['tp'], entry_price=live,
+                                               reason=o.get('reason') or 'معامله دستی کاربر', force=bool(o.get('force')),
+                                               tp_level_name=o.get('tp_level_name'))
             finally:
                 s['trade_amount_usdt'] = old_margin
                 s['leverage'] = old_lev
             changed = True
             if ok:
+                if o.get('assist_id'):
+                    try:
+                        mine = [p for p in s.get('paper_positions', []) if p.get('symbol') == o['symbol']]
+                        if mine:
+                            mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
+                            mine[-1]['assist_id'] = o['assist_id']
+                            mine[-1]['assist_delay_seconds'] = round(time.time() - float(o.get('created_at') or time.time()), 1)
+                    except Exception:
+                        logger.exception('assist tag for pending order failed')
                 send_message(chat_id, f"✅ اوردر معاملاتی `{o['symbol']}` فعال و معامله باز شد.")
             else:
                 send_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}")
@@ -1938,8 +2006,8 @@ def check_pending_orders(chat_id):
         save_session(chat_id)
 
 
-# مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). صفر = هرگز حذف نشود.
-SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '600')))
+# مدت اعتبار پیام‌های کانال سیگنال قبل از حذف خودکار (ثانیه). V3.37: پیش‌فرض صفر = سیگنال‌ها هرگز حذف نمی‌شوند.
+SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS', '0')))
 # Timer در حال انتظار برای هر message_id - با دکمه‌ی «ذخیره» لغو می‌شود تا آن پیام
 # خاص دیگر خودکار پاک نشود. حافظه‌ی درون‌پردازه‌ای است (با ری‌استارت ربات پاک می‌شود؛
 # مشکلی نیست چون آن پیام‌های قدیمی‌تر معمولاً یا از قبل حذف شده‌اند یا کاربر می‌تواند
@@ -1957,12 +2025,20 @@ def _delete_channel_message_later(channel_id, message_id):
         logger.exception('failed to delete channel message %s/%s', channel_id, message_id)
 
 
+def _schedule_channel_ttl(channel_id, message_id, ttl_seconds=None):
+    ttl = SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
+    if message_id and ttl > 0:
+        timer = Timer(ttl, _delete_channel_message_later, args=(channel_id, message_id))
+        _CHANNEL_MSG_TIMERS[message_id] = timer
+        timer.start()
+
+
 def send_channel_message(channel_id, text, reply_markup=None, ttl_seconds=None):
     """ارسال مستقیم به کانال - بدون session، بدون کیبورد پایین، بدون هیچ منطق
     کاربری. عمداً از send_message جدا نگه داشته شده چون send_message فرض می‌کند
     chat_id متعلق به یک کاربر واقعی با session است، که برای کانال صدق نمی‌کند.
     اگر ttl_seconds (پیش‌فرض SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS) مثبت باشد، پیام بعد از
-    آن مدت خودکار از کانال حذف می‌شود (یک Timer جدا در پس‌زمینه، بدون بلاک‌کردن اسکن).
+    آن مدت خودکار از کانال حذف می‌شود؛ پیش‌فرض ۰ = سیگنال‌ها هرگز حذف نمی‌شوند.
     خروجی: message_id در صورت موفقیت، وگرنه None."""
     try:
         payload = {'chat_id': channel_id, 'text': text, 'parse_mode': 'Markdown'}
@@ -1972,14 +2048,32 @@ def send_channel_message(channel_id, text, reply_markup=None, ttl_seconds=None):
         if not res or not res.get('ok'):
             return None
         message_id = (res.get('result') or {}).get('message_id')
-        ttl = SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
-        if message_id and ttl > 0:
-            timer = Timer(ttl, _delete_channel_message_later, args=(channel_id, message_id))
-            _CHANNEL_MSG_TIMERS[message_id] = timer
-            timer.start()
+        _schedule_channel_ttl(channel_id, message_id, ttl_seconds)
         return message_id
     except Exception:
         logger.exception('failed to post to signal channel')
+        return None
+
+
+def send_channel_photo(channel_id, img_bytes, caption, reply_markup=None, ttl_seconds=None):
+    """ارسال تصویر چارت + کپشن + دکمه‌ها به کانال. خروجی: message_id یا None (که در این حالت
+    فراخواننده به پیام متنی برمی‌گردد). کپشن تلگرام حداکثر ۱۰۲۴ کاراکتر است."""
+    if not TELEGRAM_TOKEN or not img_bytes:
+        return None
+    try:
+        data = {'chat_id': channel_id, 'caption': caption[:1024], 'parse_mode': 'Markdown'}
+        if reply_markup:
+            data['reply_markup'] = json.dumps(reply_markup, ensure_ascii=False)
+        r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data=data,
+                          files={'photo': ('chart.png', img_bytes, 'image/png')}, timeout=25)
+        if r.status_code != 200:
+            logger.warning('channel sendPhoto failed: %s %s', r.status_code, r.text[:200])
+            return None
+        message_id = ((r.json() or {}).get('result') or {}).get('message_id')
+        _schedule_channel_ttl(channel_id, message_id, ttl_seconds)
+        return message_id
+    except Exception:
+        logger.exception('failed to post photo to signal channel')
         return None
 
 
@@ -1990,10 +2084,11 @@ def _append_channel_keep_delete_buttons(channel_id, message_id, base_markup):
         return
     try:
         rows = list(((base_markup or {}).get('inline_keyboard')) or [])
-        rows.append([
-            {'text': '💾 ذخیره برای بررسی بعدی', 'callback_data': f'/keep_channel_msg_{message_id}'},
-            {'text': '🗑 حذف دستی', 'callback_data': f'/del_channel_msg_{message_id}'},
-        ])
+        keep_row = []
+        if SIGNAL_CHANNEL_MESSAGE_TTL_SECONDS > 0:      # وقتی پیام‌ها هرگز حذف خودکار نمی‌شوند، دکمه‌ی «ذخیره» بی‌معنی است
+            keep_row.append({'text': '💾 ذخیره برای بررسی بعدی', 'callback_data': f'/keep_channel_msg_{message_id}'})
+        keep_row.append({'text': '🗑 حذف دستی', 'callback_data': f'/del_channel_msg_{message_id}'})
+        rows.append(keep_row)
         tg('editMessageReplyMarkup', {
             'chat_id': channel_id, 'message_id': message_id,
             'reply_markup': {'inline_keyboard': rows},
@@ -2342,14 +2437,70 @@ def _signal_channel_scan_once():
                 lines.append(f"🧭 رژیم نماد: {regime_label}")
             if pattern == 'touch':
                 lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
-            lines.extend(detail_lines)
-            text = "\n".join(lines)
-            markup = {'inline_keyboard': [
-                [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)}],
-                [{'text': '🟢 خرید (Long)', 'callback_data': f'/qt_buy_{symbol}'},
-                 {'text': '🔴 فروش (Short)', 'callback_data': f'/qt_sell_{symbol}'}],
-            ]}
-            sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup=markup)
+
+            # --- طرح معامله (ورود لحظه‌ای، SL، TP + نام سطح TP، سود/زیان دقیق پس از کارمزد) و تصویر چارت ---
+            trade_side = verdict or implied_side          # 'BUY' / 'SELL'
+            plan, df_ind, live = None, None, None
+            try:
+                live = latest_price(symbol)
+                if live:
+                    plan, df_ind = build_quick_plan_with_fallback(symbol, trade_side, get_timeframe_preset(timeframe), float(live), timeframe)
+            except Exception:
+                logger.exception('signal channel plan failed symbol=%s', symbol)
+            plan_lines = []
+            if plan and live:
+                p_entry, p_sl, p_tp = float(live), float(plan['sl']), float(plan['tp'])
+                plan_lines = [
+                    "",
+                    f"📍 ورود (قیمت لحظه‌ای): `{fmt(p_entry)}` ({'خرید' if trade_side == 'BUY' else 'فروش'})",
+                    f"🛑 حد ضرر: `{fmt(p_sl)}`",
+                    f"🏁 حد سود: `{fmt(p_tp)}`",
+                    f"🎯 سطح TP: `{plan.get('tp_level_name') or '-'}`",
+                    f"⚖️ R:R: `{float(plan['rr']):.2f}`",
+                ]
+                _adm = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
+                _m, _lev = estimate_session_size(SIGNAL_CHANNEL_TF_CHAT_ID, symbol, p_entry, p_sl) if _adm else (0.0, 0)
+                plan_lines.extend(pnl_estimate_lines(p_entry, p_sl, p_tp, trade_side, _m, _lev))
+                plan_lines.append("_پیش‌بینی با قیمت لحظه‌ی ارسال؛ اسلیپیج و فاندینگ لحاظ نشده._")
+            lines.extend(plan_lines)
+            # خطوط جزئیات اندیکاتورها فقط تا جایی که در کپشن عکس (۱۰۲۴ کاراکتر) جا شود اضافه می‌شوند
+            base_len = len("\n".join(lines))
+            fit = []
+            for dl in detail_lines:
+                if base_len + sum(len(x) + 1 for x in fit) + len(dl) + 1 > 980:
+                    break
+                fit.append(dl)
+            text = "\n".join(lines + fit)
+            full_text = "\n".join(lines + list(detail_lines))
+
+            main_buy = trade_side == 'BUY'
+            rows = []
+            mini = miniapp_chart_url(symbol, timeframe)
+            if mini:
+                # دکمه‌ی web_app در کانال مجاز نیست؛ لینک ساده‌ی همان چارت تعاملی
+                rows.append([{'text': '🌐 چارت تعاملی (MiniApp)', 'url': mini}])
+            rows.append([{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, timeframe)}])
+            buy_btn = {'text': '🟢 خرید (Long)' + (' · طبق سیگنال' if main_buy else ' · برعکس سیگنال'), 'callback_data': f'/qt_buy_{symbol}'}
+            sell_btn = {'text': '🔴 فروش (Short)' + (' · برعکس سیگنال' if main_buy else ' · طبق سیگنال'), 'callback_data': f'/qt_sell_{symbol}'}
+            rows.append([buy_btn, sell_btn] if main_buy else [sell_btn, buy_btn])
+            rows.append([{'text': '✏️ ورود با قیمت دستی · خرید', 'callback_data': f'/qtm_buy_{symbol}'},
+                         {'text': '✏️ ورود با قیمت دستی · فروش', 'callback_data': f'/qtm_sell_{symbol}'}])
+            markup = {'inline_keyboard': rows}
+
+            sent_msg_id = None
+            if plan and live and df_ind is not None:
+                try:
+                    _tr = {'entry_price': float(live), 'tp': float(plan['tp']), 'sl': float(plan['sl']),
+                           'side': 'BUY (Long)' if main_buy else 'SELL (Short)', 'timeframe': timeframe,
+                           'entry_reason': f"[SETUP {tag}] {(defs[0] if side_fa == 'سقف' else defs[1])}={level_value:.10g}" if defs else '',
+                           'is_real': False, 'assist_pending': True}
+                    png, _ctx = render_trade_chart_png(symbol, df_ind, _tr)
+                    if png is not None:
+                        sent_msg_id = send_channel_photo(SIGNAL_CHANNEL_ID, png.getvalue(), text, reply_markup=markup)
+                except Exception:
+                    logger.exception('signal channel chart failed symbol=%s', symbol)
+            if sent_msg_id is None:
+                sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, full_text, reply_markup=markup)
             _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
     # ارسال دوباره‌ی همین کندل می‌شد)
@@ -2629,6 +2780,8 @@ def chart(chat_id, symbol, df, trade):
         scenario_tag = extract_scenario_tag(trade.get('entry_reason') or trade.get('signal_reason') or '')
         scenario_line = f"• سناریو: `{scenario_tag} - {_SCENARIO_LABELS_PLAIN.get(scenario_tag, '')}`\n" if scenario_tag else ""
         level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
+        tp_lvl_line = f"• سطح هدف (TP): `{trade['tp_level_name']}`\n" if trade.get('tp_level_name') else ''
+        fee_c = round_trip_fee_usdt(trade.get('margin'), trade.get('leverage'))
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *پوزیشن معامله [{mode}]*\n"
@@ -2638,8 +2791,9 @@ def chart(chat_id, symbol, df, trade):
             + level_line
             + scenario_line +
             f"• ورود: `{fmt(entry)}`\n"
-            f"• حد سود: `{fmt(tp)}` → `+{metrics['reward']:.2f} USDT`\n"
-            f"• حد ضرر: `{fmt(sl)}` → `-{metrics['risk']:.2f} USDT`\n"
+            f"• حد سود: `{fmt(tp)}` → `{metrics['reward'] - fee_c:+.2f} USDT` (پس از کسر کارمزد `{fee_c:.2f}`)\n"
+            + tp_lvl_line +
+            f"• حد ضرر: `{fmt(sl)}` → `{-(metrics['risk'] + fee_c):+.2f} USDT` (شامل کارمزد)\n"
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
             + swing_line
             + alignment_line,
@@ -2751,7 +2905,7 @@ def _blk(chat_id, reason):
     return False
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
@@ -2999,6 +3153,16 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         s['traded_levels'][level_key] = time.strftime('%Y-%m-%d', time.gmtime())
         save_session(chat_id)
 
+    # ثبت سود/زیان دقیق مورد انتظار (پس از کسر کارمزد رفت‌وبرگشت) و نام سطح TP روی خود پوزیشن
+    try:
+        _m = estimate_trade_pnl(trade['entry_price'], trade['sl'], trade['tp'], trade['side'], trade['margin'], trade['leverage'])
+        trade['expected_tp_pnl_net'] = round(_m['tp_net'], 4)
+        trade['expected_sl_pnl_net'] = round(_m['sl_net'], 4)
+        trade['expected_fee_usdt'] = round(_m['fee'], 4)
+    except Exception:
+        logger.exception('expected pnl estimate failed trade=%s', trade_id)
+    trade['tp_level_name'] = tp_level_name
+    save_session(chat_id)
     audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
     chart_tf = s['timeframe']
     df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min') else 200)
@@ -3082,7 +3246,7 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False,tp_level_name=None):
     """force=True (تایید دستی کاربر در حالت دستیار): همه‌ی محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
     محافظ ریسک، توقف روزانه، فعال‌نبودن ربات، ...) نادیده گرفته می‌شود. فقط موانع فنی می‌مانند
     (پوزیشن باز روی همان نماد، مارجین/حجم نامعتبر، خطای صرافی)."""
@@ -3102,10 +3266,10 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
                 return _blk(chat_id, 'ربات غیرفعال یا متوقف شد')
             if int(s.get('scan_generation',0)) != generation:
                 return _blk(chat_id, 'تنظیمات ربات همین لحظه تغییر کرد؛ دوباره تایید کنید')
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force,tp_level_name=tp_level_name)
 
 
-def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None,force=False):
+def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None,force=False,tp_level_name=None):
     """force=True (ورود سریع از کانال): همه‌ی محدودیت‌های خودکار نادیده گرفته می‌شود؛ فقط موانع فنی می‌مانند."""
     s=get_session(chat_id)
     if s['daily_stopped'] and not force:
@@ -3120,7 +3284,7 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
         s=get_session(chat_id)
         if s['daily_stopped'] and not force:
             return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
-        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type,force=force)
+        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type,force=force,tp_level_name=tp_level_name)
     if ok:
         return True, ''
     # دلیل دقیق رد شدن (اگر ثبت شده باشد) به‌جای پیام کلی
@@ -3147,6 +3311,33 @@ def _log_grid_levels_sync(symbol):
     return levels
 
 
+def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_ind=None):
+    """طرح SL/TP ورود سریع (سوینگ/ATR + سطح مقابل)؛ اگر ساخته نشد، SL/TP درصدی جایگزین.
+    خروجی: (plan، df با اندیکاتورها یا None). plan همیشه کلید tp_level_name دارد."""
+    is_long = side == 'BUY'
+    plan, why = None, 'داده‌ی بازار در دسترس نبود'
+    try:
+        if df_ind is None:
+            df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+            df_ind = calculate_indicators(df) if df is not None and not df.empty else None
+        if df_ind is not None and not df_ind.empty:
+            plan, why = build_quick_trade_plan(
+                df_ind, side, strategy_config,
+                grid_levels=_log_grid_levels_sync(symbol), live_price=live,
+            )
+    except Exception:
+        logger.exception('quick trade plan failed symbol=%s', symbol)
+    if not plan:
+        # طرح اصلی (سوینگ/ATR) ساخته نشد؛ SL/TP درصدی ساده ساخته می‌شود.
+        d = float(live) * QUICK_TRADE_FALLBACK_SL_PCT
+        k = 1 if is_long else -1
+        plan = {'sl': float(live) - k * d, 'tp': float(live) + k * d * QUICK_TRADE_FALLBACK_RR,
+                'rr': QUICK_TRADE_FALLBACK_RR, 'sl_source': f'درصدی {QUICK_TRADE_FALLBACK_SL_PCT*100:g}% (جایگزین: {why})',
+                'tp_source': f'{QUICK_TRADE_FALLBACK_RR:g}R', 'reason': 'ورود سریع کانال | SL/TP درصدی جایگزین',
+                'tp_level_name': f'بدون سطح مشخص - هدف {QUICK_TRADE_FALLBACK_RR:g}R (درصدی)', 'entry': float(live)}
+    return plan, df_ind
+
+
 def quick_channel_trade(chat_id, symbol, side):
     """ورود فوری با قیمت بازار از دکمه‌ی 🟢/🔴 زیر پیام کانال.
     کاربر فقط جهت را با انتخاب دکمه مشخص می‌کند؛ SL/TP را build_quick_trade_plan
@@ -3171,27 +3362,12 @@ def quick_channel_trade(chat_id, symbol, side):
     if not live:
         send_message(chat_id, f'❌ قیمت لحظه‌ای `{symbol}` دریافت نشد.'); return
     tf = s['timeframe']
-    plan, why = None, 'داده‌ی بازار در دسترس نبود'
-    try:
-        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
-        if df is not None and not df.empty:
-            plan, why = build_quick_trade_plan(
-                calculate_indicators(df), side, s.get('strategy_config'),
-                grid_levels=_log_grid_levels_sync(symbol), live_price=live,
-            )
-    except Exception:
-        logger.exception('quick trade plan failed symbol=%s', symbol)
-    if not plan:
-        # طرح اصلی (سوینگ/ATR) ساخته نشد؛ ورود متوقف نمی‌شود و SL/TP درصدی ساده ساخته می‌شود.
-        d = float(live) * QUICK_TRADE_FALLBACK_SL_PCT
-        k = 1 if is_long else -1
-        plan = {'sl': float(live) - k * d, 'tp': float(live) + k * d * QUICK_TRADE_FALLBACK_RR,
-                'rr': QUICK_TRADE_FALLBACK_RR, 'sl_source': f'درصدی {QUICK_TRADE_FALLBACK_SL_PCT*100:g}% (جایگزین: {why})',
-                'tp_source': f'{QUICK_TRADE_FALLBACK_RR:g}R', 'reason': 'ورود سریع کانال | SL/TP درصدی جایگزین'}
+    plan, _df_ind = build_quick_plan_with_fallback(symbol, side, s.get('strategy_config'), live, tf)
 
     ok, err = execute_manual_trade(
         chat_id, symbol, 'BUY (Long)' if is_long else 'SELL (Short)', plan['sl'], plan['tp'],
         entry_price=live, reason=plan['reason'], order_type='market', force=True,
+        tp_level_name=plan.get('tp_level_name'),
     )
     if not ok:
         send_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}'); return
@@ -3203,7 +3379,11 @@ def quick_channel_trade(chat_id, symbol, side):
             f"• ورود (بازار): `{fmt(pos['entry_price'])}`\n"
             f"• حد ضرر: `{fmt(pos['sl'])}` ({plan['sl_source']})\n"
             f"• حد سود: `{fmt(pos['tp'])}` ({plan['tp_source']})\n"
+            f"• سطح هدف (TP): `{plan.get('tp_level_name') or '-'}`\n"
             f"• R:R: `{plan['rr']:.2f}` | مارجین: `{fmt(pos['margin'])}` × `{pos['leverage']}` | ریسک: `{pos['risk_usdt']:.2f}$`\n"
+            + (f"• 💰 سود در صورت TP (پس از کارمزد): `{pos['expected_tp_pnl_net']:+.2f} USDT`\n"
+               f"• 🛑 زیان در صورت SL (با کارمزد): `{pos['expected_sl_pnl_net']:+.2f} USDT`\n"
+               if pos.get('expected_tp_pnl_net') is not None else "") +
             f"• تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`")
 
 
@@ -4400,6 +4580,13 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
         is_long = sig == 'BUY'
         level_txt, scn_txt = _assist_describe_source(full_reason, level_token, level_value, scn)
         score = plan.get('score')
+        tp_level_name = plan.get('tp_level_name')
+        _m, _lev = estimate_session_size(chat_id, symbol, float(entry), float(sl))
+        try:
+            _prate = float(get_user_fee_rate(chat_id))
+        except Exception:
+            _prate = None
+        pnl_lines = pnl_estimate_lines(float(entry), float(sl), float(tp), sig, _m, _lev, platform_rate=_prate)
         text = (
             f"🤝 *سیگنال منتظر تایید شما*\n"
             f"• نماد: `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'})\n"
@@ -4407,15 +4594,19 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             f"• سطح: `{level_txt}`\n"
             f"• سناریو: `{scn_txt}`\n"
             f"• ورود پیشنهادی: `{fmt(float(entry))}`\n"
-            f"• حد ضرر: `{fmt(float(sl))}` | هدف: `{fmt(float(tp))}`\n"
+            f"• حد ضرر: `{fmt(float(sl))}`\n"
+            f"• هدف (TP): `{fmt(float(tp))}`" + (f" — سطح: `{tp_level_name}`" if tp_level_name else "") + "\n"
             f"• R:R: `{rr:.2f}`" + (f" | کیفیت: `{int(round(float(score)))}/100`" if score is not None else "") + "\n"
+            + "\n".join(pnl_lines) + "\n"
             f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n"
             f"با تایید، ورود با *قیمت لحظه‌ای* انجام می‌شود."
         )
         markup = {'inline_keyboard': [
             [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
-            [{'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'},
-             {'text': '📈 TradingView', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
+            [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
+            [{'text': '✏️ ورود با قیمت دستی', 'callback_data': f'/assist_man_{aid}'},
+             {'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'}],
+            [{'text': '📈 TradingView', 'url': tradingview_chart_url(symbol, s.get('timeframe', '5min'))}],
         ]}
         _mini = miniapp_chart_url(symbol, s.get('timeframe', '5min'))
         if _mini:
@@ -4440,6 +4631,8 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'rr': round(rr, 3),
             'score': (int(round(float(score))) if score is not None else None),
             'quality_label': plan.get('quality_label'), 'structural_tp': bool(plan.get('structural_target', False)),
+            'tp_level_name': tp_level_name, 'exp_tp_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
+            'exp_sl_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['sl_net'], 4) if (_m and _lev) else None),
             'reason': full_reason, 'scn': scn, 'level_token': level_token, 'level_value': level_value,
             'tf': s.get('timeframe'), 'created_at': now, 'expires_at': now + expiry, 'status': 'pending',
             'ext': 0, 'message_id': message_id,
@@ -4480,7 +4673,8 @@ def assist_approve(chat_id, aid):
             warn = f"⚠️ قیمت لحظه‌ای `{drift_r:.2f}R` از ورود پیشنهادی دور شده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
     ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
                        structural_tp=rec['structural_tp'], plan_score=rec.get('score'), plan_rr=rec.get('rr'),
-                       plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True, force=True)
+                       plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True, force=True,
+                       tp_level_name=rec.get('tp_level_name'))
     block_reason = _LAST_BLOCK_REASON.pop(chat_id, None)
     s = get_session(chat_id)
     with _ASSIST_LOCK:
@@ -4527,6 +4721,174 @@ def assist_extend(chat_id, aid):
         rec['ext'] = rec.get('ext', 0) + 1
     save_session(chat_id)
     send_message(chat_id, f"⏳ مهلت {step // 60} دقیقه تمدید شد.")
+
+
+def _assist_pending_or_notify(chat_id, s, aid):
+    """rec در انتظار و منقضی‌نشده را برمی‌گرداند؛ وگرنه پیام مناسب می‌فرستد و None برمی‌گرداند."""
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+        if not rec or rec['status'] != 'pending':
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return None
+        if time.time() > rec['expires_at']:
+            rec['status'] = 'expired'
+            save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+            send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return None
+        return rec
+
+
+def assist_reverse(chat_id, aid):
+    """معامله‌ی برعکسِ جهت سیگنال، با قیمت لحظه‌ای (همان مسیر ورود سریع: SL/TP از سوینگ/ATR و سطح مقابل)."""
+    s = get_session(chat_id)
+    rec = _assist_pending_or_notify(chat_id, s, aid)
+    if not rec:
+        return
+    symbol = rec['symbol']
+    opp = 'SELL' if rec['sig'] == 'BUY' else 'BUY'
+    had = any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
+    quick_channel_trade(chat_id, symbol, opp)
+    s = get_session(chat_id)
+    opened = (not had) and any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
+    if opened:
+        with _ASSIST_LOCK:
+            rec = _assist_find(s, aid) or rec
+            # سیگنال اصلی «ردشده» حساب می‌شود تا نتیجه‌ی فرضی‌اش برای آمار پیگیری شود
+            rec['status'] = 'rejected'; rec['rejected_at'] = time.time(); rec['reversed'] = True
+        save_session(chat_id)
+        _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+
+
+def assist_manual_start(chat_id, aid):
+    s = get_session(chat_id)
+    rec = _assist_pending_or_notify(chat_id, s, aid)
+    if not rec:
+        return
+    try:
+        live = exchange_latest_price(chat_id, rec['symbol']) if s.get('trading_mode') == 'REAL' else latest_price(rec['symbol'])
+    except Exception:
+        live = None
+    s['user_state'] = 'WAIT_MANUAL_ENTRY_PRICE'
+    s['_manual_entry_ctx'] = {'kind': 'assist', 'aid': aid}
+    save_session(chat_id)
+    send_message(chat_id,
+        f"✏️ *ورود با قیمت دستی — `{rec['symbol']}`*\n"
+        f"قیمت ورود دلخواهت را (فقط عدد) بفرست.\n"
+        f"• ورود پیشنهادی ربات: `{fmt(rec['entry'])}`" + (f" | لحظه‌ای: `{fmt(live)}`" if live else "") + "\n"
+        f"• SL `{fmt(rec['sl'])}` و TP `{fmt(rec['tp'])}` همان سیگنال می‌مانند.\n"
+        f"معامله وقتی قیمت به عدد تو برسد باز می‌شود.")
+
+
+def manual_entry_start_channel(chat_id, symbol, side):
+    """شروع ورود با قیمت دستی از دکمه‌ی زیر پیام کانال."""
+    s = get_session(chat_id)
+    symbol = re.sub(r'[^A-Z0-9]', '', str(symbol).upper())
+    if not (2 <= len(symbol) <= 12):
+        send_message(chat_id, '⚠️ نماد نامعتبر است.'); return
+    if any(p['symbol'] == symbol for p in s['paper_positions']):
+        send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
+    try:
+        live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
+    except Exception:
+        live = None
+    s['user_state'] = 'WAIT_MANUAL_ENTRY_PRICE'
+    s['_manual_entry_ctx'] = {'kind': 'qt', 'symbol': symbol, 'side': side}
+    save_session(chat_id)
+    send_message(chat_id,
+        f"✏️ *ورود با قیمت دستی — `{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})*\n"
+        f"قیمت ورود دلخواهت را (فقط عدد) بفرست." + (f"\nقیمت لحظه‌ای: `{fmt(live)}`" if live else "") + "\n"
+        f"SL/TP بر اساس همان قیمت ورود ساخته می‌شوند و معامله وقتی قیمت به عدد تو برسد باز می‌شود.")
+
+
+def manual_entry_price_received(chat_id, raw):
+    s = get_session(chat_id)
+    ctx = dict(s.get('_manual_entry_ctx') or {})
+    s['user_state'] = None
+    save_session(chat_id)
+    try:
+        price = float(str(raw).replace(',', '').strip())
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError
+    except Exception:
+        send_message(chat_id, '⚠️ قیمت معتبر نیست؛ دوباره روی دکمه‌ی «ورود با قیمت دستی» بزن و فقط عدد بفرست.'); return
+    if ctx.get('kind') == 'assist':
+        rec = _assist_pending_or_notify(chat_id, s, ctx.get('aid'))
+        if not rec:
+            return
+        symbol, side = rec['symbol'], rec['sig']
+        sl, tp, tp_name, reason, aid = float(rec['sl']), float(rec['tp']), rec.get('tp_level_name'), rec['reason'], rec['id']
+    elif ctx.get('kind') == 'qt':
+        symbol, side = ctx['symbol'], ctx['side']
+        plan, _ = build_quick_plan_with_fallback(symbol, side, s.get('strategy_config'), price, s['timeframe'])
+        sl, tp, tp_name, reason, aid = float(plan['sl']), float(plan['tp']), plan.get('tp_level_name'), plan['reason'], None
+    else:
+        send_message(chat_id, 'ℹ️ درخواست ورود دستی پیدا نشد؛ دوباره از دکمه‌ی زیر سیگنال شروع کن.'); return
+    live = latest_price(symbol)
+    if live and abs(price - float(live)) / float(live) > 0.20:
+        send_message(chat_id, f"⚠️ قیمت `{fmt(price)}` بیش از ۲۰٪ با قیمت لحظه‌ای (`{fmt(live)}`) فاصله دارد؛ دوباره تلاش کن."); return
+    is_long = side == 'BUY'
+    if not ((is_long and sl < price < tp) or ((not is_long) and tp < price < sl)):
+        send_message(chat_id,
+            f"⚠️ با ورود `{fmt(price)}` ترتیب SL/TP با جهت {'خرید' if is_long else 'فروش'} نمی‌خواند "
+            f"(باید {'SL < ورود < TP' if is_long else 'TP < ورود < SL'} باشد؛ SL `{fmt(sl)}` | TP `{fmt(tp)}`). قیمت دیگری بفرست."); return
+    rr = abs(tp - price) / abs(price - sl)
+    _m, _lev = estimate_session_size(chat_id, symbol, price, sl)
+    try:
+        _prate = float(get_user_fee_rate(chat_id))
+    except Exception:
+        _prate = None
+    lines = [
+        f"🖐 *خلاصه‌ی ورود با قیمت دستی*",
+        f"• نماد: `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'})",
+        f"• ورود (دستی): `{fmt(price)}`",
+        f"• حد ضرر: `{fmt(sl)}`",
+        f"• هدف (TP): `{fmt(tp)}`" + (f" — سطح: `{tp_name}`" if tp_name else ""),
+        f"• R:R: `{rr:.2f}`",
+    ]
+    if rr < MIN_RR_FLOOR:
+        lines.append(f"⚠️ R:R کمتر از حداقل `{MIN_RR_FLOOR:g}` است (تصمیم با خودت).")
+    lines.extend(pnl_estimate_lines(price, sl, tp, side, _m, _lev, platform_rate=_prate))
+    lines.append("\nتایید می‌کنی؟ اوردر ثبت می‌شود و وقتی قیمت به ورودِ تو برسد، معامله باز می‌شود.")
+    s['_manual_entry_tmp'] = {'symbol': symbol, 'side': side, 'entry': price, 'sl': sl, 'tp': tp,
+                              'tp_level_name': tp_name, 'reason': reason, 'assist_id': aid,
+                              'exp_tp_pnl_net': (round(estimate_trade_pnl(price, sl, tp, side, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
+                              'exp_sl_pnl_net': (round(estimate_trade_pnl(price, sl, tp, side, _m, _lev)['sl_net'], 4) if (_m and _lev) else None)}
+    save_session(chat_id)
+    send_message(chat_id, "\n".join(lines), {'inline_keyboard': [[
+        {'text': '✅ ثبت اوردر ورود', 'callback_data': '/confirm_manual_entry'},
+        {'text': '❌ انصراف', 'callback_data': '/cancel'}]]})
+
+
+def manual_entry_confirm(chat_id):
+    s = get_session(chat_id)
+    tmp = s.get('_manual_entry_tmp')
+    if not tmp:
+        send_message(chat_id, '⚠️ اطلاعات ورود دستی پیدا نشد یا قبلاً ثبت شده؛ از اول شروع کن.'); return
+    symbol = tmp['symbol']
+    if any(p['symbol'] == symbol for p in s['paper_positions']):
+        send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
+    aid = tmp.get('assist_id')
+    if aid:
+        rec = _assist_pending_or_notify(chat_id, s, aid)
+        if not rec:
+            s.pop('_manual_entry_tmp', None); save_session(chat_id); return
+    order = {
+        'order_id': f"{symbol}-{int(time.time())}", 'symbol': symbol,
+        'side': 'BUY (Long)' if tmp['side'] == 'BUY' else 'SELL (Short)',
+        'trigger_price': None, 'entry_price': tmp['entry'], 'tp': tmp['tp'], 'sl': tmp['sl'],
+        'margin': float(s.get('trade_amount_usdt') or 0), 'leverage': s.get('leverage'),
+        'created_at': time.time(), 'triggered': True, 'force': True,
+        'reason': tmp.get('reason') or 'ورود دستی', 'tp_level_name': tmp.get('tp_level_name'), 'assist_id': aid,
+        'exp_tp_pnl_net': tmp.get('exp_tp_pnl_net'), 'exp_sl_pnl_net': tmp.get('exp_sl_pnl_net'),
+    }
+    s.setdefault('pending_orders', []).append(order)
+    if aid:
+        with _ASSIST_LOCK:
+            rec = _assist_find(s, aid)
+            if rec:
+                rec['status'] = 'approved'; rec['approved_at'] = time.time(); rec['manual_entry'] = tmp['entry']
+        _assist_strip_buttons(chat_id, (rec or {}).get('message_id'), rec)
+    s.pop('_manual_entry_tmp', None)
+    save_session(chat_id)
+    send_message(chat_id, f"✅ اوردر `{symbol}` با ورود `{fmt(tmp['entry'])}` ثبت شد؛ وقتی قیمت به آن برسد با همین SL/TP معامله باز می‌شود.", pending_orders_keyboard(chat_id))
 
 
 def _assist_resolve_shadow(rec, tf, df):
@@ -4752,7 +5114,7 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'))
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
@@ -5516,7 +5878,7 @@ def learning_text(topic):
 
 
 def apply_user_profile(s, profile):
-    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(65.0,1.30,0.50,20.0,'متعادل'),'opportunity':(60.0,1.25,0.50,18.0,'فرصت‌های بیشتر')}
+    presets={'conservative':(78.0,1.60,0.35,24.0,'محافظه‌کارانه'),'balanced':(65.0,MIN_RR_FLOOR,0.50,20.0,'متعادل'),'opportunity':(60.0,MIN_RR_FLOOR,0.50,18.0,'فرصت‌های بیشتر')}
     score,rr,risk,adx,label=presets[profile]
     s['strategy_config']['min_trade_score']=score; s['strategy_config']['min_rr']=rr; s['strategy_config']['min_adx']=adx; s['risk_per_trade_pct']=risk; s['user_experience']='simple'
     return label,score,rr,risk
@@ -6019,6 +6381,12 @@ def process_command(cmd,chat_id,message_id=None):
         # ورود سریع از دکمه‌های 🟢/🔴 زیر پیام کانال: /qt_<buy|sell>_<SYMBOL>
         _, qt_side, qt_sym = cl.split('_', 2)
         quick_channel_trade(chat_id, qt_sym.upper(), 'BUY' if qt_side == 'buy' else 'SELL'); return
+    if cl.startswith('/qtm_buy_') or cl.startswith('/qtm_sell_'):
+        # ورود با قیمت دستی از دکمه‌های زیر پیام کانال: /qtm_<buy|sell>_<SYMBOL>
+        _, qm_side, qm_sym = cl.split('_', 2)
+        manual_entry_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
+    if cl == '/confirm_manual_entry':
+        manual_entry_confirm(chat_id); return
     if cl.startswith('/keep_channel_msg_'):
         # دکمه‌ی «ذخیره برای بررسی بعدی» زیر پیام کانال - فقط تایمر حذف خودکار همان
         # پیام را لغو می‌کند؛ خود پیام و دکمه‌هایش دست‌نخورده در کانال باقی می‌مانند.
@@ -6374,6 +6742,10 @@ def process_command(cmd,chat_id,message_id=None):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
     if cl.startswith('/assist_ext_'):
         assist_extend(chat_id, cl[len('/assist_ext_'):]); return
+    if cl.startswith('/assist_rev_'):
+        assist_reverse(chat_id, cl[len('/assist_rev_'):]); return
+    if cl.startswith('/assist_man_'):
+        assist_manual_start(chat_id, cl[len('/assist_man_'):]); return
     if cl=='/my_profile_menu':
         send_message(
             chat_id,
@@ -6639,6 +7011,8 @@ def handle_text(chat_id,text):
             send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
         s['_pending_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
         send_message(chat_id,f'🧾 جهت اوردر `{sym}` را انتخاب کنید:',get_pending_side_keyboard()); return
+    if current_state == 'WAIT_MANUAL_ENTRY_PRICE':
+        manual_entry_price_received(chat_id, raw); return
     if current_state == 'WAIT_MANUAL_ONESHOT':
         lines=[ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
         if len(lines) < 5:

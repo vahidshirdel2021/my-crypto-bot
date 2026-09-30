@@ -1,4 +1,4 @@
-from strategy import STRATEGY_DEFAULTS
+from strategy import STRATEGY_DEFAULTS, MIN_RR_FLOOR
 
 CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
 
@@ -39,7 +39,7 @@ def get_params_menu_keyboard(session=None):
         [{"text": "➕ حد سود پایه +۰٫۵", "callback_data": "/tp_up"}, {"text": "➖ حد سود -۰٫۵", "callback_data": "/tp_down"}],
         [{"text": f"🧠 خروج پویا: {'🟢 فعال' if c.get('dynamic_exits',True) else '🔴 خاموش'}", "callback_data": "/dummy"}],
         [{"text": f"📊 حداقل کیفیت: {float(c.get('min_trade_score',60)):.0f}/100", "callback_data": "/dummy"}],
-        [{"text": f"⚖️ حداقل R:R: {float(c.get('min_rr',1.3)):.2f}R", "callback_data": "/dummy"}],
+        [{"text": f"⚖️ حداقل R:R: {max(MIN_RR_FLOOR, float(c.get('min_rr', MIN_RR_FLOOR))):.2f}R", "callback_data": "/dummy"}],
         [{"text": f"⚠️ ریسک: {float(s.get('risk_per_trade_pct',0.5)):.2f}%", "callback_data": "/dummy"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
