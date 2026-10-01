@@ -311,6 +311,19 @@ STRATEGY_DEFAULTS = {
     # حالت ۱/۲ (برخورد ساده) هم ذاتاً برگشتی/رنجی است، نه ترندی - طبق تصمیم کاربر همین
     # معافیت را از گیت هم‌جهتی بازار گرفت.
     "scenario_12_market_gate_exempt": True,
+    # --- مدل «PDH/PDL + P4» (تصمیم کاربر) ---------------------------------------------
+    # وقتی روشن است: فقط سطح روزانه (PDH/PDL) اجازه‌ی ساخت ستاپ دارد (ماهانه/هفتگی/۴ساعته/
+    # ۱ساعته، کلاستر و سطوح intraday برای معامله خاموش‌اند) و کندل ۴ساعته‌ی قبل (P4H/P4L)
+    # نسبت به PDH/PDL تعیین می‌کند کدام حالت‌ها مجازند و هدف‌ها (TP) کدام سطوح‌اند:
+    #   حالت ۱: P4H و P4L هر دو بین PDL و PDH  -> سناریوهای ۱/۲/۵/۶ (خرید و فروش)
+    #   حالت ۲: P4H بالای PDH (و PDL قطع نشده)  -> فقط سناریو ۳ (خرید روی PDH)، یک TP = P4H
+    #   حالت ۳: P4L پایین PDL (و PDH قطع نشده)  -> فقط سناریو ۴ (فروش روی PDL)، یک TP = P4L
+    #   هر دو قطع شده                           -> معامله نمی‌شود
+    "daily_p4_mode": True,
+    # خروج پله‌ای روی سطوح مسیر (فقط PAPER؛ در REAL فعلاً فقط نزدیک‌ترین سطح TP می‌شود)
+    "daily_p4_staged_exit": True,
+    # سطوح پله‌ایِ نزدیک‌تر از این فاصله (برحسب ATR) به هم یکی حساب می‌شوند
+    "daily_p4_min_stage_gap_atr": 0.15,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -830,6 +843,13 @@ def extract_setup_tag(reason):
 
 
 _SCENARIO_TAG_RE = re.compile(r"\|SCN=([1-6])\b")
+_P4CASE_TAG_RE = re.compile(r"\|P4CASE=([123])\b")
+
+
+def extract_p4_case(reason):
+    """حالت مدل PDH/PDL+P4 ('1'/'2'/'3') که wrapper سیگنال در reason گذاشته، یا None."""
+    m = _P4CASE_TAG_RE.search(str(reason or ""))
+    return m.group(1) if m else None
 
 
 def extract_scenario_tag(reason):
@@ -1216,6 +1236,79 @@ _SCENARIO_TOGGLE_KEYS = {
 }
 
 
+
+# --- مدل PDH/PDL + P4 -----------------------------------------------------------------
+_P4_ALLOWED_SCENARIOS = {
+    "1": {"1", "2", "5", "6"},   # P4 داخل رنج روزانه: خرید و فروش (فقط برگشتی‌ها؛ ادامه‌دهنده‌ها هدفی ندارند)
+    "2": {"3"},                  # P4 بالای PDH را قطع کرده: فقط خرید ادامه‌دهنده روی PDH
+    "3": {"4"},                  # P4 پایین PDL را قطع کرده: فقط فروش ادامه‌دهنده روی PDL
+    "both": set(),               # هر دو قطع شده: معامله نمی‌شود
+}
+
+
+def _daily_p4_context(d, pdh, pdl, idx=None):
+    """حالت (1/2/3/both) را از روی کندل ۴ساعته‌ی قبل (P4H/P4L) نسبت به PDH/PDL می‌سازد.
+    «قطع‌کردن» یعنی سقف/کف (فتیله) کندل ۴ساعته از PDH/PDL رد شده باشد. None: داده کافی نیست."""
+    if d is None or pdh is None or pdl is None:
+        return None
+    if idx is None:
+        idx = len(d) - 2
+    htf = _compute_prev_htf_levels(d, idx)
+    p4h, p4l = htf.get("P4H"), htf.get("P4L")
+    if p4h is None or p4l is None:
+        return None
+    pdh_i, pdl_i = _pdh_pdl_at(d, idx)
+    if pdh_i is None or pdl_i is None:
+        pdh_i, pdl_i = float(pdh), float(pdl)
+    crossed_hi = float(p4h) > float(pdh_i)
+    crossed_lo = float(p4l) < float(pdl_i)
+    if crossed_hi and crossed_lo:
+        case = "both"
+    elif crossed_hi:
+        case = "2"
+    elif crossed_lo:
+        case = "3"
+    else:
+        case = "1"
+    return {"case": case, "p4h": float(p4h), "p4l": float(p4l), "pdh": float(pdh_i), "pdl": float(pdl_i)}
+
+
+def _daily_p4_gate(d, pdh, pdl, sig, reason):
+    """(allowed, case, why). فقط روی سیگنال‌هایی که تگ SCN دارند تصمیم می‌گیرد."""
+    ctx = _daily_p4_context(d, pdh, pdl)
+    if ctx is None:
+        return False, None, "کندل ۴ساعته‌ی قبل (P4) هنوز آماده نیست"
+    scn = extract_scenario_tag(reason)
+    if scn is None:
+        return False, ctx["case"], "سیگنال بدون تگ سناریو (۱ تا ۶) در مدل PDH/PDL رد شد"
+    case = ctx["case"]
+    if case == "both":
+        return False, case, "کندل ۴ساعته‌ی قبل هم PDH و هم PDL را قطع کرده؛ معامله نمی‌شود"
+    if scn not in _P4_ALLOWED_SCENARIOS[case]:
+        if case == "1":
+            return False, case, f"حالت ۱ (P4 داخل PDL..PDH): سناریو {scn} ادامه‌دهنده است و سطحی پیش‌رو برای TP ندارد"
+        side = "خرید روی PDH (سناریو ۳)" if case == "2" else "فروش روی PDL (سناریو ۴)"
+        return False, case, f"حالت {case}: فقط {side} مجاز است؛ سناریو {scn} رد شد"
+    return True, case, ""
+
+
+def _daily_p4_stage_levels(ctx, signal, entry):
+    """[(قیمت، نام)] سطوح پیش‌رو برای TP پله‌ای، از نزدیک به دور."""
+    case = ctx["case"]
+    named = []
+    if case == "1":
+        named = [(ctx["pdh"], "PDH"), (ctx["pdl"], "PDL"), (ctx["p4h"], "P4H"), (ctx["p4l"], "P4L")]
+    elif case == "2":
+        named = [(ctx["p4h"], "P4H")]
+    elif case == "3":
+        named = [(ctx["p4l"], "P4L")]
+    if signal == "BUY":
+        ahead = sorted([x for x in named if x[0] > entry], key=lambda x: x[0])
+    else:
+        ahead = sorted([x for x in named if x[0] < entry], key=lambda x: -x[0])
+    return ahead
+
+
 def _scenario_number(kind, sig):
     """۶ حالت کاربر: 1=برخورد PDH+برگشت(Sell) 2=برخورد PDL+برگشت(Buy)
     3=نفوذ PDH+پولبک+ادامه(Buy) 4=نفوذ PDL+پولبک+ادامه(Sell)
@@ -1411,6 +1504,12 @@ def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_pri
         sig, reason = immediate_sig, immediate_reason
     if sig not in ("BUY", "SELL"):
         return sig, reason
+    if bool(cfg.get("daily_p4_mode", True)):
+        _d_p4, _pdh_p4, _pdl_p4 = _compute_prev_day_levels(df)
+        _ok_p4, _case_p4, _why_p4 = _daily_p4_gate(_d_p4, _pdh_p4, _pdl_p4, sig, reason)
+        if not _ok_p4:
+            return None, f"[PDH/PDL+P4] {_why_p4}"
+        reason = f"{reason}|P4CASE={_case_p4}"
     if not bool(cfg.get("htf_close_guard_enabled", True)):
         return sig, reason
     tag = extract_setup_tag(reason)
@@ -1499,6 +1598,9 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
     # 5m is more noisy: require structure confirmation. Keep 15m faster.
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
     enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
+    if bool(cfg.get("daily_p4_mode", True)):
+        # مدل PDH/PDL + P4: فقط سطح روزانه ستاپ می‌سازد (بدون کلاستر/سطوح دیگر/intraday)
+        enabled_tags = {"Daily"}
 
     def _active_level_pairs_at(idx):
         """(hi, lo) for every currently-enabled tag, evaluated as of idx.
@@ -1928,6 +2030,20 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     if target_level is not None:
         all_levels.setdefault("_target", float(target_level))
 
+    # مدل PDH/PDL + P4: سطوح هدف فقط PDH/PDL/P4H/P4L (طبق حالت) و خروج پله‌ای روی آن‌هاست.
+    p4_mode = bool(cfg.get("daily_p4_mode", True))
+    p4_ctx = None
+    p4_ahead = []
+    if p4_mode:
+        p4_ctx = _daily_p4_context(d, pdh, pdl)
+        if p4_ctx is None:
+            return None, "کندل ۴ساعته‌ی قبل (P4) هنوز آماده نیست؛ معامله رد شد"
+        _c = p4_ctx["case"]
+        if _c == "both" or (_c == "2" and signal == "SELL") or (_c == "3" and signal == "BUY"):
+            return None, f"حالت {_c} مدل PDH/PDL+P4 این جهت معامله را اجازه نمی‌دهد"
+        p4_ahead = _daily_p4_stage_levels(p4_ctx, signal, entry)
+        all_levels = {name: price for price, name in p4_ahead}
+
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
         sl = sweep_extreme + (atr * buffer_atr)
@@ -1950,7 +2066,8 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         tp_key = next((k for k, v in all_levels.items() if v == tp), None)
         tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
         _tp_before_cap = tp
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
+        if not p4_mode:
+            tp = _cap_target_to_grid(grid_levels, entry, risk_dist, -1, min_rr, tp)
         if tp != _tp_before_cap:
             tp_level_name = _grid_level_label(grid_levels, tp)
     else:
@@ -1975,9 +2092,27 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         tp_key = next((k for k, v in all_levels.items() if v == tp), None)
         tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
         _tp_before_cap = tp
-        tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
+        if not p4_mode:
+            tp = _cap_target_to_grid(grid_levels, entry, risk_dist, 1, min_rr, tp)
         if tp != _tp_before_cap:
             tp_level_name = _grid_level_label(grid_levels, tp)
+
+    # پله‌های خروج (فقط مدل PDH/PDL+P4): همه‌ی سطوح پیش‌رو، از نزدیک به دور؛ هر پله سهم مساوی.
+    # آخرین پله همان TP نهایی پوزیشن است. نزدیک‌ترین پله بالاتر قبلاً شرط حداقل R:R را گذرانده.
+    p4_stages = None
+    if p4_mode and p4_ahead:
+        _gap = atr * max(0.0, float(cfg.get("daily_p4_min_stage_gap_atr", 0.15)))
+        _st = []
+        for _price, _name in p4_ahead:
+            if _st and abs(_price - _st[-1][0]) < _gap:
+                continue
+            _st.append((_price, _name))
+        if not bool(cfg.get("daily_p4_staged_exit", True)):
+            _st = _st[:1]
+        _n = len(_st)
+        p4_stages = [{"price": float(pr), "name": nm, "fraction": 1.0 / _n} for pr, nm in _st]
+        tp = float(_st[-1][0])
+        tp_level_name = " → ".join(nm for _, nm in _st) + (" (پله‌ای)" if _n > 1 else "")
 
     # فیلتر کارمزد به ریسک دلاری
     risk_pct = risk_dist / entry
@@ -1986,7 +2121,11 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         if (0.50 / est_risk_usdt) > max_fee_ratio:
             return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
 
-    rr = abs(tp - entry) / risk_dist
+    if p4_stages:
+        # R:R وزنی: میانگین R هر پله با سهم همان پله (همین عدد در امتیازدهی/گزارش استفاده می‌شود)
+        rr = sum(st["fraction"] * abs(st["price"] - entry) / risk_dist for st in p4_stages)
+    else:
+        rr = abs(tp - entry) / risk_dist
     if rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
 
@@ -2011,8 +2150,10 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         "pdh": float(pdh), "pdl": float(pdl),
         "anchor_level": float(anchor_level) if anchor_level is not None else (float(pdh) if signal == "SELL" else float(pdl)),
         "target_level": float(target_level) if target_level is not None else (float(pdl) if signal == "SELL" else float(pdh)),
-        "structural_target": bool(target_level is not None or tp == pdl or tp == pdh),
+        "structural_target": bool(p4_mode or target_level is not None or tp == pdl or tp == pdh),
         "tp_level_name": tp_level_name,
+        "tp_stages": p4_stages,
+        "p4_case": (p4_ctx or {}).get("case"),
         "risk_atr_source_index": int(risk_idx),
         "setup_index": int(idx),
         "pattern": pattern_name,

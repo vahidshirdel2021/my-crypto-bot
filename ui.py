@@ -156,9 +156,13 @@ def get_setup_management_keyboard(session=None):
     s = session or {}
     enabled = set(s.get("enabled_setup_tags") or SETUP_TAG_ORDER)
     rows = []
+    daily_only = bool((s.get("strategy_config") or {}).get("daily_p4_mode", True))
     for tag in SETUP_TAG_ORDER:
         is_on = tag in enabled
         icon = "🟢" if is_on else "🔴"
+        if daily_only:
+            # مدل PDH/PDL+P4: فقط Daily روشن و قفل است؛ بقیه‌ی سطوح برای معامله خاموش‌اند
+            icon = "🟢🔒" if tag == "Daily" else "🔒"
         rows.append([{"text": f"{icon} {SETUP_TAG_LABELS[tag]}", "callback_data": SETUP_TAG_CALLBACK[tag]}])
     rows.append([{"text": "🔙 بازگشت", "callback_data": "/menu_settings"}])
     rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])

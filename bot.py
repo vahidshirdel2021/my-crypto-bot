@@ -35,7 +35,7 @@ from strategy import (
     compute_log_grid_levels, nearest_grid_level,
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
-    is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, MIN_RR_FLOOR,
+    is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, extract_p4_case, MIN_RR_FLOOR,
 )
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
@@ -732,7 +732,7 @@ def default_session():
         'last_direction_entry_ts': {},
         'timeframe': '5min',
         'active_strategy': 'dynamic',
-        'enabled_setup_tags': list(LEVEL_SETUP_DEFS.keys()),
+        'enabled_setup_tags': ['Daily'],  # مدل PDH/PDL+P4: فقط سطح روزانه برای معامله فعال است
         'paper_positions': [],
         'closed_positions': [],
         'trade_audit': [],
@@ -804,6 +804,9 @@ def normalize_session(data):
     stored_tags = [t for t in (data.get('enabled_setup_tags') or []) if t in valid_tags]
     s['enabled_setup_tags'] = stored_tags or valid_tags
     s['strategy_config'] = get_timeframe_preset(s['timeframe'])
+    if s['strategy_config'].get('daily_p4_mode', True):
+        # مدل PDH/PDL+P4: فقط سطح روزانه برای معامله فعال است (بقیه‌ی سطوح قفل‌اند)
+        s['enabled_setup_tags'] = ['Daily']
     # V3.28: قبلاً کانفیگ استراتژی موقع لود کامل از preset ساخته می‌شد، پس هر تنظیمی که کاربر با
     # دکمه‌ها عوض کرده بود (مثلاً خاموش‌کردن سناریو ۵/۶) با هر ری‌استارت ربات بی‌صدا برمی‌گشت به
     # پیش‌فرض. حالا فقط همین کلیدهای دکمه‌ای (نه کل کانفیگ، تا پیش‌فرض‌های جدید نسخه‌ها زیر پا
@@ -3080,7 +3083,7 @@ def _blk(chat_id, reason):
     return False
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
     trade_id = new_trade_id(chat_id, symbol)
@@ -3175,6 +3178,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
         slip = PAPER_SLIPPAGE_BPS / 10000.0
         price = price * (1.0 + slip) if side_long(side) else price * (1.0 - slip)
+    # خروج پله‌ای (مدل PDH/PDL+P4): plan['tp_stages'] سطوح مسیر را از نزدیک به دور دارد.
+    # PAPER: روی هر سطح سهم مساوی بسته می‌شود و آخرین سطح همان TP نهایی است.
+    # REAL: فعلاً فقط نزدیک‌ترین سطح به‌عنوان TP ثبت می‌شود (سفارش جزئی روی صرافی پیاده نشده).
+    _stage_list=[st for st in (tp_stages or []) if isinstance(st,dict) and st.get('price')]
+    if _stage_list and s['trading_mode']=='REAL':
+        tp=float(_stage_list[0]['price']); tp_level_name=_stage_list[0].get('name') or tp_level_name
+        _stage_list=[]
     gap_sl=abs(float(signal_price)-float(sl))
     gap_tp=abs(float(tp)-float(signal_price))
     if side_long(side):
@@ -3183,6 +3193,16 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     else:
         sl=price+gap_sl
         tp=float(tp) if (structural_tp and float(tp)<price) else price-gap_tp
+    paper_stage_rows=None
+    if _stage_list:
+        _is_l=side_long(side)
+        _valid=[st for st in _stage_list if (float(st['price'])>price if _is_l else float(st['price'])<price)]
+        if _valid:
+            tp=float(_valid[-1]['price'])
+            if len(_valid)>=2:
+                _n=len(_valid)
+                paper_stage_rows=[{'price':float(st['price']),'name':st.get('name'),'fraction':1.0/_n,'done':False} for st in _valid[:-1]]
+                tp_level_name=' → '.join(str(st.get('name')) for st in _valid)+' (پله‌ای)'
     s['_symbol_tmp']=symbol
     margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force)
     s.pop('_symbol_tmp',None)
@@ -3208,6 +3228,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'swing_break_confirmed':swing_break_confirmed,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    if paper_stage_rows:
+        trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -3421,7 +3443,7 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
-def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False,tp_level_name=None):
+def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
     """force=True (تایید دستی کاربر در حالت دستیار): همه‌ی محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
     محافظ ریسک، توقف روزانه، فعال‌نبودن ربات، ...) نادیده گرفته می‌شود. فقط موانع فنی می‌مانند
     (پوزیشن باز روی همان نماد، مارجین/حجم نامعتبر، خطای صرافی)."""
@@ -3441,7 +3463,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
                 return _blk(chat_id, 'ربات غیرفعال یا متوقف شد')
             if int(s.get('scan_generation',0)) != generation:
                 return _blk(chat_id, 'تنظیمات ربات همین لحظه تغییر کرد؛ دوباره تایید کنید')
-        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force,tp_level_name=tp_level_name)
+        return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force,tp_level_name=tp_level_name,tp_stages=tp_stages)
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None,force=False,tp_level_name=None):
@@ -3701,6 +3723,46 @@ def admin_set_fee_command(chat_id, text):
         send_message(chat_id,f'❌ خطا: `{exc}`',parse_mode='Markdown')
 
 
+def partial_close_position(chat_id,pos,price,frac_orig,label=''):
+    """بستن بخشی از یک پوزیشن PAPER روی یک پله‌ی TP (سهم frac_orig از مارجین اولیه).
+    PnL همان بخش (با کارمزد رفت‌وبرگشت و فاندینگِ همان بخش) همین حالا به بالانس اضافه می‌شود و
+    در partial_* روی پوزیشن جمع می‌ماند تا موقع بسته‌شدن نهایی، PnL/R کل معامله درست گزارش شود.
+    هرگز کل پوزیشن را نمی‌بندد (آخرین پله همان TP/SL معمولی است)."""
+    lock=get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if pos not in s['paper_positions'] or pos.get('is_real'): return False
+        cur_margin=float(pos.get('margin') or 0)
+        orig_margin=float(pos.get('orig_margin') or cur_margin)
+        close_margin=min(cur_margin, orig_margin*float(frac_orig))
+        if close_margin<=0 or close_margin>=cur_margin*0.999: return False
+        lev=float(pos['leverage']); entry=float(pos['entry_price'])
+        px=float(price)
+        if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+            slip = PAPER_SLIPPAGE_BPS / 10000.0
+            px = px * (1.0 - slip) if side_long(pos['side']) else px * (1.0 + slip)
+        frac=((px-entry)/entry) if side_long(pos['side']) else ((entry-px)/entry)
+        gross=close_margin*frac*lev
+        fee=round_trip_fee_usdt(close_margin, lev)
+        hours=max(0.0, time.time()-float(pos.get('opened_at',time.time())))/3600.0
+        funding=close_margin*lev*(PAPER_FUNDING_RATE_PCT_8H/100.0)*(hours/8.0)
+        pnl=gross-fee-funding
+        s['paper_balance']+=pnl
+        new_margin=cur_margin-close_margin
+        pos['amount']=float(pos.get('amount') or 0)*(new_margin/cur_margin)
+        pos['margin']=new_margin
+        pos['partial_pnl_usdt']=float(pos.get('partial_pnl_usdt') or 0.0)+pnl
+        pos['partial_gross_usdt']=float(pos.get('partial_gross_usdt') or 0.0)+gross
+        pos['partial_fee_usdt']=float(pos.get('partial_fee_usdt') or 0.0)+fee
+        pos['partial_funding_usdt']=float(pos.get('partial_funding_usdt') or 0.0)+funding
+        pos.setdefault('partial_exits',[]).append({'stage':label,'price':px,'fraction':float(frac_orig),'pnl_usdt':pnl,'ts':time.time()})
+        audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'partial_exit', {'stage':label,'price':px,'fraction':float(frac_orig),'pnl_usdt':pnl,'remaining_margin':new_margin})
+        save_session(chat_id)
+        side_fa='خرید (Long)' if side_long(pos.get('side')) else 'فروش (Short)'
+        send_message(chat_id,f"🪜 *خروج پله‌ای PAPER*\n• `{pos['symbol']}` ({side_fa})\n• پله: `{label}` | قیمت: `{fmt(px)}`\n• سهم بسته‌شده: `{float(frac_orig)*100:.0f}%` از حجم اولیه\n• PnL این بخش: `{pnl:+.2f} USDT`\n• بقیه‌ی پوزیشن باز می‌ماند.")
+        return True
+
+
 def close_position(chat_id,pos,price=None,reason='manual'):
     # قفل سراسری هر چت (همان قفلی که execute_trade/execute_manual_trade برای باز کردن
     # معامله استفاده می‌کنند): چند حلقه‌ی پس‌زمینه‌ی جدا (اسکنر هر ۴۵ث، پروفیت‌لاک هر ۵ث،
@@ -3757,6 +3819,12 @@ def close_position(chat_id,pos,price=None,reason='manual'):
             funding_cost=float(pos['margin'])*float(pos['leverage'])*(PAPER_FUNDING_RATE_PCT_8H/100.0)*funding_intervals
             pnl=pnl_gross-fee-funding_cost
             s['paper_balance']+=pnl; pos['close_price']=price; pos['pnl_is_estimate']=False
+            if pos.get('partial_exits'):
+                # خروج‌های پله‌ای قبلی (قبلاً به بالانس اضافه شده‌اند): فقط برای گزارش/PnL کل جمع می‌شوند
+                pnl += float(pos.get('partial_pnl_usdt') or 0.0)
+                pnl_gross += float(pos.get('partial_gross_usdt') or 0.0)
+                fee += float(pos.get('partial_fee_usdt') or 0.0)
+                funding_cost += float(pos.get('partial_funding_usdt') or 0.0)
             pos['pnl_gross_usdt']=pnl_gross
             pos['funding_usdt']=funding_cost
             fee_note=f' (کارمزد + فاندینگ کسر شد: {funding_cost:.2f} USDT)'
@@ -4228,6 +4296,17 @@ def update_positions(chat_id):
                 exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL (same candle)'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
             elif hit_sl: exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL'
+            # خروج پله‌ای (مدل PDH/PDL+P4): پله‌هایی که در این کندل لمس شدند (و SL همزمان نخورده)
+            # به ترتیب نزدیک به دور، قبل از TP نهایی بسته می‌شوند.
+            if (reason is None or reason=='TP') and p.get('tp_stages'):
+                for st in p['tp_stages']:
+                    if st.get('done'): continue
+                    st_hit=(high>=float(st['price'])) if side_long(p['side']) else (low<=float(st['price']))
+                    if not st_hit: break
+                    if partial_close_position(chat_id,p,float(st['price']),float(st.get('fraction') or 0),str(st.get('name') or '')):
+                        st['done']=True
+                    else:
+                        break
             if reason and reason.startswith('SL') and risk_distance > 0:
                 # چقدر از فیل واقعی، بدتر از قیمت دقیق SL شبیه‌سازی شده - جدا از pnl
                 # نهایی ثبت می‌شود تا بشود دید چقدر از ضرر از اسلیپیج آمده، نه قیمت.
@@ -4880,7 +4959,7 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'rr': round(rr, 3),
             'score': (int(round(float(score))) if score is not None else None),
             'quality_label': plan.get('quality_label'), 'structural_tp': bool(plan.get('structural_target', False)),
-            'tp_level_name': tp_level_name, 'exp_tp_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
+            'tp_level_name': tp_level_name, 'tp_stages': plan.get('tp_stages'), 'exp_tp_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
             'exp_sl_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['sl_net'], 4) if (_m and _lev) else None),
             'reason': full_reason, 'scn': scn, 'level_token': level_token, 'level_value': level_value,
             'tf': s.get('timeframe'), 'created_at': now, 'expires_at': now + expiry, 'status': 'pending',
@@ -4923,7 +5002,7 @@ def assist_approve(chat_id, aid):
     ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
                        structural_tp=rec['structural_tp'], plan_score=rec.get('score'), plan_rr=rec.get('rr'),
                        plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True, force=True,
-                       tp_level_name=rec.get('tp_level_name'))
+                       tp_level_name=rec.get('tp_level_name'), tp_stages=rec.get('tp_stages'))
     block_reason = _LAST_BLOCK_REASON.pop(chat_id, None)
     s = get_session(chat_id)
     with _ASSIST_LOCK:
@@ -5496,6 +5575,22 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
         exempt12 = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True)) and _scn in ('1', '2')
         if not (exempt56 or exempt12):
             return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
+    # مدل PDH/PDL+P4 (تصمیم کاربر): در حالت ۲ (کندل ۴ساعته PDH را قطع کرده؛ فقط خرید) جهت بازار
+    # باید صعودی باشد و در حالت ۳ (PDL قطع شده؛ فقط فروش) نزولی. این فیلتر مستقل از سوییچ
+    # «هم‌جهتی با بازار» همیشه برای همین دو حالت اعمال می‌شود (همان معیار ۷ از ۱۰ نماد شاخص).
+    _p4_case = extract_p4_case(reason)
+    if _p4_case in ('2', '3'):
+        _need = 'BULLISH' if _p4_case == '2' else 'BEARISH'
+        _gate_now = market_gate
+        if _gate_now is None:
+            try:
+                _gate_now = await refresh_market_gate(http, tf)
+            except Exception:
+                _gate_now = None
+        if _gate_now != _need:
+            _have = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}.get(_gate_now, 'نامشخص')
+            _want = 'صعودی' if _need == 'BULLISH' else 'نزولی'
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'فیلتر PDH/PDL+P4 (حالت {_p4_case}): جهت بازار باید {_want} باشد ولی {_have} است', 'market_gate', sig, diagnostics=diagnostics)
     if s.get('manual_block_all_entries'):
         return _entry_diag_result(chat_id, symbol, 'manual_block', 'توقف کامل ورود به معامله دستی فعال است', 'signal', sig, diagnostics=diagnostics)
     if sig == 'BUY' and s.get('manual_block_buy_entries'):
@@ -5535,7 +5630,7 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
-    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'))
+    ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'),tp_stages=plan.get('tp_stages'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
     return _entry_diag_result(chat_id, symbol, 'execute_blocked', 'سیگنال ایجاد شد اما اجرای ورود موفق نشد', 'execute', sig)
@@ -5856,7 +5951,9 @@ def strategy_families_keyboard(chat_id):
         'inline_keyboard': [
             [cell(sweep_on, 'Sweep (۵/۱۵ دقیقه)', '/toggle_strategy_sweep'),
              cell(htf_on, 'HTF Reversal (۱س/۴س)', '/toggle_strategy_htf')],
-            [cell(session_on, 'سطوح سشن‌ها (London/NY/Asia)', '/toggle_strategy_sessions')],
+            ([{'text': '🔒 سطوح سشن‌ها (در مدل PDH/PDL+P4 خاموش است)', 'callback_data': '/noop'}]
+             if scfg.get('daily_p4_mode', True) else
+             [cell(session_on, 'سطوح سشن‌ها (London/NY/Asia)', '/toggle_strategy_sessions')]),
             [{'text': '🔙 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
@@ -6757,6 +6854,10 @@ def process_command(cmd,chat_id,message_id=None):
             '/toggle_setup_monthly': 'Monthly',
         }
         tag = toggle_tag_map.get(cl)
+        if tag and s.get('strategy_config', {}).get('daily_p4_mode', True):
+            s['enabled_setup_tags'] = ['Daily']; s['strategy_config']['enabled_setup_tags'] = ['Daily']
+            send_message(chat_id, "🔒 مدل PDH/PDL+P4 فعال است: فقط سطح روزانه (Daily) برای معامله روشن می‌ماند و بقیه‌ی سطوح قابل روشن‌شدن نیستند.")
+            edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4: فقط Daily فعال است.", get_setup_management_keyboard(s), message_id); return
         if tag:
             current = list(s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys()))
             if tag in current:
@@ -7248,6 +7349,8 @@ def process_command(cmd,chat_id,message_id=None):
         }
         cfg_key, default_val, label = key_map[cl]
         s.setdefault('strategy_config', {})
+        if cl == '/toggle_strategy_sessions' and s['strategy_config'].get('daily_p4_mode', True):
+            send_message(chat_id, "🔒 مدل PDH/PDL+P4 فعال است: سطوح سشن‌ها (و هر سطح غیر از Daily) برای معامله خاموش‌اند و قابل روشن‌شدن نیستند.", strategy_families_keyboard(chat_id)); return
         current = bool(s['strategy_config'].get(cfg_key, default_val))
         s['strategy_config'][cfg_key] = not current
         save_session(chat_id)
