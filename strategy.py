@@ -324,6 +324,12 @@ STRATEGY_DEFAULTS = {
     "daily_p4_staged_exit": True,
     # سطوح پله‌ایِ نزدیک‌تر از این فاصله (برحسب ATR) به هم یکی حساب می‌شوند
     "daily_p4_min_stage_gap_atr": 0.15,
+    # ستاپ «برگشت P4» (دکمه‌ی جدا، پیش‌فرض خاموش؛ فقط وقتی daily_p4_mode روشن است معنا دارد):
+    # داخل رنج روزانه (حالت ۱) روی P4L/P4H هم سناریوهای برگشتی (۱/۲/۵/۶) مجازند، به شرط
+    # «فیلتر موقعیت»: خرید روی P4L فقط اگر P4L در p4_reversal_zone_pct پایینیِ رنج PDL..PDH باشد،
+    # و فروش روی P4H فقط اگر P4H در همین سهم بالاییِ رنج باشد. هدف‌ها همان پله‌های حالت ۱.
+    "p4_reversal_enabled": False,
+    "p4_reversal_zone_pct": 0.40,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -1273,6 +1279,24 @@ def _daily_p4_context(d, pdh, pdl, idx=None):
     return {"case": case, "p4h": float(p4h), "p4l": float(p4l), "pdh": float(pdh_i), "pdl": float(pdl_i)}
 
 
+def _p4_reversal_zone_flags(d, pdh, pdl, idx, cfg):
+    """(buy_ok, sell_ok) برای ستاپ برگشت P4: فقط در حالت ۱ و با فیلتر موقعیت."""
+    ctx = _daily_p4_context(d, pdh, pdl, idx)
+    if ctx is None or ctx["case"] != "1":
+        return False, False
+    rng = ctx["pdh"] - ctx["pdl"]
+    if not np.isfinite(rng) or rng <= 0:
+        return False, False
+    zone = max(0.05, min(0.50, _safe_float(cfg.get("p4_reversal_zone_pct", 0.40), 0.40)))
+    buy_ok = (ctx["p4l"] - ctx["pdl"]) / rng <= zone
+    sell_ok = (ctx["p4h"] - ctx["pdl"]) / rng >= 1.0 - zone
+    return bool(buy_ok), bool(sell_ok)
+
+
+def _p4_rev_side_ok(sig, buy_ok, sell_ok):
+    return (sig == "BUY" and buy_ok) or (sig == "SELL" and sell_ok)
+
+
 def _daily_p4_gate(d, pdh, pdl, sig, reason):
     """(allowed, case, why). فقط روی سیگنال‌هایی که تگ SCN دارند تصمیم می‌گیرد."""
     ctx = _daily_p4_context(d, pdh, pdl)
@@ -1598,9 +1622,13 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
     # 5m is more noisy: require structure confirmation. Keep 15m faster.
     require_micro_structure = str(timeframe).lower() in ("5min", "5m", "5minute")
     enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
-    if bool(cfg.get("daily_p4_mode", True)):
-        # مدل PDH/PDL + P4: فقط سطح روزانه ستاپ می‌سازد (بدون کلاستر/سطوح دیگر/intraday)
-        enabled_tags = {"Daily"}
+    p4_model = bool(cfg.get("daily_p4_mode", True))
+    p4_rev = p4_model and bool(cfg.get("p4_reversal_enabled", False))
+    if p4_model:
+        # مدل PDH/PDL + P4: فقط سطح روزانه ستاپ می‌سازد (بدون کلاستر/سطوح دیگر/intraday)؛
+        # با دکمه‌ی «برگشت P4» سطح ۴ساعته هم (فقط برگشتی‌ها، حالت ۱، با فیلتر موقعیت) اضافه می‌شود.
+        enabled_tags = {"Daily", "4h"} if p4_rev else {"Daily"}
+        cfg = {**cfg, "level_cluster_enabled": False}
 
     def _active_level_pairs_at(idx):
         """(hi, lo) for every currently-enabled tag, evaluated as of idx.
@@ -1779,8 +1807,15 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
             return None, None, None, None
         allow_continuation = bool(cfg.get("sweep_enable_retest_continuation", True))
         for tag, hi, lo, hi_key, lo_key, hi_label, lo_label in _ordered_candidates_at(idx):
+            # ستاپ «برگشت P4»: فقط برگشتی‌ها (بدون ادامه‌دهنده)، فقط حالت ۱ و با فیلتر موقعیت
+            p4_rev_tag = bool(p4_model and tag == "4h")
+            buy_ok = sell_ok = True
+            if p4_rev_tag:
+                buy_ok, sell_ok = _p4_reversal_zone_flags(d, pdh, pdl, idx, cfg)
+                if not (buy_ok or sell_ok):
+                    continue
             if idx >= 1:
-                if allow_continuation:
+                if allow_continuation and not p4_rev_tag:
                     rsig, rreason = _detect_retest_continuation(
                         d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
                     )
@@ -1789,13 +1824,13 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                 fsig, freason = _detect_failed_retest_reversal(
                     d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
                 )
-                if fsig and _scenario_enabled("fakeout", fsig, cfg):
+                if fsig and _scenario_enabled("fakeout", fsig, cfg) and (not p4_rev_tag or _p4_rev_side_ok(fsig, buy_ok, sell_ok)):
                     return fsig, _tag_scenario(freason, "fakeout", fsig), atr, tag
             sig, reason, _ = _detect_named_level_sweep(
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
             )
-            if sig and _scenario_enabled("simple", sig, cfg):
+            if sig and _scenario_enabled("simple", sig, cfg) and (not p4_rev_tag or _p4_rev_side_ok(sig, buy_ok, sell_ok)):
                 return sig, _tag_scenario(reason, "simple", sig), atr, tag
         return None, None, None, None
 

@@ -770,6 +770,40 @@ def default_session():
     }
 
 
+_P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled')
+
+
+def _p4_keep_flags(old_cfg, new_cfg):
+    """دکمه‌های مدل PDH/PDL+P4 هنگام بازسازی preset (تغییر تایم‌فریم/ریست) از دست نروند."""
+    if isinstance(old_cfg, dict):
+        for k in _P4_FLAG_KEYS:
+            if k in old_cfg:
+                new_cfg[k] = old_cfg[k]
+    return new_cfg
+
+
+def _p4_sync_tags(s):
+    """وقتی مدل PDH/PDL+P4 روشن است فقط Daily فعال می‌ماند و لیست قبلی در
+    enabled_setup_tags_backup نگه داشته می‌شود تا با خاموش‌کردن مدل برگردد.
+    وقتی مدل خاموش است لیست سطوح دست‌نخورده می‌ماند (خالی بود: هر ۵ سطح)."""
+    cfg = s.setdefault('strategy_config', {})
+    valid = list(LEVEL_SETUP_DEFS.keys())
+    cur = [t for t in (s.get('enabled_setup_tags') or []) if t in valid]
+    if cfg.get('daily_p4_mode', True):
+        if cur and set(cur) != {'Daily'}:
+            s['enabled_setup_tags_backup'] = cur
+        s['enabled_setup_tags'] = ['Daily']
+    else:
+        s['enabled_setup_tags'] = cur or valid
+    cfg['enabled_setup_tags'] = s['enabled_setup_tags']
+
+
+def _setup_mgmt_text(s):
+    if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
+        return "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4 روشن است: فقط Daily برای معامله فعال می‌ماند."
+    return "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:"
+
+
 def normalize_session(data):
     s = default_session(); s.update(data or {})
     s['filters'] = {**FILTER_DEFAULTS, **(data.get('filters') or {})}
@@ -804,9 +838,6 @@ def normalize_session(data):
     stored_tags = [t for t in (data.get('enabled_setup_tags') or []) if t in valid_tags]
     s['enabled_setup_tags'] = stored_tags or valid_tags
     s['strategy_config'] = get_timeframe_preset(s['timeframe'])
-    if s['strategy_config'].get('daily_p4_mode', True):
-        # مدل PDH/PDL+P4: فقط سطح روزانه برای معامله فعال است (بقیه‌ی سطوح قفل‌اند)
-        s['enabled_setup_tags'] = ['Daily']
     # V3.28: قبلاً کانفیگ استراتژی موقع لود کامل از preset ساخته می‌شد، پس هر تنظیمی که کاربر با
     # دکمه‌ها عوض کرده بود (مثلاً خاموش‌کردن سناریو ۵/۶) با هر ری‌استارت ربات بی‌صدا برمی‌گشت به
     # پیش‌فرض. حالا فقط همین کلیدهای دکمه‌ای (نه کل کانفیگ، تا پیش‌فرض‌های جدید نسخه‌ها زیر پا
@@ -815,11 +846,12 @@ def normalize_session(data):
     _persist_exact = {
         'weakness_exit_enabled', 'sweep_require_swing_break', 'sweep_require_confirmation_candle',
         'strategy_sweep_enabled', 'strategy_htf_reversal_enabled', 'adaptive_allow_session_swing_anchors',
+        'daily_p4_mode', 'p4_reversal_enabled',
     }
     for _k, _v in _stored_scfg.items():
         if _k in _persist_exact or _k.startswith('scenario_') or _k.startswith('confirm_'):
             s['strategy_config'][_k] = _v
-    s['strategy_config']['enabled_setup_tags'] = s['enabled_setup_tags']
+    _p4_sync_tags(s)
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
     s['bottom_menu_open'] = bool(s.get('bottom_menu_open', True))
@@ -1022,7 +1054,7 @@ _INPLACE_MENU_PREFIXES = (
     '/menu', '/open_positions', '/performance', '/trade_audit', '/quality_report', '/today_trades',
     '/trade_tracking', '/trade_filter', '/list_pending_orders', '/cancel_pending', '/close_all_prompt',
     '/close_longs_prompt', '/close_shorts_prompt', '/emergency_close_prompt',
-    '/fee_', '/entry_diag', '/entry_report', '/toggle_entry_diag', '/setup_management', '/toggle_setup_',
+    '/fee_', '/entry_diag', '/entry_report', '/toggle_entry_diag', '/setup_management', '/toggle_setup_', '/toggle_p4_',
     '/check_wizard', '/manage_watchlist', '/market_report', '/learn', '/profile_', '/params',
     '/admin_', '/signal_channel', '/scenario_management', '/toggle_scenario', '/toggle_confirm_',
     '/my_profile', '/save_my_profile', '/apply_my_profile', '/set_tf_', '/timeframe', '/set_bal_',
@@ -6189,8 +6221,9 @@ def reload_and_restart_scan(chat_id, message_id=None):
     """
     try:
         s = get_session(chat_id)
-        s['strategy_config'] = get_timeframe_preset(s.get('timeframe', '5min'))
-        s['strategy_config']['enabled_setup_tags'] = s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys())
+        _old_cfg = s.get('strategy_config')
+        s['strategy_config'] = _p4_keep_flags(_old_cfg, get_timeframe_preset(s.get('timeframe', '5min')))
+        _p4_sync_tags(s)
         save_session(chat_id)
         start_scan(chat_id, message_id)
         send_message(chat_id, "🔄 *تنظیمات استراتژی بر اساس تایم‌فریم فعلی بازسازی شد و اسکن فعال گردید.*")
@@ -6821,8 +6854,9 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_tf_'):
         tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
         if cl in tf_map:
-            s['timeframe']=tf_map[cl]; s['strategy_config']=get_timeframe_preset(s['timeframe'])
-            s['strategy_config']['enabled_setup_tags'] = s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys())
+            _old_cfg = s.get('strategy_config')
+            s['timeframe']=tf_map[cl]; s['strategy_config']=_p4_keep_flags(_old_cfg, get_timeframe_preset(s['timeframe']))
+            _p4_sync_tags(s)
             save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
         send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...')
@@ -6846,7 +6880,29 @@ def process_command(cmd,chat_id,message_id=None):
             edit_page(chat_id, f"⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[sec]}", get_entry_diag_keyboard(s.get('entry_diag_enabled', True), sec), message_id)
         return
     if cl == '/setup_management':
-        edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
+    if cl == '/toggle_p4_model':
+        _cfg_p4 = s.setdefault('strategy_config', {})
+        if bool(_cfg_p4.get('daily_p4_mode', True)):
+            # خاموش‌کردن مدل: رفتار دقیقاً مثل قبل (لیست قبلی سطوح برمی‌گردد؛ نبود: هر ۵ سطح)
+            _cfg_p4['daily_p4_mode'] = False
+            _valid_p4 = list(LEVEL_SETUP_DEFS.keys())
+            _bk = [t for t in (s.get('enabled_setup_tags_backup') or []) if t in _valid_p4]
+            s['enabled_setup_tags'] = _bk or _valid_p4
+            _cfg_p4['enabled_setup_tags'] = s['enabled_setup_tags']
+        else:
+            _cfg_p4['daily_p4_mode'] = True
+            _p4_sync_tags(s)
+        save_session(chat_id)
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
+    if cl == '/toggle_p4_reversal':
+        _cfg_p4 = s.setdefault('strategy_config', {})
+        if not bool(_cfg_p4.get('daily_p4_mode', True)):
+            send_message(chat_id, "🔒 ستاپ برگشت P4 فقط وقتی مدل PDH/PDL+P4 روشن است کار می‌کند.")
+        else:
+            _cfg_p4['p4_reversal_enabled'] = not bool(_cfg_p4.get('p4_reversal_enabled', False))
+            save_session(chat_id)
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
     if cl.startswith('/toggle_setup_'):
         toggle_tag_map = {
             '/toggle_setup_1h': '1h', '/toggle_setup_4h': '4h',

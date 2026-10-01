@@ -156,7 +156,14 @@ def get_setup_management_keyboard(session=None):
     s = session or {}
     enabled = set(s.get("enabled_setup_tags") or SETUP_TAG_ORDER)
     rows = []
-    daily_only = bool((s.get("strategy_config") or {}).get("daily_p4_mode", True))
+    _cfg_ui = s.get("strategy_config") or {}
+    daily_only = bool(_cfg_ui.get("daily_p4_mode", True))
+    p4_rev_on = bool(_cfg_ui.get("p4_reversal_enabled", False))
+    rows.append([{"text": f"{'🟢' if daily_only else '🔴'} مدل PDH/PDL + P4 (۳ حالت)", "callback_data": "/toggle_p4_model"}])
+    if daily_only:
+        rows.append([{"text": f"{'🟢' if p4_rev_on else '🔴'} ستاپ برگشت P4 (داخل رنج روزانه)", "callback_data": "/toggle_p4_reversal"}])
+    else:
+        rows.append([{"text": "🔒 ستاپ برگشت P4 (نیازمند مدل PDH/PDL+P4)", "callback_data": "/noop"}])
     for tag in SETUP_TAG_ORDER:
         is_on = tag in enabled
         icon = "🟢" if is_on else "🔴"
