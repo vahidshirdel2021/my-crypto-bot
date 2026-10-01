@@ -1,3 +1,4 @@
+import os
 # -*- coding: utf-8 -*-
 """
 بک‌تست استراتژی‌های ربات روی داده تاریخی CoinEx
@@ -67,6 +68,11 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long):
     r = (current_price - entry) / risk_distance if is_long else (entry - current_price) / risk_distance
     if r < 1.0:
         return None
+    frac = max(0.0, min(0.9, float(os.environ.get('TRAILING_LOCK_FRACTION', '0.6'))))
+    if frac > 0:
+        if r < 1.5:
+            return 0.0
+        return max(0.0, math.floor(r * frac * 5 + 1e-9) / 5.0)
     step = math.floor(r * 2) / 2.0
     return max(0.0, step - 1.0)
 

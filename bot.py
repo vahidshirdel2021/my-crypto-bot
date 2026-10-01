@@ -3,6 +3,7 @@ import copy
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
 import urllib.parse as urlparse
 from threading import Thread, RLock, Timer
+import threading, functools
 from typing import Dict, Any
 
 try:
@@ -81,7 +82,23 @@ DAILY_LOSS_LIMIT_PCT = float(os.environ.get('DAILY_LOSS_LIMIT_PCT', '3'))
 RISK_PER_TRADE_PCT = float(os.environ.get('RISK_PER_TRADE_PCT', '0.5'))
 # تایم‌فریم‌هایی که هرگز نباید معامله‌شان به روز بعد منتقل شود (چه با سود چه با ضرر)
 NO_OVERNIGHT_TIMEFRAMES = ('5min', '15min')
-DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')
+DAILY_CLOSE_TZ = os.environ.get('DAILY_CLOSE_TZ', 'Asia/Tehran')   # فقط برای نمایش زمان‌ها (fmt_scan_time)؛ مرز روز با CRYPTO_DAY_TZ تعیین می‌شود
+# V3.42: قفل سود قوی‌تر (peak/ویک، نردبان ۶۰٪، اسلیپیج کمتر استاپ در سود)
+# V3.41.1: مرز «روز» برای بستن اجباری پوزیشن‌های ۵/۱۵ دقیقه، پاک‌سازی روزانه‌ی پیام‌ها و گزارش «معاملات امروز»
+# = پایان روز کریپتو، یعنی ۰۰:۰۰ UTC (همان لحظه‌ای که کندل روزانه‌ی بازار و PDH/PDL ربات عوض می‌شود).
+# به تایم‌زون تهران یا DAILY_CLOSE_TZ ربطی ندارد.
+CRYPTO_DAY_TZ = os.environ.get('CRYPTO_DAY_TZ', 'UTC')
+
+
+def _crypto_now():
+    """زمان فعلی در منطقه‌ی روز کریپتو (پیش‌فرض UTC) به‌صورت datetime آگاه از منطقه."""
+    tz = timezone.utc
+    if CRYPTO_DAY_TZ.strip().upper() != 'UTC' and ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(CRYPTO_DAY_TZ)
+        except Exception:
+            tz = timezone.utc
+    return datetime.now(tz)
 
 
 def _local_tz():
@@ -118,14 +135,8 @@ POSITION_MANAGEMENT_LOSS_WEAKNESS_SCORE = 45.0
 
 
 def _seconds_to_local_day_end():
-    """ثانیه‌های باقی‌مانده تا پایان روز جاری بر اساس منطقه‌زمانی DAILY_CLOSE_TZ."""
-    tz = None
-    if ZoneInfo is not None:
-        try:
-            tz = ZoneInfo(DAILY_CLOSE_TZ)
-        except Exception:
-            tz = None
-    now = datetime.now(tz) if tz else datetime.utcnow()
+    """ثانیه‌های باقی‌مانده تا پایان روز کریپتو (۰۰:۰۰ UTC؛ CRYPTO_DAY_TZ)."""
+    now = _crypto_now()
     day_end = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return (day_end - now).total_seconds()
 MAX_MARGIN_USAGE_PCT = float(os.environ.get('MAX_MARGIN_USAGE_PCT', '50'))
@@ -153,6 +164,9 @@ PAPER_SLIPPAGE_BPS = max(0.0, float(os.environ.get('PAPER_SLIPPAGE_BPS', '2.0'))
 # اعمال می‌کنند؛ فقط دقتِ ثبتِ نتیجه را بالا می‌برند و روی تصمیم ورود/خروج اثر ندارند.
 PAPER_STOP_SLIPPAGE_FRACTION = max(0.0, min(1.0, float(os.environ.get('PAPER_STOP_SLIPPAGE_FRACTION', '0.5'))))
 PAPER_STOP_SLIPPAGE_MAX_R = max(0.0, float(os.environ.get('PAPER_STOP_SLIPPAGE_MAX_R', '0.5')))
+# V3.42: اسلیپیج کمتر برای استاپِ در سود (SL بالاتر از ورود برای Long / پایین‌تر برای Short)
+PAPER_LOCKED_STOP_SLIPPAGE_FRACTION = max(0.0, min(1.0, float(os.environ.get('PAPER_LOCKED_STOP_SLIPPAGE_FRACTION', '0.15'))))
+PAPER_LOCKED_STOP_SLIPPAGE_MAX_R = max(0.0, float(os.environ.get('PAPER_LOCKED_STOP_SLIPPAGE_MAX_R', '0.25')))
 # سقف مجموع ریسکِ باز (٪ از سرمایه) روی همهٔ پوزیشن‌های هم‌زمان، صرف‌نظر از جهت‌شان.
 # با تنظیمات پیش‌فرض (سقف ۳ پوزیشن، ریسک ثابت هر معامله) عملاً هیچ‌وقت فعال نمی‌شود؛
 # فقط وقتی کاربر سقف پوزیشن یا درصد ریسک را بالا ببرد، به‌عنوان دیوار دوم وارد عمل می‌شود.
@@ -1011,12 +1025,155 @@ def _auto_delete_loop():
         time.sleep(15)
 
 
+# ---------------------------------------------------------------------------
+# V3.41: پاک‌سازی روزانه‌ی پیام‌های داخل ربات.
+# هر پیامی که ربات در چت خصوصی کاربران می‌فرستد (یا کاربر می‌فرستد) در یک لاگ ثبت می‌شود؛
+# با شروع روز کریپتو (۰۰:۰۰ UTC؛ CRYPTO_DAY_TZ) همه‌ی آن‌ها حذف می‌شوند.
+# پیام‌های سیگنال (کارت‌های دستیار، کارت ورود معاملاتی که از کانال/دستیار شروع شده) تا همین
+# لحظه‌ی پاک‌سازی نگه داشته می‌شوند. محدودیت تلگرام: پیام‌های قدیمی‌تر از ۴۸ ساعت قابل حذف نیستند.
+# DAILY_MESSAGE_CLEANUP=false این قابلیت را خاموش می‌کند. پیام‌های کانال سیگنال را تغییر نمی‌دهد.
+# ---------------------------------------------------------------------------
+DAILY_MESSAGE_CLEANUP = os.environ.get('DAILY_MESSAGE_CLEANUP', 'true').lower() not in ('0', 'false', 'no')
+_DAY_LOG_FILE = os.environ.get('DAY_MESSAGE_LOG_FILE', 'day_message_log.json')
+_DAY_LOG = {}            # {chat_id: [message_id, ...]}
+_DAY_LOG_DATE = None     # تاریخ محلی آخرین پاک‌سازی/ثبت
+_DAY_LOG_LOCK = RLock()
+_DAY_LOG_DIRTY = False
+_DAY_LOG_MAX_PER_CHAT = 5000
+_DAY_LOG_METHODS = ('sendMessage', 'sendPhoto', 'copyMessage', 'sendDocument', 'sendVideo', 'sendAnimation')
+
+
+def _local_date_str():
+    return _crypto_now().strftime('%Y-%m-%d')
+
+
+def _day_log_record(chat_id, message_id):
+    """شناسه‌ی پیام چت خصوصی را برای پاک‌سازی روز بعد ثبت می‌کند (کانال‌ها/گروه‌ها نادیده گرفته می‌شوند)."""
+    global _DAY_LOG_DIRTY
+    if not DAILY_MESSAGE_CLEANUP or not message_id or chat_id is None:
+        return
+    try:
+        cid = int(chat_id); mid = int(message_id)
+    except Exception:
+        return
+    if cid <= 0:
+        return
+    with _DAY_LOG_LOCK:
+        ids = _DAY_LOG.setdefault(cid, [])
+        if mid not in ids:
+            ids.append(mid)
+            if len(ids) > _DAY_LOG_MAX_PER_CHAT:
+                del ids[:len(ids) - _DAY_LOG_MAX_PER_CHAT]
+            _DAY_LOG_DIRTY = True
+
+
+def _day_log_load():
+    global _DAY_LOG, _DAY_LOG_DATE
+    try:
+        with open(_DAY_LOG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        chats = {int(k): [int(x) for x in v] for k, v in (data.get('chats') or {}).items()}
+        with _DAY_LOG_LOCK:
+            for cid, ids in chats.items():
+                cur = _DAY_LOG.setdefault(cid, [])
+                cur[:0] = [m for m in ids if m not in cur]
+            _DAY_LOG_DATE = data.get('date') or None
+    except Exception:
+        pass
+
+
+def _day_log_save():
+    global _DAY_LOG_DIRTY
+    with _DAY_LOG_LOCK:
+        if not _DAY_LOG_DIRTY:
+            return
+        payload = {'date': _DAY_LOG_DATE, 'chats': {str(k): v for k, v in _DAY_LOG.items()}}
+        _DAY_LOG_DIRTY = False
+    try:
+        with open(_DAY_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except Exception:
+        logger.exception('failed to persist day message log')
+
+
+def _day_cleanup_run():
+    """همه‌ی پیام‌های ثبت‌شده را حذف می‌کند و اشاره‌گرهای کارت‌های حذف‌شده را در session پاک می‌کند."""
+    global _DAY_LOG, _DAY_LOG_DIRTY
+    with _DAY_LOG_LOCK:
+        old = _DAY_LOG
+        _DAY_LOG = {}
+        _DAY_LOG_DIRTY = True
+    total = 0
+    for cid, ids in old.items():
+        for mid in ids:
+            try:
+                tg('deleteMessage', {'chat_id': cid, 'message_id': mid}, 10)
+                total += 1
+            except Exception:
+                logger.exception('day cleanup delete failed chat=%s message=%s', cid, mid)
+            time.sleep(0.04)          # زیر سقف نرخ درخواست تلگرام بمانیم
+        gone = set(ids)
+        with _AUTO_DELETE_LOCK:
+            _AUTO_DELETE_QUEUE[:] = [x for x in _AUTO_DELETE_QUEUE if not (x[1] == cid and x[2] in gone)]
+        with _KB_ANCHOR_LOCK:
+            _KB_ANCHOR.pop(cid, None)
+        try:
+            sess = USER_SESSIONS.get(cid)
+            if sess is not None:
+                sess['positions_message_id'] = None
+                for rec in (sess.get('assist_log') or []):
+                    if rec.get('status') == 'pending':
+                        rec['status'] = 'expired'          # کارتش پاک شده؛ دیگر قابل تایید نیست
+                    rec['msg_deleted'] = True; rec['message_id'] = None; rec['old_mids'] = []
+                save_session(cid)
+        except Exception:
+            logger.exception('day cleanup session reset failed chat=%s', cid)
+        try:
+            send_message(cid, '🌅 روز جدید شروع شد؛ پیام‌های روز قبل پاک شدند.', parse_mode=None)
+        except Exception:
+            logger.exception('day cleanup notice failed chat=%s', cid)
+    logger.info('day cleanup done: %s messages deleted', total)
+    return total
+
+
+def _day_cleanup_loop():
+    global _DAY_LOG_DATE, _DAY_LOG_DIRTY
+    if not DAILY_MESSAGE_CLEANUP:
+        logger.info('DAILY_MESSAGE_CLEANUP=false - پاک‌سازی روزانه‌ی پیام‌ها خاموش است.')
+        return
+    _day_log_load()
+    while True:
+        try:
+            today = _local_date_str()
+            with _DAY_LOG_LOCK:
+                last = _DAY_LOG_DATE
+            if last is None:
+                with _DAY_LOG_LOCK:
+                    _DAY_LOG_DATE = today; _DAY_LOG_DIRTY = True
+            elif last != today:
+                _day_cleanup_run()
+                with _DAY_LOG_LOCK:
+                    _DAY_LOG_DATE = today; _DAY_LOG_DIRTY = True
+            _day_log_save()
+        except Exception:
+            logger.exception('day cleanup loop failed')
+        time.sleep(15)
+
+
 def tg(method, payload=None, timeout=10):
     if not TELEGRAM_TOKEN: return None
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
         if r.status_code != 200: logger.warning('Telegram %s: %s', method, r.text[:300]); return None
-        return r.json()
+        data = r.json()
+        if method in _DAY_LOG_METHODS:
+            try:
+                _res = (data or {}).get('result')
+                if (data or {}).get('ok') and isinstance(_res, dict):
+                    _day_log_record((payload or {}).get('chat_id'), _res.get('message_id'))
+            except Exception:
+                pass
+        return data
     except Exception as exc:
         logger.warning('Telegram request failed: %s', exc); return None
 
@@ -1146,7 +1303,7 @@ def sync_bottom_keyboard(chat_id, status_message=None):
     return send_message(chat_id, text, get_bottom_menu_keyboard(active), parse_mode=None)
 
 
-def send_photo(chat_id, img, caption='', markup=None):
+def send_photo(chat_id, img, caption='', markup=None, keep=False):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s = get_session(chat_id)
     if markup is None:
@@ -1156,7 +1313,8 @@ def send_photo(chat_id, img, caption='', markup=None):
         if r.status_code == 200:
             try:
                 _mid = ((r.json() or {}).get('result') or {}).get('message_id')
-                if not _register_kb_anchor(chat_id, _mid, markup): schedule_auto_delete(chat_id, _mid)
+                _day_log_record(chat_id, _mid)
+                if not _register_kb_anchor(chat_id, _mid, markup) and not keep: schedule_auto_delete(chat_id, _mid)
             except Exception: pass
         return r.status_code == 200
     except Exception as exc: logger.warning('sendPhoto failed: %s', exc); return False
@@ -1770,18 +1928,20 @@ def _ensure_tf_gate_sync(tf):
         logger.exception('ensure tf gate failed tf=%s', tf)
 
 
+# V3.42: نردبان قبلی (step-1R) در سودهای ~1.8R فقط 0.5R قفل می‌کرد؛ یعنی از ~8.7$ سود فقط ~2.4$ تضمین بود
+# (CHZ/MASK). حالا از 1.5R به بعد TRAILING_LOCK_FRACTION (پیش‌فرض ۶۰٪) از بیشترین R دیده‌شده قفل می‌شود
+# (پله‌های ۰.۲R). بین 1R تا 1.5R همچنان break-even. TRAILING_LOCK_FRACTION=0 → نردبان قدیمی.
+TRAILING_LOCK_FRACTION = max(0.0, min(0.9, float(os.environ.get('TRAILING_LOCK_FRACTION', '0.6'))))
+
+
 def trailing_locked_r(entry, risk_distance, current_price, is_long):
     """
     Profit-protection ladder for an already profitable position.
 
-    1.0R -> break-even
-    1.5R -> lock +0.5R
-    2.0R -> lock +1.0R
-    2.5R -> lock +1.5R
-    ...
-
-    This intentionally does not alter entry/TP logic; it only protects an
-    existing position after it has moved in the intended direction.
+    1.0R-1.5R -> break-even
+    >=1.5R    -> lock TRAILING_LOCK_FRACTION of the best R seen (0.2R steps)
+                 e.g. 1.5R -> +0.8R, 1.8R -> +1.0R, 2.0R -> +1.2R, 2.5R -> +1.5R
+    (TRAILING_LOCK_FRACTION=0 restores the old step-1R ladder.)
     """
     try:
         entry=float(entry); risk_distance=float(risk_distance); current_price=float(current_price)
@@ -1790,6 +1950,9 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long):
     if risk_distance<=0 or not math.isfinite(risk_distance): return None
     r=(current_price-entry)/risk_distance if is_long else (entry-current_price)/risk_distance
     if r<1.0: return None
+    if TRAILING_LOCK_FRACTION>0:
+        if r<1.5: return 0.0
+        return max(0.0, math.floor(r*TRAILING_LOCK_FRACTION*5+1e-9)/5.0)
     step=math.floor(r*2)/2.0
     return max(0.0, step-1.0)
 
@@ -1885,7 +2048,7 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
 def _maybe_close_before_day_end(chat_id, p, price):
     """
     برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
-    چه با ضرر. اگر تا پایان روز (بر اساس DAILY_CLOSE_TZ) کمتر از یک چرخه اسکن باقی مانده
+    چه با ضرر. اگر تا پایان روز کریپتو (۰۰:۰۰ UTC) کمتر از یک چرخه اسکن باقی مانده
     باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
     """
     tf = p.get('timeframe', '5min')
@@ -3007,7 +3170,8 @@ def chart(chat_id, symbol, df, trade):
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
             + swing_line
             + alignment_line,
-            trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf)
+            trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf),
+            keep=bool(getattr(_SIGNAL_ORIGIN, 'on', False))
         )
     except Exception:
         logger.exception('chart error')
@@ -3060,13 +3224,19 @@ def _paper_stop_fill_price(pos, low, high, risk_distance):
     SL خورده یا نه، جای دیگری (update_positions) گرفته می‌شود.
     """
     sl = float(pos.get('sl') or 0.0)
-    if risk_distance <= 0 or PAPER_STOP_SLIPPAGE_FRACTION <= 0:
-        return sl
     is_long = side_long(pos.get('side'))
+    # V3.42: استاپِ در سود (قفل سود/ترلینگ) اسلیپیج کمتری می‌خورد؛ ویکِ کندل ممکن است قبل از
+    # جابه‌جایی استاپ رخ داده باشد و جریمه‌ی کامل برای ضرر عادی برای آن منصفانه نیست.
+    entry_p = float(pos.get('entry_price') or 0.0)
+    in_profit_stop = entry_p > 0 and ((sl > entry_p) if is_long else (sl < entry_p))
+    frac = PAPER_LOCKED_STOP_SLIPPAGE_FRACTION if in_profit_stop else PAPER_STOP_SLIPPAGE_FRACTION
+    max_r = PAPER_LOCKED_STOP_SLIPPAGE_MAX_R if in_profit_stop else PAPER_STOP_SLIPPAGE_MAX_R
+    if risk_distance <= 0 or frac <= 0:
+        return sl
     overshoot = (sl - float(low)) if is_long else (float(high) - sl)
     if overshoot <= 0:
         return sl
-    charged = min(overshoot, PAPER_STOP_SLIPPAGE_MAX_R * risk_distance) * PAPER_STOP_SLIPPAGE_FRACTION
+    charged = min(overshoot, max_r * risk_distance) * frac
     return (sl - charged) if is_long else (sl + charged)
 
 
@@ -3567,6 +3737,23 @@ def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_i
     return plan, df_ind
 
 
+_SIGNAL_ORIGIN = threading.local()
+
+
+def _from_signal_origin(fn):
+    """معامله‌هایی که از سیگنال کانال/دستیار شروع می‌شوند: کارت ورودشان تا پاک‌سازی روزانه می‌ماند (حذف خودکار ۳ دقیقه‌ای ندارد)."""
+    @functools.wraps(fn)
+    def _wrapper(*a, **k):
+        prev = getattr(_SIGNAL_ORIGIN, 'on', False)
+        _SIGNAL_ORIGIN.on = True
+        try:
+            return fn(*a, **k)
+        finally:
+            _SIGNAL_ORIGIN.on = prev
+    return _wrapper
+
+
+@_from_signal_origin
 def quick_channel_trade(chat_id, symbol, side):
     """ورود فوری با قیمت بازار از دکمه‌ی 🟢/🔴 زیر پیام کانال.
     کاربر فقط جهت را با انتخاب دکمه مشخص می‌کند؛ SL/TP را build_quick_trade_plan
@@ -4169,6 +4356,8 @@ PROFIT_LOCK_EARLY_LOCK_R = max(0.0, float(os.environ.get('PROFIT_LOCK_EARLY_LOCK
 # این‌قدر برابر کارمزد تخمینی همان معامله باشد، تا بستن روی سطح قفل‌شده هیچ‌وقت به ضرر خالص
 # نینجامد. با ۱.۰ کردنش این حاشیه‌ی اطمینان خاموش می‌شود (فقط دقیقاً هم‌سطح کارمزد).
 PROFIT_LOCK_MIN_NET_MULT = max(1.0, float(os.environ.get('PROFIT_LOCK_MIN_NET_MULT', '1.3')))
+# V3.42: سطح قفل سود بر اساس بیشترین سودِ دیده‌شده (شامل ویک کندل) بالا برود؛ 0/false = رفتار قبلی.
+PROFIT_LOCK_USE_PEAK = os.environ.get('PROFIT_LOCK_USE_PEAK', 'true').lower() not in ('0', 'false', 'no')
 _PROFIT_LOCK_INFLIGHT = set()
 _PROFIT_LOCK_RETRY_AFTER = {}
 
@@ -4206,16 +4395,35 @@ def profit_lock_scan_once():
                 if pnl is None:
                     continue
                 level = float(p.get('profit_lock_level_usdt') or 0.0)
-                new_level = math.floor(pnl / step + 1e-9) * step if step > 0 else 0.0
+                # V3.42: سطح قفل بر اساس «بیشترین سودِ دیده‌شده» بالا می‌رود، نه فقط قیمت لحظه‌ی همین چک.
+                # بیشترین سود = بهترین از: قیمت‌های لحظه‌ای که این ترد دیده + ویکِ کندل (peak_favorable_price که
+                # چرخه‌ی اصلی ثبت می‌کند). بدون این، ویکی که بین دو چک رد می‌شد قفل را فعال نمی‌کرد.
+                # شرط بستن همچنان با قیمت لحظه‌ای است.
+                pnl_peak = pnl
+                if PROFIT_LOCK_USE_PEAK:
+                    try:
+                        lp = p.get('lock_peak_pnl')
+                        if lp is None or pnl > float(lp):
+                            p['lock_peak_pnl'] = pnl
+                        pnl_peak = max(pnl, float(p.get('lock_peak_pnl') or pnl))
+                        if not p.get('is_real'):
+                            pk = p.get('peak_favorable_price')
+                            if pk:
+                                pk_pnl = _profit_lock_pnl(p, float(pk))
+                                if pk_pnl is not None:
+                                    pnl_peak = max(pnl_peak, pk_pnl)
+                    except Exception:
+                        pnl_peak = pnl
+                new_level = math.floor(pnl_peak / step + 1e-9) * step if step > 0 else 0.0
                 risk_usdt = float(p.get('risk_usdt') or 0.0)
                 fee_est = round_trip_fee_usdt(p.get('margin'), p.get('leverage')) or 0.0
                 min_lock_after_fee = fee_est * PROFIT_LOCK_MIN_NET_MULT if fee_est > 0 else 0.0
-                if new_level > 0 and 0 < new_level < min_lock_after_fee <= pnl:
+                if new_level > 0 and 0 < new_level < min_lock_after_fee <= pnl_peak:
                     new_level = min_lock_after_fee
                 if PROFIT_LOCK_EARLY_TRIGGER_R > 0 and risk_usdt > 0:
                     early_trigger = max(risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R, min_lock_after_fee)
                     early_lock = max(risk_usdt * PROFIT_LOCK_EARLY_LOCK_R, min_lock_after_fee)
-                    if pnl >= early_trigger and early_lock > new_level:
+                    if pnl_peak >= early_trigger and early_lock > new_level:
                         new_level = early_lock
                 if new_level > 0 and new_level > level:
                     level = new_level
@@ -4233,7 +4441,20 @@ def profit_lock_scan_once():
                         continue
                     _PROFIT_LOCK_INFLIGHT.add(key)
                     try:
-                        ok = close_position(chat_id, p, float(price), f'قفل سود پله‌ای ({level:g}$)')
+                        exit_px = float(price)
+                        if not p.get('is_real') and pnl < level:
+                            # PAPER: استاپِ قفل روی سطح قفل‌شده فیل می‌شود (با اسلیپیج کم)، نه روی قیمتی که
+                            # چرخه‌ی بعدیِ چک دیده؛ مثل سفارش استاپ واقعی.
+                            try:
+                                amt = abs(float(p.get('amount') or 0))
+                                if amt > 0:
+                                    over = min(level - pnl, (float(p.get('risk_usdt') or 0.0) or level) * PAPER_LOCKED_STOP_SLIPPAGE_MAX_R)
+                                    fill_pnl = level - over * PAPER_LOCKED_STOP_SLIPPAGE_FRACTION
+                                    e0 = float(p['entry_price'])
+                                    exit_px = (e0 + fill_pnl / amt) if side_long(p.get('side', 'BUY')) else (e0 - fill_pnl / amt)
+                            except Exception:
+                                exit_px = float(price)
+                        ok = close_position(chat_id, p, exit_px, f'قفل سود پله‌ای ({level:g}$)')
                     finally:
                         _PROFIT_LOCK_INFLIGHT.discard(key)
                     if not ok:
@@ -4837,7 +5058,9 @@ def _send_photo_get_id(chat_id, img_bytes, caption, markup):
         if r.status_code != 200:
             logger.warning('assist sendPhoto failed: %s %s', r.status_code, r.text[:200])
             return None
-        return ((r.json() or {}).get('result') or {}).get('message_id')
+        _mid = ((r.json() or {}).get('result') or {}).get('message_id')
+        _day_log_record(chat_id, _mid)
+        return _mid
     except Exception:
         logger.exception('assist sendPhoto error')
         return None
@@ -4866,7 +5089,8 @@ ASSIST_EXTEND_SECONDS = max(60, int(os.environ.get('ASSIST_EXTEND_SECONDS', '900
 # V3.38.5: لیست «📋 سیگنال‌های در انتظار» فقط سیگنال‌هایی را نشان می‌دهد که حداقل این‌قدر ثانیه از مهلتشان باقی مانده (۳۰۰ = ۵ دقیقه؛ ۰ = همه).
 ASSIST_LIST_MIN_REMAINING_SECONDS = max(0, int(os.environ.get('ASSIST_LIST_MIN_REMAINING_SECONDS', '300')))
 # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر این‌قدر ثانیه بعد از انقضا از چت حذف می‌شوند (۶۰ = ۱ دقیقه؛ ۰ = هرگز).
-ASSIST_EXPIRED_DELETE_AFTER_SECONDS = max(0, int(os.environ.get('ASSIST_EXPIRED_DELETE_AFTER_SECONDS', '60')))
+# V3.41: کارت سیگنال‌ها تا پاک‌سازی روزانه می‌مانند (۰ = حذف زمان‌دار خاموش)؛ اگر پاک‌سازی روزانه خاموش باشد همان ۶۰ ثانیه‌ی قبلی.
+ASSIST_EXPIRED_DELETE_AFTER_SECONDS = max(0, int(os.environ.get('ASSIST_EXPIRED_DELETE_AFTER_SECONDS', '0' if DAILY_MESSAGE_CLEANUP else '60')))
 _ASSIST_CD_LAST = {}   # آخرین برچسب شمارش معکوس ارسال‌شده برای هر سیگنال (جلوگیری از ویرایش تکراری)
 
 
@@ -5004,6 +5228,7 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
     return _entry_diag_result(chat_id, symbol, 'assist_sent', 'سیگنال برای تایید ارسال شد', 'assist', sig)
 
 
+@_from_signal_origin
 def assist_approve(chat_id, aid):
     s = get_session(chat_id)
     with _ASSIST_LOCK:
@@ -5371,6 +5596,7 @@ def manual_entry_price_received(chat_id, raw):
         {'text': '❌ انصراف', 'callback_data': '/cancel'}]]})
 
 
+@_from_signal_origin
 def manual_entry_confirm(chat_id):
     s = get_session(chat_id)
     tmp = s.get('_manual_entry_tmp')
@@ -5834,13 +6060,7 @@ def today_trades_report(chat_id):
     s = get_session(chat_id)
     closed = list(s.get('closed_positions') or [])
 
-    tz = None
-    if ZoneInfo is not None:
-        try:
-            tz = ZoneInfo(DAILY_CLOSE_TZ)
-        except Exception:
-            tz = None
-    now_local = datetime.now(tz) if tz else datetime.utcnow()
+    now_local = _crypto_now()
     day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
     day_start_ts = day_start.timestamp()
 
@@ -7783,6 +8003,8 @@ def telegram_listener():
                         finally: end_callback_context()
                     elif data:
                         _um = u.get('message') or {}
+                        if (_um.get('chat') or {}).get('type') == 'private' and _um.get('message_id'):
+                            _day_log_record(chat, _um['message_id'])
                         if (AUTO_DELETE_USER_MESSAGES and (_um.get('chat') or {}).get('type') == 'private'
                                 and _um.get('message_id')):
                             schedule_auto_delete(chat, _um['message_id'])
@@ -8185,6 +8407,7 @@ def main():
     Thread(target=lambda: (time.sleep(11), _profit_lock_loop()), daemon=True, name='profit-lock').start()
     Thread(target=lambda: (time.sleep(13), _assist_loop()), daemon=True, name='assist').start()
     Thread(target=lambda: (time.sleep(15), _auto_delete_loop()), daemon=True, name='auto-delete').start()
+    Thread(target=lambda: (time.sleep(17), _day_cleanup_loop()), daemon=True, name='day-cleanup').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
