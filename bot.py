@@ -800,7 +800,7 @@ _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled')
 def _p4_keep_flags(old_cfg, new_cfg):
     """دکمه‌های مدل PDH/PDL+P4 هنگام بازسازی preset (تغییر تایم‌فریم/ریست) از دست نروند."""
     if isinstance(old_cfg, dict):
-        for k in _P4_FLAG_KEYS:
+        for k in tuple(_P4_FLAG_KEYS) + tuple(GATE_REGISTRY):   # V3.42: کلیدهای گیت هم با تغییر تایم‌فریم از بین نروند
             if k in old_cfg:
                 new_cfg[k] = old_cfg[k]
     return new_cfg
@@ -872,6 +872,7 @@ def normalize_session(data):
         'strategy_sweep_enabled', 'strategy_htf_reversal_enabled', 'adaptive_allow_session_swing_anchors',
         'daily_p4_mode', 'p4_reversal_enabled',
     }
+    _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
         if _k in _persist_exact or _k.startswith('scenario_') or _k.startswith('confirm_'):
             s['strategy_config'][_k] = _v
@@ -1912,6 +1913,12 @@ def _tf_regime_line(tf):
     gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
     label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(gate, '⏳ نامشخص')
     return f"🧭 رژیم بازار ({TF_DISPLAY.get(tf, tf)}): *{label}*"
+
+
+def _symbol_regime_line(regime, tf):
+    """خط رژیم خودِ نماد روی تایم‌فریم سیگنال (همان معیار پیام کانال سیگنال: close نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده)."""
+    label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime, '⏳ نامشخص')
+    return f"🧭 رژیم نماد ({TF_DISPLAY.get(tf, tf)}): *{label}*"
 
 
 def _ensure_tf_gate_sync(tf):
@@ -3351,15 +3358,15 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         return _blk(chat_id, 'روی همین ستاپ قبلاً معامله انجام شده (ستاپ مصرف‌شده)')
     if require_active and not force and not s['is_bot_active']:
         return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
-    if s['daily_stopped'] and not force:
+    if s['daily_stopped'] and not force and gate_on(s, 'gate_risk_guard_enabled'):
         return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
-    if not force and not risk_guard(chat_id):
+    if not force and gate_on(s, 'gate_risk_guard_enabled') and not risk_guard(chat_id):
         return _blk(chat_id, 'محافظ ریسک (حد ضرر/ضرر پیاپی/حد روزانه) اجازه‌ی ورود نمی‌دهد')
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
-    if now<cd and not force:
+    if now<cd and not force and gate_on(s, 'gate_cooldown_enabled'):
         return _blk(chat_id, f'کول‌داون نماد {symbol} بعد از معامله‌ی قبلی هنوز {int(cd-now)} ثانیه مانده')
     s['cooldowns'].pop(symbol,None)
-    if level_key and level_key in s.get('traded_levels', {}) and not force:
+    if level_key and level_key in s.get('traded_levels', {}) and not force and gate_on(s, 'gate_traded_level_enabled'):
         return _blk(chat_id, 'روی همین سطح قبلاً معامله شده و سطح هنوز آزاد نشده')
     is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
     if not force and not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
@@ -3432,7 +3439,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
     fee_estimate=round_trip_fee_usdt(margin,leverage)
-    if not force and MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
+    if not force and gate_on(s, 'gate_open_fee_ratio_enabled') and MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
         return _blk(chat_id, f'ریسک دلاری ({risk_usdt:.2f}$) نسبت به کارمزد رفت‌وبرگشت ({fee_estimate:.2f}$) کمتر از {MIN_RISK_TO_FEE_RATIO:g} برابر است')
     # سقف مجموع ریسک باز: جمع ریسک دلاری همهٔ پوزیشن‌های باز (صرف‌نظر از جهت) به‌علاوهٔ
     # این معاملهٔ جدید نباید از درصد مشخصی از سرمایه بگذرد. با تنظیمات پیش‌فرض عملاً
@@ -3442,7 +3449,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         try:
             equity = exchange_balance(chat_id) if s['trading_mode'] == 'REAL' else current_paper_equity(s)
             open_risk = sum(float(p.get('risk_usdt') or 0.0) for p in s.get('paper_positions', []))
-            if equity > 0 and (open_risk + risk_usdt) > equity * (max_total_risk_pct / 100.0):
+            if gate_on(s, 'gate_total_risk_cap_enabled') and equity > 0 and (open_risk + risk_usdt) > equity * (max_total_risk_pct / 100.0):
                 return _blk(chat_id, f'سقف مجموع ریسک باز ({max_total_risk_pct:g}% سرمایه) رد می‌شود')
         except Exception:
             pass
@@ -5224,11 +5231,14 @@ def _assist_markup(rec, remaining=None):
     """کیبورد کارت دستیار. اگر شمارش معکوس فعال باشد، دکمه‌ی «تمدید مهلت» به زمان باقی‌مانده تبدیل می‌شود."""
     aid = rec['id']; sym = rec['symbol']; tf = rec.get('tf') or '5min'
     is_long = rec['sig'] == 'BUY'
-    if rec.get('countdown'):
+    if rec.get('saved'):
+        # V3.42: سیگنال ذخیره‌شده مهلت ندارد؛ منتظر رسیدن قیمت به ورود می‌ماند.
+        ext_btn = {'text': '💾 ذخیره‌شده · در حال پایش', 'callback_data': f'/assist_saved_{aid}'}
+    elif rec.get('countdown'):
         rem = remaining if remaining is not None else max(0, float(rec.get('expires_at', 0)) - time.time())
         ext_btn = {'text': _assist_countdown_label(rem), 'callback_data': f'/assist_cd_{aid}'}
     else:
-        ext_btn = {'text': '⏳ تمدید مهلت', 'callback_data': f'/assist_ext_{aid}'}
+        ext_btn = {'text': '💾 ذخیره و بررسی تغییر', 'callback_data': f'/assist_save_{aid}'}
     rows = [
         [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
         [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
@@ -5306,8 +5316,13 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             _prate = None
         pnl_lines = pnl_estimate_lines(float(entry), float(sl), float(tp), sig, _m, _lev, platform_rate=_prate, compact=True)
         _tf_key = s.get('timeframe', '5min')
+        try:
+            _sym_regime = _signal_channel_symbol_regime(df) if df is not None else None
+        except Exception:
+            _sym_regime = None
         text = (
             f"{_tf_regime_line(_tf_key)}\n"
+            f"{_symbol_regime_line(_sym_regime, _tf_key)}\n"
             f"• `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'}) | تایم‌فریم: `{TF_DISPLAY.get(_tf_key, _tf_key)}`\n"
             f"• سطح: `{level_txt}` | سناریو: `{scn_txt}`\n"
             f"• ورود پیشنهادی: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}`\n"
@@ -5338,6 +5353,7 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
             'quality_label': plan.get('quality_label'), 'structural_tp': bool(plan.get('structural_target', False)),
             'tp_level_name': tp_level_name, 'tp_stages': plan.get('tp_stages'), 'exp_tp_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
             'exp_sl_pnl_net': (round(estimate_trade_pnl(entry, sl, tp, sig, _m, _lev)['sl_net'], 4) if (_m and _lev) else None),
+            'symbol_regime': _sym_regime,
             'reason': full_reason, 'scn': scn, 'level_token': level_token, 'level_value': level_value,
             'tf': s.get('timeframe'), 'created_at': now, 'expires_at': now + expiry, 'status': 'pending',
             'ext': 0, 'message_id': message_id,
@@ -5463,6 +5479,123 @@ def assist_indicators(chat_id, aid):
     send_message(chat_id, "\n".join(lines))
 
 
+ASSIST_SAVED_HORIZON_SECONDS = 10 * 365 * 24 * 3600   # V3.42: سیگنال ذخیره‌شده عملاً مهلت ندارد
+
+
+def assist_save(chat_id, aid):
+    """V3.42: «💾 ذخیره و بررسی تغییر» جای «تمدید مهلت» است. سیگنال بدون مهلت ذخیره می‌شود و ربات
+    پایش می‌کند؛ لحظه‌ی تاچ قیمت ورود، با قیمت بازار وارد می‌شود و SL/TP با همان فاصله‌های سیگنال
+    نسبت به قیمت ورودِ واقعی تنظیم می‌شوند."""
+    s = get_session(chat_id)
+    rec = _assist_pending_or_notify(chat_id, s, aid)
+    if not rec:
+        return
+    with _ASSIST_LOCK:
+        if rec.get('saved'):
+            send_message(chat_id, 'ℹ️ این سیگنال از قبل ذخیره شده و پایش می‌شود.'); return
+        now = time.time()
+        rec['saved'] = True
+        rec['saved_at'] = now
+        rec['countdown'] = False
+        rec['expires_at'] = now + ASSIST_SAVED_HORIZON_SECONDS
+    save_session(chat_id)
+    _assist_edit_markup(chat_id, rec)
+    risk = abs(float(rec['entry']) - float(rec['sl']))
+    tp_gap = abs(float(rec['tp']) - float(rec['entry']))
+    send_message(chat_id,
+        f"💾 *{rec['symbol']}* ({'🟢 خرید' if rec['sig'] == 'BUY' else '🔴 فروش'}) ذخیره شد و پایش می‌شود.\n"
+        f"• وقتی قیمت به `{fmt(float(rec['entry']))}` برسد، با *قیمت بازار* وارد می‌شوم.\n"
+        f"• SL و TP با همان فاصله‌ها از قیمت ورودِ واقعی تنظیم می‌شوند (فاصله SL `{fmt(risk)}` | فاصله TP `{fmt(tp_gap)}`).\n"
+        f"• اگر قبل از رسیدن به ورود، قیمت از SL یا TP عبور کند، سیگنال باطل و اطلاع داده می‌شود.\n"
+        f"• سیگنال تا وقتی ❌ رد نکنی یا ورود نشود، در «📋 سیگنال‌های در انتظار» می‌ماند.")
+
+
+def assist_saved_info(chat_id, aid):
+    s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        rec = _assist_find(s, aid)
+    if not rec or rec.get('status') != 'pending':
+        send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار نیست.'); return
+    send_message(chat_id, f"💾 `{rec['symbol']}` ذخیره است و منتظر رسیدن قیمت به `{fmt(float(rec['entry']))}` می‌ماند. برای لغو، دکمه ❌ رد را بزن.")
+
+
+def assist_saved_touch_once():
+    """سیگنال‌های ذخیره‌شده را با قیمت لحظه‌ای می‌سنجد: تاچ ورود → ورود با قیمت بازار؛ عبور از SL/TP → باطل."""
+    for chat_id, s in list(USER_SESSIONS.items()):
+        for rec in list(s.get('assist_log') or []):
+            try:
+                if rec.get('status') != 'pending' or not rec.get('saved'):
+                    continue
+                sym = rec['symbol']
+                try:
+                    live = exchange_latest_price(chat_id, sym) if s.get('trading_mode') == 'REAL' else latest_price(sym)
+                except Exception:
+                    live = None
+                if not live or float(live) <= 0:
+                    continue
+                live = float(live)
+                is_long = rec['sig'] == 'BUY'
+                entry = float(rec['entry']); sl = float(rec['sl']); tp = float(rec['tp'])
+                # جهتِ «تاچ» پویاست (مثل اوردر معلق): اگر ورود بالای قیمت است منتظر صعود، وگرنه نزول.
+                # دفعه‌ی اول جهت انتظار ثبت می‌شود تا بعد از رد شدن از ورود دوباره برنگردد.
+                side_wait = rec.get('touch_dir')
+                if side_wait is None:
+                    side_wait = 'up' if entry >= live else 'down'
+                    rec['touch_dir'] = side_wait
+                touched = (live >= entry) if side_wait == 'up' else (live <= entry)
+                if abs(live - entry) / max(entry, 1e-9) < 0.0005:
+                    touched = True
+                # قیمتی که از SL یا TP سیگنال رد شده باشد (حتی اگر هم‌زمان از ورود هم گذشته باشد، مثل جهش بین دو چک)
+                # دیگر ستاپ معتبر نیست؛ ورود نمی‌گیرد و باطل می‌شود.
+                crossed_sl = (live <= sl) if is_long else (live >= sl)
+                crossed_tp = (live >= tp) if is_long else (live <= tp)
+                if crossed_sl or crossed_tp or not touched:
+                    if crossed_sl or crossed_tp:
+                        with _ASSIST_LOCK:
+                            if rec.get('status') == 'pending':
+                                rec['status'] = 'invalidated'; rec['invalidated_at'] = time.time()
+                                rec['invalid_reason'] = 'SL' if crossed_sl else 'TP'
+                        save_session(chat_id)
+                        _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+                        send_message(chat_id,
+                            f"🚫 سیگنال ذخیره‌شده `{sym}` باطل شد: قیمت (`{fmt(live)}`) از "
+                            f"{'SL' if crossed_sl else 'TP'} سیگنال عبور کرد و ورودی انجام نشد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.")
+                    continue
+                # --- تاچ ورود: ورود با قیمت بازار، SL/TP با فاصله‌های سیگنال نسبت به ورود واقعی ---
+                with _ASSIST_LOCK:
+                    if rec.get('status') != 'pending':
+                        continue
+                    rec['status'] = 'triggering'      # جلوگیری از اجرای هم‌زمان دوباره
+                try:
+                    ok, err = execute_manual_trade(chat_id, sym, rec['side_label'], rec['sl'], rec['tp'],
+                                                   entry_price=entry, reason=rec.get('reason') or 'سیگنال ذخیره‌شده',
+                                                   force=False, tp_level_name=rec.get('tp_level_name'))
+                except Exception as _e:
+                    logger.exception('assist saved entry crashed aid=%s', rec.get('id'))
+                    ok, err = False, f'خطای داخلی: {_e}'
+                s = get_session(chat_id)
+                with _ASSIST_LOCK:
+                    if ok:
+                        rec['status'] = 'approved'; rec['approved_at'] = time.time(); rec['auto_touch_entry'] = True
+                        mine = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
+                        if mine:
+                            mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
+                            mine[-1]['assist_id'] = rec['id']
+                            mine[-1]['assist_delay_seconds'] = round(rec['approved_at'] - rec['created_at'], 1)
+                    else:
+                        rec['status'] = 'blocked'; rec['block_reason'] = err
+                save_session(chat_id)
+                _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+                if ok:
+                    pos = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
+                    px = f" | ورود `{fmt(float(pos[-1]['entry_price']))}` · SL `{fmt(float(pos[-1]['sl']))}` · TP `{fmt(float(pos[-1]['tp']))}`" if pos else ''
+                    send_message(chat_id, f"✅ قیمت `{sym}` به ورود رسید؛ با قیمت بازار وارد شدم{px}.")
+                else:
+                    send_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
+            except Exception:
+                logger.exception('assist saved touch failed aid=%s', rec.get('id'))
+
+
 def assist_extend(chat_id, aid):
     """V3.38: لمس «تمدید مهلت» → مهلت روی ASSIST_EXTEND_SECONDS (۱۵ دقیقه) از همین لحظه تنظیم می‌شود
     و خودِ دکمه به شمارش معکوس زمان باقی‌مانده تبدیل می‌شود (در _assist_loop تازه می‌شود)."""
@@ -5482,37 +5615,30 @@ def assist_extend(chat_id, aid):
 
 
 def _assist_pending_recs(s):
-    """سیگنال‌های در انتظار تصمیمِ منقضی‌نشده، نزدیک‌ترین مهلت اول."""
+    """همه‌ی سیگنال‌های در انتظار (ذخیره‌شده + منتظر تصمیم)، جدیدترین اول. V3.42: بدون فیلتر زمان."""
     now = time.time()
     with _ASSIST_LOCK:
         recs = [r for r in (s.get('assist_log') or [])
-                if r.get('status') == 'pending' and float(r.get('expires_at', 0) or 0) > now]
-    recs.sort(key=lambda r: r['expires_at'])
+                if r.get('status') == 'pending' and (r.get('saved') or float(r.get('expires_at', 0) or 0) > now)]
+    recs.sort(key=lambda r: float(r.get('created_at', 0) or 0), reverse=True)
     return recs
 
 
 def assist_pending_list(chat_id, message_id=None):
-    """V3.38: لیست همه‌ی سیگنال‌های در انتظار با زمان باقی‌مانده؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
+    """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
-    all_recs = _assist_pending_recs(s)
-    now = time.time()
-    recs = [r for r in all_recs if float(r['expires_at']) - now >= ASSIST_LIST_MIN_REMAINING_SECONDS]
+    recs = _assist_pending_recs(s)
     if not recs:
-        if all_recs:
-            send_message(chat_id, f"✅ سیگنالی با حداقل {ASSIST_LIST_MIN_REMAINING_SECONDS // 60} دقیقه مهلت باقی‌مانده نیست.",
-                         {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}]]}, message_id=message_id)
-        else:
-            send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
+        send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
         return
-    shown = recs[:15]
+    shown = recs[:25]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(recs)})*", ""]
     rows = []
     for n, r in enumerate(shown, 1):
         is_long = r['sig'] == 'BUY'
         tf = r.get('tf') or '5min'
-        rem = max(0, int(float(r['expires_at']) - now))
-        rem_txt = f"{rem // 60:02d}:{rem % 60:02d}"
         side_txt = '🟢 خرید' if is_long else '🔴 فروش'
+        state_txt = '💾 ذخیره‌شده (پایش ورود)' if r.get('saved') else 'منتظر تصمیم'
         try:
             live = latest_price(r['symbol'])
         except Exception:
@@ -5525,11 +5651,11 @@ def assist_pending_list(chat_id, message_id=None):
             crossed_tp = (live >= r['tp']) if is_long else (live <= r['tp'])
             flag = ' ⚠️ از SL رد شده' if crossed_sl else (' ⚠️ از TP رد شده' if crossed_tp else '')
             price_txt = f" | لحظه‌ای `{fmt(float(live))}` (`{fav:+.2f}R`){flag}"
-        lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · ⏳ `{rem_txt}`")
+        lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · {state_txt}")
         lines.append(f"    ورود `{fmt(float(r['entry']))}`{price_txt}")
-        rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'} · ⏳ {rem_txt}", 'callback_data': f"/assist_open_{r['id']}"}])
+        rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'}" + (' 💾' if r.get('saved') else ''), 'callback_data': f"/assist_open_{r['id']}"}])
     if len(recs) > len(shown):
-        lines.append(f"\n… و {len(recs) - len(shown)} سیگنال دیگر (نزدیک‌ترین مهلت‌ها اول نمایش داده شد)")
+        lines.append(f"\n… و {len(recs) - len(shown)} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
     lines.append("\nروی هر ردیف بزنید تا کارت آن سیگنال دوباره پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
     rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
@@ -5542,6 +5668,7 @@ def _assist_card_text(rec):
     level_txt, scn_txt = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
     lines = [
         _tf_regime_line(tf),
+        _symbol_regime_line(rec.get('symbol_regime'), tf),
         f"• `{rec['symbol']}` ({'🟢 خرید' if is_long else '🔴 فروش'}) | تایم‌فریم: `{TF_DISPLAY.get(tf, tf)}`",
         f"• سطح: `{level_txt}` | سناریو: `{scn_txt}`",
         f"• ورود پیشنهادی: `{fmt(float(rec['entry']))}` | SL: `{fmt(float(rec['sl']))}`",
@@ -5821,17 +5948,22 @@ def assist_maintenance_once():
 def _assist_loop():
     tick = 0
     while True:
-        try:
-            assist_countdown_once()
-        except Exception:
-            logger.exception('assist countdown failed')
-        if tick % 2 == 0:          # نگهداری اصلی (کندل‌ها/سایه) مثل قبل هر ~۳۰ ثانیه
+        if tick % 3 == 0:          # برچسب شمارش معکوس (فقط کارت‌های قدیمیِ تمدیدشده) هر ~۱۵ ثانیه
+            try:
+                assist_countdown_once()
+            except Exception:
+                logger.exception('assist countdown failed')
+        if tick % 6 == 0:          # نگهداری اصلی (کندل‌ها/سایه) هر ~۳۰ ثانیه
             try:
                 assist_maintenance_once()
             except Exception:
                 logger.exception('assist maintenance failed')
+        try:
+            assist_saved_touch_once()     # V3.42: پایش تاچ ورود سیگنال‌های ذخیره‌شده (هر ~۵ ثانیه)
+        except Exception:
+            logger.exception('assist saved touch failed')
         tick += 1
-        time.sleep(15)
+        time.sleep(5)
 
 
 def assist_stats_text(s):
@@ -6249,13 +6381,55 @@ _SCENARIO_LABELS_PLAIN = {
 }
 
 
+# V3.42: رجیستری کلیدهای روشن/خاموش گیت‌ها. هر فیلتر/گیتی که سیگنال یا ورود را رد می‌کند باید اینجا
+# یک ردیف داشته باشد (کلید در strategy_config ذخیره می‌شود). برای افزودن فیلتر جدید فقط یک ردیف اضافه کن:
+#   key: (برچسب دکمه، پیش‌فرض، بخش منو، توضیح)
+GATE_REGISTRY = {
+    # --- ورود و فیلتر سیگنال ---
+    'htf_trend_filter_enabled':   ('روند تایم بالا (۴ساعته)', False, 'entry', 'خرید خلاف روند نزولی ۴ساعته و فروش خلاف روند صعودی ۴ساعته رد می‌شود (روند خنثی مجاز).'),
+    'momentum_fade_filter_enabled': ('کاهش مومنتوم RSI', False, 'entry', 'RSI کندل ستاپ باید حداقل چند واحد از اوج (فروش) یا کف (خرید) اخیر برگشته باشد.'),
+    'session_filter_enabled':     ('فیلتر سشن (UTC)', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی تنظیم‌شده (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ UTC) صادر می‌شود.'),
+    'htf_close_guard_enabled':    ('گارد پایان کندل تایم بالا', True, 'entry', 'سیگنال در دقایق پایانی کندل تایم بالا صادر نمی‌شود.'),
+    # --- ساختار ستاپ ---
+    'sweep_require_reclaim':      ('الزام ریکلیم سطح', True, 'structure', 'سویپ فقط وقتی معتبر است که قیمت به داخل بازگردد.'),
+    'sweep_require_reversal_candle': ('الزام کندل برگشتی', True, 'structure', 'کندل ریکلیم باید جهت برگشت را تایید کند.'),
+    'sweep_enable_retest_continuation': ('ادامه بعد از پولبک (۳/۴)', True, 'structure', 'ستاپ‌های نفوذ + پولبک + ادامه مجازند.'),
+    'active_setup_enabled':       ('ستاپ فعال (فرصت از دست‌رفته)', True, 'structure', 'ستاپ معتبر اخیر چند کندل زنده می‌ماند.'),
+    'active_setup_require_daily_breakout': ('الزام شکست روزانه ستاپ فعال', True, 'structure', 'ستاپ فعال فقط بعد از شکست تاییدشده PDH/PDL.'),
+    'active_structure_confirmation': ('تاییدیه ساختار ستاپ فعال', True, 'structure', 'ستاپ فعال به تایید ریزساختار نیاز دارد.'),
+    'level_cluster_enabled':      ('سطح کلاستر', True, 'structure', 'سطوح هم‌پوشان به‌عنوان یک سطح واحد در نظر گرفته می‌شوند.'),
+    # --- کیفیت و ریسک ---
+    'gate_min_score_enabled':     ('حداقل امتیاز کیفیت', True, 'quality', 'سیگنال با امتیاز کمتر از حداقل رد می‌شود.'),
+    'gate_min_rr_enabled':        ('حداقل R:R', True, 'quality', 'سیگنال با R:R کمتر از حداقل (و نزدیک‌ترین سطح هدف ضعیف) رد می‌شود.'),
+    'gate_max_sl_atr_enabled':    ('سقف فاصله SL (ATR)', True, 'quality', 'استاپ دورتر از سقف ATR رد می‌شود.'),
+    'gate_fee_ratio_enabled':     ('نسبت ریسک به کارمزد (سیگنال)', True, 'quality', 'ریسک دلاریِ خیلی کوچک نسبت به کارمزد در مرحله‌ی سیگنال رد می‌شود.'),
+    'use_edge_proxy_gate':        ('گیت Edge proxy', False, 'quality', 'گیت تجربی امتیاز مورد انتظار.'),
+    'gate_open_fee_ratio_enabled': ('حداقل ریسک به کارمزد (ورود)', True, 'quality', 'در لحظه‌ی ورود، ریسک دلاری کمتر از چند برابر کارمزد رد می‌شود.'),
+    'gate_total_risk_cap_enabled': ('سقف مجموع ریسک باز', True, 'quality', 'مجموع ریسک پوزیشن‌های باز نباید از درصد سقف سرمایه بیشتر شود.'),
+    'gate_cooldown_enabled':      ('کول‌داون نماد', True, 'quality', 'بعد از بسته‌شدن معامله، همان نماد مدتی ورود نمی‌گیرد.'),
+    'gate_traded_level_enabled':  ('قفل «سطح معامله‌شده»', True, 'quality', 'روی سطحی که قبلاً معامله شده و هنوز آزاد نشده، ورود جدید ندارد.'),
+    'gate_risk_guard_enabled':    ('محافظ ریسک (ضرر پیاپی/حد روزانه)', True, 'quality', 'با ضرر پیاپی یا رسیدن به حد ضرر روزانه ورود متوقف می‌شود. خاموش‌کردنش حفاظت سرمایه را برمی‌دارد.'),
+}
+
+
+def _gate_default(key):
+    row = GATE_REGISTRY.get(key)
+    if row is not None:
+        return row[1]
+    return STRATEGY_DEFAULTS.get(key, True)
+
+
+def gate_on(s, key):
+    """وضعیت یک کلید گیت برای این سشن (از strategy_config؛ در غیاب آن پیش‌فرض رجیستری)."""
+    try:
+        return bool((s.get('strategy_config') or {}).get(key, _gate_default(key)))
+    except Exception:
+        return _gate_default(key)
+
+
 def trade_filter_management_keyboard(chat_id, section=None):
     """منوی مدیریت فیلتر معاملات، دسته‌بندی‌شده.
-    section=None  -> منوی اصلی دسته‌ها
-    'entry'       -> ورود و فیلتر سیگنال
-    'exit'        -> مدیریت خروج و محافظت از سود
-    'limits'      -> بلاک دستی و سقف پوزیشن‌ها
-    'tools'       -> سناریوها، استراتژی، دستیار و پروفایل
+    None -> منوی اصلی دسته‌ها | entry | structure | quality | exit | limits | tools
     """
     s = get_session(chat_id)
     scfg = s.get('strategy_config') or {}
@@ -6263,6 +6437,11 @@ def trade_filter_management_keyboard(chat_id, section=None):
     def cell(flag_val, on_label, cb):
         icon = '🟢' if flag_val else '🔴'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
+
+    def gate_rows(sec, per_row=1):
+        keys = [k for k, v in GATE_REGISTRY.items() if v[2] == sec]
+        cells = [cell(gate_on(s, k), GATE_REGISTRY[k][0], f'/toggle_gate_{k}') for k in keys]
+        return [cells[i:i + per_row] for i in range(0, len(cells), per_row)]
 
     back_row = [{'text': '⬅️ دسته‌ها', 'callback_data': '/trade_filter_management'},
                 {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]
@@ -6275,8 +6454,13 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [cell(sweep_confirm, 'تاییدیه کندل Sweep', '/toggle_sweep_confirm'),
              cell(swing_break, 'شکست سوینگ محلی', '/toggle_swing_break')],
             [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment')],
-            back_row,
-        ]}
+        ] + gate_rows('entry') + [back_row]}
+
+    if section == 'structure':
+        return {'inline_keyboard': gate_rows('structure') + [back_row]}
+
+    if section == 'quality':
+        return {'inline_keyboard': gate_rows('quality') + [back_row]}
 
     if section == 'exit':
         weakness_on = bool(scfg.get('weakness_exit_enabled', False))
@@ -6315,6 +6499,8 @@ def trade_filter_management_keyboard(chat_id, section=None):
 
     return {'inline_keyboard': [
         [{'text': '📥 ورود و فیلتر سیگنال', 'callback_data': '/trade_filter_entry'},
+         {'text': '🧩 ساختار ستاپ', 'callback_data': '/trade_filter_structure'}],
+        [{'text': '🧱 کیفیت و ریسک', 'callback_data': '/trade_filter_quality'},
          {'text': '🚪 مدیریت خروج', 'callback_data': '/trade_filter_exit'}],
         [{'text': '🚫 بلاک دستی و سقف‌ها', 'callback_data': '/trade_filter_limits'},
          {'text': '🧭 استراتژی و ابزارها', 'callback_data': '/trade_filter_tools'}],
@@ -7643,8 +7829,21 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
+    if cl.startswith('/toggle_gate_'):
+        _gk = cl[len('/toggle_gate_'):]
+        if _gk in GATE_REGISTRY:
+            _lbl, _dflt, _sec, _note = GATE_REGISTRY[_gk]
+            _cfg = s.setdefault('strategy_config', {})
+            _cur = bool(_cfg.get(_gk, _dflt))
+            _cfg[_gk] = not _cur
+            save_session(chat_id)
+            _st = '🟢 روشن' if not _cur else '🔴 خاموش'
+            send_message(chat_id, f"{_lbl}: {_st}\n\n{_note}", trade_filter_management_keyboard(chat_id, _sec))
+            return
     _tf_sections = {
         '/trade_filter_entry': ('entry', "📥 *ورود و فیلتر سیگنال*\n\nفیلترهایی که تعیین می‌کنند سیگنال چه زمانی قبول شود."),
+        '/trade_filter_structure': ('structure', "🧩 *ساختار ستاپ*\n\nقواعد شناسایی ستاپ سویپ/شکست؛ هر کدام جدا قابل خاموش‌شدن است."),
+        '/trade_filter_quality': ('quality', "🧱 *کیفیت و ریسک*\n\nگیت‌هایی که سیگنال یا ورود را بر اساس کیفیت، R:R، فاصله SL، کارمزد و ریسک رد می‌کنند."),
         '/trade_filter_exit': ('exit', "🚪 *مدیریت خروج*\n\nقفل سود، ترلینگ SL، خروج با ضعف روند، بستن پایان روز و هشدارهای سود/ضعف سود."),
         '/trade_filter_limits': ('limits', "🚫 *بلاک دستی و سقف‌ها*\n\nبلاک جهت ورود و سقف معاملات هم‌جهت."),
         '/trade_filter_tools': ('tools', "🧭 *استراتژی و ابزارها*\n\nسناریوها، خانواده‌های استراتژی، حالت دستیار و پروفایل."),
@@ -7764,8 +7963,12 @@ def process_command(cmd,chat_id,message_id=None):
         assist_approve(chat_id, cl[len('/assist_ok_'):]); return
     if cl.startswith('/assist_no_'):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
-    if cl.startswith('/assist_ext_'):
-        assist_extend(chat_id, cl[len('/assist_ext_'):]); return
+    if cl.startswith('/assist_save_'):
+        assist_save(chat_id, cl[len('/assist_save_'):]); return
+    if cl.startswith('/assist_saved_'):
+        assist_saved_info(chat_id, cl[len('/assist_saved_'):]); return
+    if cl.startswith('/assist_ext_'):      # کارت‌های قدیمیِ «تمدید مهلت» هم به ذخیره‌ی بدون مهلت تبدیل می‌شوند
+        assist_save(chat_id, cl[len('/assist_ext_'):]); return
     if cl.startswith('/assist_ind_'):
         assist_indicators(chat_id, cl[len('/assist_ind_'):]); return
     if cl=='/assist_pending':

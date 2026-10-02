@@ -330,6 +330,26 @@ STRATEGY_DEFAULTS = {
     # و فروش روی P4H فقط اگر P4H در همین سهم بالاییِ رنج باشد. هدف‌ها همان پله‌های حالت ۱.
     "p4_reversal_enabled": False,
     "p4_reversal_zone_pct": 0.40,
+    # --- V3.42: کلید روشن/خاموش برای همه‌ی گیت‌های رد سیگنال (پیش‌فرض True = رفتار قبلی) ---
+    "gate_min_rr_enabled": True,        # حداقل R:R (نزدیک‌ترین سطح و R:R نهایی)
+    "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
+    "gate_fee_ratio_enabled": True,     # نسبت ریسک به کارمزد (پلن)
+    "gate_min_score_enabled": True,     # حداقل امتیاز کیفیت
+    # --- V3.42: فیلترهای جدید (پیش‌فرض خاموش؛ باید با داده اعتبارسنجی شوند) ---
+    # روند تایم بالا: از روی همان کندل‌های تایم‌فریم اصلی به ۴ساعته تبدیل می‌شود (EMA8 در برابر EMA21).
+    # خرید وقتی روند ۴ساعته نزولی است و فروش وقتی صعودی است رد می‌شود؛ روند خنثی مجاز است.
+    "htf_trend_filter_enabled": False,
+    "htf_trend_ema_fast": 8,
+    "htf_trend_ema_slow": 21,
+    "htf_trend_min_candles": 24,
+    # کاهش مومنتوم: روی کندل ستاپ، RSI باید حداقل این‌قدر از اوج (فروش) / کف (خرید) اخیرش برگشته باشد.
+    "momentum_fade_filter_enabled": False,
+    "momentum_fade_lookback": 8,
+    "momentum_fade_min_drop": 3.0,
+    # سشن: فقط در بازه‌ی ساعتی (UTC) مجاز؛ start==end یعنی ۲۴ ساعته. اگر start > end بازه از نیمه‌شب می‌گذرد.
+    "session_filter_enabled": False,
+    "session_filter_start_hour_utc": 7,
+    "session_filter_end_hour_utc": 21,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -2025,6 +2045,73 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
     return current_target
 
 
+def _gate_on(cfg, key, default=True):
+    try:
+        return bool(cfg.get(key, default))
+    except Exception:
+        return default
+
+
+def _htf_trend_label(d, upto_idx, cfg):
+    """روند ۴ساعته از روی کندل‌های تایم‌فریم اصلی: 'UP' | 'DOWN' | 'NEUTRAL' | None (داده کافی نیست)."""
+    try:
+        if "_dt" not in d.columns:
+            return None
+        x = d.iloc[: int(upto_idx) + 1]
+        c4 = x.set_index("_dt")["close"].astype(float).resample("4h").last().dropna()
+        n_min = int(cfg.get("htf_trend_min_candles", 24))
+        if len(c4) < max(n_min, 5):
+            return None
+        fast = c4.ewm(span=int(cfg.get("htf_trend_ema_fast", 8)), adjust=False).mean()
+        slow = c4.ewm(span=int(cfg.get("htf_trend_ema_slow", 21)), adjust=False).mean()
+        last = float(c4.iloc[-1])
+        if float(fast.iloc[-1]) > float(slow.iloc[-1]) and last > float(slow.iloc[-1]):
+            return "UP"
+        if float(fast.iloc[-1]) < float(slow.iloc[-1]) and last < float(slow.iloc[-1]):
+            return "DOWN"
+        return "NEUTRAL"
+    except Exception:
+        return None
+
+
+def _extra_signal_filters(d, idx, risk_idx, signal, cfg):
+    """V3.42: فیلترهای اختیاری (همه پیش‌فرض خاموش). خروجی: None یا متن دلیل رد.
+    اگر داده کافی نباشد فیلتر «بی‌اثر» است (fail-open)، نه رد."""
+    # 1) سشن
+    if _gate_on(cfg, "session_filter_enabled", False):
+        try:
+            h = int(pd.Timestamp(d.iloc[risk_idx]["_dt"]).hour)
+            a = int(cfg.get("session_filter_start_hour_utc", 7)) % 24
+            b = int(cfg.get("session_filter_end_hour_utc", 21)) % 24
+            ok = True if a == b else ((a <= h < b) if a < b else (h >= a or h < b))
+            if not ok:
+                return f"فیلتر سشن: ساعت {h:02d}:00 UTC خارج از بازه‌ی مجاز {a:02d}:00-{b:02d}:00 است"
+        except Exception:
+            pass
+    # 2) روند تایم بالا
+    if _gate_on(cfg, "htf_trend_filter_enabled", False):
+        trend = _htf_trend_label(d, risk_idx, cfg)
+        if trend == "UP" and signal == "SELL":
+            return "فیلتر روند تایم بالا: روند ۴ساعته صعودی است و فروش خلاف آن است"
+        if trend == "DOWN" and signal == "BUY":
+            return "فیلتر روند تایم بالا: روند ۴ساعته نزولی است و خرید خلاف آن است"
+    # 3) کاهش مومنتوم RSI
+    if _gate_on(cfg, "momentum_fade_filter_enabled", False):
+        try:
+            lb = max(2, int(cfg.get("momentum_fade_lookback", 8)))
+            need = float(cfg.get("momentum_fade_min_drop", 3.0))
+            seg = pd.to_numeric(d["rsi"].iloc[max(0, int(idx) - lb): int(idx) + 1], errors="coerce").dropna()
+            if len(seg) >= 3:
+                now_v = float(seg.iloc[-1])
+                if signal == "SELL" and (float(seg.max()) - now_v) < need:
+                    return f"فیلتر مومنتوم: RSI هنوز در اوج است ({now_v:.1f}؛ اوج اخیر {float(seg.max()):.1f})"
+                if signal == "BUY" and (now_v - float(seg.min())) < need:
+                    return f"فیلتر مومنتوم: RSI هنوز در کف است ({now_v:.1f}؛ کف اخیر {float(seg.min()):.1f})"
+        except Exception:
+            pass
+    return None
+
+
 def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False, target_name=None):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
@@ -2088,7 +2175,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         risk_dist = sl - entry
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
+        if _gate_on(cfg, "gate_max_sl_atr_enabled") and risk_dist > atr * max_sl_atr:
             return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (sweep_extreme - entry) / risk_dist
         below = [p for p in all_levels.values() if p < entry]
@@ -2096,7 +2183,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
             return None, "هیچ سطح ساختاری‌ای زیر قیمت ورود برای هدف‌گذاری وجود ندارد؛ معامله رد شد"
         tp = max(below)  # نزدیک‌ترین سطح پایین‌تر از قیمت ورود
         rr_to_tp = (entry - tp) / risk_dist
-        if rr_to_tp < min_rr:
+        if _gate_on(cfg, "gate_min_rr_enabled") and rr_to_tp < min_rr:
             return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
         tp_key = next((k for k, v in all_levels.items() if v == tp), None)
         tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
@@ -2114,7 +2201,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         risk_dist = entry - sl
         if risk_dist <= 0:
             return None, "فاصله حد ضرر معتبر نیست"
-        if risk_dist > atr * max_sl_atr:
+        if _gate_on(cfg, "gate_max_sl_atr_enabled") and risk_dist > atr * max_sl_atr:
             return None, "استاپ ساختاری بیش از حد دور است؛ معامله رد شد"
         reclaim_depth = (entry - sweep_extreme) / risk_dist
         above = [p for p in all_levels.values() if p > entry]
@@ -2122,7 +2209,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
             return None, "هیچ سطح ساختاری‌ای بالای قیمت ورود برای هدف‌گذاری وجود ندارد؛ معامله رد شد"
         tp = min(above)  # نزدیک‌ترین سطح بالاتر از قیمت ورود
         rr_to_tp = (tp - entry) / risk_dist
-        if rr_to_tp < min_rr:
+        if _gate_on(cfg, "gate_min_rr_enabled") and rr_to_tp < min_rr:
             return None, f"نزدیک‌ترین سطح ({tp:.6g}) فقط {rr_to_tp:.2f}R می‌دهد؛ کمتر از حداقل {min_rr:.2f}R - معامله رد شد"
         tp_key = next((k for k, v in all_levels.items() if v == tp), None)
         tp_level_name = (target_name or "هدف نقدینگی (آداپتیو)") if tp_key == "_target" else level_token_label(tp_key)
@@ -2153,7 +2240,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     risk_pct = risk_dist / entry
     est_risk_usdt = 500.0 * risk_pct
     if est_risk_usdt > 0:
-        if (0.50 / est_risk_usdt) > max_fee_ratio:
+        if _gate_on(cfg, "gate_fee_ratio_enabled") and (0.50 / est_risk_usdt) > max_fee_ratio:
             return None, f"ریسک به کارمزد کوچک است ({est_risk_usdt:.2f}$)"
 
     if p4_stages:
@@ -2161,8 +2248,12 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         rr = sum(st["fraction"] * abs(st["price"] - entry) / risk_dist for st in p4_stages)
     else:
         rr = abs(tp - entry) / risk_dist
-    if rr < min_rr:
+    if _gate_on(cfg, "gate_min_rr_enabled") and rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
+
+    _extra_reason = _extra_signal_filters(d, idx, risk_idx, signal, cfg)
+    if _extra_reason:
+        return None, _extra_reason
 
     reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
     candle_score = min(20.0, max(0.0, body_ratio * 27.0))
@@ -2176,7 +2267,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
     min_score = float(cfg.get("min_trade_score", 58.0))
     quality_label = "عالی" if score >= 85 else "خوب" if score >= 75 else "قابل قبول" if score >= min_score else "ضعیف"
-    if score < min_score:
+    if _gate_on(cfg, "gate_min_score_enabled") and score < min_score:
         return None, f"امتیاز کیفیت پایین است ({score}/100)"
 
     plan = {
