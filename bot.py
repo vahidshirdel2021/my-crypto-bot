@@ -791,6 +791,12 @@ def default_session():
         'assist_expiry_seconds': 300,
         'assist_log': [],
         'assist_seen': {},
+        # V3.42.7: هشدار هم‌جهتی با روند BTC/ETH (کلیدها در «ورود و فیلتر سیگنال»). پیش‌فرض روشن.
+        'trend_warn_enabled': True,
+        'trend_warn_btc': True,
+        'trend_warn_eth': True,
+        'auto_trend_pending': {},
+        'auto_trend_seen': {},
     }
 
 
@@ -896,6 +902,13 @@ def normalize_session(data):
     if s['assist_expiry_seconds'] not in (180, 300, 600, 900):
         s['assist_expiry_seconds'] = 300
     s['assist_log'] = list(data.get('assist_log') or [])[-500:]
+    s['trend_warn_enabled'] = bool(data.get('trend_warn_enabled', True))
+    s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
+    s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
+    _now_n = time.time()
+    s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
+                               if isinstance(v, dict) and _now_n - float(v.get('created_at', 0) or 0) < 24 * 3600}
+    s['auto_trend_seen'] = {k: v for k, v in dict(data.get('auto_trend_seen') or {}).items() if _now_n - float(v or 0) < 6 * 3600}
     s['assist_seen'] = {k: v for k, v in dict(data.get('assist_seen') or {}).items() if time.time() - float(v or 0) < 6 * 3600}
     raw_pw = dict(data.get('priority_watch') or {})
     cutoff = time.time() - PRIORITY_WATCH_TTL_SECONDS
@@ -3779,7 +3792,7 @@ def _from_signal_origin(fn):
 
 
 @_from_signal_origin
-def quick_channel_trade(chat_id, symbol, side):
+def quick_channel_trade(chat_id, symbol, side, skip_trend=False):
     """ورود فوری با قیمت بازار از دکمه‌ی 🟢/🔴 زیر پیام کانال.
     کاربر فقط جهت را با انتخاب دکمه مشخص می‌کند؛ SL/TP را build_quick_trade_plan
     (سوینگ/ATR + سطح مقابل) می‌سازد و اجرا از همان مسیر معامله‌ی دستی می‌گذرد
@@ -3795,6 +3808,9 @@ def quick_channel_trade(chat_id, symbol, side):
     # وجود پوزیشن باز روی همین نماد (سیستم پوزیشن‌ها یک پوزیشن به‌ازای هر نماد نگه می‌دارد).
     if any(p['symbol'] == symbol for p in s['paper_positions']):
         send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
+    # V3.42.7: هشدار تضاد با روند BTC/ETH قبل از ورود سریع از کانال (با کلیدهای منوی فیلتر قابل خاموش‌شدن)
+    if not skip_trend and _assist_trend_warn(chat_id, symbol, side, f"/qt_tgok_{'buy' if is_long else 'sell'}_{symbol}", '/assist_trendcancel'):
+        return
 
     try:
         live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
@@ -5365,8 +5381,210 @@ def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason,
     return _entry_diag_result(chat_id, symbol, 'assist_sent', 'سیگنال برای تایید ارسال شد', 'assist', sig)
 
 
+# ===================== هشدار هم‌جهتی با روند BTC/ETH (قبل از تایید ورود در حالت دستیار) =====================
+# قبل از هر ورودِ مسیر دستیار (✅ ورود، 🔄 معامله برعکس، ثبت اوردر با قیمت دستی، ورود خودکارِ سیگنال ذخیره‌شده)
+# روند بیت‌کوین و اتریوم روی «تایم‌فریم معاملاتی فعال» سنجیده می‌شود (همان معیار داشبورد بازار:
+# قیمت نسبت به EMA50 و EMA20>=EMA50 روی آخرین کندل بسته‌شده). اگر جهت معامله با روند هرکدام در تضاد
+# باشد، ورود نگه داشته می‌شود و پیام هشدار با دکمه‌ی «بله، وارد شو / نه» می‌آید. اگر داده در دسترس نباشد
+# یا هم‌جهت/خنثی باشد، هیچ مانعی ایجاد نمی‌شود (fail-open).
+TREND_WARN_ENABLED = os.environ.get('ASSIST_TREND_WARN', '1') not in ('0', 'false', 'False')
+TREND_WARN_SYMBOLS = ('BTC', 'ETH')
+_TREND_WARN_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم'}
+_TREND_WARN_RECENT = {}
+
+
+_TREND_SNAP_CACHE = {}      # {(symbol, tf): (ts, snapshot)} - کش کوتاه تا چند سیگنال پشت‌سرهم دوباره داده نگیرند
+_TREND_SNAP_TTL = 20.0
+
+
+def _trend_snapshot_cached(sym, tf):
+    now = time.time()
+    c = _TREND_SNAP_CACHE.get((sym, tf))
+    if c and now - c[0] < _TREND_SNAP_TTL:
+        return c[1]
+    snap = _market_snapshot(sym, tf)
+    _TREND_SNAP_CACHE[(sym, tf)] = (now, snap)
+    return snap
+
+
+def _trend_active_symbols(chat_id, symbol=None):
+    """نمادهای شاخصی که طبق کلیدهای کاربر باید چک شوند (کلید کلی + کلید جدای BTC/ETH)."""
+    if not TREND_WARN_ENABLED:
+        return []
+    if chat_id is not None:
+        s = get_session(chat_id)
+        if not s.get('trend_warn_enabled', True):
+            return []
+        flags = {'BTC': bool(s.get('trend_warn_btc', True)), 'ETH': bool(s.get('trend_warn_eth', True))}
+    else:
+        flags = {'BTC': True, 'ETH': True}
+    return [x for x in TREND_WARN_SYMBOLS if flags.get(x, True) and x != str(symbol or '').upper()]
+
+
+def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
+    """اگر جهت side با روند BTC یا ETH در تضاد باشد متن هشدار، وگرنه None (بدون تضاد یا داده ناکافی).
+    کلیدهای کاربر (trend_warn_enabled / trend_warn_btc / trend_warn_eth) اعمال می‌شوند."""
+    syms = _trend_active_symbols(chat_id, symbol)
+    if not syms:
+        return None
+    try:
+        with ThreadPoolExecutor(max_workers=len(syms)) as ex:
+            snaps = dict(zip(syms, ex.map(lambda x: _trend_snapshot_cached(x, tf), syms)))
+    except Exception:
+        logger.exception('trend warn: snapshot failed symbol=%s', symbol)
+        return None
+    is_long = (side == 'BUY')
+    lines, conflict = [], False
+    for sym in syms:
+        snap = snaps.get(sym)
+        name = f"{_TREND_WARN_NAMES.get(sym, sym)} ({sym})"
+        if not snap:
+            lines.append(f"• {name}: ⚪ داده در دسترس نیست")
+            continue
+        sc = int(snap.get('score', 0))
+        if sc > 0:
+            bad = not is_long
+            lines.append(f"• {name}: 🟢 صعودی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
+        elif sc < 0:
+            bad = is_long
+            lines.append(f"• {name}: 🔴 نزولی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
+        else:
+            bad = False
+            lines.append(f"• {name}: ⚪ خنثی / رنج — بدون تضاد")
+        conflict = conflict or bad
+    if not conflict:
+        return None
+    side_txt = '🟢 خرید (Long)' if is_long else '🔴 فروش (Short)'
+    return (f"⚠️ *هشدار: ورود با روند بازار در تضاد است*\n\n"
+            f"نماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم فعال: `{tf}`\n\n"
+            + "\n".join(lines) +
+            "\n\nروند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.\n"
+            "*ورود را تایید می‌کنید؟*")
+
+
+def _assist_trend_warn(chat_id, symbol, side, ok_cb, no_cb):
+    """True = هشدار فرستاده شد و ورود تا تصمیم کاربر نگه داشته می‌شود؛ False = ورود می‌تواند ادامه یابد."""
+    try:
+        key = (chat_id, ok_cb)
+        now = time.time()
+        if now - _TREND_WARN_RECENT.get(key, 0) < 5:      # دابل‌کلیک: کارت هشدار دوباره نیاید
+            return True
+        s = get_session(chat_id)
+        tf = s.get('timeframe', '5min')
+        text = _assist_trend_conflict_text(symbol, side, tf, chat_id)
+        if not text:
+            return False
+        _TREND_WARN_RECENT[key] = now
+        send_message(chat_id, text, {'inline_keyboard': [[
+            {'text': '✅ بله، وارد شو', 'callback_data': ok_cb},
+            {'text': '❌ نه', 'callback_data': no_cb}]]}, keep=True)
+        return True
+    except Exception:
+        logger.exception('trend warn failed symbol=%s', symbol)
+        return False
+
+
+def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
+    """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
+    دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
+    همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
+    if not _trend_active_symbols(chat_id, symbol):
+        return False
+    s = get_session(chat_id)
+    now = time.time()
+    _tag, level_token, level_value = extract_setup_level(full_reason)
+    seen_key = f"{symbol}|{sig}|{level_token}|{level_value}"
+    seen = s.setdefault('auto_trend_seen', {})
+    if now - float(seen.get(seen_key, 0) or 0) < ASSIST_SEEN_TTL_SECONDS:
+        return True
+    tf = s.get('timeframe', '5min')
+    text = _assist_trend_conflict_text(symbol, sig, tf, chat_id)
+    if not text:
+        return False
+    rid = hashlib.sha1(f"{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
+    expiry = int(s.get('assist_expiry_seconds', 300) or 300)
+    rec = {'id': rid, 'symbol': symbol, 'sig': sig, 'side_label': 'BUY (Long)' if sig == 'BUY' else 'SELL (Short)',
+           'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'reason': full_reason,
+           'structural_tp': bool(plan.get('structural_target', False)), 'score': plan.get('score'), 'rr': plan.get('rr'),
+           'quality_label': plan.get('quality_label'), 'tp_level_name': plan.get('tp_level_name'), 'tp_stages': plan.get('tp_stages'),
+           'created_at': now, 'expires_at': now + expiry, 'status': 'pending'}
+    try:
+        rr_txt = f" | R:R: `{float(plan.get('rr')):.2f}`" if plan.get('rr') is not None else ''
+    except Exception:
+        rr_txt = ''
+    head = (f"🤖 *ورود خودکار نگه داشته شد*\n"
+            f"• `{symbol}` | ورود: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}` | TP: `{fmt(float(tp))}`{rr_txt}\n"
+            f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n")
+    res = tg('sendMessage', {'chat_id': chat_id, 'text': head + text, 'parse_mode': 'Markdown',
+                             'reply_markup': {'inline_keyboard': [[
+                                 {'text': '✅ بله، وارد شو', 'callback_data': f'/autotg_ok_{rid}'},
+                                 {'text': '❌ نه', 'callback_data': f'/autotg_no_{rid}'}]]}}, 10)
+    if not (res and res.get('ok')):
+        logger.warning('auto trend warn send failed symbol=%s', symbol)
+        return False       # ارسال نشد: به‌جای از دست دادن سیگنال، مثل fail-open ادامه می‌دهد
+    rec['message_id'] = (res.get('result') or {}).get('message_id')
+    s.setdefault('auto_trend_pending', {})[rid] = rec
+    seen[seen_key] = now
+    save_session(chat_id)
+    return True
+
+
+def auto_trend_decide(chat_id, rid, approve):
+    s = get_session(chat_id)
+    rec = (s.get('auto_trend_pending') or {}).get(rid)
+    if not rec:
+        send_message(chat_id, 'ℹ️ این درخواست پیدا نشد (احتمالاً قدیمی شده است).'); return
+    _strip_all_buttons(chat_id, rec.get('message_id'))
+    if rec.get('status') != 'pending':
+        send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec.get('status')})."); return
+    if not approve:
+        rec['status'] = 'rejected'; save_session(chat_id)
+        send_message(chat_id, f"❌ ورود `{rec['symbol']}` رد شد.", keep=False); return
+    symbol = rec['symbol']
+    if time.time() > float(rec.get('expires_at', 0)):
+        rec['status'] = 'expired'; save_session(chat_id)
+        send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده؛ ورودی انجام نشد.'); return
+    if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
+        rec['status'] = 'skipped'; save_session(chat_id)
+        send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
+    try:
+        live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
+    except Exception:
+        live = None
+    if not live or float(live) <= 0:
+        send_message(chat_id, '⚠️ قیمت لحظه‌ای در دسترس نیست؛ چند ثانیه بعد دوباره تایید کنید.'); return
+    live = float(live)
+    is_long = rec['sig'] == 'BUY'
+    risk_dist = abs(rec['entry'] - rec['sl'])
+    crossed = (live <= rec['sl'] or live >= rec['tp']) if is_long else (live >= rec['sl'] or live <= rec['tp'])
+    drift_r = abs(live - rec['entry']) / risk_dist if risk_dist > 0 else 0.0
+    if crossed or drift_r > ASSIST_MAX_DRIFT_R:
+        rec['status'] = 'invalidated'; save_session(chat_id)
+        send_message(chat_id, f"🚫 ورود `{symbol}` انجام نشد: قیمت لحظه‌ای (`{fmt(live)}`) از ورود/SL/TP پیشنهادی فاصله گرفته و ستاپ دیگر معتبر نیست.")
+        return
+    ok = execute_trade(chat_id, symbol, rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
+                       structural_tp=rec.get('structural_tp', False), plan_score=rec.get('score'), plan_rr=rec.get('rr'),
+                       plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True,
+                       tp_level_name=rec.get('tp_level_name'), tp_stages=rec.get('tp_stages'))
+    s = get_session(chat_id)
+    if ok:
+        rec['status'] = 'approved'; save_session(chat_id)
+    else:
+        detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
+        send_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}")
+
+
+def _strip_all_buttons(chat_id, message_id):
+    if not message_id:
+        return
+    try:
+        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': message_id, 'reply_markup': {'inline_keyboard': []}}, 10)
+    except Exception:
+        logger.exception('strip buttons failed')
+
+
 @_from_signal_origin
-def assist_approve(chat_id, aid):
+def assist_approve(chat_id, aid, skip_trend=False):
     s = get_session(chat_id)
     with _ASSIST_LOCK:
         rec = _assist_find(s, aid)
@@ -5393,6 +5611,8 @@ def assist_approve(chat_id, aid):
             warn = f"⚠️ قیمت لحظه‌ای (`{fmt(live)}`) از SL یا TP پیشنهادی عبور کرده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
         elif drift_r > ASSIST_MAX_DRIFT_R:
             warn = f"⚠️ قیمت لحظه‌ای `{drift_r:.2f}R` از ورود پیشنهادی دور شده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
+    if not skip_trend and _assist_trend_warn(chat_id, rec['symbol'], rec['sig'], f'/assist_tgok_{aid}', f'/assist_no_{aid}'):
+        return
     ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
                        structural_tp=rec['structural_tp'], plan_score=rec.get('score'), plan_rr=rec.get('rr'),
                        plan_quality_label=rec.get('quality_label'), bypass_burst_cooldown=True, force=True,
@@ -5526,6 +5746,8 @@ def assist_saved_touch_once():
             try:
                 if rec.get('status') != 'pending' or not rec.get('saved'):
                     continue
+                if rec.get('trend_hold'):      # منتظر تصمیم کاربر روی هشدار روند BTC/ETH
+                    continue
                 sym = rec['symbol']
                 try:
                     live = exchange_latest_price(chat_id, sym) if s.get('trading_mode') == 'REAL' else latest_price(sym)
@@ -5562,6 +5784,12 @@ def assist_saved_touch_once():
                             f"{'SL' if crossed_sl else 'TP'} سیگنال عبور کرد و ورودی انجام نشد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.")
                     continue
                 # --- تاچ ورود: ورود با قیمت بازار، SL/TP با فاصله‌های سیگنال نسبت به ورود واقعی ---
+                if not rec.get('trend_checked'):
+                    rec['trend_checked'] = True
+                    if _assist_trend_warn(chat_id, sym, rec['sig'], f"/assist_tgok_{rec['id']}", f"/assist_no_{rec['id']}"):
+                        rec['trend_hold'] = True
+                        save_session(chat_id)
+                        continue
                 with _ASSIST_LOCK:
                     if rec.get('status') != 'pending':
                         continue
@@ -5723,7 +5951,7 @@ def _assist_pending_or_notify(chat_id, s, aid):
         return rec
 
 
-def assist_reverse(chat_id, aid):
+def assist_reverse(chat_id, aid, skip_trend=False):
     """معامله‌ی برعکسِ جهت سیگنال، با قیمت لحظه‌ای (همان مسیر ورود سریع: SL/TP از سوینگ/ATR و سطح مقابل)."""
     s = get_session(chat_id)
     rec = _assist_pending_or_notify(chat_id, s, aid)
@@ -5731,8 +5959,10 @@ def assist_reverse(chat_id, aid):
         return
     symbol = rec['symbol']
     opp = 'SELL' if rec['sig'] == 'BUY' else 'BUY'
+    if not skip_trend and _assist_trend_warn(chat_id, symbol, opp, f'/assist_revok_{aid}', '/assist_trendcancel'):
+        return
     had = any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
-    quick_channel_trade(chat_id, symbol, opp)
+    quick_channel_trade(chat_id, symbol, opp, skip_trend=True)      # هشدار روند همین چند خط بالاتر انجام شده
     s = get_session(chat_id)
     opened = (not had) and any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
     if opened:
@@ -5845,7 +6075,7 @@ def manual_entry_price_received(chat_id, raw):
 
 
 @_from_signal_origin
-def manual_entry_confirm(chat_id):
+def manual_entry_confirm(chat_id, skip_trend=False):
     s = get_session(chat_id)
     tmp = s.get('_manual_entry_tmp')
     if not tmp:
@@ -5858,6 +6088,8 @@ def manual_entry_confirm(chat_id):
         rec = _assist_pending_or_notify(chat_id, s, aid)
         if not rec:
             s.pop('_manual_entry_tmp', None); save_session(chat_id); return
+    if not skip_trend and _assist_trend_warn(chat_id, symbol, tmp['side'], '/manual_entry_tgok', '/cancel'):
+        return
     order = {
         'order_id': f"{symbol}-{int(time.time())}", 'symbol': symbol,
         'side': 'BUY (Long)' if tmp['side'] == 'BUY' else 'SELL (Short)',
@@ -6141,6 +6373,14 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
+    # V3.42.7: ورود خودکار هم قبل از اجرا با روند BTC/ETH سنجیده می‌شود؛ در صورت تضاد ورود نگه داشته می‌شود و منتظر تایید کاربر می‌ماند.
+    try:
+        _held = await asyncio.to_thread(_auto_trend_gate, chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
+    except Exception:
+        logger.exception('auto trend gate failed symbol=%s', symbol)
+        _held = False
+    if _held:
+        return _entry_diag_result(chat_id, symbol, 'trend_hold', 'تضاد با روند BTC/ETH؛ منتظر تایید کاربر', 'trend_warn', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'),tp_stages=plan.get('tp_stages'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
@@ -6454,6 +6694,9 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [cell(sweep_confirm, 'تاییدیه کندل Sweep', '/toggle_sweep_confirm'),
              cell(swing_break, 'شکست سوینگ محلی', '/toggle_swing_break')],
             [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment')],
+            [cell(bool(s.get('trend_warn_enabled', True)), 'هشدار روند BTC/ETH (کلی)', '/toggle_trend_warn')],
+            [cell(bool(s.get('trend_warn_btc', True)), 'چک بیت‌کوین', '/toggle_trend_warn_btc'),
+             cell(bool(s.get('trend_warn_eth', True)), 'چک اتریوم', '/toggle_trend_warn_eth')],
         ] + gate_rows('entry') + [back_row]}
 
     if section == 'structure':
@@ -7769,6 +8012,23 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"⚠️ هشدار ضعف سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
+    if cl in ('/toggle_trend_warn', '/toggle_trend_warn_btc', '/toggle_trend_warn_eth'):
+        key = {'/toggle_trend_warn': 'trend_warn_enabled', '/toggle_trend_warn_btc': 'trend_warn_btc', '/toggle_trend_warn_eth': 'trend_warn_eth'}[cl]
+        label = {'/toggle_trend_warn': 'هشدار روند بازار (کلی)', '/toggle_trend_warn_btc': 'چک روند بیت‌کوین', '/toggle_trend_warn_eth': 'چک روند اتریوم'}[cl]
+        s[key] = not bool(s.get(key, True))
+        save_session(chat_id)
+        st = '🟢 روشن' if s[key] else '🔴 خاموش'
+        extra = ''
+        if key != 'trend_warn_enabled' and not s.get('trend_warn_enabled', True):
+            extra = '\n\n⚠️ کلید کلی «هشدار روند بازار» خاموش است؛ تا آن را روشن نکنی هیچ چکی انجام نمی‌شود.'
+        elif key == 'trend_warn_enabled' and s[key] and not (s.get('trend_warn_btc', True) or s.get('trend_warn_eth', True)):
+            extra = '\n\n⚠️ هر دو کلید بیت‌کوین و اتریوم خاموش‌اند؛ تا یکی را روشن نکنی چکی انجام نمی‌شود.'
+        send_message(chat_id,
+            f"🧭 {label}: {st}\n\n"
+            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین/اتریوم روی تایم‌فریم فعال در تضاد باشد، "
+            "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبودِ داده مانع ایجاد نمی‌کند." + extra,
+            trade_filter_management_keyboard(chat_id, 'entry'))
+        return
     if cl=='/toggle_profit_alert':
         current = bool(s.get('profit_alert_enabled', True))
         s['profit_alert_enabled'] = not current
@@ -7963,6 +8223,29 @@ def process_command(cmd,chat_id,message_id=None):
         assist_approve(chat_id, cl[len('/assist_ok_'):]); return
     if cl.startswith('/assist_no_'):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
+    if cl.startswith('/assist_tgok_'):      # تایید ورود بعد از هشدار تضاد با روند BTC/ETH
+        _strip_all_buttons(chat_id, message_id)
+        assist_approve(chat_id, cl[len('/assist_tgok_'):], skip_trend=True); return
+    if cl.startswith('/assist_revok_'):
+        _strip_all_buttons(chat_id, message_id)
+        assist_reverse(chat_id, cl[len('/assist_revok_'):], skip_trend=True); return
+    if cl.startswith('/autotg_ok_'):      # تایید ورود خودکارِ نگه‌داشته‌شده بعد از هشدار روند BTC/ETH
+        auto_trend_decide(chat_id, cl[len('/autotg_ok_'):], True); return
+    if cl.startswith('/autotg_no_'):
+        auto_trend_decide(chat_id, cl[len('/autotg_no_'):], False); return
+    if cl.startswith('/qt_tgok_'):      # ورود سریع کانال بعد از هشدار روند: /qt_tgok_<buy|sell>_<SYMBOL>
+        _strip_all_buttons(chat_id, message_id)
+        try:
+            _, _, _qs, _qsym = cl.split('_', 3)
+        except ValueError:
+            return
+        quick_channel_trade(chat_id, _qsym.upper(), 'BUY' if _qs == 'buy' else 'SELL', skip_trend=True); return
+    if cl == '/assist_trendcancel':
+        _strip_all_buttons(chat_id, message_id)
+        send_message(chat_id, 'انصراف داده شد؛ ورودی انجام نشد.', keep=False); return
+    if cl == '/manual_entry_tgok':
+        _strip_all_buttons(chat_id, message_id)
+        manual_entry_confirm(chat_id, skip_trend=True); return
     if cl.startswith('/assist_save_'):
         assist_save(chat_id, cl[len('/assist_save_'):]); return
     if cl.startswith('/assist_saved_'):
