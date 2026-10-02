@@ -743,6 +743,10 @@ def default_session():
         'swing_trailing_enabled': True,
         # V3.42: کلید بستن اجباری معاملات ۵/۱۵ دقیقه‌ای در پایان روز UTC. پیش‌فرض روشن (رفتار قبلی).
         'day_end_close_enabled': True,
+        # V3.42: هشدار وقتی سود پوزیشن باز به PROFIT_ALERT_USDT برسد (دکمه در «مدیریت خروج»).
+        'profit_alert_enabled': True,
+        # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
+        'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
         'manual_block_buy_entries': False,
@@ -2820,11 +2824,10 @@ def _signal_channel_scan_once():
                 if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
                     continue
             _SIGNAL_CHANNEL_SEEN[key] = True
-            verdict_label = {'BUY': '🟢 مناسب خرید', 'SELL': '🔴 مناسب فروش'}.get(verdict, '⚪️ معامله نکن (سیگنال ضعیف/متضاد)')
+            # V3.42: برچسب جهت (مناسب خرید/فروش) از پیام کانال حذف شد؛ جهت را خود کاربر با دکمه‌ها انتخاب می‌کند.
             lines = [
                 _tf_regime_line(timeframe),
                 f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
-                f"*{verdict_label}*",
                 "",
                 f"🎯 سطح: {level_label} `{fmt(level_value)}`",
                 f"🧩 الگو: {_signal_channel_pattern_label(pattern, side_fa)}",
@@ -2848,7 +2851,7 @@ def _signal_channel_scan_once():
                 p_entry, p_sl, p_tp = float(live), float(plan['sl']), float(plan['tp'])
                 plan_lines = [
                     "",
-                    f"📍 ورود (قیمت لحظه‌ای): `{fmt(p_entry)}` ({'خرید' if trade_side == 'BUY' else 'فروش'})",
+                    f"📍 ورود (قیمت لحظه‌ای): `{fmt(p_entry)}`",
                     f"🛑 حد ضرر: `{fmt(p_sl)}`   🏁 حد سود: `{fmt(p_tp)}`",
                 ]
                 _adm = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
@@ -2879,7 +2882,7 @@ def _signal_channel_scan_once():
                     _tr = {'entry_price': float(live), 'tp': float(plan['tp']), 'sl': float(plan['sl']),
                            'side': 'BUY (Long)' if main_buy else 'SELL (Short)', 'timeframe': timeframe,
                            'entry_reason': f"[SETUP {tag}] {(defs[0] if side_fa == 'سقف' else defs[1])}={level_value:.10g}" if defs else '',
-                           'is_real': False, 'assist_pending': True}
+                           'is_real': False, 'assist_pending': True, 'hide_direction': True}
                     png, _ctx = render_trade_chart_png(symbol, df_ind, _tr)
                     if png is not None:
                         sent_msg_id = send_channel_photo(SIGNAL_CHANNEL_ID, png.getvalue(), text, reply_markup=markup)
@@ -3104,7 +3107,8 @@ def render_trade_chart_png(symbol, df, trade):
         mode = 'PENDING' if trade.get('assist_pending') else ('REAL' if trade.get('is_real') else 'PAPER')
         direction = 'LONG' if is_long else 'SHORT'
         setup_badge = f'  •  [SETUP {setup_tag}]' if setup_tag else ''
-        ax.set_title(f'{symbol}  •  {direction}  •  {tf_label}  •  {mode}{setup_badge}', loc='left',
+        _dir_part = '' if trade.get('hide_direction') else f'{direction}  •  '   # V3.42: چارت کانال برچسب جهت ندارد
+        ax.set_title(f'{symbol}  •  {_dir_part}{tf_label}  •  {mode}{setup_badge}', loc='left',
                      color='white', fontsize=15, fontweight='bold', pad=14)
 
         summary = f"TF: {tf_label} | Entry: {fmt(entry)} | TP: {fmt(tp)} | SL: {fmt(sl)}"
@@ -4480,8 +4484,108 @@ def profit_lock_scan_once():
                 logger.exception('profit lock check failed chat=%s symbol=%s', chat_id, p.get('symbol'))
 
 
+# V3.42: هشدار سود - وقتی سود لحظه‌ای (ناخالص، همان فرمول «سود/زیان فعلی») یک پوزیشن باز به
+# PROFIT_ALERT_USDT دلار و هر مضرب بعدی آن (۵، ۱۰، ۱۵، ...) برسد، برای هر پله یک‌بار پیام می‌فرستد. مستقل از «قفل سود» است و چیزی را نمی‌بندد.
+# PROFIT_ALERT_USDT=0 آن را کاملاً خاموش می‌کند؛ کلید روشن/خاموش هم در منوی «مدیریت خروج» هست.
+PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '5')))
+# V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
+# حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
+# بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
+# فقط اطلاع‌رسانی است و چیزی را نمی‌بندد (مستقل از «مدیریت ضعف روند»). PROFIT_FADE_PCT=0 آن را خاموش می‌کند.
+PROFIT_FADE_PCT = max(0.0, float(os.environ.get('PROFIT_FADE_PCT', '0.15')))
+PROFIT_FADE_MIN_USDT = max(0.0, float(os.environ.get('PROFIT_FADE_MIN_USDT', '1.0')))
+
+
+def _fade_indicator_lines(s, p):
+    """وضعیت ضعف اندیکاتوری روی تایم‌فریم مدیریت (فقط برای نمایش در پیام؛ هر خطا → لیست خالی)."""
+    try:
+        tf = _position_management_timeframe(p)
+        wdf = get_klines(p['symbol'], tf, 150)
+        if wdf is None or wdf.empty or len(wdf) < 60:
+            return []
+        wdf = calculate_indicators(wdf)
+        if wdf.empty or len(wdf) < 60:
+            return []
+        cfg = s.get('strategy_config') or STRATEGY_DEFAULTS
+        is_weak, wscore, wreasons = evaluate_trend_weakness(wdf, p['side'], cfg)
+        head = f"• ضعف اندیکاتوری ({tf}): {'⚠️ تایید شد' if is_weak else 'هنوز تایید نشده'} (امتیاز {wscore}/100)"
+        return [head] + [f"   - {r}" for r in list(wreasons)[:3]]
+    except Exception:
+        return []
+
+
+def profit_alert_scan_once():
+    step = PROFIT_ALERT_USDT
+    if step <= 0:
+        return
+    for chat_id, s in list(USER_SESSIONS.items()):
+        up_on = bool(s.get('profit_alert_enabled', True))
+        fade_on = bool(s.get('profit_fade_alert_enabled', True)) and PROFIT_FADE_PCT > 0
+        if not (up_on or fade_on):
+            continue
+        for p in list(s.get('paper_positions') or []):
+            try:
+                if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                    continue
+                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                if not price:
+                    continue
+                pnl = _profit_lock_pnl(p, float(price))
+                if pnl is None:
+                    continue
+                long_side = side_long(p.get('side', 'BUY'))
+                side_txt = '🟢 خرید' if long_side else '🔴 فروش'
+
+                # اوجِ سودی که این ترد دیده؛ پله‌ی اوج = بالاترین مضرب آستانه زیر آن
+                peak = max(float(p.get('profit_peak_pnl') or 0.0), pnl)
+                if peak > float(p.get('profit_peak_pnl') or 0.0):
+                    p['profit_peak_pnl'] = peak
+                peak_level = math.floor(peak / step + 1e-9) * step if peak >= step else 0.0
+
+                # --- هشدار ضعف: بعد از رسیدن به حداقل یک پله و شروع افت از اوج ---
+                # دوباره‌فعال‌شدن: بعد از یک هشدار ضعف، فقط وقتی اوجِ تازه‌ای کمی بالاتر از اوجِ هشدار قبلی ثبت شود.
+                fade_peak = float(p.get('profit_fade_alert_peak') or 0.0)
+                fade_armed = fade_peak <= 0 or peak > fade_peak + max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * fade_peak)
+                if fade_on and peak_level >= step and fade_armed:
+                    drop = peak - pnl
+                    if drop >= max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * peak):
+                        p['profit_fade_alert_peak'] = peak
+                        lines = [
+                            f"⚠️ *مشاهده ضعف در سود* | *{p['symbol']}* ({side_txt})",
+                            f"• اوج سود: `{peak:.2f}$` (پله {peak_level:g}$) → سود فعلی: `{pnl:.2f}$` (افت `{drop:.2f}$`)",
+                            f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`",
+                            f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`",
+                        ]
+                        lines += _fade_indicator_lines(s, p)
+                        lines.append("فقط هشدار است؛ پوزیشن بسته نشده. سود ناخالص (بدون کارمزد) است.")
+                        send_message(chat_id, "\n".join(lines))
+                        save_session(chat_id)
+
+                # --- هشدار رسیدن به پله‌ی سود (۵، ۱۰، ۱۵، ...) ---
+                if up_on and pnl >= step:
+                    last_level = float(p.get('profit_alert_level') or 0.0)
+                    level = math.floor(pnl / step + 1e-9) * step
+                    if level > last_level + 1e-9:
+                        p['profit_alert_level'] = level
+                        msg = (
+                            f"💰 *هشدار سود {level:g}$* | *{p['symbol']}* ({side_txt})\n"
+                            f"• سود فعلی: `{pnl:.2f}$`\n"
+                            f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`\n"
+                            f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`\n"
+                            f"سود ناخالص (بدون کارمزد) است و پوزیشن همچنان باز است."
+                        )
+                        send_message(chat_id, msg)
+                        save_session(chat_id)
+            except Exception:
+                logger.exception('profit alert failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+
+
 def _profit_lock_loop():
     while True:
+        try:
+            profit_alert_scan_once()
+        except Exception:
+            logger.exception('profit alert loop failed')
         try:
             profit_lock_scan_once()
         except Exception:
@@ -6181,6 +6285,8 @@ def trade_filter_management_keyboard(chat_id, section=None):
              cell(bool(s.get('swing_trailing_enabled', True)), 'ترلینگ سوینگ', '/toggle_swing_trailing')],
             [cell(weakness_on, 'مدیریت ضعف روند', '/toggle_weakness_exit'),
              cell(bool(s.get('day_end_close_enabled', True)), 'بستن پایان روز', '/toggle_day_end_close')],
+            [cell(bool(s.get('profit_alert_enabled', True)), f'هشدار سود هر {PROFIT_ALERT_USDT:g}$', '/toggle_profit_alert'),
+             cell(bool(s.get('profit_fade_alert_enabled', True)), 'هشدار ضعف سود', '/toggle_profit_fade_alert')],
             back_row,
         ]}
 
@@ -7465,6 +7571,30 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
+    if cl=='/toggle_profit_fade_alert':
+        current = bool(s.get('profit_fade_alert_enabled', True))
+        s['profit_fade_alert_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            f'اگر سود پوزیشن به یک پله ({PROFIT_ALERT_USDT:g}$ و مضرب‌ها) برسد و بعد از اوج حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) افت کند، پیام «مشاهده ضعف» می‌گیری. پوزیشن بسته نمی‌شود.'
+            if not current else
+            'هشدار ضعف سود خاموش شد.'
+        )
+        send_message(chat_id, f"⚠️ هشدار ضعف سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl=='/toggle_profit_alert':
+        current = bool(s.get('profit_alert_enabled', True))
+        s['profit_alert_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            f'وقتی سود یک پوزیشن باز به {PROFIT_ALERT_USDT:g}$ و هر مضرب بعدی (مثلاً {PROFIT_ALERT_USDT*2:g}$ و {PROFIT_ALERT_USDT*3:g}$) برسد، برای هر پله یک پیام هشدار می‌گیری (پوزیشن بسته نمی‌شود).'
+            if not current else
+            'هشدار سود خاموش شد.'
+        )
+        send_message(chat_id, f"💰 هشدار سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
     if cl=='/toggle_day_end_close':
         current = bool(s.get('day_end_close_enabled', True))
         s['day_end_close_enabled'] = not current
@@ -7515,7 +7645,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     _tf_sections = {
         '/trade_filter_entry': ('entry', "📥 *ورود و فیلتر سیگنال*\n\nفیلترهایی که تعیین می‌کنند سیگنال چه زمانی قبول شود."),
-        '/trade_filter_exit': ('exit', "🚪 *مدیریت خروج*\n\nقفل سود، ترلینگ SL، خروج با ضعف روند و بستن پایان روز."),
+        '/trade_filter_exit': ('exit', "🚪 *مدیریت خروج*\n\nقفل سود، ترلینگ SL، خروج با ضعف روند، بستن پایان روز و هشدارهای سود/ضعف سود."),
         '/trade_filter_limits': ('limits', "🚫 *بلاک دستی و سقف‌ها*\n\nبلاک جهت ورود و سقف معاملات هم‌جهت."),
         '/trade_filter_tools': ('tools', "🧭 *استراتژی و ابزارها*\n\nسناریوها، خانواده‌های استراتژی، حالت دستیار و پروفایل."),
     }
