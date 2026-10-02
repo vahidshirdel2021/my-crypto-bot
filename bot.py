@@ -737,6 +737,12 @@ def default_session():
         # باشند ورود فروش، اگر ≥۷ نماد نزولی باشند ورود خرید مسدود می‌شود و اگر هیچ‌کدام
         # (رنج) باشد اصلاً ورودی انجام نمی‌شود. پیش‌فرض False (خاموش).
         'market_alignment_filters_enabled': False,
+        # V3.42: کلید روشن/خاموش قفل سود (دکمه در «مدیریت فیلتر معاملات»). پیش‌فرض از PROFIT_LOCK_ENABLED (خاموش).
+        'profit_lock_enabled': PROFIT_LOCK_ENABLED,
+        # V3.42: کلید جدا برای ترلینگ سوینگ (جابه‌جایی SL به آخرین سوینگ تأییدشده). پیش‌فرض روشن (رفتار قبلی).
+        'swing_trailing_enabled': True,
+        # V3.42: کلید بستن اجباری معاملات ۵/۱۵ دقیقه‌ای در پایان روز UTC. پیش‌فرض روشن (رفتار قبلی).
+        'day_end_close_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
         'manual_block_buy_entries': False,
@@ -1931,6 +1937,9 @@ def _ensure_tf_gate_sync(tf):
 # V3.42: نردبان قبلی (step-1R) در سودهای ~1.8R فقط 0.5R قفل می‌کرد؛ یعنی از ~8.7$ سود فقط ~2.4$ تضمین بود
 # (CHZ/MASK). حالا از 1.5R به بعد TRAILING_LOCK_FRACTION (پیش‌فرض ۶۰٪) از بیشترین R دیده‌شده قفل می‌شود
 # (پله‌های ۰.۲R). بین 1R تا 1.5R همچنان break-even. TRAILING_LOCK_FRACTION=0 → نردبان قدیمی.
+# V3.42: کلید اصلی قفل سود (نردبان R + قفل دلاری + قفل زودهنگام). پیش‌فرض خاموش (طبق درخواست کاربر).
+# برای روشن‌کردن دوباره: PROFIT_LOCK_ENABLED=true در .env
+PROFIT_LOCK_ENABLED = os.environ.get('PROFIT_LOCK_ENABLED', 'false').lower() in ('1', 'true', 'yes')
 TRAILING_LOCK_FRACTION = max(0.0, min(0.9, float(os.environ.get('TRAILING_LOCK_FRACTION', '0.6'))))
 
 
@@ -1959,6 +1968,8 @@ def trailing_locked_r(entry, risk_distance, current_price, is_long):
 
 def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None):
     """Apply the position-management trailing ladder without changing entries."""
+    if not bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)):
+        return False
     try:
         entry=float(p['entry_price'])
         risk_distance=float(p.get('risk_distance') or 0.0)
@@ -2045,12 +2056,15 @@ def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
         logger.debug('swing trailing check failed symbol=%s: %s', p.get('symbol'), exc)
 
 
-def _maybe_close_before_day_end(chat_id, p, price):
+def _maybe_close_before_day_end(chat_id, p, price, s=None):
     """
     برای معاملات تایم‌فریم ۵ و ۱۵ دقیقه: پوزیشن هرگز نباید به روز بعد منتقل شود، چه با سود
     چه با ضرر. اگر تا پایان روز کریپتو (۰۰:۰۰ UTC) کمتر از یک چرخه اسکن باقی مانده
     باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
     """
+    # V3.42: کلید «بستن پایان روز» (دکمه در مدیریت فیلتر معاملات). پیش‌فرض روشن (رفتار قبلی).
+    if s is not None and not bool(s.get('day_end_close_enabled', True)):
+        return False
     tf = p.get('timeframe', '5min')
     if tf not in NO_OVERNIGHT_TIMEFRAMES:
         return False
@@ -4150,7 +4164,8 @@ def _weakness_exit_check(chat_id, s, p, current_r, wdf=None, current_price=None)
         # Fast profit protection is based on live price/MFE and remains independent
         # of indicator weakness. Indicator weakness starts only after a real profit
         # buffer (>= 1R), so normal pullbacks cannot close a marginally profitable trade.
-        if peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
+        # V3.42: این قانون «پس‌دادن سود از اوج» یک نوع قفل سود است؛ فقط وقتی کلید «قفل سود» روشن است.
+        if bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)) and peak_r>=1.0 and current_r <= peak_r-0.30 and current_r>=0.50:
             return True,[f"مدیریت {management_tf}: بازگشت از اوج سود {peak_r:.1f}R به {current_r:.1f}R"]
 
         early_loss_enabled=bool(cfg.get('early_loss_weakness_exit_enabled',False))
@@ -4381,6 +4396,8 @@ def profit_lock_scan_once():
         return
     now = time.time()
     for chat_id, s in list(USER_SESSIONS.items()):
+        if not bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)):
+            continue
         for p in list(s.get('paper_positions') or []):
             try:
                 if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
@@ -4530,7 +4547,7 @@ def update_positions(chat_id):
             update_trade_excursions(p, float(price), float(price))
             p['last_unrealized_pnl']=float(p.get('margin',0))*(((price-float(p['entry_price']))/float(p['entry_price'])) if side_long(p['side']) else ((float(p['entry_price'])-price)/float(p['entry_price'])))*float(p['leverage'])
             p['last_price']=float(price)
-        if _maybe_close_before_day_end(chat_id,p,price):
+        if _maybe_close_before_day_end(chat_id,p,price,s):
             continue
 
         entry=float(p['entry_price'])
@@ -4573,7 +4590,7 @@ def update_positions(chat_id):
 
         if reason is None:
             # Structural swing stop intentionally remains on the primary trading timeframe.
-            if not primary_df.empty:
+            if not primary_df.empty and bool(s.get('swing_trailing_enabled', True)):
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
 
         if reason is None:
@@ -6128,8 +6145,14 @@ _SCENARIO_LABELS_PLAIN = {
 }
 
 
-def trade_filter_management_keyboard(chat_id):
-    """دکمه‌های محدودیت/فیلتر معاملات (نه خانواده‌ی استراتژی‌ها - آن یک منوی جداست)."""
+def trade_filter_management_keyboard(chat_id, section=None):
+    """منوی مدیریت فیلتر معاملات، دسته‌بندی‌شده.
+    section=None  -> منوی اصلی دسته‌ها
+    'entry'       -> ورود و فیلتر سیگنال
+    'exit'        -> مدیریت خروج و محافظت از سود
+    'limits'      -> بلاک دستی و سقف پوزیشن‌ها
+    'tools'       -> سناریوها، استراتژی، دستیار و پروفایل
+    """
     s = get_session(chat_id)
     scfg = s.get('strategy_config') or {}
 
@@ -6137,33 +6160,60 @@ def trade_filter_management_keyboard(chat_id):
         icon = '🟢' if flag_val else '🔴'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
-    sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
-    swing_break = bool(scfg.get('sweep_require_swing_break', True))
-    align_on = bool(s.get('market_alignment_filters_enabled', False))
-    weakness_on = bool(scfg.get('weakness_exit_enabled', False))
-    block_buy = bool(s.get('manual_block_buy_entries', False))
-    block_sell = bool(s.get('manual_block_sell_entries', False))
-    block_all = bool(s.get('manual_block_all_entries', False))
-    max_same = int(s.get('max_same_direction_positions', 0) or 0)
-    max_same_txt = str(max_same) if max_same > 0 else '∞'
+    back_row = [{'text': '⬅️ دسته‌ها', 'callback_data': '/trade_filter_management'},
+                {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]
 
-    return {
-        'inline_keyboard': [
+    if section == 'entry':
+        sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
+        swing_break = bool(scfg.get('sweep_require_swing_break', True))
+        align_on = bool(s.get('market_alignment_filters_enabled', False))
+        return {'inline_keyboard': [
             [cell(sweep_confirm, 'تاییدیه کندل Sweep', '/toggle_sweep_confirm'),
              cell(swing_break, 'شکست سوینگ محلی', '/toggle_swing_break')],
-            [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment'),
-             cell(weakness_on, 'مدیریت ضعف روند', '/toggle_weakness_exit')],
+            [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment')],
+            back_row,
+        ]}
+
+    if section == 'exit':
+        weakness_on = bool(scfg.get('weakness_exit_enabled', False))
+        return {'inline_keyboard': [
+            [cell(bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)), 'قفل سود', '/toggle_profit_lock'),
+             cell(bool(s.get('swing_trailing_enabled', True)), 'ترلینگ سوینگ', '/toggle_swing_trailing')],
+            [cell(weakness_on, 'مدیریت ضعف روند', '/toggle_weakness_exit'),
+             cell(bool(s.get('day_end_close_enabled', True)), 'بستن پایان روز', '/toggle_day_end_close')],
+            back_row,
+        ]}
+
+    if section == 'limits':
+        block_buy = bool(s.get('manual_block_buy_entries', False))
+        block_sell = bool(s.get('manual_block_sell_entries', False))
+        block_all = bool(s.get('manual_block_all_entries', False))
+        max_same = int(s.get('max_same_direction_positions', 0) or 0)
+        max_same_txt = str(max_same) if max_same > 0 else '∞'
+        return {'inline_keyboard': [
             [cell(block_buy, 'بلاک خرید', '/toggle_block_buy'),
              cell(block_sell, 'بلاک فروش', '/toggle_block_sell')],
             [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
             [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
+            back_row,
+        ]}
+
+    if section == 'tools':
+        return {'inline_keyboard': [
             [{'text': '🧭 مدیریت ۶ سناریو PDH/PDL', 'callback_data': '/scenario_management'}],
+            [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
             [{'text': '🤝 حالت دستیار (ورود با تایید من)', 'callback_data': '/assist_menu'}],
             [{'text': '👤 پروفایل من', 'callback_data': '/my_profile_menu'}],
-            [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
-            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
-        ]
-    }
+            back_row,
+        ]}
+
+    return {'inline_keyboard': [
+        [{'text': '📥 ورود و فیلتر سیگنال', 'callback_data': '/trade_filter_entry'},
+         {'text': '🚪 مدیریت خروج', 'callback_data': '/trade_filter_exit'}],
+        [{'text': '🚫 بلاک دستی و سقف‌ها', 'callback_data': '/trade_filter_limits'},
+         {'text': '🧭 استراتژی و ابزارها', 'callback_data': '/trade_filter_tools'}],
+        [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+    ]}
 
 
 def same_direction_limit_keyboard(chat_id):
@@ -6178,7 +6228,7 @@ def same_direction_limit_keyboard(chat_id):
         'inline_keyboard': [
             [opt(2, '2'), opt(5, '5')],
             [opt(10, '10'), opt(0, 'بدون محدودیت')],
-            [{'text': '⬅️ بازگشت', 'callback_data': '/trade_filter_management'}],
+            [{'text': '⬅️ بازگشت', 'callback_data': '/trade_filter_limits'}],
         ]
     }
 
@@ -7064,7 +7114,7 @@ def process_command(cmd,chat_id,message_id=None):
         msg = f"✅ حداکثر پوزیشن هم‌جهت هم‌زمان: `{cur or '∞'}`"
         if overall > 0 and (cur == 0 or cur > overall):
             msg += f"\n\n⚠️ سقف کل پوزیشن‌های باز روی `{overall}` است و همان همچنان اعمال می‌شود. برای بالاتر رفتن، «حداکثر پوزیشن» را هم افزایش دهید."
-        send_message(chat_id, msg, trade_filter_management_keyboard(chat_id)); return
+        send_message(chat_id, msg, trade_filter_management_keyboard(chat_id, 'limits')); return
     if cl.startswith('/set_dir_cooldown_'):
         s['same_direction_entry_cooldown_seconds']=max(0.0,float(cl.replace('/set_dir_cooldown_',''))); save_session(chat_id)
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
@@ -7390,7 +7440,7 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس، سیگنال Sweep فقط وقتی صادر می‌شود که یک کندل بعد از ریکلیم هم جهتش را تایید کند - ورود کمی دیرتر و با قیمت بدتر، ولی فیک‌اوت‌های زودهنگام فیلتر می‌شوند.'
             if not current else 'برگشت به حالت قبلی: سیگنال Sweep دوباره بلافاصله روی کندل ریکلیم صادر می‌شود.'
         )
-        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_swing_break':
         s.setdefault('strategy_config', {})
@@ -7402,7 +7452,7 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس، بعد از ریکلیم، سیگنال Sweep صادر نمی‌شود مگر قیمت واقعاً از سقف/کف سوینگِ محلیِ تشکیل‌شده بعد از ریکلیم رد بشه (نه صرفاً عدم نقض) - قوی‌تر از «تاییدیه یک کندل اضافه» است و در صورت روشن‌بودن هر دو، همین یکی ملاک عمل قرار می‌گیرد.'
             if not current else 'برگشت به حالت قبلی: نیازی به شکست سوینگ محلی نیست.'
         )
-        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_market_alignment':
         current = bool(s.get('market_alignment_filters_enabled', False))
@@ -7413,7 +7463,43 @@ def process_command(cmd,chat_id,message_id=None):
             'از این پس در تایم‌فریم فعال، ۱۰ نماد شاخص بررسی می‌شوند: اگر ۷ نماد یا بیشتر صعودی باشند ورود فروش مسدود می‌شود، اگر ۷ نماد یا بیشتر نزولی باشند ورود خرید مسدود می‌شود، و اگر بازار رنج باشد هیچ ورودی انجام نمی‌شود. پوزیشن‌های باز دست‌نخورده می‌مانند.'
             if not current else 'گیت جهت بازار خاموش شد: ورودها فقط بر اساس سیگنال استراتژی انجام می‌شوند و هیچ محدودیت جهت بازاری اعمال نمی‌شود.'
         )
-        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
+        return
+    if cl=='/toggle_day_end_close':
+        current = bool(s.get('day_end_close_enabled', True))
+        s['day_end_close_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'بستن پایان روز روشن شد: معاملات ۵ و ۱۵ دقیقه‌ای نزدیک ۰۰:۰۰ UTC با قیمت بازار بسته می‌شوند.'
+            if not current else
+            'بستن پایان روز خاموش شد: معاملات ۵ و ۱۵ دقیقه‌ای به روز بعد منتقل می‌شوند (با تغییر PDH/PDL در ۰۰:۰۰ UTC).'
+        )
+        send_message(chat_id, f"🕛 بستن پایان روز: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl=='/toggle_swing_trailing':
+        current = bool(s.get('swing_trailing_enabled', True))
+        s['swing_trailing_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'ترلینگ سوینگ روشن شد: با تشکیل سوینگ جدید، SL به آن منتقل می‌شود (هرگز بازتر نمی‌شود).'
+            if not current else
+            'ترلینگ سوینگ خاموش شد: SL پوزیشن‌ها با سوینگ جابه‌جا نمی‌شود.'
+        )
+        send_message(chat_id, f"🔄 ترلینگ سوینگ: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl=='/toggle_profit_lock':
+        current = bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED))
+        s['profit_lock_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'قفل سود (نردبان R + قفل دلاری + قفل زودهنگام) روشن شد؛ برای پوزیشن‌های باز و جدید اعمال می‌شود.'
+            if not current else
+            'قفل سود خاموش شد: معامله فقط با SL، TP یا پله‌های خروج بسته می‌شود. پوزیشن‌های باز هم دیگر قفل نمی‌شوند.'
+        )
+        send_message(chat_id, f"🔒 قفل سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_weakness_exit':
         s.setdefault('strategy_config', {})
@@ -7425,10 +7511,20 @@ def process_command(cmd,chat_id,message_id=None):
             'برگشت به حالت قبلی: پوزیشن‌ها دیگر بابت ضعف اندیکاتورها یا برگشت از اوج سود زودتر بسته نمی‌شوند - فقط با SL/TP معمولی (و بستن اجباری آخر روز) می‌بندند.'
             if current else 'مدیریت هوشمند دوباره فعال شد.'
         )
-        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    _tf_sections = {
+        '/trade_filter_entry': ('entry', "📥 *ورود و فیلتر سیگنال*\n\nفیلترهایی که تعیین می‌کنند سیگنال چه زمانی قبول شود."),
+        '/trade_filter_exit': ('exit', "🚪 *مدیریت خروج*\n\nقفل سود، ترلینگ SL، خروج با ضعف روند و بستن پایان روز."),
+        '/trade_filter_limits': ('limits', "🚫 *بلاک دستی و سقف‌ها*\n\nبلاک جهت ورود و سقف معاملات هم‌جهت."),
+        '/trade_filter_tools': ('tools', "🧭 *استراتژی و ابزارها*\n\nسناریوها، خانواده‌های استراتژی، حالت دستیار و پروفایل."),
+    }
+    if cl in _tf_sections:
+        _sec, _title = _tf_sections[cl]
+        send_message(chat_id, _title, trade_filter_management_keyboard(chat_id, _sec))
         return
     if cl=='/trade_filter_management':
-        send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nهمه‌ی محدودیت‌ها و فیلترهای مربوط به ورود/مدیریت معاملات این‌جا جمع شده‌اند.", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nیکی از دسته‌ها را انتخاب کن.", trade_filter_management_keyboard(chat_id))
         return
     if cl=='/scenario_management':
         send_message(
@@ -7595,7 +7691,7 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = 'از این پس هیچ معامله‌ی خریدی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات خرید دوباره آزادند.'
-        send_message(chat_id, f"🚫 بلاک دستی معاملات خرید: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🚫 بلاک دستی معاملات خرید: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/toggle_block_sell':
         current = bool(s.get('manual_block_sell_entries', False))
@@ -7603,7 +7699,7 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = 'از این پس هیچ معامله‌ی فروشی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات فروش دوباره آزادند.'
-        send_message(chat_id, f"🚫 بلاک دستی معاملات فروش: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🚫 بلاک دستی معاملات فروش: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/toggle_block_all':
         current = bool(s.get('manual_block_all_entries', False))
@@ -7611,7 +7707,7 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = 'از این پس هیچ معامله‌ی جدیدی (نه خرید نه فروش) باز نمی‌شود - این فقط جلوی ورود جدید را می‌گیرد، پوزیشن‌های باز فعلی طبق روال عادی مدیریت می‌شوند.' if not current else 'ورود به معامله برای هر دو جهت دوباره آزاد است.'
-        send_message(chat_id, f"🛑 توقف کامل ورود به معامله: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, f"🛑 توقف کامل ورود به معامله: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/noop':
         return
