@@ -3015,6 +3015,31 @@ def _touch_last_save():
         logger.exception('failed to persist signal channel touch state')
 
 
+def _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming):
+    """V3.42.14: قالب ثابت پیام کانال (طبق قالب کاربر):
+        🧭 رژیم بازار (15م): ...
+        🧭 رژیم نماد (15م): ...
+        سیگنال : خرید / فروش
+        📡 نماد · تایم‌فریم
+        (خالی)
+        🎯 سطح: ...
+        🧩 الگو: ...
+        🕯 کندل: ...      (فقط الگوی برخورد ساده)
+    خط‌های «ورود/SL/TP/سود و زیان» بعد از این می‌آیند (plan_lines)."""
+    lines = [
+        _tf_regime_line(timeframe),
+        _symbol_regime_line(regime, timeframe),
+        "سیگنال : خرید / فروش",
+        f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
+        "",
+        f"🎯 سطح: {level_label} `{fmt(level_value)}`",
+        f"🧩 الگو: {_signal_channel_pattern_label(pattern, side_fa)}",
+    ]
+    if pattern == 'touch':
+        lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
+    return lines
+
+
 def _signal_channel_scan_once():
     global _SIGNAL_CHANNEL_TOUCH_DIRTY
     if not SIGNAL_CHANNEL_ID:
@@ -3059,17 +3084,7 @@ def _signal_channel_scan_once():
                 _SIGNAL_CHANNEL_TOUCH_LAST[touch_key] = time.time()
                 _SIGNAL_CHANNEL_TOUCH_DIRTY = True
             # V3.42: برچسب جهت (مناسب خرید/فروش) از پیام کانال حذف شد؛ جهت را خود کاربر با دکمه‌ها انتخاب می‌کند.
-            lines = [
-                _tf_regime_line(timeframe),
-                f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
-                "",
-                f"🎯 سطح: {level_label} `{fmt(level_value)}`",
-                f"🧩 الگو: {_signal_channel_pattern_label(pattern, side_fa)}",
-            ]
-            if regime_label:
-                lines.append(f"🧭 رژیم نماد: {regime_label}")
-            if pattern == 'touch':
-                lines.append(f"🕯 کندل: {'در حال تشکیل' if forming else 'تازه بسته‌شده'}")
+            lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming)
 
             # --- طرح معامله (ورود لحظه‌ای، SL، TP + نام سطح TP، سود/زیان دقیق پس از کارمزد) و تصویر چارت ---
             trade_side = verdict or implied_side          # 'BUY' / 'SELL'
@@ -4556,36 +4571,39 @@ def refresh_live_position_messages():
     """Refresh visible position cards every ~10s without running the heavy management engine."""
     now = time.time()
     for chat_id, s in list(USER_SESSIONS.items()):
-        if not s.get('paper_positions') or not s.get('positions_message_id'):
-            continue
-        if now - float(s.get('positions_message_last_edit') or 0.0) < 10.0:
-            continue
-        prices = {}
-        for p in list(s.get('paper_positions') or []):
-            try:
-                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
-                if price:
-                    prices[p['symbol']] = float(price)
-                    p['last_price'] = float(price)
-            except Exception:
-                pass
-        text, markup = _build_open_positions_view(chat_id, prices)
-        res = tg('editMessageText', {
-            'chat_id': chat_id,
-            'message_id': int(s['positions_message_id']),
-            'text': text,
-            'reply_markup': markup,
-            'parse_mode': 'Markdown'
-        }, 10)
-        if res and res.get('ok'):
-            s['positions_message_last_edit'] = now
-            save_session(chat_id)
-        else:
-            desc = ((res or {}).get('description') or '').lower()
-            if 'message is not modified' in desc:
+        try:
+            if not s.get('paper_positions') or not s.get('positions_message_id'):
+                continue
+            if now - float(s.get('positions_message_last_edit') or 0.0) < 10.0:
+                continue
+            prices = {}
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if price:
+                        prices[p['symbol']] = float(price)
+                        p['last_price'] = float(price)
+                except Exception:
+                    pass
+            text, markup = _build_open_positions_view(chat_id, prices)
+            res = tg('editMessageText', {
+                'chat_id': chat_id,
+                'message_id': int(s['positions_message_id']),
+                'text': text,
+                'reply_markup': markup,
+                'parse_mode': 'Markdown'
+            }, 10)
+            if res and res.get('ok'):
                 s['positions_message_last_edit'] = now
-            elif 'not found' in desc or "can't be edited" in desc:
-                s['positions_message_id'] = None   # پیام حذف شده؛ رفرش بی‌نتیجه متوقف شود
+                save_session(chat_id)
+            else:
+                desc = ((res or {}).get('description') or '').lower()
+                if 'message is not modified' in desc:
+                    s['positions_message_last_edit'] = now
+                elif 'not found' in desc or "can't be edited" in desc:
+                    s['positions_message_id'] = None   # پیام حذف شده؛ رفرش بی‌نتیجه متوقف شود
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'refresh_live_position_messages', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 # --- قفل سود پله‌ای (تنها منطقِ «قفل سود»؛ مستقل از SL/TP و مدیریت ضعف روند) ---------------
@@ -4647,88 +4665,91 @@ def profit_lock_scan_once():
         return
     now = time.time()
     for chat_id, s in list(USER_SESSIONS.items()):
-        if not bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)):
-            continue
-        for p in list(s.get('paper_positions') or []):
-            try:
-                if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
-                    continue
-                key = p.get('trade_id') or id(p)
-                if key in _PROFIT_LOCK_INFLIGHT or now < _PROFIT_LOCK_RETRY_AFTER.get(key, 0.0):
-                    continue
-                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
-                if not price:
-                    continue
-                pnl = _profit_lock_pnl(p, float(price))
-                if pnl is None:
-                    continue
-                level = float(p.get('profit_lock_level_usdt') or 0.0)
-                # V3.42: سطح قفل بر اساس «بیشترین سودِ دیده‌شده» بالا می‌رود، نه فقط قیمت لحظه‌ی همین چک.
-                # بیشترین سود = بهترین از: قیمت‌های لحظه‌ای که این ترد دیده + ویکِ کندل (peak_favorable_price که
-                # چرخه‌ی اصلی ثبت می‌کند). بدون این، ویکی که بین دو چک رد می‌شد قفل را فعال نمی‌کرد.
-                # شرط بستن همچنان با قیمت لحظه‌ای است.
-                pnl_peak = pnl
-                if PROFIT_LOCK_USE_PEAK:
-                    try:
-                        lp = p.get('lock_peak_pnl')
-                        if lp is None or pnl > float(lp):
-                            p['lock_peak_pnl'] = pnl
-                        pnl_peak = max(pnl, float(p.get('lock_peak_pnl') or pnl))
-                        if not p.get('is_real'):
-                            pk = p.get('peak_favorable_price')
-                            if pk:
-                                pk_pnl = _profit_lock_pnl(p, float(pk))
-                                if pk_pnl is not None:
-                                    pnl_peak = max(pnl_peak, pk_pnl)
-                    except Exception:
-                        pnl_peak = pnl
-                new_level = math.floor(pnl_peak / step + 1e-9) * step if step > 0 else 0.0
-                risk_usdt = float(p.get('risk_usdt') or 0.0)
-                fee_est = round_trip_fee_usdt(p.get('margin'), p.get('leverage')) or 0.0
-                min_lock_after_fee = fee_est * PROFIT_LOCK_MIN_NET_MULT if fee_est > 0 else 0.0
-                if new_level > 0 and 0 < new_level < min_lock_after_fee <= pnl_peak:
-                    new_level = min_lock_after_fee
-                if PROFIT_LOCK_EARLY_TRIGGER_R > 0 and risk_usdt > 0:
-                    early_trigger = max(risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R, min_lock_after_fee)
-                    early_lock = max(risk_usdt * PROFIT_LOCK_EARLY_LOCK_R, min_lock_after_fee)
-                    if pnl_peak >= early_trigger and early_lock > new_level:
-                        new_level = early_lock
-                if new_level > 0 and new_level > level:
-                    level = new_level
-                    p['profit_lock_level_usdt'] = level
-                    save_session(chat_id)
-                if level > 0 and pnl <= level:
-                    if p.get('is_real'):
-                        # فقط اگر پوزیشن هنوز روی صرافی وجود دارد (مثلاً SL/TP صرافی قبلاً نبسته باشدش)
-                        try:
-                            if not find_position(chat_id, p['symbol']):
-                                continue
-                        except Exception:
-                            continue
-                    if p not in s.get('paper_positions', []):
+        try:
+            if not bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)):
+                continue
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
                         continue
-                    _PROFIT_LOCK_INFLIGHT.add(key)
-                    try:
-                        exit_px = float(price)
-                        if not p.get('is_real') and pnl < level:
-                            # PAPER: استاپِ قفل روی سطح قفل‌شده فیل می‌شود (با اسلیپیج کم)، نه روی قیمتی که
-                            # چرخه‌ی بعدیِ چک دیده؛ مثل سفارش استاپ واقعی.
+                    key = p.get('trade_id') or id(p)
+                    if key in _PROFIT_LOCK_INFLIGHT or now < _PROFIT_LOCK_RETRY_AFTER.get(key, 0.0):
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    pnl = _profit_lock_pnl(p, float(price))
+                    if pnl is None:
+                        continue
+                    level = float(p.get('profit_lock_level_usdt') or 0.0)
+                    # V3.42: سطح قفل بر اساس «بیشترین سودِ دیده‌شده» بالا می‌رود، نه فقط قیمت لحظه‌ی همین چک.
+                    # بیشترین سود = بهترین از: قیمت‌های لحظه‌ای که این ترد دیده + ویکِ کندل (peak_favorable_price که
+                    # چرخه‌ی اصلی ثبت می‌کند). بدون این، ویکی که بین دو چک رد می‌شد قفل را فعال نمی‌کرد.
+                    # شرط بستن همچنان با قیمت لحظه‌ای است.
+                    pnl_peak = pnl
+                    if PROFIT_LOCK_USE_PEAK:
+                        try:
+                            lp = p.get('lock_peak_pnl')
+                            if lp is None or pnl > float(lp):
+                                p['lock_peak_pnl'] = pnl
+                            pnl_peak = max(pnl, float(p.get('lock_peak_pnl') or pnl))
+                            if not p.get('is_real'):
+                                pk = p.get('peak_favorable_price')
+                                if pk:
+                                    pk_pnl = _profit_lock_pnl(p, float(pk))
+                                    if pk_pnl is not None:
+                                        pnl_peak = max(pnl_peak, pk_pnl)
+                        except Exception:
+                            pnl_peak = pnl
+                    new_level = math.floor(pnl_peak / step + 1e-9) * step if step > 0 else 0.0
+                    risk_usdt = float(p.get('risk_usdt') or 0.0)
+                    fee_est = round_trip_fee_usdt(p.get('margin'), p.get('leverage')) or 0.0
+                    min_lock_after_fee = fee_est * PROFIT_LOCK_MIN_NET_MULT if fee_est > 0 else 0.0
+                    if new_level > 0 and 0 < new_level < min_lock_after_fee <= pnl_peak:
+                        new_level = min_lock_after_fee
+                    if PROFIT_LOCK_EARLY_TRIGGER_R > 0 and risk_usdt > 0:
+                        early_trigger = max(risk_usdt * PROFIT_LOCK_EARLY_TRIGGER_R, min_lock_after_fee)
+                        early_lock = max(risk_usdt * PROFIT_LOCK_EARLY_LOCK_R, min_lock_after_fee)
+                        if pnl_peak >= early_trigger and early_lock > new_level:
+                            new_level = early_lock
+                    if new_level > 0 and new_level > level:
+                        level = new_level
+                        p['profit_lock_level_usdt'] = level
+                        save_session(chat_id)
+                    if level > 0 and pnl <= level:
+                        if p.get('is_real'):
+                            # فقط اگر پوزیشن هنوز روی صرافی وجود دارد (مثلاً SL/TP صرافی قبلاً نبسته باشدش)
                             try:
-                                amt = abs(float(p.get('amount') or 0))
-                                if amt > 0:
-                                    over = min(level - pnl, (float(p.get('risk_usdt') or 0.0) or level) * PAPER_LOCKED_STOP_SLIPPAGE_MAX_R)
-                                    fill_pnl = level - over * PAPER_LOCKED_STOP_SLIPPAGE_FRACTION
-                                    e0 = float(p['entry_price'])
-                                    exit_px = (e0 + fill_pnl / amt) if side_long(p.get('side', 'BUY')) else (e0 - fill_pnl / amt)
+                                if not find_position(chat_id, p['symbol']):
+                                    continue
                             except Exception:
-                                exit_px = float(price)
-                        ok = close_position(chat_id, p, exit_px, f'قفل سود پله‌ای ({level:g}$)')
-                    finally:
-                        _PROFIT_LOCK_INFLIGHT.discard(key)
-                    if not ok:
-                        _PROFIT_LOCK_RETRY_AFTER[key] = time.time() + PROFIT_LOCK_RETRY_SECONDS
-            except Exception:
-                logger.exception('profit lock check failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+                                continue
+                        if p not in s.get('paper_positions', []):
+                            continue
+                        _PROFIT_LOCK_INFLIGHT.add(key)
+                        try:
+                            exit_px = float(price)
+                            if not p.get('is_real') and pnl < level:
+                                # PAPER: استاپِ قفل روی سطح قفل‌شده فیل می‌شود (با اسلیپیج کم)، نه روی قیمتی که
+                                # چرخه‌ی بعدیِ چک دیده؛ مثل سفارش استاپ واقعی.
+                                try:
+                                    amt = abs(float(p.get('amount') or 0))
+                                    if amt > 0:
+                                        over = min(level - pnl, (float(p.get('risk_usdt') or 0.0) or level) * PAPER_LOCKED_STOP_SLIPPAGE_MAX_R)
+                                        fill_pnl = level - over * PAPER_LOCKED_STOP_SLIPPAGE_FRACTION
+                                        e0 = float(p['entry_price'])
+                                        exit_px = (e0 + fill_pnl / amt) if side_long(p.get('side', 'BUY')) else (e0 - fill_pnl / amt)
+                                except Exception:
+                                    exit_px = float(price)
+                            ok = close_position(chat_id, p, exit_px, f'قفل سود پله‌ای ({level:g}$)')
+                        finally:
+                            _PROFIT_LOCK_INFLIGHT.discard(key)
+                        if not ok:
+                            _PROFIT_LOCK_RETRY_AFTER[key] = time.time() + PROFIT_LOCK_RETRY_SECONDS
+                except Exception:
+                    logger.exception('profit lock check failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'profit_lock_scan_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 # V3.42: هشدار سود - وقتی سود لحظه‌ای (ناخالص، همان فرمول «سود/زیان فعلی») یک پوزیشن باز به
@@ -4766,65 +4787,68 @@ def profit_alert_scan_once():
     if step <= 0:
         return
     for chat_id, s in list(USER_SESSIONS.items()):
-        up_on = bool(s.get('profit_alert_enabled', True))
-        fade_on = bool(s.get('profit_fade_alert_enabled', True)) and PROFIT_FADE_PCT > 0
-        if not (up_on or fade_on):
-            continue
-        for p in list(s.get('paper_positions') or []):
-            try:
-                if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
-                    continue
-                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
-                if not price:
-                    continue
-                pnl = _profit_lock_pnl(p, float(price))
-                if pnl is None:
-                    continue
-                long_side = side_long(p.get('side', 'BUY'))
-                side_txt = '🟢 خرید' if long_side else '🔴 فروش'
+        try:
+            up_on = bool(s.get('profit_alert_enabled', True))
+            fade_on = bool(s.get('profit_fade_alert_enabled', True)) and PROFIT_FADE_PCT > 0
+            if not (up_on or fade_on):
+                continue
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    pnl = _profit_lock_pnl(p, float(price))
+                    if pnl is None:
+                        continue
+                    long_side = side_long(p.get('side', 'BUY'))
+                    side_txt = '🟢 خرید' if long_side else '🔴 فروش'
 
-                # اوجِ سودی که این ترد دیده؛ پله‌ی اوج = بالاترین مضرب آستانه زیر آن
-                peak = max(float(p.get('profit_peak_pnl') or 0.0), pnl)
-                if peak > float(p.get('profit_peak_pnl') or 0.0):
-                    p['profit_peak_pnl'] = peak
-                peak_level = math.floor(peak / step + 1e-9) * step if peak >= step else 0.0
+                    # اوجِ سودی که این ترد دیده؛ پله‌ی اوج = بالاترین مضرب آستانه زیر آن
+                    peak = max(float(p.get('profit_peak_pnl') or 0.0), pnl)
+                    if peak > float(p.get('profit_peak_pnl') or 0.0):
+                        p['profit_peak_pnl'] = peak
+                    peak_level = math.floor(peak / step + 1e-9) * step if peak >= step else 0.0
 
-                # --- هشدار ضعف: بعد از رسیدن به حداقل یک پله و شروع افت از اوج ---
-                # دوباره‌فعال‌شدن: بعد از یک هشدار ضعف، فقط وقتی اوجِ تازه‌ای کمی بالاتر از اوجِ هشدار قبلی ثبت شود.
-                fade_peak = float(p.get('profit_fade_alert_peak') or 0.0)
-                fade_armed = fade_peak <= 0 or peak > fade_peak + max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * fade_peak)
-                if fade_on and peak_level >= step and fade_armed:
-                    drop = peak - pnl
-                    if drop >= max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * peak):
-                        p['profit_fade_alert_peak'] = peak
-                        lines = [
-                            f"⚠️ *مشاهده ضعف در سود* | *{p['symbol']}* ({side_txt})",
-                            f"• اوج سود: `{peak:.2f}$` (پله {peak_level:g}$) → سود فعلی: `{pnl:.2f}$` (افت `{drop:.2f}$`)",
-                            f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`",
-                            f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`",
-                        ]
-                        lines += _fade_indicator_lines(s, p)
-                        lines.append("فقط هشدار است؛ پوزیشن بسته نشده. سود ناخالص (بدون کارمزد) است.")
-                        send_message(chat_id, "\n".join(lines))
-                        save_session(chat_id)
+                    # --- هشدار ضعف: بعد از رسیدن به حداقل یک پله و شروع افت از اوج ---
+                    # دوباره‌فعال‌شدن: بعد از یک هشدار ضعف، فقط وقتی اوجِ تازه‌ای کمی بالاتر از اوجِ هشدار قبلی ثبت شود.
+                    fade_peak = float(p.get('profit_fade_alert_peak') or 0.0)
+                    fade_armed = fade_peak <= 0 or peak > fade_peak + max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * fade_peak)
+                    if fade_on and peak_level >= step and fade_armed:
+                        drop = peak - pnl
+                        if drop >= max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT * peak):
+                            p['profit_fade_alert_peak'] = peak
+                            lines = [
+                                f"⚠️ *مشاهده ضعف در سود* | *{p['symbol']}* ({side_txt})",
+                                f"• اوج سود: `{peak:.2f}$` (پله {peak_level:g}$) → سود فعلی: `{pnl:.2f}$` (افت `{drop:.2f}$`)",
+                                f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`",
+                                f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`",
+                            ]
+                            lines += _fade_indicator_lines(s, p)
+                            lines.append("فقط هشدار است؛ پوزیشن بسته نشده. سود ناخالص (بدون کارمزد) است.")
+                            send_message(chat_id, "\n".join(lines))
+                            save_session(chat_id)
 
-                # --- هشدار رسیدن به پله‌ی سود (۵، ۱۰، ۱۵، ...) ---
-                if up_on and pnl >= step:
-                    last_level = float(p.get('profit_alert_level') or 0.0)
-                    level = math.floor(pnl / step + 1e-9) * step
-                    if level > last_level + 1e-9:
-                        p['profit_alert_level'] = level
-                        msg = (
-                            f"💰 *هشدار سود {level:g}$* | *{p['symbol']}* ({side_txt})\n"
-                            f"• سود فعلی: `{pnl:.2f}$`\n"
-                            f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`\n"
-                            f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`\n"
-                            f"سود ناخالص (بدون کارمزد) است و پوزیشن همچنان باز است."
-                        )
-                        send_message(chat_id, msg)
-                        save_session(chat_id)
-            except Exception:
-                logger.exception('profit alert failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+                    # --- هشدار رسیدن به پله‌ی سود (۵، ۱۰، ۱۵، ...) ---
+                    if up_on and pnl >= step:
+                        last_level = float(p.get('profit_alert_level') or 0.0)
+                        level = math.floor(pnl / step + 1e-9) * step
+                        if level > last_level + 1e-9:
+                            p['profit_alert_level'] = level
+                            msg = (
+                                f"💰 *هشدار سود {level:g}$* | *{p['symbol']}* ({side_txt})\n"
+                                f"• سود فعلی: `{pnl:.2f}$`\n"
+                                f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`\n"
+                                f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`\n"
+                                f"سود ناخالص (بدون کارمزد) است و پوزیشن همچنان باز است."
+                            )
+                            send_message(chat_id, msg)
+                            save_session(chat_id)
+                except Exception:
+                    logger.exception('profit alert failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'profit_alert_scan_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 def _profit_lock_loop():
@@ -5526,16 +5550,19 @@ def assist_countdown_once():
     """برچسب دکمه‌ی شمارش معکوس سیگنال‌های تمدیدشده را تازه می‌کند (هر ~۱۵ ثانیه از _assist_loop)."""
     now = time.time()
     for chat_id, s in list(USER_SESSIONS.items()):
-        for rec in list(s.get('assist_log') or []):
-            if rec.get('status') != 'pending' or not rec.get('countdown'):
-                _ASSIST_CD_LAST.pop(rec.get('id'), None)
-                continue
-            rem = float(rec.get('expires_at', 0)) - now
-            if rem <= 0:
-                continue     # assist_maintenance_once دکمه‌های عملیاتی را برمی‌دارد
-            if _ASSIST_CD_LAST.get(rec['id']) == _assist_countdown_label(rem):
-                continue
-            _assist_edit_markup(chat_id, rec)
+        try:
+            for rec in list(s.get('assist_log') or []):
+                if rec.get('status') != 'pending' or not rec.get('countdown'):
+                    _ASSIST_CD_LAST.pop(rec.get('id'), None)
+                    continue
+                rem = float(rec.get('expires_at', 0)) - now
+                if rem <= 0:
+                    continue     # assist_maintenance_once دکمه‌های عملیاتی را برمی‌دارد
+                if _ASSIST_CD_LAST.get(rec['id']) == _assist_countdown_label(rem):
+                    continue
+                _assist_edit_markup(chat_id, rec)
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'assist_countdown_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 def _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=None):
@@ -6017,86 +6044,89 @@ def assist_saved_touch_once():
     if not ASSIST_SAVED_AUTO_TOUCH:
         return
     for chat_id, s in list(USER_SESSIONS.items()):
-        for rec in list(s.get('assist_log') or []):
-            try:
-                if rec.get('status') != 'pending' or not rec.get('saved'):
-                    continue
-                if rec.get('trend_hold'):      # منتظر تصمیم کاربر روی هشدار روند BTC/ETH
-                    continue
-                sym = rec['symbol']
+        try:
+            for rec in list(s.get('assist_log') or []):
                 try:
-                    live = exchange_latest_price(chat_id, sym) if s.get('trading_mode') == 'REAL' else latest_price(sym)
-                except Exception:
-                    live = None
-                if not live or float(live) <= 0:
-                    continue
-                live = float(live)
-                is_long = rec['sig'] == 'BUY'
-                entry = float(rec['entry']); sl = float(rec['sl']); tp = float(rec['tp'])
-                # جهتِ «تاچ» پویاست (مثل اوردر معلق): اگر ورود بالای قیمت است منتظر صعود، وگرنه نزول.
-                # دفعه‌ی اول جهت انتظار ثبت می‌شود تا بعد از رد شدن از ورود دوباره برنگردد.
-                side_wait = rec.get('touch_dir')
-                if side_wait is None:
-                    side_wait = 'up' if entry >= live else 'down'
-                    rec['touch_dir'] = side_wait
-                touched = (live >= entry) if side_wait == 'up' else (live <= entry)
-                if abs(live - entry) / max(entry, 1e-9) < 0.0005:
-                    touched = True
-                # قیمتی که از SL یا TP سیگنال رد شده باشد (حتی اگر هم‌زمان از ورود هم گذشته باشد، مثل جهش بین دو چک)
-                # دیگر ستاپ معتبر نیست؛ ورود نمی‌گیرد و باطل می‌شود.
-                crossed_sl = (live <= sl) if is_long else (live >= sl)
-                crossed_tp = (live >= tp) if is_long else (live <= tp)
-                if crossed_sl or crossed_tp or not touched:
-                    if crossed_sl or crossed_tp:
-                        with _ASSIST_LOCK:
-                            if rec.get('status') == 'pending':
-                                rec['status'] = 'invalidated'; rec['invalidated_at'] = time.time()
-                                rec['invalid_reason'] = 'SL' if crossed_sl else 'TP'
-                        save_session(chat_id)
-                        _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
-                        send_message(chat_id,
-                            f"🚫 سیگنال ذخیره‌شده `{sym}` باطل شد: قیمت (`{fmt(live)}`) از "
-                            f"{'SL' if crossed_sl else 'TP'} سیگنال عبور کرد و ورودی انجام نشد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.")
-                    continue
-                # --- تاچ ورود: ورود با قیمت بازار، SL/TP با فاصله‌های سیگنال نسبت به ورود واقعی ---
-                if not rec.get('trend_checked'):
-                    rec['trend_checked'] = True
-                    if _assist_trend_warn(chat_id, sym, rec['sig'], f"/assist_tgok_{rec['id']}", f"/assist_no_{rec['id']}"):
-                        rec['trend_hold'] = True
-                        save_session(chat_id)
+                    if rec.get('status') != 'pending' or not rec.get('saved'):
                         continue
-                with _ASSIST_LOCK:
-                    if rec.get('status') != 'pending':
+                    if rec.get('trend_hold'):      # منتظر تصمیم کاربر روی هشدار روند BTC/ETH
                         continue
-                    rec['status'] = 'triggering'      # جلوگیری از اجرای هم‌زمان دوباره
-                try:
-                    ok, err = execute_manual_trade(chat_id, sym, rec['side_label'], rec['sl'], rec['tp'],
-                                                   entry_price=entry, reason=rec.get('reason') or 'سیگنال ذخیره‌شده',
-                                                   force=False, tp_level_name=rec.get('tp_level_name'))
-                except Exception as _e:
-                    logger.exception('assist saved entry crashed aid=%s', rec.get('id'))
-                    ok, err = False, f'خطای داخلی: {_e}'
-                s = get_session(chat_id)
-                with _ASSIST_LOCK:
+                    sym = rec['symbol']
+                    try:
+                        live = exchange_latest_price(chat_id, sym) if s.get('trading_mode') == 'REAL' else latest_price(sym)
+                    except Exception:
+                        live = None
+                    if not live or float(live) <= 0:
+                        continue
+                    live = float(live)
+                    is_long = rec['sig'] == 'BUY'
+                    entry = float(rec['entry']); sl = float(rec['sl']); tp = float(rec['tp'])
+                    # جهتِ «تاچ» پویاست (مثل اوردر معلق): اگر ورود بالای قیمت است منتظر صعود، وگرنه نزول.
+                    # دفعه‌ی اول جهت انتظار ثبت می‌شود تا بعد از رد شدن از ورود دوباره برنگردد.
+                    side_wait = rec.get('touch_dir')
+                    if side_wait is None:
+                        side_wait = 'up' if entry >= live else 'down'
+                        rec['touch_dir'] = side_wait
+                    touched = (live >= entry) if side_wait == 'up' else (live <= entry)
+                    if abs(live - entry) / max(entry, 1e-9) < 0.0005:
+                        touched = True
+                    # قیمتی که از SL یا TP سیگنال رد شده باشد (حتی اگر هم‌زمان از ورود هم گذشته باشد، مثل جهش بین دو چک)
+                    # دیگر ستاپ معتبر نیست؛ ورود نمی‌گیرد و باطل می‌شود.
+                    crossed_sl = (live <= sl) if is_long else (live >= sl)
+                    crossed_tp = (live >= tp) if is_long else (live <= tp)
+                    if crossed_sl or crossed_tp or not touched:
+                        if crossed_sl or crossed_tp:
+                            with _ASSIST_LOCK:
+                                if rec.get('status') == 'pending':
+                                    rec['status'] = 'invalidated'; rec['invalidated_at'] = time.time()
+                                    rec['invalid_reason'] = 'SL' if crossed_sl else 'TP'
+                            save_session(chat_id)
+                            _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+                            send_message(chat_id,
+                                f"🚫 سیگنال ذخیره‌شده `{sym}` باطل شد: قیمت (`{fmt(live)}`) از "
+                                f"{'SL' if crossed_sl else 'TP'} سیگنال عبور کرد و ورودی انجام نشد. برای ارزیابی بعدی، نتیجه‌ی فرضی‌اش پیگیری می‌شود.")
+                        continue
+                    # --- تاچ ورود: ورود با قیمت بازار، SL/TP با فاصله‌های سیگنال نسبت به ورود واقعی ---
+                    if not rec.get('trend_checked'):
+                        rec['trend_checked'] = True
+                        if _assist_trend_warn(chat_id, sym, rec['sig'], f"/assist_tgok_{rec['id']}", f"/assist_no_{rec['id']}"):
+                            rec['trend_hold'] = True
+                            save_session(chat_id)
+                            continue
+                    with _ASSIST_LOCK:
+                        if rec.get('status') != 'pending':
+                            continue
+                        rec['status'] = 'triggering'      # جلوگیری از اجرای هم‌زمان دوباره
+                    try:
+                        ok, err = execute_manual_trade(chat_id, sym, rec['side_label'], rec['sl'], rec['tp'],
+                                                       entry_price=entry, reason=rec.get('reason') or 'سیگنال ذخیره‌شده',
+                                                       force=False, tp_level_name=rec.get('tp_level_name'))
+                    except Exception as _e:
+                        logger.exception('assist saved entry crashed aid=%s', rec.get('id'))
+                        ok, err = False, f'خطای داخلی: {_e}'
+                    s = get_session(chat_id)
+                    with _ASSIST_LOCK:
+                        if ok:
+                            rec['status'] = 'approved'; rec['approved_at'] = time.time(); rec['auto_touch_entry'] = True
+                            mine = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
+                            if mine:
+                                mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
+                                mine[-1]['assist_id'] = rec['id']
+                                mine[-1]['assist_delay_seconds'] = round(rec['approved_at'] - rec['created_at'], 1)
+                        else:
+                            rec['status'] = 'blocked'; rec['block_reason'] = err
+                    save_session(chat_id)
+                    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
                     if ok:
-                        rec['status'] = 'approved'; rec['approved_at'] = time.time(); rec['auto_touch_entry'] = True
-                        mine = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
-                        if mine:
-                            mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
-                            mine[-1]['assist_id'] = rec['id']
-                            mine[-1]['assist_delay_seconds'] = round(rec['approved_at'] - rec['created_at'], 1)
+                        pos = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
+                        px = f" | ورود `{fmt(float(pos[-1]['entry_price']))}` · SL `{fmt(float(pos[-1]['sl']))}` · TP `{fmt(float(pos[-1]['tp']))}`" if pos else ''
+                        send_message(chat_id, f"✅ قیمت `{sym}` به ورود رسید؛ با قیمت بازار وارد شدم{px}.")
                     else:
-                        rec['status'] = 'blocked'; rec['block_reason'] = err
-                save_session(chat_id)
-                _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
-                if ok:
-                    pos = [p for p in s.get('paper_positions', []) if p.get('symbol') == sym]
-                    px = f" | ورود `{fmt(float(pos[-1]['entry_price']))}` · SL `{fmt(float(pos[-1]['sl']))}` · TP `{fmt(float(pos[-1]['tp']))}`" if pos else ''
-                    send_message(chat_id, f"✅ قیمت `{sym}` به ورود رسید؛ با قیمت بازار وارد شدم{px}.")
-                else:
-                    send_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
-            except Exception:
-                logger.exception('assist saved touch failed aid=%s', rec.get('id'))
+                        send_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
+                except Exception:
+                    logger.exception('assist saved touch failed aid=%s', rec.get('id'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'assist_saved_touch_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 def assist_extend(chat_id, aid):
@@ -6411,48 +6441,51 @@ def _assist_resolve_shadow(rec, tf, df):
 def assist_maintenance_once():
     now = time.time()
     for chat_id, s in list(USER_SESSIONS.items()):
-        log = s.get('assist_log') or []
-        if not log:
-            continue
-        changed = False
-        for rec in log:
-            if rec.get('status') == 'pending' and now > rec.get('expires_at', 0) and not rec.get('saved'):
-                _expired_now = False
-                with _ASSIST_LOCK:
-                    # V3.42.12: بین بررسی شرط و قفل ممکن است کاربر «ذخیره» را زده باشد؛ دوباره چک می‌کنیم
-                    if rec.get('status') == 'pending' and not rec.get('saved') and now > rec.get('expires_at', 0):
-                        rec['status'] = 'expired'; changed = True; _expired_now = True
-                if _expired_now:
-                    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
-        # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر ۱ ساعت بعد از انقضا از چت پاک می‌شوند (خودِ رکورد و آمار سایه می‌ماند).
-        if ASSIST_EXPIRED_DELETE_AFTER_SECONDS > 0:
-            for rec in log:
-                if (rec.get('status') in ('expired', 'invalidated') and not rec.get('msg_deleted')
-                        and now - float(rec.get('expires_at', 0) or 0) >= ASSIST_EXPIRED_DELETE_AFTER_SECONDS):
-                    for mid in ([rec.get('message_id')] + list(rec.get('old_mids') or [])):
-                        if mid:
-                            try: tg('deleteMessage', {'chat_id': chat_id, 'message_id': mid}, 10)
-                            except Exception: logger.exception('assist: expired card delete failed')
-                    rec['msg_deleted'] = True; rec['message_id'] = None; rec['old_mids'] = []; changed = True
-        todo = [r for r in log if r.get('status') in ('rejected', 'expired', 'invalidated') and not r.get('shadow_done')]
-        by_symbol = {}
-        for r in todo:
-            by_symbol.setdefault(r['symbol'], []).append(r)
-        for sym, recs in by_symbol.items():
-            try:
-                df = get_klines(sym, recs[0].get('tf') or '5min', 300)
-            except Exception:
-                df = None
-            if df is None or getattr(df, 'empty', True):
+        try:
+            log = s.get('assist_log') or []
+            if not log:
                 continue
-            for r in recs:
-                res = _assist_resolve_shadow(r, r.get('tf'), df)
-                if res:
-                    r['shadow'] = res; r['shadow_done'] = True; changed = True
-                elif now - r['created_at'] > ASSIST_SHADOW_HORIZON_SECONDS:
-                    r['shadow'] = {'outcome': 'timeout', 'r': None, 'ts': now}; r['shadow_done'] = True; changed = True
-        if changed:
-            save_session(chat_id)
+            changed = False
+            for rec in log:
+                if rec.get('status') == 'pending' and now > rec.get('expires_at', 0) and not rec.get('saved'):
+                    _expired_now = False
+                    with _ASSIST_LOCK:
+                        # V3.42.12: بین بررسی شرط و قفل ممکن است کاربر «ذخیره» را زده باشد؛ دوباره چک می‌کنیم
+                        if rec.get('status') == 'pending' and not rec.get('saved') and now > rec.get('expires_at', 0):
+                            rec['status'] = 'expired'; changed = True; _expired_now = True
+                    if _expired_now:
+                        _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+            # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر ۱ ساعت بعد از انقضا از چت پاک می‌شوند (خودِ رکورد و آمار سایه می‌ماند).
+            if ASSIST_EXPIRED_DELETE_AFTER_SECONDS > 0:
+                for rec in log:
+                    if (rec.get('status') in ('expired', 'invalidated') and not rec.get('msg_deleted')
+                            and now - float(rec.get('expires_at', 0) or 0) >= ASSIST_EXPIRED_DELETE_AFTER_SECONDS):
+                        for mid in ([rec.get('message_id')] + list(rec.get('old_mids') or [])):
+                            if mid:
+                                try: tg('deleteMessage', {'chat_id': chat_id, 'message_id': mid}, 10)
+                                except Exception: logger.exception('assist: expired card delete failed')
+                        rec['msg_deleted'] = True; rec['message_id'] = None; rec['old_mids'] = []; changed = True
+            todo = [r for r in log if r.get('status') in ('rejected', 'expired', 'invalidated') and not r.get('shadow_done')]
+            by_symbol = {}
+            for r in todo:
+                by_symbol.setdefault(r['symbol'], []).append(r)
+            for sym, recs in by_symbol.items():
+                try:
+                    df = get_klines(sym, recs[0].get('tf') or '5min', 300)
+                except Exception:
+                    df = None
+                if df is None or getattr(df, 'empty', True):
+                    continue
+                for r in recs:
+                    res = _assist_resolve_shadow(r, r.get('tf'), df)
+                    if res:
+                        r['shadow'] = res; r['shadow_done'] = True; changed = True
+                    elif now - r['created_at'] > ASSIST_SHADOW_HORIZON_SECONDS:
+                        r['shadow'] = {'outcome': 'timeout', 'r': None, 'ts': now}; r['shadow_done'] = True; changed = True
+            if changed:
+                save_session(chat_id)
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'assist_maintenance_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
 def _assist_loop():
@@ -9050,6 +9083,23 @@ def handle_text(chat_id,text):
     else: process_command(text,chat_id)
 
 
+_NOT_ALLOWED_NOTIFIED = {}
+
+
+def _notify_not_allowed(chat_id):
+    """V3.42.13: اگر ALLOWED_CHAT_IDS تنظیم شده باشد، کاربرِ خارج از لیست قبلاً بدون هیچ پاسخی نادیده گرفته می‌شد
+    و «ربات کار نمی‌کند» به نظر می‌رسید. حالا هر ۱۰ دقیقه یک‌بار پیام می‌گیرد و در لاگ ثبت می‌شود."""
+    try:
+        now = time.time()
+        if now - _NOT_ALLOWED_NOTIFIED.get(chat_id, 0) < 600:
+            return
+        _NOT_ALLOWED_NOTIFIED[chat_id] = now
+        logger.warning('chat_id=%s در ALLOWED_CHAT_IDS نیست؛ درخواست نادیده گرفته شد. برای باز کردن ربات برای همه، متغیر ALLOWED_CHAT_IDS را خالی کنید یا این آیدی را اضافه کنید.', chat_id)
+        tg('sendMessage', {'chat_id': chat_id, 'text': '⛔ دسترسی شما به این ربات فعال نیست. برای فعال‌سازی با ادمین تماس بگیرید.\n\nشناسه‌ی شما: ' + str(chat_id)}, 10)
+    except Exception:
+        logger.exception('not-allowed notice failed chat=%s', chat_id)
+
+
 def telegram_listener():
     global TELEGRAM_OFFSET
     backlog_checked=False
@@ -9121,11 +9171,17 @@ def telegram_listener():
                         else:
                             answer_callback(callback['id'])
                         continue
-                    upsert_telegram_user(telegram_user, chat)
+                    try:
+                        upsert_telegram_user(telegram_user, chat)
+                    except Exception:
+                        # V3.42.13: ثبت پروفایل کاربر فقط برای گزارش ادمین است؛ خطای دیتابیس نباید پاسخ‌دادن به کاربر را قطع کند
+                        logger.exception('upsert_telegram_user failed chat=%s (ادامه‌ی پردازش پیام)', chat)
                     if callback.get('id'):
                         alert_text = 'پاسخ به‌صورت خصوصی در چت ربات ارسال می‌شود. اگر قبلاً ربات را استارت نکرده‌اید، لطفاً اول در چت خصوصی /start را بزنید.' if is_channel_post else None
                         answer_callback(callback['id'], text=alert_text)
-                    if not is_allowed(chat): continue
+                    if not is_allowed(chat):
+                        _notify_not_allowed(chat)
+                        continue
                     data=callback.get('data') or (u.get('message') or {}).get('text')
                     if callback:
                         begin_callback_context(chat, message_id_for_reply, data)
@@ -9154,9 +9210,12 @@ async def scan_loop():
     while True:
         try:
             for cid,s in list(USER_SESSIONS.items()):
-                if s['trading_mode']=='REAL' and s['is_bot_active']:
-                    reconcile_real(cid)
-                update_positions(cid)
+                try:
+                    if s['trading_mode']=='REAL' and s['is_bot_active']:
+                        reconcile_real(cid)
+                    update_positions(cid)
+                except Exception:
+                    logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'scan_loop', cid)  # خطای یک کاربر بقیه را متوقف نکند
             timeout=aiohttp.ClientTimeout(total=10)
             conn=aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS,ttl_dns_cache=300)
             async with aiohttp.ClientSession(timeout=timeout,connector=conn) as http:
@@ -9181,33 +9240,36 @@ async def scan_loop():
                     gate_by_tf[tf] = await refresh_market_gate(http, tf)
                     base_watchlist_by_tf[tf] = scan_watchlist_for_timeframe(tf, loose_regime)
                 for cid,s in list(USER_SESSIONS.items()):
-                    if not s['is_bot_active'] or s['daily_stopped']: continue
-                    if not risk_guard(cid): continue
-                    if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
-                        _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
-                        continue
-                    user_tf = s.get('timeframe', '5min')
-                    align_on = bool(s.get('market_alignment_filters_enabled', False))
-                    gate = gate_by_tf.get(user_tf) if align_on else None
-                    if gate == 'RANGE':
-                        # بازار رنج => هیچ ورودی (شامل صف اولویت‌دار) انجام نمی‌شود
-                        _entry_diag_batch_update(cid, [{'status':'blocked','reason':_market_gate_reason('RANGE', user_tf)}])
-                        continue
-                    watchlist = base_watchlist_by_tf.get(user_tf) or []
-                    for sym in watchlist:
-                        tasks.append(scan_symbol(http,cid,sym,gate))
-                    # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
-                    # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
-                    # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
-                    # دوباره بررسی می‌شوند تا به‌محض مهیا شدن شرایط بلافاصله وارد شوند.
-                    pw = s.get('priority_watch') or {}
-                    if pw:
-                        stale_cutoff = time.time() - PRIORITY_WATCH_TTL_SECONDS
-                        for sym, meta in list(pw.items()):
-                            if float((meta or {}).get('added_at', 0)) < stale_cutoff:
-                                pw.pop(sym, None); continue
-                            if sym in watchlist: continue
+                    try:
+                        if not s['is_bot_active'] or s['daily_stopped']: continue
+                        if not risk_guard(cid): continue
+                        if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
+                            _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
+                            continue
+                        user_tf = s.get('timeframe', '5min')
+                        align_on = bool(s.get('market_alignment_filters_enabled', False))
+                        gate = gate_by_tf.get(user_tf) if align_on else None
+                        if gate == 'RANGE':
+                            # بازار رنج => هیچ ورودی (شامل صف اولویت‌دار) انجام نمی‌شود
+                            _entry_diag_batch_update(cid, [{'status':'blocked','reason':_market_gate_reason('RANGE', user_tf)}])
+                            continue
+                        watchlist = base_watchlist_by_tf.get(user_tf) or []
+                        for sym in watchlist:
                             tasks.append(scan_symbol(http,cid,sym,gate))
+                        # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
+                        # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
+                        # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
+                        # دوباره بررسی می‌شوند تا به‌محض مهیا شدن شرایط بلافاصله وارد شوند.
+                        pw = s.get('priority_watch') or {}
+                        if pw:
+                            stale_cutoff = time.time() - PRIORITY_WATCH_TTL_SECONDS
+                            for sym, meta in list(pw.items()):
+                                if float((meta or {}).get('added_at', 0)) < stale_cutoff:
+                                    pw.pop(sym, None); continue
+                                if sym in watchlist: continue
+                                tasks.append(scan_symbol(http,cid,sym,gate))
+                    except Exception:
+                        logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'scan_loop', cid)  # خطای یک کاربر بقیه را متوقف نکند
                 if tasks:
                     batch = await asyncio.gather(*tasks, return_exceptions=True)
                     by_chat = {}
@@ -9465,8 +9527,11 @@ def _pending_orders_loop():
     while True:
         try:
             for chat_id, s in list(USER_SESSIONS.items()):
-                if s.get('pending_orders'):
-                    check_pending_orders(chat_id)
+                try:
+                    if s.get('pending_orders'):
+                        check_pending_orders(chat_id)
+                except Exception:
+                    logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', '_pending_orders_loop', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
         except Exception:
             logger.exception('pending orders check failed')
         time.sleep(10)
