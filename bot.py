@@ -1146,8 +1146,10 @@ def _day_cleanup_run():
             if sess is not None:
                 sess['positions_message_id'] = None
                 for rec in (sess.get('assist_log') or []):
-                    if rec.get('status') == 'pending':
+                    if rec.get('status') == 'pending' and not rec.get('saved'):
                         rec['status'] = 'expired'          # کارتش پاک شده؛ دیگر قابل تایید نیست
+                    # V3.42.9: سیگنال «💾 ذخیره‌شده» با پاک‌سازی روزانه حذف نمی‌شود؛ فقط پیام قدیمی پاک می‌شود و
+                    # کارت از روی رکورد در «📋 سیگنال‌های در انتظار» دوباره ساخته می‌شود (assist_open).
                     rec['msg_deleted'] = True; rec['message_id'] = None; rec['old_mids'] = []
                 save_session(cid)
         except Exception:
@@ -1230,28 +1232,49 @@ def answer_callback(cid, text=None, show_alert=False):
 import threading as _threading
 _CB_CTX = _threading.local()
 
-# دکمه‌هایی که «ناوبری منو» هستند: جواب‌شان باید همان پیامِ منو را ویرایش کند نه اینکه پیام جدید بسازد.
-_INPLACE_MENU_PREFIXES = (
-    '/menu', '/open_positions', '/performance', '/trade_audit', '/quality_report', '/today_trades',
-    '/trade_tracking', '/trade_filter', '/list_pending_orders', '/cancel_pending', '/close_all_prompt',
-    '/close_longs_prompt', '/close_shorts_prompt', '/emergency_close_prompt',
-    '/fee_', '/entry_diag', '/entry_report', '/toggle_entry_diag', '/setup_management', '/toggle_setup_', '/toggle_p4_',
-    '/check_wizard', '/manage_watchlist', '/market_report', '/learn', '/profile_', '/params',
-    '/admin_', '/signal_channel', '/scenario_management', '/toggle_scenario', '/toggle_confirm_',
-    '/my_profile', '/save_my_profile', '/apply_my_profile', '/set_tf_', '/timeframe', '/set_bal_',
-    '/set_margin_', '/set_lev_', '/set_max_', '/adx_', '/sl_', '/tp_', '/cancel',
+# V3.42.8: «همه‌ی» دکمه‌های اینلاین به‌صورت پیش‌فرض همان پیامِ منو را ویرایش می‌کنند (نه پیام جدید).
+# فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
+# عمداً مسیر قبلی خودشان را نگه می‌دارند.
+_NEW_MESSAGE_PREFIXES = (
+    '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
+    '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
+    '/check_entry_', '/cancel_watch_', '/chind_', '/noop', '/dummy',
 )
 
 
 def _inplace_menu_command(cmd):
     c = str(cmd or '')
-    return any(c.startswith(pfx) for pfx in _INPLACE_MENU_PREFIXES)
+    if not c.startswith('/'):
+        return False
+    return not any(c.startswith(pfx) for pfx in _NEW_MESSAGE_PREFIXES)
+
+
+# دکمه‌ی «بازگشت» برای پیام‌هایی که کیبورد اینلاین ندارند (پرامپت‌ها/نتیجه‌ها): به منوی والدِ همان دکمه.
+_BACK_PARENT = {
+    '/add_long_symbol': '/manage_watchlist', '/remove_long_symbol': '/manage_watchlist',
+    '/add_short_symbol': '/manage_watchlist', '/remove_short_symbol': '/manage_watchlist',
+    '/backtest_start': '/manage_watchlist', '/scan_signal_start': '/manage_watchlist',
+    '/pending_order_start': '/menu_trading', '/market_report': '/menu_reports',
+    '/export_trade_data': '/performance', '/export_trade_pipeline': '/trade_tracking_menu',
+    '/admin_set_fee_prompt': '/admin_fee_report', '/pending_side_buy': '/menu_trading',
+    '/pending_side_sell': '/menu_trading', '/confirm_pending_order': '/menu_trading',
+    '/cancel_pending_all': '/menu_trading', '/close_longs_prompt': '/open_positions',
+    '/close_shorts_prompt': '/open_positions', '/confirm_close_longs': '/open_positions',
+    '/confirm_close_shorts': '/open_positions', '/confirm_emergency_close_all': '/menu',
+    '/assist_expiry_cycle': '/assist_menu', '/assist_stats': '/assist_menu',
+}
+
+
+def _back_markup(ctx):
+    parent = _BACK_PARENT.get((ctx or {}).get('cmd', ''), '/menu')
+    # /back: اول وضعیتِ «منتظر ورودی» را پاک می‌کند، بعد منوی والد را باز می‌کند (همان پیام).
+    return {'inline_keyboard': [[{'text': '🔙 بازگشت', 'callback_data': '/back:' + parent}]]}
 
 
 def begin_callback_context(chat_id, message_id, cmd):
     """قبل از process_command برای کلیک روی دکمه‌ی اینلاین صدا زده می‌شود."""
     if message_id and _inplace_menu_command(cmd):
-        _CB_CTX.data = {'chat_id': chat_id, 'message_id': message_id, 'used': False}
+        _CB_CTX.data = {'chat_id': chat_id, 'message_id': message_id, 'used': False, 'cmd': str(cmd or '')}
     else:
         _CB_CTX.data = None
 
@@ -1285,9 +1308,14 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     """keep=True: این پیام (مثلاً سیگنال) هرگز خودکار حذف نمی‌شود."""
     if not is_allowed(chat_id): return False
     s = get_session(chat_id)
+    _ctx = getattr(_CB_CTX, 'data', None)
+    _can_inplace = bool(not keep and _ctx and not _ctx['used'] and _ctx['chat_id'] == chat_id)
+    if markup is None and not keep and (message_id or _can_inplace):
+        # V3.42.8: پیام بدون کیبورد اینلاین (پرامپت/نتیجه) هم باید روی همان پیام ویرایش شود، پس دکمه‌ی بازگشت می‌گیرد
+        # (کیبورد ثابت پایین چت را نمی‌شود با ویرایش ست کرد).
+        markup = _back_markup(_ctx)
     if markup is None: markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
     # ویرایش درجا: اولین پاسخِ دارای کیبورد اینلاین به کلیک یک دکمه، همان پیام را عوض می‌کند.
-    _ctx = getattr(_CB_CTX, 'data', None)
     if (not message_id and not keep and _ctx and not _ctx['used'] and _ctx['chat_id'] == chat_id
             and isinstance(markup, dict) and 'inline_keyboard' in markup):
         _ctx['used'] = True
@@ -3397,7 +3425,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # which independent per-trade risk sizing does not account for.
     dir_key = 'BUY' if side_long(side) else 'SELL'
     max_same_dir = int(s.get('max_same_direction_positions', 0) or 0)
-    if max_same_dir > 0 and not force:
+    # V3.42.8: سقف هم‌جهت برای «همه‌ی» مسیرهای ورود اعمال می‌شود (اسکن خودکار، سیگنال ذخیره‌شده،
+    # تایید دستیار، ورود سریع کانال، معامله‌ی دستی، اوردر معلق) و با force=True هم دور زده نمی‌شود.
+    if max_same_dir > 0:
         same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
         if same_dir_open >= max_same_dir:
             return _blk(chat_id, f"سقف پوزیشن هم‌جهت ({max_same_dir}) پر است؛ {same_dir_open} پوزیشن {'Long' if dir_key=='BUY' else 'Short'} باز است")
@@ -3684,9 +3714,9 @@ async def get_log_grid_levels(http, symbol):
 
 
 def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
-    """force=True (تایید دستی کاربر در حالت دستیار): همه‌ی محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
+    """force=True (تایید دستی کاربر در حالت دستیار): محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
     محافظ ریسک، توقف روزانه، فعال‌نبودن ربات، ...) نادیده گرفته می‌شود. فقط موانع فنی می‌مانند
-    (پوزیشن باز روی همان نماد، مارجین/حجم نامعتبر، خطای صرافی)."""
+    (پوزیشن باز روی همان نماد، مارجین/حجم نامعتبر، خطای صرافی) + سقف معاملات هم‌جهت که همیشه اعمال می‌شود."""
     s=get_session(chat_id)
     generation=int(s.get('scan_generation',0))
     _LAST_BLOCK_REASON.pop(chat_id, None)
@@ -3707,7 +3737,7 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
 
 
 def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='معامله دستی کاربر',order_type=None,force=False,tp_level_name=None):
-    """force=True (ورود سریع از کانال): همه‌ی محدودیت‌های خودکار نادیده گرفته می‌شود؛ فقط موانع فنی می‌مانند."""
+    """force=True (ورود سریع از کانال): محدودیت‌های خودکار نادیده گرفته می‌شود؛ فقط موانع فنی و سقف معاملات هم‌جهت می‌مانند."""
     s=get_session(chat_id)
     if s['daily_stopped'] and not force:
         return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
@@ -3803,9 +3833,9 @@ def quick_channel_trade(chat_id, symbol, side, skip_trend=False):
     side_fa = 'خرید (Long)' if is_long else 'فروش (Short)'
     if not (2 <= len(symbol) <= 12):
         send_message(chat_id, '⚠️ نماد نامعتبر است.'); return
-    # ورود سریع از کانال بدون هیچ مانع استراتژیک: حد ضرر روزانه، سقف پوزیشن، سقف هم‌جهت، کول‌داون،
-    # محافظ ریسک، ستاپ/سطح مصرف‌شده و ... نادیده گرفته می‌شوند. تنها مانعِ فنیِ غیرقابل‌عبور:
-    # وجود پوزیشن باز روی همین نماد (سیستم پوزیشن‌ها یک پوزیشن به‌ازای هر نماد نگه می‌دارد).
+    # ورود سریع از کانال بدون موانع استراتژیک: حد ضرر روزانه، سقف پوزیشن باز، کول‌داون، محافظ ریسک،
+    # ستاپ/سطح مصرف‌شده و ... نادیده گرفته می‌شوند. استثنا: «سقف معاملات هم‌جهت» (V3.42.8) که روی
+    # همه‌ی ورودها اعمال می‌شود. مانع فنی دیگر: وجود پوزیشن باز روی همین نماد (یک پوزیشن به‌ازای هر نماد).
     if any(p['symbol'] == symbol for p in s['paper_positions']):
         send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
     # V3.42.7: هشدار تضاد با روند BTC/ETH قبل از ورود سریع از کانال (با کلیدهای منوی فیلتر قابل خاموش‌شدن)
@@ -5248,8 +5278,8 @@ def _assist_markup(rec, remaining=None):
     aid = rec['id']; sym = rec['symbol']; tf = rec.get('tf') or '5min'
     is_long = rec['sig'] == 'BUY'
     if rec.get('saved'):
-        # V3.42: سیگنال ذخیره‌شده مهلت ندارد؛ منتظر رسیدن قیمت به ورود می‌ماند.
-        ext_btn = {'text': '💾 ذخیره‌شده · در حال پایش', 'callback_data': f'/assist_saved_{aid}'}
+        # V3.42.9: سیگنال ذخیره‌شده مهلت ندارد و ورود خودکار ندارد؛ کاربر هر وقت خواست «✅ ورود» می‌زند.
+        ext_btn = {'text': '💾 ذخیره‌شده · بدون مهلت', 'callback_data': f'/assist_saved_{aid}'}
     elif rec.get('countdown'):
         rem = remaining if remaining is not None else max(0, float(rec.get('expires_at', 0)) - time.time())
         ext_btn = {'text': _assist_countdown_label(rem), 'callback_data': f'/assist_cd_{aid}'}
@@ -5584,7 +5614,7 @@ def _strip_all_buttons(chat_id, message_id):
 
 
 @_from_signal_origin
-def assist_approve(chat_id, aid, skip_trend=False):
+def assist_approve(chat_id, aid, skip_trend=False, skip_far=False):
     s = get_session(chat_id)
     with _ASSIST_LOCK:
         rec = _assist_find(s, aid)
@@ -5593,7 +5623,7 @@ def assist_approve(chat_id, aid, skip_trend=False):
         if rec['status'] != 'pending':
             send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec['status']})."); return
         now = time.time()
-        if now > rec['expires_at']:
+        if now > rec['expires_at'] and not rec.get('saved'):
             rec['status'] = 'expired'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
             send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return
         try:
@@ -5607,10 +5637,25 @@ def assist_approve(chat_id, aid, skip_trend=False):
         crossed = (live <= rec['sl'] or live >= rec['tp']) if is_long else (live >= rec['sl'] or live <= rec['tp'])
         drift_r = abs(live - rec['entry']) / risk_dist if risk_dist > 0 else 0.0
         warn = None
-        if crossed:
-            warn = f"⚠️ قیمت لحظه‌ای (`{fmt(live)}`) از SL یا TP پیشنهادی عبور کرده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
-        elif drift_r > ASSIST_MAX_DRIFT_R:
-            warn = f"⚠️ قیمت لحظه‌ای `{drift_r:.2f}R` از ورود پیشنهادی دور شده بود؛ طبق تصمیم شما ورود انجام شد و SL/TP دور قیمت لحظه‌ای بازچینی شد."
+        far_text = None
+        if (crossed or drift_r > ASSIST_MAX_DRIFT_R) and not skip_far:
+            # V3.42.9: قیمت از سیگنال دور شده → قبل از ورود تایید می‌گیریم (به‌جای ورود و هشدارِ بعدی).
+            _tp_gap = abs(float(rec['tp']) - float(rec['entry']))
+            far_text = (
+                f"⚠️ *قیمت از ورود پیشنهادی دور شده*\n"
+                f"• `{rec['symbol']}` ({'🟢 خرید' if is_long else '🔴 فروش'})\n"
+                f"• ورود پیشنهادی سیگنال: `{fmt(float(rec['entry']))}`\n"
+                f"• قیمت لحظه‌ای بازار: `{fmt(live)}` (فاصله: `{drift_r:.2f}R`)\n"
+                + (f"• قیمت لحظه‌ای از SL یا TP سیگنال هم عبور کرده است.\n" if crossed else "")
+                + f"• اگر تایید کنی با قیمت بازار وارد می‌شوم و SL/TP با همان فاصله‌های سیگنال از قیمت لحظه‌ای تنظیم می‌شوند "
+                  f"(فاصله SL `{fmt(risk_dist)}` | فاصله TP `{fmt(_tp_gap)}`)"
+                + (" — TP ساختاری اگر هنوز جلوی قیمت باشد ثابت می‌ماند" if rec.get('structural_tp') else "") + ".\n\n"
+                f"ورود را تایید می‌کنی؟")
+    if far_text:
+        send_message(chat_id, far_text, {'inline_keyboard': [[
+            {'text': '✅ بله، وارد شو', 'callback_data': f'/assist_farok_{aid}'},
+            {'text': '❌ نه', 'callback_data': f'/assist_farno_{aid}'}]]}, keep=True)
+        return
     if not skip_trend and _assist_trend_warn(chat_id, rec['symbol'], rec['sig'], f'/assist_tgok_{aid}', f'/assist_no_{aid}'):
         return
     ok = execute_trade(chat_id, rec['symbol'], rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
@@ -5628,12 +5673,16 @@ def assist_approve(chat_id, aid, skip_trend=False):
                 mine.sort(key=lambda p: float(p.get('opened_at', 0) or 0))
                 mine[-1]['assist_id'] = aid
                 mine[-1]['assist_delay_seconds'] = round(rec['approved_at'] - rec['created_at'], 1)
+        elif rec.get('saved'):
+            pass      # V3.42.9: ورودِ ناموفق، سیگنال ذخیره‌شده را از لیست انتظار حذف نمی‌کند (فقط ورود موفق یا ❌ رد)
         else:
             rec['status'] = 'blocked'
     save_session(chat_id)
-    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+    if ok or not rec.get('saved'):
+        _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
     if not ok:
-        send_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}")
+        send_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}"
+                     + ("\n💾 سیگنال همچنان در «📋 سیگنال‌های در انتظار» می‌ماند." if rec.get('saved') else ''))
     elif warn:
         send_message(chat_id, warn)
 
@@ -5699,20 +5748,22 @@ def assist_indicators(chat_id, aid):
     send_message(chat_id, "\n".join(lines))
 
 
+ASSIST_SAVED_AUTO_TOUCH = os.environ.get('ASSIST_SAVED_AUTO_TOUCH', 'false').lower() in ('1', 'true', 'yes')   # V3.42.9: پیش‌فرض خاموش
 ASSIST_SAVED_HORIZON_SECONDS = 10 * 365 * 24 * 3600   # V3.42: سیگنال ذخیره‌شده عملاً مهلت ندارد
 
 
 def assist_save(chat_id, aid):
-    """V3.42: «💾 ذخیره و بررسی تغییر» جای «تمدید مهلت» است. سیگنال بدون مهلت ذخیره می‌شود و ربات
-    پایش می‌کند؛ لحظه‌ی تاچ قیمت ورود، با قیمت بازار وارد می‌شود و SL/TP با همان فاصله‌های سیگنال
-    نسبت به قیمت ورودِ واقعی تنظیم می‌شوند."""
+    """V3.42.9: «💾 ذخیره و بررسی تغییر»: سیگنال بدون مهلت در «سیگنال‌های در انتظار» نگه داشته می‌شود و
+    ربات خودکار وارد نمی‌شود. هر وقت کاربر «✅ ورود» را بزند، با قیمت لحظه‌ای بازار وارد می‌شود و SL/TP با
+    همان فاصله‌های سیگنال نسبت به قیمت لحظه‌ای تنظیم می‌شوند؛ اگر قیمت از ورود پیشنهادی خیلی دور شده باشد،
+    قبل از ورود تایید گرفته می‌شود (assist_approve)."""
     s = get_session(chat_id)
     rec = _assist_pending_or_notify(chat_id, s, aid)
     if not rec:
         return
     with _ASSIST_LOCK:
         if rec.get('saved'):
-            send_message(chat_id, 'ℹ️ این سیگنال از قبل ذخیره شده و پایش می‌شود.'); return
+            send_message(chat_id, 'ℹ️ این سیگنال از قبل ذخیره شده است.'); return
         now = time.time()
         rec['saved'] = True
         rec['saved_at'] = now
@@ -5723,11 +5774,11 @@ def assist_save(chat_id, aid):
     risk = abs(float(rec['entry']) - float(rec['sl']))
     tp_gap = abs(float(rec['tp']) - float(rec['entry']))
     send_message(chat_id,
-        f"💾 *{rec['symbol']}* ({'🟢 خرید' if rec['sig'] == 'BUY' else '🔴 فروش'}) ذخیره شد و پایش می‌شود.\n"
-        f"• وقتی قیمت به `{fmt(float(rec['entry']))}` برسد، با *قیمت بازار* وارد می‌شوم.\n"
-        f"• SL و TP با همان فاصله‌ها از قیمت ورودِ واقعی تنظیم می‌شوند (فاصله SL `{fmt(risk)}` | فاصله TP `{fmt(tp_gap)}`).\n"
-        f"• اگر قبل از رسیدن به ورود، قیمت از SL یا TP عبور کند، سیگنال باطل و اطلاع داده می‌شود.\n"
-        f"• سیگنال تا وقتی ❌ رد نکنی یا ورود نشود، در «📋 سیگنال‌های در انتظار» می‌ماند.")
+        f"💾 *{rec['symbol']}* ({'🟢 خرید' if rec['sig'] == 'BUY' else '🔴 فروش'}) ذخیره شد.\n"
+        f"• بدون مهلت در «📋 سیگنال‌های در انتظار» می‌ماند و خودکار وارد نمی‌شوم.\n"
+        f"• هر وقت خواستی ✅ ورود را بزن؛ با *قیمت لحظه‌ای بازار* وارد می‌شوم و SL/TP با همان فاصله‌ها از قیمت ورودِ واقعی تنظیم می‌شوند (فاصله SL `{fmt(risk)}` | فاصله TP `{fmt(tp_gap)}`).\n"
+        f"• اگر قیمت از ورود پیشنهادی (`{fmt(float(rec['entry']))}`) خیلی دور شده باشد، قبل از ورود از تو تایید می‌گیرم.\n"
+        f"• برای حذف سیگنال ❌ رد را بزن.")
 
 
 def assist_saved_info(chat_id, aid):
@@ -5736,11 +5787,14 @@ def assist_saved_info(chat_id, aid):
         rec = _assist_find(s, aid)
     if not rec or rec.get('status') != 'pending':
         send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار نیست.'); return
-    send_message(chat_id, f"💾 `{rec['symbol']}` ذخیره است و منتظر رسیدن قیمت به `{fmt(float(rec['entry']))}` می‌ماند. برای لغو، دکمه ❌ رد را بزن.")
+    send_message(chat_id, f"💾 `{rec['symbol']}` ذخیره است و خودکار وارد نمی‌شوم. هر وقت خواستی ✅ ورود را بزن؛ با قیمت لحظه‌ای وارد می‌شوم. برای حذف، ❌ رد را بزن.")
 
 
 def assist_saved_touch_once():
-    """سیگنال‌های ذخیره‌شده را با قیمت لحظه‌ای می‌سنجد: تاچ ورود → ورود با قیمت بازار؛ عبور از SL/TP → باطل."""
+    """V3.42.9: غیرفعال. سیگنال ذخیره‌شده دیگر خودکار (با تاچ قیمت) وارد نمی‌شود و با عبور از SL/TP هم باطل
+    نمی‌شود؛ فقط کاربر با «✅ ورود» (قیمت لحظه‌ای + تایید در صورت دوری قیمت) یا «❌ رد» تکلیفش را روشن می‌کند."""
+    if not ASSIST_SAVED_AUTO_TOUCH:
+        return
     for chat_id, s in list(USER_SESSIONS.items()):
         for rec in list(s.get('assist_log') or []):
             try:
@@ -5866,7 +5920,7 @@ def assist_pending_list(chat_id, message_id=None):
         is_long = r['sig'] == 'BUY'
         tf = r.get('tf') or '5min'
         side_txt = '🟢 خرید' if is_long else '🔴 فروش'
-        state_txt = '💾 ذخیره‌شده (پایش ورود)' if r.get('saved') else 'منتظر تصمیم'
+        state_txt = '💾 ذخیره‌شده (بدون مهلت)' if r.get('saved') else 'منتظر تصمیم'
         try:
             live = latest_price(r['symbol'])
         except Exception:
@@ -5944,7 +5998,7 @@ def _assist_pending_or_notify(chat_id, s, aid):
         rec = _assist_find(s, aid)
         if not rec or rec['status'] != 'pending':
             send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return None
-        if time.time() > rec['expires_at']:
+        if time.time() > rec['expires_at'] and not rec.get('saved'):
             rec['status'] = 'expired'
             save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
             send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return None
@@ -6141,7 +6195,7 @@ def assist_maintenance_once():
             continue
         changed = False
         for rec in log:
-            if rec.get('status') == 'pending' and now > rec.get('expires_at', 0):
+            if rec.get('status') == 'pending' and now > rec.get('expires_at', 0) and not rec.get('saved'):
                 with _ASSIST_LOCK:
                     if rec.get('status') == 'pending':
                         rec['status'] = 'expired'; changed = True
@@ -7462,6 +7516,13 @@ def check_entry_now(chat_id, symbol):
 
 
 def process_command(cmd,chat_id,message_id=None):
+    if str(cmd).startswith('/back:'):
+        # بازگشت از پرامپت‌ها: وضعیت انتظار ورودی را پاک کن و منوی والد را روی همان پیام باز کن.
+        try:
+            _s = get_session(chat_id); _s['user_state'] = None; _s.pop('_manual_tmp', None); save_session(chat_id)
+        except Exception:
+            pass
+        return process_command(str(cmd)[len('/back:'):] or '/menu', chat_id, message_id)
     if cmd == '/backtest_start':
         start_backtest_flow(chat_id); return
     if cmd == '/scan_signal_start':
@@ -7552,6 +7613,15 @@ def process_command(cmd,chat_id,message_id=None):
         edit_page(chat_id,'🎓 *آموزش ساده مفاهیم ربات*',get_learn_menu_keyboard(),message_id); return
     if cl in ('/learn_adx','/learn_atr','/learn_rsi','/learn_rr','/learn_why'):
         edit_page(chat_id,learning_text(cl.replace('/learn_','')),get_learn_menu_keyboard(),message_id); return
+    if cl in ('/adx_up','/adx_down','/sl_up','/sl_down','/tp_up','/tp_down'):
+        _c = s.setdefault('strategy_config', {})
+        _spec = {'/adx_up': ('min_adx', 20.0, +1.0, 5.0, 50.0), '/adx_down': ('min_adx', 20.0, -1.0, 5.0, 50.0),
+                 '/sl_up': ('sl_multiplier', 1.5, +0.2, 0.5, 5.0), '/sl_down': ('sl_multiplier', 1.5, -0.2, 0.5, 5.0),
+                 '/tp_up': ('tp_multiplier', 2.0, +0.5, 1.0, 8.0), '/tp_down': ('tp_multiplier', 2.0, -0.5, 1.0, 8.0)}[cl]
+        _k, _dflt, _step, _lo, _hi = _spec
+        _c[_k] = round(max(_lo, min(_hi, float(_c.get(_k, _dflt)) + _step)), 2)
+        save_session(chat_id)
+        edit_page(chat_id, '🔵 *تنظیمات حرفه‌ای*', get_params_menu_keyboard(s), message_id); return
     if cl=='/profile_advanced':
         s['user_experience']='advanced'; save_session(chat_id); edit_page(chat_id,'🔵 *حالت حرفه‌ای فعال شد.*',get_params_menu_keyboard(s),message_id); return
     if cl=='/profile_simple':
@@ -7664,8 +7734,8 @@ def process_command(cmd,chat_id,message_id=None):
             _p4_sync_tags(s)
             save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
-        send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...')
-        send_message(chat_id, market_dashboard_all_timeframes(chat_id)); return
+        send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...', message_id=message_id)
+        send_message(chat_id, market_dashboard_all_timeframes(chat_id), message_id=message_id); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
@@ -7703,7 +7773,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl == '/toggle_p4_reversal':
         _cfg_p4 = s.setdefault('strategy_config', {})
         if not bool(_cfg_p4.get('daily_p4_mode', True)):
-            send_message(chat_id, "🔒 ستاپ برگشت P4 فقط وقتی مدل PDH/PDL+P4 روشن است کار می‌کند.")
+            edit_page(chat_id, "🔒 ستاپ برگشت P4 فقط وقتی مدل PDH/PDL+P4 روشن است کار می‌کند.\n\n" + _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
         else:
             _cfg_p4['p4_reversal_enabled'] = not bool(_cfg_p4.get('p4_reversal_enabled', False))
             save_session(chat_id)
@@ -7717,16 +7787,14 @@ def process_command(cmd,chat_id,message_id=None):
         tag = toggle_tag_map.get(cl)
         if tag and s.get('strategy_config', {}).get('daily_p4_mode', True):
             s['enabled_setup_tags'] = ['Daily']; s['strategy_config']['enabled_setup_tags'] = ['Daily']
-            send_message(chat_id, "🔒 مدل PDH/PDL+P4 فعال است: فقط سطح روزانه (Daily) برای معامله روشن می‌ماند و بقیه‌ی سطوح قابل روشن‌شدن نیستند.")
-            edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4: فقط Daily فعال است.", get_setup_management_keyboard(s), message_id); return
+            edit_page(chat_id, "🔒 مدل PDH/PDL+P4 فعال است: فقط سطح روزانه (Daily) برای معامله روشن می‌ماند و بقیه‌ی سطوح قابل روشن‌شدن نیستند.\n\n🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4: فقط Daily فعال است.", get_setup_management_keyboard(s), message_id); return
         if tag:
             current = list(s.get('enabled_setup_tags') or list(LEVEL_SETUP_DEFS.keys()))
             if tag in current:
                 if len(current) > 1:
                     current.remove(tag)
                 else:
-                    send_message(chat_id, "⚠️ حداقل یک ستاپ باید فعال باقی بماند.")
-                    edit_page(chat_id, "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
+                    edit_page(chat_id, "⚠️ حداقل یک ستاپ باید فعال باقی بماند.\n\n🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:", get_setup_management_keyboard(s), message_id); return
             else:
                 current.append(tag)
             s['enabled_setup_tags'] = current
@@ -7928,17 +7996,19 @@ def process_command(cmd,chat_id,message_id=None):
         if n==0: send_message(chat_id,'❌ پوزیشن خریدی وجود ندارد.'); return
         send_message(chat_id,f'⚠️ تأیید بستن {n} پوزیشن خرید:',get_confirm_close_longs_keyboard()); return
     if cl=='/confirm_close_longs':
+        _n = 0
         for p in s['paper_positions'][:]:
-            if side_long(p['side']): close_position(chat_id,p,reason='manual_longs')
-        return
+            if side_long(p['side']): close_position(chat_id,p,reason='manual_longs'); _n += 1
+        send_message(chat_id, f'✅ {_n} پوزیشن خرید بسته شد.', message_id=message_id); return
     if cl=='/close_shorts_prompt':
         n=sum(1 for p in s['paper_positions'] if not side_long(p['side']))
         if n==0: send_message(chat_id,'❌ پوزیشن فروشی وجود ندارد.'); return
         send_message(chat_id,f'⚠️ تأیید بستن {n} پوزیشن فروش:',get_confirm_close_shorts_keyboard()); return
     if cl=='/confirm_close_shorts':
+        _n = 0
         for p in s['paper_positions'][:]:
-            if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts')
-        return
+            if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts'); _n += 1
+        send_message(chat_id, f'✅ {_n} پوزیشن فروش بسته شد.', message_id=message_id); return
     if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm','/quality_report'):
         if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
         elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
@@ -8223,6 +8293,21 @@ def process_command(cmd,chat_id,message_id=None):
         assist_approve(chat_id, cl[len('/assist_ok_'):]); return
     if cl.startswith('/assist_no_'):
         assist_reject(chat_id, cl[len('/assist_no_'):]); return
+    if cl.startswith('/assist_farok_'):      # V3.42.9: تایید ورود وقتی قیمت از ورود پیشنهادی دور شده
+        _aid = cl[len('/assist_farok_'):]
+        _strip_all_buttons(chat_id, message_id)
+        assist_approve(chat_id, _aid, skip_far=True)
+        # کارت تاییدیه به نتیجه تبدیل شود (نه اینکه بدون دکمه و بدون توضیح بماند)
+        _rec = _assist_find(get_session(chat_id), _aid)
+        if _rec and _rec.get('status') == 'approved':
+            _pos = [p for p in get_session(chat_id).get('paper_positions', []) if p.get('symbol') == _rec['symbol']]
+            _px = (f" | ورود `{fmt(float(_pos[-1]['entry_price']))}` · SL `{fmt(float(_pos[-1]['sl']))}` · TP `{fmt(float(_pos[-1]['tp']))}`") if _pos else ''
+            send_message(chat_id, f"✅ `{_rec['symbol']}` با قیمت لحظه‌ای بازار وارد شد{_px}.", message_id=message_id)
+        return
+    if cl.startswith('/assist_farno_'):
+        send_message(chat_id, '❌ ورود انجام نشد. سیگنال همچنان در «📋 سیگنال‌های در انتظار» می‌ماند.',
+                     {'inline_keyboard': [[{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'}]]},
+                     message_id=message_id); return
     if cl.startswith('/assist_tgok_'):      # تایید ورود بعد از هشدار تضاد با روند BTC/ETH
         _strip_all_buttons(chat_id, message_id)
         assist_approve(chat_id, cl[len('/assist_tgok_'):], skip_trend=True); return
@@ -8354,8 +8439,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/full_reset_confirm':
         ok,msg=full_reset(chat_id)
         if ok:
-            send_message(chat_id,msg)
-            send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
+            send_message(chat_id, msg + '\n\n🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.', get_start_keyboard())
             sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
         else:
             send_message(chat_id,msg,get_performance_keyboard())
