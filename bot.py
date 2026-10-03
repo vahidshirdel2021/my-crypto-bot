@@ -9208,8 +9208,13 @@ def _notify_admins_access_request(chat_id):
             {'text': '✅ تایید', 'callback_data': f'/admin_access_approve_{int(chat_id)}'},
             {'text': '🚫 رد', 'callback_data': f'/admin_access_deny_{int(chat_id)}'},
         ]]}
+        if not ADMIN_CHAT_IDS:
+            logger.warning('درخواست دسترسی از chat_id=%s آمد ولی هیچ ادمینی تعریف نشده است. در .env مقدار ADMIN_CHAT_IDS را با آیدی عددی خودتان تنظیم کنید و ربات را ری‌استارت کنید.', chat_id)
+            return
         for admin_id in list(ADMIN_CHAT_IDS):
-            send_message(admin_id, text, markup, keep=True, parse_mode=None)
+            ok = send_message(admin_id, text, markup, keep=True, parse_mode=None)
+            if not ok:
+                logger.warning('ارسال درخواست دسترسی به ادمین %s ناموفق بود (احتمالاً این ادمین هنوز در چت خصوصی ربات /start نزده است).', admin_id)
     except Exception:
         logger.exception('admin access-request notice failed chat=%s', chat_id)
 
@@ -9721,6 +9726,8 @@ def _watchlist_refresh_loop():
 def main():
     init_db()
     load_access_control()
+    if not ADMIN_CHAT_IDS:
+        logger.warning('هیچ ادمینی تعریف نشده: ADMIN_CHAT_IDS (یا ALLOWED_CHAT_IDS) خالی است؛ پنل مدیریت و تایید کاربران کار نمی‌کند.')
     load_telegram_offset()
     load_sessions()
     logger.info('Loaded %s sessions', len(USER_SESSIONS))
