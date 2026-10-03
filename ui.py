@@ -177,15 +177,15 @@ def get_setup_management_keyboard(session=None):
 
 
 _SCENARIO_LABELS = {
-    "1": "۱ برخورد PDH+برگشت (Sell)", "2": "۲ برخورد PDL+برگشت (Buy)",
-    "3": "۳ نفوذ PDH+ادامه (Buy)", "4": "۴ نفوذ PDL+ادامه (Sell)",
-    "5": "۵ شکست کاذب PDH (Sell)", "6": "۶ شکست کاذب PDL (Buy)",
+    "1": "۱ برخورد به سقف دیروز و برگشت (فروش)", "2": "۲ برخورد به کف دیروز و برگشت (خرید)",
+    "3": "۳ شکست سقف دیروز و ادامه صعود (خرید)", "4": "۴ شکست کف دیروز و ادامه نزول (فروش)",
+    "5": "۵ شکست کاذب سقف دیروز (فروش)", "6": "۶ شکست کاذب کف دیروز (خرید)",
 }
 
 
 def get_scenario_management_keyboard(session=None):
-    """۶ حالت معاملاتی PDH/PDL + سه تاییدیه‌ی اختیاری هر جفت + معافیت ۵/۶ از گیت
-    هم‌جهتی بازار."""
+    """۶ حالت معاملاتی روی سقف/کف دیروز (PDH/PDL) + سه «سخت‌گیری بیشتر»ِ اختیاری برای هر جفت حالت
+    + معافیت‌های همسویی با بازار. نام دکمه‌ها برای کاربر مبتدی ساده نوشته شده؛ callback_data ها ثابت‌اند."""
     s = session or {}
     cfg = s.get("strategy_config") or {}
     rows = []
@@ -196,14 +196,14 @@ def get_scenario_management_keyboard(session=None):
     conf_simple = bool(cfg.get("confirm_simple_reject_enabled", False))
     conf_cont = bool(cfg.get("confirm_continuation_enabled", False))
     conf_fake = bool(cfg.get("confirm_fakeout_enabled", False))
-    rows.append([{"text": f"{'🟢' if conf_simple else '🔴'} تاییدیه حالت ۱/۲ (کندل رد + حجم)", "callback_data": "/toggle_confirm_simple"}])
-    rows.append([{"text": f"{'🟢' if conf_cont else '🔴'} تاییدیه حالت ۳/۴ (سلامت پولبک)", "callback_data": "/toggle_confirm_continuation"}])
-    rows.append([{"text": f"{'🟢' if conf_fake else '🔴'} تاییدیه حالت ۵/۶ (واگرایی حجم)", "callback_data": "/toggle_confirm_fakeout"}])
+    rows.append([{"text": f"{'🟢' if conf_simple else '🔴'} سخت‌گیری بیشتر در حالت ۱ و ۲", "callback_data": "/toggle_confirm_simple"}])
+    rows.append([{"text": f"{'🟢' if conf_cont else '🔴'} سخت‌گیری بیشتر در حالت ۳ و ۴", "callback_data": "/toggle_confirm_continuation"}])
+    rows.append([{"text": f"{'🟢' if conf_fake else '🔴'} سخت‌گیری بیشتر در حالت ۵ و ۶", "callback_data": "/toggle_confirm_fakeout"}])
     exempt56 = bool(cfg.get("scenario_56_market_gate_exempt", True))
-    rows.append([{"text": f"{'🟢' if exempt56 else '🔴'} معافیت ۵/۶ از گیت هم‌جهتی بازار", "callback_data": "/toggle_scenario56_exempt"}])
+    rows.append([{"text": f"{'🟢' if exempt56 else '🔴'} حالت ۵ و ۶ بدون نیاز به همسویی با بازار", "callback_data": "/toggle_scenario56_exempt"}])
     exempt12 = bool(cfg.get("scenario_12_market_gate_exempt", True))
-    rows.append([{"text": f"{'🟢' if exempt12 else '🔴'} معافیت ۱/۲ از گیت هم‌جهتی بازار", "callback_data": "/toggle_scenario12_exempt"}])
-    rows.append([{"text": "🧰 بازگشت به مدیریت فیلتر", "callback_data": "/trade_filter_management"}])
+    rows.append([{"text": f"{'🟢' if exempt12 else '🔴'} حالت ۱ و ۲ بدون نیاز به همسویی با بازار", "callback_data": "/toggle_scenario12_exempt"}])
+    rows.append([{"text": "🧰 بازگشت به قوانین معامله", "callback_data": "/trade_filter_management"}])
     return {"inline_keyboard": rows}
 
 
@@ -213,11 +213,11 @@ def get_my_profile_keyboard(session=None):
     چیده و ذخیره کرده."""
     s = session or {}
     has_profile = bool(s.get("my_profile"))
-    apply_label = "📥 اعمال پروفایل من" if has_profile else "📥 اعمال پروفایل من (هنوز چیزی ذخیره نشده)"
+    apply_label = "📥 بازگشت به تنظیمات ذخیره‌شده‌ی من" if has_profile else "📥 بازگشت به تنظیمات ذخیره‌شده (هنوز چیزی ذخیره نشده)"
     rows = [
-        [{"text": "💾 ذخیره‌ی تنظیمات فعلی به‌عنوان پروفایل من", "callback_data": "/save_my_profile"}],
+        [{"text": "💾 ذخیره‌ی تنظیمات فعلی (تنظیمات من)", "callback_data": "/save_my_profile"}],
         [{"text": apply_label, "callback_data": "/apply_my_profile"}],
-        [{"text": "🧰 بازگشت به مدیریت فیلتر", "callback_data": "/trade_filter_management"}],
+        [{"text": "🧰 بازگشت به قوانین معامله", "callback_data": "/trade_filter_management"}],
     ]
     return {"inline_keyboard": rows}
 
@@ -250,7 +250,7 @@ def get_trading_menu_keyboard():
 def get_settings_menu_keyboard():
     return {"inline_keyboard": [
         [{"text": "🎛 مدیریت ستاپ‌های معاملاتی", "callback_data": "/setup_management"},
-         {"text": "🧰 مدیریت فیلتر معاملات", "callback_data": "/trade_filter_management"}],
+         {"text": "🧰 قوانین معامله (فیلترها)", "callback_data": "/trade_filter_management"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],

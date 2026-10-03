@@ -243,6 +243,14 @@ def _save_signal_channel_level_tags(tags):
 
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
 _SIGNAL_CHANNEL_PATTERNS = _load_signal_channel_patterns()
+# V3.42.12: «برخورد ساده» قبلاً کلیدش شامل زمان کندل بود؛ پس تا وقتی قیمت دور یک سطح می‌چرخید، هر کندل جدید یک پیام تازه
+# برای همان سطح می‌فرستاد (۳-۴ پیام برای یک ارز). حالا هر سطح (نماد+تایم‌فریم+سطح+مقدار) فقط یک‌بار اعلام می‌شود و
+# تا وقتی قیمت در حال لمس آن است ساکت می‌ماند؛ فقط اگر دست‌کم SIGNAL_CHANNEL_TOUCH_REARM_SECONDS (پیش‌فرض ۳۰ دقیقه) از آن
+# سطح دور شده بود و دوباره برخورد کرد، دوباره پیام می‌آید. 0 = برای همان مقدار سطح هرگز تکرار نشود.
+SIGNAL_CHANNEL_TOUCH_REARM_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_TOUCH_REARM_SECONDS', '1800')))
+_SIGNAL_CHANNEL_TOUCH_FILE = os.environ.get('SIGNAL_CHANNEL_TOUCH_FILE', 'signal_channel_touch_last.json')
+_SIGNAL_CHANNEL_TOUCH_LAST = {}   # {"symbol|tf|tag|side|level": آخرین زمانی که قیمت روی این سطح دیده شد (بعد از ارسال پیام)}
+_SIGNAL_CHANNEL_TOUCH_DIRTY = False
 _SIGNAL_CHANNEL_SEEN = {}  # {(symbol, timeframe, tag, hi/lo, pattern, candle_ts): True} - یک پیام به‌ازای هر کندل/سطح؛ به ترتیب درج نگه‌داری می‌شود
 
 COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
@@ -979,31 +987,138 @@ AUTO_DELETE_SECONDS = max(0, int(os.environ.get('AUTO_DELETE_SECONDS', '180')))
 # V3.38.7: پیام‌هایی که خودِ کاربر در چت خصوصی با ربات می‌فرستد (نماد، قیمت، /menu، دکمه‌های ثابت) هم بعد از AUTO_DELETE_SECONDS حذف شوند.
 AUTO_DELETE_USER_MESSAGES = os.environ.get('AUTO_DELETE_USER_MESSAGES', 'true').lower() not in ('0', 'false', 'no')
 _AUTO_DELETE_FILE = os.environ.get('AUTO_DELETE_QUEUE_FILE', 'auto_delete_queue.json')
+_KB_ANCHOR_FILE = os.environ.get('KB_ANCHOR_FILE', 'kb_anchor.json')
+# V3.42.11: پیامی که به‌خاطر «محافظت» (کیبورد ثابت / کارت پوزیشن باز) حذف نشد، بعد از این مدت دوباره بررسی می‌شود.
+AUTO_DELETE_RECHECK_SECONDS = max(15, int(os.environ.get('AUTO_DELETE_RECHECK_SECONDS', '45')))
 _AUTO_DELETE_QUEUE = []          # [[due_ts, chat_id, message_id], ...]
+_AUTO_DELETE_KEYS = set()        # {(chat_id, message_id)} برای جلوگیری از ثبت تکراری
 _AUTO_DELETE_LOCK = RLock()
 _AUTO_DELETE_DIRTY = False
 
 
 def _auto_delete_load():
-    global _AUTO_DELETE_QUEUE
+    """صف حذف و شناسه‌ی پیام حامل کیبورد ثابت را از دیسک می‌خواند (با داده‌ی درون‌حافظه ادغام می‌شود)."""
+    global _AUTO_DELETE_DIRTY
     try:
         with open(_AUTO_DELETE_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if isinstance(data, list):
-            _AUTO_DELETE_QUEUE = [[float(a), int(b), int(c)] for a, b, c in data]
+            with _AUTO_DELETE_LOCK:
+                for a, b, c in data:
+                    key = (int(b), int(c))
+                    if key in _AUTO_DELETE_KEYS:
+                        continue
+                    _AUTO_DELETE_QUEUE.append([float(a), int(b), int(c)])
+                    _AUTO_DELETE_KEYS.add(key)
     except Exception:
-        _AUTO_DELETE_QUEUE = []
+        pass
+    # V3.42.11: بدون این، بعد از ری‌استارت ربات «حامل کیبورد ثابت» ناشناخته می‌شد و با اولین حذف، دکمه‌های ثابت می‌پرید.
+    try:
+        with open(_KB_ANCHOR_FILE, 'r', encoding='utf-8') as f:
+            d = json.load(f)
+        with _KB_ANCHOR_LOCK:
+            for k, v in (d or {}).items():
+                _KB_ANCHOR.setdefault(int(k), int(v))
+    except Exception:
+        pass
+
+
+def _kb_anchor_save():
+    try:
+        with _KB_ANCHOR_LOCK:
+            payload = {str(k): int(v) for k, v in _KB_ANCHOR.items()}
+        with open(_KB_ANCHOR_FILE, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    except Exception:
+        logger.exception('failed to persist keyboard anchors')
 
 
 def schedule_auto_delete(chat_id, message_id, ttl=None):
-    """پیام تازه‌ارسال‌شده‌ی ربات را برای حذف بعد از ttl ثانیه (پیش‌فرض AUTO_DELETE_SECONDS) ثبت می‌کند."""
+    """پیام را برای حذف بعد از ttl ثانیه (پیش‌فرض AUTO_DELETE_SECONDS) ثبت می‌کند. ثبت تکراری نادیده گرفته می‌شود."""
     global _AUTO_DELETE_DIRTY
     ttl = AUTO_DELETE_SECONDS if ttl is None else int(ttl)
     if ttl <= 0 or not message_id or not chat_id:
         return
+    key = (int(chat_id), int(message_id))
     with _AUTO_DELETE_LOCK:
-        _AUTO_DELETE_QUEUE.append([time.time() + ttl, int(chat_id), int(message_id)])
+        if key in _AUTO_DELETE_KEYS:
+            return
+        _AUTO_DELETE_QUEUE.append([time.time() + ttl, key[0], key[1]])
+        _AUTO_DELETE_KEYS.add(key)
         _AUTO_DELETE_DIRTY = True
+
+
+def _track_bot_message(chat_id, message_id):
+    """V3.42.11: «هر» پیامی که ربات در چت خصوصی می‌فرستد (از هر مسیری: کارت دستیار، هشدار، عکس، فایل، ...)
+    خودکار برای حذف ۳ دقیقه‌ای ثبت می‌شود؛ دیگر به این‌که فرستنده‌اش یادش رفته schedule_auto_delete بزند یا
+    keep=True داده، وابسته نیست. استثناها هنگام حذف در _message_protected بررسی می‌شوند."""
+    try:
+        if AUTO_DELETE_SECONDS <= 0 or not message_id or chat_id is None:
+            return
+        if int(chat_id) <= 0:          # کانال/گروه: منطق جدا دارند
+            return
+        schedule_auto_delete(chat_id, message_id)
+    except Exception:
+        pass
+
+
+def _message_protected(chat_id, message_id):
+    """True = این پیام الان حذف نشود:
+    ۱) پیام حامل کیبورد ثابت پایین چت؛ ۲) کارت زنده‌ی پوزیشن‌ها و کارت ورود (سیگنال) هر پوزیشن *باز*.
+    وقتی پوزیشن بسته شد، کارت‌هایش دیگر محافظت نمی‌شوند و در بررسی بعدی پاک می‌شوند."""
+    try:
+        with _KB_ANCHOR_LOCK:
+            if _KB_ANCHOR.get(chat_id) == message_id:
+                return True
+        sess = USER_SESSIONS.get(chat_id)
+        positions = (sess or {}).get('paper_positions') or []
+        if not positions:
+            return False
+        if sess.get('positions_message_id') == message_id:
+            return True
+        for p in positions:
+            if p.get('entry_card_mid') == message_id:
+                return True
+    except Exception:
+        logger.exception('message protection check failed chat=%s message=%s', chat_id, message_id)
+        return True            # شک داشتیم: حذف نکن
+    return False
+
+
+def _ensure_kb_anchor(chat_id):
+    """اگر برای این چت پیام حامل کیبورد ثابت شناخته‌شده نیست، قبل از حذف‌ها یکی می‌فرستد تا دکمه‌های ثابت نپرند."""
+    with _KB_ANCHOR_LOCK:
+        has = chat_id in _KB_ANCHOR
+    if has or not is_allowed(chat_id):
+        return
+    try:
+        sync_bottom_keyboard(chat_id)
+    except Exception:
+        logger.exception('ensure keyboard anchor failed chat=%s', chat_id)
+
+
+def _after_message_deleted(chat_id, message_id):
+    """اشاره‌گرهای session را که به پیام حذف‌شده می‌رسند پاک می‌کند."""
+    try:
+        sess = USER_SESSIONS.get(chat_id)
+        if not sess:
+            return
+        if sess.get('positions_message_id') == message_id:
+            sess['positions_message_id'] = None
+        changed = False
+        for rec in (sess.get('assist_log') or []):
+            mids = [rec.get('message_id')] + list(rec.get('old_mids') or [])
+            if message_id in mids:
+                # رکورد سیگنال می‌ماند؛ کارت از «📋 سیگنال‌های در انتظار» دوباره ساخته می‌شود (assist_open)
+                if rec.get('message_id') == message_id:
+                    rec['message_id'] = None
+                rec['old_mids'] = [m for m in (rec.get('old_mids') or []) if m != message_id]
+                rec['msg_deleted'] = True
+                changed = True
+        if changed:
+            save_session(chat_id)
+    except Exception:
+        logger.exception('after-delete cleanup failed chat=%s', chat_id)
 
 
 def _auto_delete_sweep_once():
@@ -1011,22 +1126,36 @@ def _auto_delete_sweep_once():
     now = time.time()
     with _AUTO_DELETE_LOCK:
         due = [x for x in _AUTO_DELETE_QUEUE if x[0] <= now]
-        if due:
-            _AUTO_DELETE_QUEUE[:] = [x for x in _AUTO_DELETE_QUEUE if x[0] > now]
-            _AUTO_DELETE_DIRTY = True
-    for _due, chat_id, message_id in due:
+    if due:
+        # اول مطمئن شو کیبورد ثابت هر چتی که قرار است پیامش پاک شود سر جایش هست
+        for chat_id in sorted({x[1] for x in due}):
+            _ensure_kb_anchor(chat_id)
+    requeue = []
+    done = []
+    for item in due:
+        _due, chat_id, message_id = item
+        if _message_protected(chat_id, message_id):
+            requeue.append(item)
+            continue
         try:
-            tg('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, 10)
+            res = tg('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, 10)
         except Exception:
+            res = None
             logger.exception('auto delete failed chat=%s message=%s', chat_id, message_id)
-        # اگر کارت پوزیشن‌های زنده حذف شد، شناسه‌اش را پاک کن تا رفرش زنده بی‌نتیجه ادامه پیدا نکند
-        try:
-            sess = USER_SESSIONS.get(chat_id)
-            if sess and sess.get('positions_message_id') == message_id:
-                sess['positions_message_id'] = None
-        except Exception:
-            pass
+        done.append(item)
+        _after_message_deleted(chat_id, message_id)
+        time.sleep(0.03)
     with _AUTO_DELETE_LOCK:
+        for item in done:
+            try:
+                _AUTO_DELETE_QUEUE.remove(item)
+            except ValueError:
+                pass
+            _AUTO_DELETE_KEYS.discard((item[1], item[2]))
+        for item in requeue:
+            item[0] = now + AUTO_DELETE_RECHECK_SECONDS      # همان لیست درون صف است؛ زمان بررسی بعدی
+        if done or requeue:
+            _AUTO_DELETE_DIRTY = True
         if _AUTO_DELETE_DIRTY:
             try:
                 with open(_AUTO_DELETE_FILE, 'w', encoding='utf-8') as f:
@@ -1071,9 +1200,12 @@ def _local_date_str():
     return _crypto_now().strftime('%Y-%m-%d')
 
 
-def _day_log_record(chat_id, message_id):
-    """شناسه‌ی پیام چت خصوصی را برای پاک‌سازی روز بعد ثبت می‌کند (کانال‌ها/گروه‌ها نادیده گرفته می‌شوند)."""
+def _day_log_record(chat_id, message_id, track=True):
+    """شناسه‌ی پیام چت خصوصی را برای پاک‌سازی روز بعد ثبت می‌کند (کانال‌ها/گروه‌ها نادیده گرفته می‌شوند).
+    track=True (پیام‌های ربات): همزمان برای حذف ۳ دقیقه‌ای هم ثبت می‌شود."""
     global _DAY_LOG_DIRTY
+    if track:
+        _track_bot_message(chat_id, message_id)
     if not DAILY_MESSAGE_CLEANUP or not message_id or chat_id is None:
         return
     try:
@@ -1129,6 +1261,12 @@ def _day_cleanup_run():
         _DAY_LOG_DIRTY = True
     total = 0
     for cid, ids in old.items():
+        # V3.42.11: کیبورد ثابت و کارت پوزیشن‌های باز با پاک‌سازی روزانه هم حذف نمی‌شوند؛ به لاگ روز جدید منتقل می‌شوند
+        _prot = [m for m in ids if _message_protected(cid, m)]
+        if _prot:
+            with _DAY_LOG_LOCK:
+                _DAY_LOG.setdefault(cid, []).extend(_prot)
+            ids = [m for m in ids if m not in _prot]
         for mid in ids:
             try:
                 tg('deleteMessage', {'chat_id': cid, 'message_id': mid}, 10)
@@ -1140,11 +1278,13 @@ def _day_cleanup_run():
         with _AUTO_DELETE_LOCK:
             _AUTO_DELETE_QUEUE[:] = [x for x in _AUTO_DELETE_QUEUE if not (x[1] == cid and x[2] in gone)]
         with _KB_ANCHOR_LOCK:
-            _KB_ANCHOR.pop(cid, None)
+            if _KB_ANCHOR.get(cid) in gone:        # فقط اگر خودِ پیام حامل واقعاً حذف شد
+                _KB_ANCHOR.pop(cid, None)
         try:
             sess = USER_SESSIONS.get(cid)
             if sess is not None:
-                sess['positions_message_id'] = None
+                if sess.get('positions_message_id') in gone:
+                    sess['positions_message_id'] = None
                 for rec in (sess.get('assist_log') or []):
                     if rec.get('status') == 'pending' and not rec.get('saved'):
                         rec['status'] = 'expired'          # کارتش پاک شده؛ دیگر قابل تایید نیست
@@ -1231,6 +1371,7 @@ def answer_callback(cid, text=None, show_alert=False):
 
 import threading as _threading
 _CB_CTX = _threading.local()
+_LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی که send_photo در همین thread فرستاد
 
 # V3.42.8: «همه‌ی» دکمه‌های اینلاین به‌صورت پیش‌فرض همان پیامِ منو را ویرایش می‌کنند (نه پیام جدید).
 # فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
@@ -1299,6 +1440,7 @@ def _register_kb_anchor(chat_id, message_id, markup):
     with _KB_ANCHOR_LOCK:
         old = _KB_ANCHOR.get(chat_id)
         _KB_ANCHOR[chat_id] = message_id
+    _kb_anchor_save()
     if old and old != message_id:
         schedule_auto_delete(chat_id, old)
     return True
@@ -1356,6 +1498,7 @@ def sync_bottom_keyboard(chat_id, status_message=None):
 
 
 def send_photo(chat_id, img, caption='', markup=None, keep=False):
+    _LAST_PHOTO.mid = None
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s = get_session(chat_id)
     if markup is None:
@@ -1365,6 +1508,7 @@ def send_photo(chat_id, img, caption='', markup=None, keep=False):
         if r.status_code == 200:
             try:
                 _mid = ((r.json() or {}).get('result') or {}).get('message_id')
+                _LAST_PHOTO.mid = _mid
                 _day_log_record(chat_id, _mid)
                 if not _register_kb_anchor(chat_id, _mid, markup) and not keep: schedule_auto_delete(chat_id, _mid)
             except Exception: pass
@@ -2844,7 +2988,35 @@ def _signal_channel_pattern_label(pattern, side_fa):
     return _ALL_SIGNAL_CHANNEL_PATTERNS.get(pattern, pattern)
 
 
+def _touch_last_load():
+    try:
+        with open(_SIGNAL_CHANNEL_TOUCH_FILE, 'r', encoding='utf-8') as f:
+            d = json.load(f)
+        if isinstance(d, dict):
+            for k, v in d.items():
+                _SIGNAL_CHANNEL_TOUCH_LAST.setdefault(str(k), float(v))
+    except Exception:
+        pass
+
+
+def _touch_last_save():
+    global _SIGNAL_CHANNEL_TOUCH_DIRTY
+    if not _SIGNAL_CHANNEL_TOUCH_DIRTY:
+        return
+    _SIGNAL_CHANNEL_TOUCH_DIRTY = False
+    try:
+        now = time.time()
+        # سطح‌های خیلی قدیمی (مثلاً سطح ساعتیِ دیروز) دیگر لازم نیستند
+        for k in [k for k, v in _SIGNAL_CHANNEL_TOUCH_LAST.items() if now - v > 7 * 86400]:
+            _SIGNAL_CHANNEL_TOUCH_LAST.pop(k, None)
+        with open(_SIGNAL_CHANNEL_TOUCH_FILE, 'w', encoding='utf-8') as f:
+            json.dump(_SIGNAL_CHANNEL_TOUCH_LAST, f)
+    except Exception:
+        logger.exception('failed to persist signal channel touch state')
+
+
 def _signal_channel_scan_once():
+    global _SIGNAL_CHANNEL_TOUCH_DIRTY
     if not SIGNAL_CHANNEL_ID:
         return
     timeframe = _signal_channel_timeframe()
@@ -2855,6 +3027,17 @@ def _signal_channel_scan_once():
             key = (symbol, timeframe, tag, side_fa, pattern, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
+            touch_key = None
+            if pattern == 'touch':
+                touch_key = f"{symbol}|{timeframe}|{tag}|{side_fa}|{float(level_value):.10g}"
+                _prev = _SIGNAL_CHANNEL_TOUCH_LAST.get(touch_key)
+                if _prev is not None:
+                    _now = time.time()
+                    _since = _now - _prev
+                    _SIGNAL_CHANNEL_TOUCH_LAST[touch_key] = _now      # هنوز روی سطح است؛ ساعت «دور شدن» از اول شروع شود
+                    _SIGNAL_CHANNEL_TOUCH_DIRTY = True
+                    if SIGNAL_CHANNEL_TOUCH_REARM_SECONDS <= 0 or _since < SIGNAL_CHANNEL_TOUCH_REARM_SECONDS:
+                        continue
             defs = LEVEL_SETUP_DEFS.get(tag)
             level_label = (defs[2] if side_fa == 'سقف' else defs[3]) if defs else f'{side_fa} {tag}'
             regime_label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime)
@@ -2872,6 +3055,9 @@ def _signal_channel_scan_once():
                 if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
                     continue
             _SIGNAL_CHANNEL_SEEN[key] = True
+            if touch_key is not None:
+                _SIGNAL_CHANNEL_TOUCH_LAST[touch_key] = time.time()
+                _SIGNAL_CHANNEL_TOUCH_DIRTY = True
             # V3.42: برچسب جهت (مناسب خرید/فروش) از پیام کانال حذف شد؛ جهت را خود کاربر با دکمه‌ها انتخاب می‌کند.
             lines = [
                 _tf_regime_line(timeframe),
@@ -2940,6 +3126,7 @@ def _signal_channel_scan_once():
                 sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, full_text, reply_markup=markup)
             _channel_ind_cache_put(sent_msg_id, ind_text)
             _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
+    _touch_last_save()
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
     # ارسال دوباره‌ی همین کندل می‌شد)
     if len(_SIGNAL_CHANNEL_SEEN) > 5000:
@@ -2954,6 +3141,7 @@ def _signal_channel_loop():
     if not SIGNAL_CHANNEL_ID:
         logger.info('SIGNAL_CHANNEL_ID تنظیم نشده - کانال اعلام برخورد سطوح غیرفعال است.')
         return
+    _touch_last_load()
     while True:
         try:
             _signal_channel_scan_once()
@@ -3192,7 +3380,8 @@ def render_trade_chart_png(symbol, df, trade):
         return None, None
 
 
-def chart(chat_id, symbol, df, trade):
+def chart(chat_id, symbol, df, trade, entry_card=False):
+    """entry_card=True: این عکس «کارت سیگنال/ورود» پوزیشن تازه‌باز است؛ تا وقتی پوزیشن باز است حذف نمی‌شود."""
     try:
         b, ctx = render_trade_chart_png(symbol, df, trade)
         if b is None:
@@ -3239,6 +3428,11 @@ def chart(chat_id, symbol, df, trade):
             trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf),
             keep=bool(getattr(_SIGNAL_ORIGIN, 'on', False))
         )
+        if entry_card:
+            _emid = getattr(_LAST_PHOTO, 'mid', None)
+            if _emid:
+                trade['entry_card_mid'] = int(_emid)
+                save_session(chat_id)
     except Exception:
         logger.exception('chart error')
 
@@ -3634,7 +3828,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     chart_tf = s['timeframe']
     df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min') else 200)
     if not df.empty:
-        chart(chat_id, symbol, calculate_indicators(df), trade)
+        chart(chat_id, symbol, calculate_indicators(df), trade, entry_card=True)
     return True
 
 
@@ -4538,9 +4732,9 @@ def profit_lock_scan_once():
 
 
 # V3.42: هشدار سود - وقتی سود لحظه‌ای (ناخالص، همان فرمول «سود/زیان فعلی») یک پوزیشن باز به
-# PROFIT_ALERT_USDT دلار و هر مضرب بعدی آن (۵، ۱۰، ۱۵، ...) برسد، برای هر پله یک‌بار پیام می‌فرستد. مستقل از «قفل سود» است و چیزی را نمی‌بندد.
+# PROFIT_ALERT_USDT دلار و هر مضرب بعدی آن (۴، ۸، ۱۲، ...) برسد، برای هر پله یک‌بار پیام می‌فرستد. مستقل از «قفل سود» است و چیزی را نمی‌بندد.
 # PROFIT_ALERT_USDT=0 آن را کاملاً خاموش می‌کند؛ کلید روشن/خاموش هم در منوی «مدیریت خروج» هست.
-PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '5')))
+PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '4')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -5182,6 +5376,21 @@ ASSIST_LOG_CAP = 500
 ASSIST_SEEN_TTL_SECONDS = 6 * 3600
 ASSIST_EXPIRY_CHOICES = (180, 300, 600, 900)
 _ASSIST_LOCK = RLock()
+# V3.42.12: لمس دکمه توسط یک thread تک‌رشته‌ی دریافت پیام‌ها پردازش می‌شود؛ اگر آن thread مشغول کار دیگری بوده (چارت، قیمت‌گیری،
+# ...) پردازش لمس ممکن است چند ثانیه/دقیقه بعد از لمس واقعی انجام شود و سیگنال «در لحظه‌ی پردازش» منقضی دیده شود، در حالی
+# که کاربر به‌موقع لمس کرده بود. برای همین مهلت را با «زودترین زمان ممکن برای لمس» می‌سنجیم (لحظه‌ی برگشتن getUpdates قبلی).
+_PRESS = _threading.local()
+ASSIST_SAVE_GRACE_SECONDS = max(0, int(os.environ.get('ASSIST_SAVE_GRACE_SECONDS', '20')))
+# V3.42.13: «💾 ذخیره» روی سیگنالی که تا این مدت پیش منقضی شده هم آن را زنده می‌کند (ذخیره‌شده ورود خودکار ندارد و
+# ورود فقط با ✅ + تایید قیمت انجام می‌شود، پس زنده‌کردنش بی‌خطر است). لمس‌هایی که دیر پردازش شده‌اند از دست نمی‌روند.
+ASSIST_SAVE_REVIVE_SECONDS = max(0, int(os.environ.get('ASSIST_SAVE_REVIVE_SECONDS', '1800')))
+
+
+def _assist_now():
+    """زمانِ «لمس» برای مقایسه با مهلت سیگنال: کوچک‌تر از (الان) و (زودترین زمان ممکن لمس) وقتی از یک لمس دکمه آمده‌ایم."""
+    t = time.time()
+    e = getattr(_PRESS, 'earliest', None)
+    return min(t, e) if e else t
 
 
 def _assist_find(s, aid):
@@ -5623,7 +5832,7 @@ def assist_approve(chat_id, aid, skip_trend=False, skip_far=False):
         if rec['status'] != 'pending':
             send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec['status']})."); return
         now = time.time()
-        if now > rec['expires_at'] and not rec.get('saved'):
+        if _assist_now() > float(rec['expires_at']) + ASSIST_SAVE_GRACE_SECONDS and not rec.get('saved'):
             rec['status'] = 'expired'; save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
             send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return
         try:
@@ -5758,6 +5967,18 @@ def assist_save(chat_id, aid):
     همان فاصله‌های سیگنال نسبت به قیمت لحظه‌ای تنظیم می‌شوند؛ اگر قیمت از ورود پیشنهادی خیلی دور شده باشد،
     قبل از ورود تایید گرفته می‌شود (assist_approve)."""
     s = get_session(chat_id)
+    with _ASSIST_LOCK:
+        _r0 = _assist_find(s, aid)
+        # V3.42.12: اگر کاربر به‌موقع لمس کرده ولی ربات تا لحظه‌ی پردازش سیگنال را «منقضی» کرده، دوباره زنده‌اش کن
+        if _r0 is not None:
+            logger.info('assist save press: aid=%s status=%s saved=%s expired_ago=%.0fs press_age=%.0fs', aid, _r0.get('status'),
+                        _r0.get('saved'), time.time() - float(_r0.get('expires_at', 0) or 0), time.time() - _assist_now())
+        if (_r0 and _r0.get('status') == 'expired' and not _r0.get('saved')
+                and time.time() <= float(_r0.get('expires_at', 0) or 0) + max(ASSIST_SAVE_GRACE_SECONDS, ASSIST_SAVE_REVIVE_SECONDS)):
+            _r0['status'] = 'pending'
+            _r0['expires_at'] = time.time() + 30      # فقط برای عبور از بررسی مهلت پایین؛ بلافاصله با ذخیره بدون مهلت می‌شود
+            _r0.pop('shadow', None); _r0.pop('shadow_done', None); _r0.pop('msg_deleted', None)
+            _r0['revived_by_save'] = True
     rec = _assist_pending_or_notify(chat_id, s, aid)
     if not rec:
         return
@@ -5998,7 +6219,7 @@ def _assist_pending_or_notify(chat_id, s, aid):
         rec = _assist_find(s, aid)
         if not rec or rec['status'] != 'pending':
             send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.'); return None
-        if time.time() > rec['expires_at'] and not rec.get('saved'):
+        if _assist_now() > float(rec['expires_at']) + ASSIST_SAVE_GRACE_SECONDS and not rec.get('saved'):
             rec['status'] = 'expired'
             save_session(chat_id); _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
             send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده بود؛ برای ارزیابی ثبت شد.'); return None
@@ -6196,10 +6417,13 @@ def assist_maintenance_once():
         changed = False
         for rec in log:
             if rec.get('status') == 'pending' and now > rec.get('expires_at', 0) and not rec.get('saved'):
+                _expired_now = False
                 with _ASSIST_LOCK:
-                    if rec.get('status') == 'pending':
-                        rec['status'] = 'expired'; changed = True
-                _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
+                    # V3.42.12: بین بررسی شرط و قفل ممکن است کاربر «ذخیره» را زده باشد؛ دوباره چک می‌کنیم
+                    if rec.get('status') == 'pending' and not rec.get('saved') and now > rec.get('expires_at', 0):
+                        rec['status'] = 'expired'; changed = True; _expired_now = True
+                if _expired_now:
+                    _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
         # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر ۱ ساعت بعد از انقضا از چت پاک می‌شوند (خودِ رکورد و آمار سایه می‌ماند).
         if ASSIST_EXPIRED_DELETE_AFTER_SECONDS > 0:
             for rec in log:
@@ -6301,7 +6525,7 @@ def assist_keyboard(chat_id):
         [{'text': f'⏱ مهلت تایید: {mins} دقیقه (تغییر)', 'callback_data': '/assist_expiry_cycle'}],
         [{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'}],
         [{'text': '📊 آمار دستیار', 'callback_data': '/assist_stats'}],
-        [{'text': '🧰 بازگشت به مدیریت فیلتر', 'callback_data': '/trade_filter_management'}],
+        [{'text': '🧰 بازگشت به قوانین معامله', 'callback_data': '/trade_filter_management'}],
     ]}
 
 
@@ -6660,7 +6884,7 @@ def trade_tracking_keyboard(chat_id):
         'inline_keyboard': [
             [{'text': f'{icon} ردیابی معاملات: {state}', 'callback_data': '/toggle_trade_pipeline'}],
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
-            [{'text': '🧰 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
+            [{'text': '🧰 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
             [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
@@ -6669,9 +6893,9 @@ def trade_tracking_keyboard(chat_id):
 
 
 _SCENARIO_LABELS_PLAIN = {
-    "1": "برخورد PDH+برگشت (Sell)", "2": "برخورد PDL+برگشت (Buy)",
-    "3": "نفوذ PDH+ادامه (Buy)", "4": "نفوذ PDL+ادامه (Sell)",
-    "5": "شکست کاذب PDH (Sell)", "6": "شکست کاذب PDL (Buy)",
+    "1": "برخورد به سقف دیروز و برگشت (فروش)", "2": "برخورد به کف دیروز و برگشت (خرید)",
+    "3": "شکست سقف دیروز و ادامه صعود (خرید)", "4": "شکست کف دیروز و ادامه نزول (فروش)",
+    "5": "شکست کاذب سقف دیروز (فروش)", "6": "شکست کاذب کف دیروز (خرید)",
 }
 
 
@@ -6679,31 +6903,123 @@ _SCENARIO_LABELS_PLAIN = {
 # یک ردیف داشته باشد (کلید در strategy_config ذخیره می‌شود). برای افزودن فیلتر جدید فقط یک ردیف اضافه کن:
 #   key: (برچسب دکمه، پیش‌فرض، بخش منو، توضیح)
 GATE_REGISTRY = {
-    # --- ورود و فیلتر سیگنال ---
-    'htf_trend_filter_enabled':   ('روند تایم بالا (۴ساعته)', False, 'entry', 'خرید خلاف روند نزولی ۴ساعته و فروش خلاف روند صعودی ۴ساعته رد می‌شود (روند خنثی مجاز).'),
-    'momentum_fade_filter_enabled': ('کاهش مومنتوم RSI', False, 'entry', 'RSI کندل ستاپ باید حداقل چند واحد از اوج (فروش) یا کف (خرید) اخیر برگشته باشد.'),
-    'session_filter_enabled':     ('فیلتر سشن (UTC)', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی تنظیم‌شده (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ UTC) صادر می‌شود.'),
-    'htf_close_guard_enabled':    ('گارد پایان کندل تایم بالا', True, 'entry', 'سیگنال در دقایق پایانی کندل تایم بالا صادر نمی‌شود.'),
-    # --- ساختار ستاپ ---
-    'sweep_require_reclaim':      ('الزام ریکلیم سطح', True, 'structure', 'سویپ فقط وقتی معتبر است که قیمت به داخل بازگردد.'),
-    'sweep_require_reversal_candle': ('الزام کندل برگشتی', True, 'structure', 'کندل ریکلیم باید جهت برگشت را تایید کند.'),
-    'sweep_enable_retest_continuation': ('ادامه بعد از پولبک (۳/۴)', True, 'structure', 'ستاپ‌های نفوذ + پولبک + ادامه مجازند.'),
-    'active_setup_enabled':       ('ستاپ فعال (فرصت از دست‌رفته)', True, 'structure', 'ستاپ معتبر اخیر چند کندل زنده می‌ماند.'),
-    'active_setup_require_daily_breakout': ('الزام شکست روزانه ستاپ فعال', True, 'structure', 'ستاپ فعال فقط بعد از شکست تاییدشده PDH/PDL.'),
-    'active_structure_confirmation': ('تاییدیه ساختار ستاپ فعال', True, 'structure', 'ستاپ فعال به تایید ریزساختار نیاز دارد.'),
-    'level_cluster_enabled':      ('سطح کلاستر', True, 'structure', 'سطوح هم‌پوشان به‌عنوان یک سطح واحد در نظر گرفته می‌شوند.'),
-    # --- کیفیت و ریسک ---
-    'gate_min_score_enabled':     ('حداقل امتیاز کیفیت', True, 'quality', 'سیگنال با امتیاز کمتر از حداقل رد می‌شود.'),
-    'gate_min_rr_enabled':        ('حداقل R:R', True, 'quality', 'سیگنال با R:R کمتر از حداقل (و نزدیک‌ترین سطح هدف ضعیف) رد می‌شود.'),
-    'gate_max_sl_atr_enabled':    ('سقف فاصله SL (ATR)', True, 'quality', 'استاپ دورتر از سقف ATR رد می‌شود.'),
-    'gate_fee_ratio_enabled':     ('نسبت ریسک به کارمزد (سیگنال)', True, 'quality', 'ریسک دلاریِ خیلی کوچک نسبت به کارمزد در مرحله‌ی سیگنال رد می‌شود.'),
-    'use_edge_proxy_gate':        ('گیت Edge proxy', False, 'quality', 'گیت تجربی امتیاز مورد انتظار.'),
-    'gate_open_fee_ratio_enabled': ('حداقل ریسک به کارمزد (ورود)', True, 'quality', 'در لحظه‌ی ورود، ریسک دلاری کمتر از چند برابر کارمزد رد می‌شود.'),
-    'gate_total_risk_cap_enabled': ('سقف مجموع ریسک باز', True, 'quality', 'مجموع ریسک پوزیشن‌های باز نباید از درصد سقف سرمایه بیشتر شود.'),
-    'gate_cooldown_enabled':      ('کول‌داون نماد', True, 'quality', 'بعد از بسته‌شدن معامله، همان نماد مدتی ورود نمی‌گیرد.'),
-    'gate_traded_level_enabled':  ('قفل «سطح معامله‌شده»', True, 'quality', 'روی سطحی که قبلاً معامله شده و هنوز آزاد نشده، ورود جدید ندارد.'),
-    'gate_risk_guard_enabled':    ('محافظ ریسک (ضرر پیاپی/حد روزانه)', True, 'quality', 'با ضرر پیاپی یا رسیدن به حد ضرر روزانه ورود متوقف می‌شود. خاموش‌کردنش حفاظت سرمایه را برمی‌دارد.'),
+    # --- شرایط ورود به معامله ---
+    'htf_trend_filter_enabled':   ('همسو بودن با روند بزرگ‌تر (چارت ۴ ساعته)', False, 'entry', 'اگر روند چارت ۴ ساعته نزولی است، ربات خرید نمی‌کند؛ اگر صعودی است، فروش نمی‌کند. وقتی روند مشخص نیست، هر دو مجازند.'),
+    'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
+    'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
+    'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', True, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
+    # --- شناسایی فرصت (الگوی قیمت) ---
+    'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
+    'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
+    'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', True, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
+    'active_setup_enabled':       ('فرصتِ چند کندل قبل هنوز معتبر بماند', True, 'structure', 'اگر فرصت معتبری همین چند کندل پیش پیدا شده و زمانش کامل از دست نرفته، تا چند کندل دیگر هم می‌شود واردش شد.'),
+    'active_setup_require_daily_breakout': ('شکست قطعی سقف یا کف دیروز لازم است', True, 'structure', 'فرصتِ چند کندل قبل فقط وقتی قابل استفاده است که قیمت سقف یا کف دیروز را قطعی شکسته باشد.'),
+    'active_structure_confirmation': ('تایید با حرکت‌های ریز قیمت', True, 'structure', 'فرصتِ چند کندل قبل باید با حرکت‌های ریز قیمت (در چارت کوچک‌تر) هم تایید شود.'),
+    'level_cluster_enabled':      ('یکی حساب کردن سطوح نزدیک به هم', True, 'structure', 'اگر چند سطح مهم خیلی به هم نزدیک باشند، به‌جای چند سطح جدا یک سطح حساب می‌شوند.'),
+    # --- کیفیت و کنترل ریسک ---
+    'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', True, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
+    'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
+    'gate_max_sl_atr_enabled':    ('سقف فاصله‌ی حد ضرر', True, 'quality', 'اگر حد ضرر لازم از نوسان معمول بازار خیلی دورتر باشد (ریسک زیاد)، سیگنال رد می‌شود.'),
+    'gate_fee_ratio_enabled':     ('جلوگیری از معامله‌ی کم‌ارزش (مرحله‌ی سیگنال)', True, 'quality', 'اگر مبلغ ریسک معامله آن‌قدر کوچک باشد که کارمزد بخش بزرگی از آن را می‌خورد، سیگنال رد می‌شود.'),
+    'use_edge_proxy_gate':        ('فیلتر آزمایشی سودآوری مورد انتظار', False, 'quality', 'یک فیلتر آزمایشی که سودآوری مورد انتظار هر سیگنال را تخمین می‌زند. فقط برای کاربران باتجربه؛ پیش‌فرض خاموش.'),
+    'gate_open_fee_ratio_enabled': ('جلوگیری از معامله‌ی کم‌ارزش (لحظه‌ی ورود)', True, 'quality', 'در لحظه‌ی ورود هم بررسی می‌شود که مبلغ ریسک چند برابر کارمزد باشد؛ وگرنه ورود انجام نمی‌شود.'),
+    'gate_total_risk_cap_enabled': ('سقف جمع ریسک معامله‌های باز', True, 'quality', 'جمع ریسک همه‌ی معامله‌های باز نباید از درصد مشخصی از سرمایه بیشتر شود.'),
+    'gate_cooldown_enabled':      ('استراحت بعد از هر معامله', True, 'quality', 'بعد از بسته شدن معامله روی یک ارز، تا مدتی دوباره وارد همان ارز نمی‌شود.'),
+    'gate_traded_level_enabled':  ('عدم تکرار ورود روی یک سطح', True, 'quality', 'روی سطحی که قبلاً معامله شده و هنوز آزاد نشده، ورود جدید انجام نمی‌شود.'),
+    'gate_risk_guard_enabled':    ('ایست ایمنی بعد از ضرر', True, 'quality', 'با چند ضرر پشت‌سرهم یا رسیدن به حد ضرر روزانه، ورود جدید متوقف می‌شود. خاموش کردنش محافظت از سرمایه را برمی‌دارد.'),
 }
+
+
+def _filter_info(key):
+    """(نام ساده‌ی دکمه, توضیح) برای دکمه‌های «قوانین معامله» که در GATE_REGISTRY نیستند."""
+    pa = PROFIT_ALERT_USDT
+    static = {
+        'sweep_confirm': ('صبر برای یک کندل تایید اضافه',
+            'بعد از اینکه قیمت یک سطح مهم را لحظه‌ای می‌شکند و برمی‌گردد (دام قیمتی)، ربات یک کندل دیگر صبر می‌کند تا برگشت واقعاً تایید شود. ورود کمی دیرتر و با قیمت بدتر می‌شود، ولی برگشت‌های دروغین کمتر می‌شوند.'),
+        'swing_break': ('تایید با عبور از آخرین سقف/کف کوچک',
+            'بعد از برگشت قیمت، ربات فقط وقتی وارد می‌شود که قیمت آخرین سقفِ کوچک (برای خرید) یا کفِ کوچک (برای فروش) را هم رد کند. از «صبر برای یک کندل تایید اضافه» سخت‌گیرانه‌تر است و اگر هر دو روشن باشند همین ملاک است.'),
+        'market_alignment': ('همسو بودن با اکثر بازار',
+            'ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+        'trend_warn': ('هشدار روند بیت‌کوین و اتریوم (کلید اصلی)',
+            'قبل از ورود، اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، ورود نگه داشته می‌شود و از تو می‌پرسد «وارد شوم؟». روند خنثی یا نبود داده مانع نمی‌شود. دو کلید بعدی مشخص می‌کنند کدام ارز بررسی شود.'),
+        'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
+        'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
+        'profit_lock': ('قفل کردن سود',
+            'وقتی سود معامله به پله‌های مشخص می‌رسد، حد ضرر جلو می‌آید تا بخشی از سود تضمین شود؛ اگر قیمت برگردد، معامله با همان سودِ قفل‌شده بسته می‌شود.'),
+        'swing_trailing': ('دنبال کردن قیمت با حد ضرر',
+            'با شکل گرفتن هر سقف یا کفِ کوچکِ جدید، حد ضرر به آن نزدیک می‌شود (هرگز دورتر نمی‌شود)، تا سود بیشتری حفظ شود.'),
+        'weakness_exit': ('خروج زودتر وقتی حرکت ضعیف می‌شود',
+            'اگر نشانه‌ها بگویند حرکت قیمت ضعیف شده یا بخش مهمی از سودِ بالاترین نقطه پس داده شده، معامله قبل از رسیدن به حد ضرر بسته می‌شود. در حالت خاموش فقط با حد ضرر یا حد سود (و بستن اجباری آخر روز) بسته می‌شود.'),
+        'day_end_close': ('بستن معامله‌ها آخر روز',
+            'معامله‌های ۵ و ۱۵ دقیقه‌ای نزدیک ساعت ۰۰:۰۰ به وقت جهانی UTC (حدود ۰۳:۳۰ بامداد ایران) با قیمت بازار بسته می‌شوند. اگر خاموش باشد به روز بعد منتقل می‌شوند.'),
+        'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
+            f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
+        'profit_fade_alert': ('هشدار کم شدن سود',
+            f'اگر سود معامله به یک پله ({pa:g}$ و مضرب‌ها) برسد و بعد حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) از اوجش پایین بیاید، پیام «ضعف سود» می‌گیری. معامله بسته نمی‌شود.'),
+        'block_buy': ('ممنوع کردن خرید',
+            'ربات هیچ معامله‌ی خریدِ جدیدی باز نمی‌کند. معامله‌های باز فعلی دست‌نخورده می‌مانند.'),
+        'block_sell': ('ممنوع کردن فروش',
+            'ربات هیچ معامله‌ی فروشِ جدیدی باز نمی‌کند. معامله‌های باز فعلی دست‌نخورده می‌مانند.'),
+        'block_all': ('توقف ورود به معامله‌ی جدید',
+            'هیچ معامله‌ی جدیدی (نه خرید و نه فروش) باز نمی‌شود. معامله‌های باز طبق روال عادی مدیریت می‌شوند.'),
+        'same_dir': ('حداکثر معامله‌ی هم‌جهت هم‌زمان',
+            'حداکثر چند معامله‌ی خرید (یا چند معامله‌ی فروش) هم‌زمان باز بماند. بدون محدودیت = نامحدود.'),
+        'scenarios': ('انتخاب حالت‌های معامله (۶ حالت)',
+            'ربات سقف و کفِ «دیروز» را دو سطح مهم می‌داند و ۶ حالت را دنبال می‌کند: برخورد و برگشت، شکست و ادامه، شکست کاذب. هر حالت جدا روشن/خاموش می‌شود.'),
+        'families': ('روش‌های معامله‌گری',
+            'روشن/خاموش کردن هر روش: «دام قیمتی» برای چارت‌های ۵ و ۱۵ دقیقه و «برگشت در چارت‌های بزرگ‌تر» برای ۱ و ۴ ساعته.'),
+        'assist': ('حالت دستیار (ورود فقط با تایید من)',
+            'ربات سیگنال را می‌فرستد ولی تا تایید نکنی وارد معامله نمی‌شود.'),
+        'my_profile': ('تنظیمات ذخیره‌شده‌ی من',
+            'تنظیمات دلخواهت را ذخیره کن و هر وقت خواستی با یک دکمه به همان حالت برگرد.'),
+    }
+    return static[key]
+
+
+_FILTER_SECTION_KEYS = {
+    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth'],
+    'exit': ['profit_lock', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
+    'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
+    'tools': ['scenarios', 'families', 'assist', 'my_profile'],
+}
+
+_FILTER_SECTION_TITLES = {
+    'entry': ('📥 *شرایط ورود به معامله*', 'این دکمه‌ها مشخص می‌کنند ربات چه زمانی اجازه‌ی ورود دارد.'),
+    'structure': ('🧩 *شناسایی فرصت (الگوی قیمت)*', 'قواعدی که ربات با آن‌ها فرصت‌هایی مثل «شکست کاذب» و «شکست و بازگشت» را روی سقف و کف‌های مهم تشخیص می‌دهد.'),
+    'quality': ('🧱 *کیفیت و کنترل ریسک*', 'جلوی سیگنال‌های ضعیف یا پرریسک را می‌گیرند.'),
+    'exit': ('🚪 *خروج و حفظ سود*', 'مشخص می‌کنند معامله‌های باز چطور از سودشان محافظت شوند و چه زمانی بسته یا هشدار داده شوند.'),
+    'limits': ('🚫 *ممنوعیت‌ها و محدودیت‌ها*', 'محدود کردن جهت ورود و تعداد معامله‌های هم‌جهت.'),
+    'tools': ('🧭 *روش معامله و ابزارها*', 'انتخاب حالت‌ها و روش‌های معامله، حالت دستیار و تنظیمات ذخیره‌شده.'),
+}
+
+_FILTER_HOW_TO = '🟢 یعنی روشن و 🔴 یعنی خاموش؛ با لمس هر دکمه وضعیتش عوض می‌شود.'
+
+
+def filter_section_text(section):
+    """متن بالای هر دسته‌ی «قوانین معامله»: توضیح ساده‌ی هر دکمه، قبل از لمس کردنش."""
+    title, intro = _FILTER_SECTION_TITLES[section]
+    items = []
+    for k in _FILTER_SECTION_KEYS.get(section, []):
+        lbl, note = _filter_info(k)
+        items.append(f'• {lbl}: {note}')
+    for k, v in GATE_REGISTRY.items():
+        if v[2] == section:
+            items.append(f'• {v[0]}: {v[3]}')
+    has_toggles = section in ('entry', 'structure', 'quality', 'exit', 'limits')
+    return f'{title}\n\n{intro}' + (f'\n{_FILTER_HOW_TO}' if has_toggles else '') + '\n\n' + '\n\n'.join(items)
+
+
+FILTER_MAIN_TEXT = (
+    '🧰 *قوانین معامله (فیلترها)*\n\n'
+    'فیلترها قانون‌هایی هستند که تعیین می‌کنند ربات چه موقع وارد معامله شود، چه موقع صبر کند و معامله‌ی باز را چطور مدیریت کند. '
+    'نیازی نیست چیزی را تغییر بدهی؛ تنظیمات پیش‌فرض آماده‌اند. یک دسته را انتخاب کن تا توضیح هر دکمه را ببینی:\n\n'
+    '📥 شرایط ورود به معامله: ربات چه وقت اجازه‌ی ورود دارد.\n'
+    '🧩 شناسایی فرصت (الگوی قیمت): چطور فرصت‌ها را تشخیص می‌دهد.\n'
+    '🧱 کیفیت و کنترل ریسک: جلوگیری از سیگنال‌های ضعیف یا پرریسک.\n'
+    '🚪 خروج و حفظ سود: محافظت از سود معامله‌های باز.\n'
+    '🚫 ممنوعیت‌ها و محدودیت‌ها: ممنوع کردن خرید/فروش و سقف تعداد معامله.\n'
+    '🧭 روش معامله و ابزارها: انتخاب حالت‌ها، حالت دستیار و تنظیمات ذخیره‌شده.'
+)
 
 
 def _gate_default(key):
@@ -6722,7 +7038,8 @@ def gate_on(s, key):
 
 
 def trade_filter_management_keyboard(chat_id, section=None):
-    """منوی مدیریت فیلتر معاملات، دسته‌بندی‌شده.
+    """منوی «قوانین معامله (فیلترها)»، دسته‌بندی‌شده؛ نام دکمه‌ها ساده و بدون اصطلاح تخصصی است و توضیح هر کدام
+    در متن بالای همان صفحه (filter_section_text) و بعد از هر لمس نمایش داده می‌شود.
     None -> منوی اصلی دسته‌ها | entry | structure | quality | exit | limits | tools
     """
     s = get_session(chat_id)
@@ -6732,10 +7049,12 @@ def trade_filter_management_keyboard(chat_id, section=None):
         icon = '🟢' if flag_val else '🔴'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
-    def gate_rows(sec, per_row=1):
+    def fcell(flag_val, key, cb):
+        return cell(flag_val, _filter_info(key)[0], cb)
+
+    def gate_rows(sec):
         keys = [k for k, v in GATE_REGISTRY.items() if v[2] == sec]
-        cells = [cell(gate_on(s, k), GATE_REGISTRY[k][0], f'/toggle_gate_{k}') for k in keys]
-        return [cells[i:i + per_row] for i in range(0, len(cells), per_row)]
+        return [[cell(gate_on(s, k), GATE_REGISTRY[k][0], f'/toggle_gate_{k}')] for k in keys]
 
     back_row = [{'text': '⬅️ دسته‌ها', 'callback_data': '/trade_filter_management'},
                 {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]
@@ -6745,12 +7064,12 @@ def trade_filter_management_keyboard(chat_id, section=None):
         swing_break = bool(scfg.get('sweep_require_swing_break', True))
         align_on = bool(s.get('market_alignment_filters_enabled', False))
         return {'inline_keyboard': [
-            [cell(sweep_confirm, 'تاییدیه کندل Sweep', '/toggle_sweep_confirm'),
-             cell(swing_break, 'شکست سوینگ محلی', '/toggle_swing_break')],
-            [cell(align_on, 'هم‌جهتی با بازار', '/toggle_market_alignment')],
-            [cell(bool(s.get('trend_warn_enabled', True)), 'هشدار روند BTC/ETH (کلی)', '/toggle_trend_warn')],
-            [cell(bool(s.get('trend_warn_btc', True)), 'چک بیت‌کوین', '/toggle_trend_warn_btc'),
-             cell(bool(s.get('trend_warn_eth', True)), 'چک اتریوم', '/toggle_trend_warn_eth')],
+            [fcell(sweep_confirm, 'sweep_confirm', '/toggle_sweep_confirm')],
+            [fcell(swing_break, 'swing_break', '/toggle_swing_break')],
+            [fcell(align_on, 'market_alignment', '/toggle_market_alignment')],
+            [fcell(bool(s.get('trend_warn_enabled', True)), 'trend_warn', '/toggle_trend_warn')],
+            [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
+             fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
         ] + gate_rows('entry') + [back_row]}
 
     if section == 'structure':
@@ -6762,12 +7081,12 @@ def trade_filter_management_keyboard(chat_id, section=None):
     if section == 'exit':
         weakness_on = bool(scfg.get('weakness_exit_enabled', False))
         return {'inline_keyboard': [
-            [cell(bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)), 'قفل سود', '/toggle_profit_lock'),
-             cell(bool(s.get('swing_trailing_enabled', True)), 'ترلینگ سوینگ', '/toggle_swing_trailing')],
-            [cell(weakness_on, 'مدیریت ضعف روند', '/toggle_weakness_exit'),
-             cell(bool(s.get('day_end_close_enabled', True)), 'بستن پایان روز', '/toggle_day_end_close')],
-            [cell(bool(s.get('profit_alert_enabled', True)), f'هشدار سود هر {PROFIT_ALERT_USDT:g}$', '/toggle_profit_alert'),
-             cell(bool(s.get('profit_fade_alert_enabled', True)), 'هشدار ضعف سود', '/toggle_profit_fade_alert')],
+            [fcell(bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)), 'profit_lock', '/toggle_profit_lock')],
+            [fcell(bool(s.get('swing_trailing_enabled', True)), 'swing_trailing', '/toggle_swing_trailing')],
+            [fcell(weakness_on, 'weakness_exit', '/toggle_weakness_exit')],
+            [fcell(bool(s.get('day_end_close_enabled', True)), 'day_end_close', '/toggle_day_end_close')],
+            [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
+            [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             back_row,
         ]}
 
@@ -6776,31 +7095,31 @@ def trade_filter_management_keyboard(chat_id, section=None):
         block_sell = bool(s.get('manual_block_sell_entries', False))
         block_all = bool(s.get('manual_block_all_entries', False))
         max_same = int(s.get('max_same_direction_positions', 0) or 0)
-        max_same_txt = str(max_same) if max_same > 0 else '∞'
+        max_same_txt = str(max_same) if max_same > 0 else 'بدون محدودیت'
         return {'inline_keyboard': [
-            [cell(block_buy, 'بلاک خرید', '/toggle_block_buy'),
-             cell(block_sell, 'بلاک فروش', '/toggle_block_sell')],
-            [cell(block_all, 'توقف کامل ورود (هر دو جهت)', '/toggle_block_all')],
-            [{'text': f'👥 حداکثر معاملات هم‌جهت هم‌زمان: {max_same_txt}', 'callback_data': '/same_dir_menu'}],
+            [fcell(block_buy, 'block_buy', '/toggle_block_buy')],
+            [fcell(block_sell, 'block_sell', '/toggle_block_sell')],
+            [fcell(block_all, 'block_all', '/toggle_block_all')],
+            [{'text': f"👥 {_filter_info('same_dir')[0]}: {max_same_txt}", 'callback_data': '/same_dir_menu'}],
             back_row,
         ]}
 
     if section == 'tools':
         return {'inline_keyboard': [
-            [{'text': '🧭 مدیریت ۶ سناریو PDH/PDL', 'callback_data': '/scenario_management'}],
-            [{'text': '🧩 خانواده‌های استراتژی', 'callback_data': '/strategy_families_menu'}],
-            [{'text': '🤝 حالت دستیار (ورود با تایید من)', 'callback_data': '/assist_menu'}],
-            [{'text': '👤 پروفایل من', 'callback_data': '/my_profile_menu'}],
+            [{'text': f"🧭 {_filter_info('scenarios')[0]}", 'callback_data': '/scenario_management'}],
+            [{'text': f"🧩 {_filter_info('families')[0]}", 'callback_data': '/strategy_families_menu'}],
+            [{'text': f"🤝 {_filter_info('assist')[0]}", 'callback_data': '/assist_menu'}],
+            [{'text': f"👤 {_filter_info('my_profile')[0]}", 'callback_data': '/my_profile_menu'}],
             back_row,
         ]}
 
     return {'inline_keyboard': [
-        [{'text': '📥 ورود و فیلتر سیگنال', 'callback_data': '/trade_filter_entry'},
-         {'text': '🧩 ساختار ستاپ', 'callback_data': '/trade_filter_structure'}],
-        [{'text': '🧱 کیفیت و ریسک', 'callback_data': '/trade_filter_quality'},
-         {'text': '🚪 مدیریت خروج', 'callback_data': '/trade_filter_exit'}],
-        [{'text': '🚫 بلاک دستی و سقف‌ها', 'callback_data': '/trade_filter_limits'},
-         {'text': '🧭 استراتژی و ابزارها', 'callback_data': '/trade_filter_tools'}],
+        [{'text': '📥 شرایط ورود به معامله', 'callback_data': '/trade_filter_entry'}],
+        [{'text': '🧩 شناسایی فرصت (الگوی قیمت)', 'callback_data': '/trade_filter_structure'}],
+        [{'text': '🧱 کیفیت و کنترل ریسک', 'callback_data': '/trade_filter_quality'}],
+        [{'text': '🚪 خروج و حفظ سود', 'callback_data': '/trade_filter_exit'}],
+        [{'text': '🚫 ممنوعیت‌ها و محدودیت‌ها', 'callback_data': '/trade_filter_limits'}],
+        [{'text': '🧭 روش معامله و ابزارها', 'callback_data': '/trade_filter_tools'}],
         [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
     ]}
 
@@ -6840,12 +7159,12 @@ def strategy_families_keyboard(chat_id):
 
     return {
         'inline_keyboard': [
-            [cell(sweep_on, 'Sweep (۵/۱۵ دقیقه)', '/toggle_strategy_sweep'),
-             cell(htf_on, 'HTF Reversal (۱س/۴س)', '/toggle_strategy_htf')],
-            ([{'text': '🔒 سطوح سشن‌ها (در مدل PDH/PDL+P4 خاموش است)', 'callback_data': '/noop'}]
+            [cell(sweep_on, 'دام قیمتی (چارت ۵ و ۱۵ دقیقه)', '/toggle_strategy_sweep')],
+            [cell(htf_on, 'برگشت در چارت‌های بزرگ‌تر (۱ و ۴ ساعته)', '/toggle_strategy_htf')],
+            ([{'text': '🔒 سطوح ساعات بازار (در مدل «سقف و کف دیروز» خاموش است)', 'callback_data': '/noop'}]
              if scfg.get('daily_p4_mode', True) else
-             [cell(session_on, 'سطوح سشن‌ها (London/NY/Asia)', '/toggle_strategy_sessions')]),
-            [{'text': '🔙 مدیریت فیلتر معاملات', 'callback_data': '/trade_filter_management'}],
+             [cell(session_on, 'سطوح ساعات بازار (لندن، نیویورک، آسیا)', '/toggle_strategy_sessions')]),
+            [{'text': '🔙 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}],
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
     }
@@ -8042,10 +8361,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس، سیگنال Sweep فقط وقتی صادر می‌شود که یک کندل بعد از ریکلیم هم جهتش را تایید کند - ورود کمی دیرتر و با قیمت بدتر، ولی فیک‌اوت‌های زودهنگام فیلتر می‌شوند.'
-            if not current else 'برگشت به حالت قبلی: سیگنال Sweep دوباره بلافاصله روی کندل ریکلیم صادر می‌شود.'
+            'از این پس بعد از برگشت قیمت، ربات یک کندل دیگر صبر می‌کند تا برگشت تایید شود. ورود کمی دیرتر و با قیمت بدتر می‌شود، ولی برگشت‌های دروغین کمتر می‌شوند.'
+            if not current else 'برگشت به حالت قبلی: ربات بلافاصله بعد از برگشت قیمت وارد می‌شود و منتظر کندل اضافه نمی‌ماند.'
         )
-        send_message(chat_id, f"🕯 تاییدیه یک کندل اضافه Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
+        send_message(chat_id, f"🕯 {_filter_info('sweep_confirm')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_swing_break':
         s.setdefault('strategy_config', {})
@@ -8054,10 +8373,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس، بعد از ریکلیم، سیگنال Sweep صادر نمی‌شود مگر قیمت واقعاً از سقف/کف سوینگِ محلیِ تشکیل‌شده بعد از ریکلیم رد بشه (نه صرفاً عدم نقض) - قوی‌تر از «تاییدیه یک کندل اضافه» است و در صورت روشن‌بودن هر دو، همین یکی ملاک عمل قرار می‌گیرد.'
-            if not current else 'برگشت به حالت قبلی: نیازی به شکست سوینگ محلی نیست.'
+            'از این پس بعد از برگشت قیمت، ربات فقط وقتی وارد می‌شود که قیمت آخرین سقفِ کوچک (برای خرید) یا کفِ کوچک (برای فروش) را هم رد کند. این شرط از «صبر برای یک کندل تایید اضافه» سخت‌گیرانه‌تر است و اگر هر دو روشن باشند همین ملاک است.'
+            if not current else 'برگشت به حالت قبلی: دیگر لازم نیست قیمت از آخرین سقف یا کف کوچک عبور کند.'
         )
-        send_message(chat_id, f"📐 شکست سوینگ محلی Sweep: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
+        send_message(chat_id, f"📐 {_filter_info('swing_break')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_market_alignment':
         current = bool(s.get('market_alignment_filters_enabled', False))
@@ -8065,10 +8384,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس در تایم‌فریم فعال، ۱۰ نماد شاخص بررسی می‌شوند: اگر ۷ نماد یا بیشتر صعودی باشند ورود فروش مسدود می‌شود، اگر ۷ نماد یا بیشتر نزولی باشند ورود خرید مسدود می‌شود، و اگر بازار رنج باشد هیچ ورودی انجام نمی‌شود. پوزیشن‌های باز دست‌نخورده می‌مانند.'
-            if not current else 'گیت جهت بازار خاموش شد: ورودها فقط بر اساس سیگنال استراتژی انجام می‌شوند و هیچ محدودیت جهت بازاری اعمال نمی‌شود.'
+            'از این پس ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'
+            if not current else 'این قانون خاموش شد: ورودها فقط بر اساس سیگنال انجام می‌شوند و جهتِ اکثر بازار محدودیتی ایجاد نمی‌کند.'
         )
-        send_message(chat_id, f"🌐 فیلتر هم‌جهتی با بازار: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
+        send_message(chat_id, f"🌐 {_filter_info('market_alignment')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_profit_fade_alert':
         current = bool(s.get('profit_fade_alert_enabled', True))
@@ -8076,27 +8395,27 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            f'اگر سود پوزیشن به یک پله ({PROFIT_ALERT_USDT:g}$ و مضرب‌ها) برسد و بعد از اوج حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) افت کند، پیام «مشاهده ضعف» می‌گیری. پوزیشن بسته نمی‌شود.'
+            _filter_info('profit_fade_alert')[1]
             if not current else
-            'هشدار ضعف سود خاموش شد.'
+            'هشدار کم شدن سود خاموش شد.'
         )
-        send_message(chat_id, f"⚠️ هشدار ضعف سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"⚠️ {_filter_info('profit_fade_alert')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl in ('/toggle_trend_warn', '/toggle_trend_warn_btc', '/toggle_trend_warn_eth'):
         key = {'/toggle_trend_warn': 'trend_warn_enabled', '/toggle_trend_warn_btc': 'trend_warn_btc', '/toggle_trend_warn_eth': 'trend_warn_eth'}[cl]
-        label = {'/toggle_trend_warn': 'هشدار روند بازار (کلی)', '/toggle_trend_warn_btc': 'چک روند بیت‌کوین', '/toggle_trend_warn_eth': 'چک روند اتریوم'}[cl]
+        label = _filter_info({'/toggle_trend_warn': 'trend_warn', '/toggle_trend_warn_btc': 'trend_warn_btc', '/toggle_trend_warn_eth': 'trend_warn_eth'}[cl])[0]
         s[key] = not bool(s.get(key, True))
         save_session(chat_id)
         st = '🟢 روشن' if s[key] else '🔴 خاموش'
         extra = ''
         if key != 'trend_warn_enabled' and not s.get('trend_warn_enabled', True):
-            extra = '\n\n⚠️ کلید کلی «هشدار روند بازار» خاموش است؛ تا آن را روشن نکنی هیچ چکی انجام نمی‌شود.'
+            extra = '\n\n⚠️ کلید اصلی «هشدار روند بیت‌کوین و اتریوم» خاموش است؛ تا آن را روشن نکنی هیچ بررسی‌ای انجام نمی‌شود.'
         elif key == 'trend_warn_enabled' and s[key] and not (s.get('trend_warn_btc', True) or s.get('trend_warn_eth', True)):
-            extra = '\n\n⚠️ هر دو کلید بیت‌کوین و اتریوم خاموش‌اند؛ تا یکی را روشن نکنی چکی انجام نمی‌شود.'
+            extra = '\n\n⚠️ هر دو کلید بیت‌کوین و اتریوم خاموش‌اند؛ تا یکی را روشن نکنی بررسی‌ای انجام نمی‌شود.'
         send_message(chat_id,
             f"🧭 {label}: {st}\n\n"
-            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین/اتریوم روی تایم‌فریم فعال در تضاد باشد، "
-            "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبودِ داده مانع ایجاد نمی‌کند." + extra,
+            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
+            "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبود داده مانع نمی‌شود." + extra,
             trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_profit_alert':
@@ -8105,11 +8424,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            f'وقتی سود یک پوزیشن باز به {PROFIT_ALERT_USDT:g}$ و هر مضرب بعدی (مثلاً {PROFIT_ALERT_USDT*2:g}$ و {PROFIT_ALERT_USDT*3:g}$) برسد، برای هر پله یک پیام هشدار می‌گیری (پوزیشن بسته نمی‌شود).'
+            _filter_info('profit_alert')[1]
             if not current else
-            'هشدار سود خاموش شد.'
+            'هشدار رسیدن به سود خاموش شد.'
         )
-        send_message(chat_id, f"💰 هشدار سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"💰 {_filter_info('profit_alert')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_day_end_close':
         current = bool(s.get('day_end_close_enabled', True))
@@ -8117,11 +8436,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'بستن پایان روز روشن شد: معاملات ۵ و ۱۵ دقیقه‌ای نزدیک ۰۰:۰۰ UTC با قیمت بازار بسته می‌شوند.'
+            'بستن آخر روز روشن شد: معامله‌های ۵ و ۱۵ دقیقه‌ای نزدیک ساعت ۰۰:۰۰ به وقت جهانی UTC (حدود ۰۳:۳۰ بامداد ایران) با قیمت بازار بسته می‌شوند.'
             if not current else
-            'بستن پایان روز خاموش شد: معاملات ۵ و ۱۵ دقیقه‌ای به روز بعد منتقل می‌شوند (با تغییر PDH/PDL در ۰۰:۰۰ UTC).'
+            'بستن آخر روز خاموش شد: معامله‌های ۵ و ۱۵ دقیقه‌ای به روز بعد منتقل می‌شوند (با شروع روز جدید، سقف و کف «دیروز» عوض می‌شود).'
         )
-        send_message(chat_id, f"🕛 بستن پایان روز: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"🕛 {_filter_info('day_end_close')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_swing_trailing':
         current = bool(s.get('swing_trailing_enabled', True))
@@ -8129,11 +8448,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'ترلینگ سوینگ روشن شد: با تشکیل سوینگ جدید، SL به آن منتقل می‌شود (هرگز بازتر نمی‌شود).'
+            'روشن شد: با شکل گرفتن هر سقف یا کفِ کوچکِ جدید، حد ضرر به آن نزدیک می‌شود (هرگز دورتر نمی‌شود).'
             if not current else
-            'ترلینگ سوینگ خاموش شد: SL پوزیشن‌ها با سوینگ جابه‌جا نمی‌شود.'
+            'خاموش شد: حد ضرر معامله‌ها با سقف و کف‌های جدید جابه‌جا نمی‌شود.'
         )
-        send_message(chat_id, f"🔄 ترلینگ سوینگ: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"🔄 {_filter_info('swing_trailing')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_lock':
         current = bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED))
@@ -8141,11 +8460,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'قفل سود (نردبان R + قفل دلاری + قفل زودهنگام) روشن شد؛ برای پوزیشن‌های باز و جدید اعمال می‌شود.'
+            'قفل کردن سود روشن شد: وقتی سود به پله‌های مشخص برسد، حد ضرر جلو می‌آید تا بخشی از سود تضمین شود. برای معامله‌های باز و جدید اعمال می‌شود.'
             if not current else
-            'قفل سود خاموش شد: معامله فقط با SL، TP یا پله‌های خروج بسته می‌شود. پوزیشن‌های باز هم دیگر قفل نمی‌شوند.'
+            'قفل کردن سود خاموش شد: معامله فقط با حد ضرر، حد سود یا پله‌های خروج بسته می‌شود و معامله‌های باز هم دیگر قفل نمی‌شوند.'
         )
-        send_message(chat_id, f"🔒 قفل سود: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"🔒 {_filter_info('profit_lock')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_weakness_exit':
         s.setdefault('strategy_config', {})
@@ -8154,10 +8473,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'برگشت به حالت قبلی: پوزیشن‌ها دیگر بابت ضعف اندیکاتورها یا برگشت از اوج سود زودتر بسته نمی‌شوند - فقط با SL/TP معمولی (و بستن اجباری آخر روز) می‌بندند.'
-            if current else 'مدیریت هوشمند دوباره فعال شد.'
+            'خاموش شد: معامله‌ها دیگر به‌خاطر ضعیف شدن حرکت یا پس دادن بخشی از سود زودتر بسته نمی‌شوند؛ فقط با حد ضرر یا حد سود (و بستن اجباری آخر روز) بسته می‌شوند.'
+            if current else 'روشن شد: اگر حرکت قیمت ضعیف شود یا بخش مهمی از سودِ بالاترین نقطه پس داده شود، معامله زودتر بسته می‌شود.'
         )
-        send_message(chat_id, f"🧠 مدیریت هوشمند ضعف روند: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"🧠 {_filter_info('weakness_exit')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl.startswith('/toggle_gate_'):
         _gk = cl[len('/toggle_gate_'):]
@@ -8171,31 +8490,34 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id, f"{_lbl}: {_st}\n\n{_note}", trade_filter_management_keyboard(chat_id, _sec))
             return
     _tf_sections = {
-        '/trade_filter_entry': ('entry', "📥 *ورود و فیلتر سیگنال*\n\nفیلترهایی که تعیین می‌کنند سیگنال چه زمانی قبول شود."),
-        '/trade_filter_structure': ('structure', "🧩 *ساختار ستاپ*\n\nقواعد شناسایی ستاپ سویپ/شکست؛ هر کدام جدا قابل خاموش‌شدن است."),
-        '/trade_filter_quality': ('quality', "🧱 *کیفیت و ریسک*\n\nگیت‌هایی که سیگنال یا ورود را بر اساس کیفیت، R:R، فاصله SL، کارمزد و ریسک رد می‌کنند."),
-        '/trade_filter_exit': ('exit', "🚪 *مدیریت خروج*\n\nقفل سود، ترلینگ SL، خروج با ضعف روند، بستن پایان روز و هشدارهای سود/ضعف سود."),
-        '/trade_filter_limits': ('limits', "🚫 *بلاک دستی و سقف‌ها*\n\nبلاک جهت ورود و سقف معاملات هم‌جهت."),
-        '/trade_filter_tools': ('tools', "🧭 *استراتژی و ابزارها*\n\nسناریوها، خانواده‌های استراتژی، حالت دستیار و پروفایل."),
+        '/trade_filter_entry': 'entry', '/trade_filter_structure': 'structure', '/trade_filter_quality': 'quality',
+        '/trade_filter_exit': 'exit', '/trade_filter_limits': 'limits', '/trade_filter_tools': 'tools',
     }
     if cl in _tf_sections:
-        _sec, _title = _tf_sections[cl]
-        send_message(chat_id, _title, trade_filter_management_keyboard(chat_id, _sec))
+        _sec = _tf_sections[cl]
+        send_message(chat_id, filter_section_text(_sec), trade_filter_management_keyboard(chat_id, _sec))
         return
     if cl=='/trade_filter_management':
-        send_message(chat_id, "🧰 *مدیریت فیلتر معاملات*\n\nیکی از دسته‌ها را انتخاب کن.", trade_filter_management_keyboard(chat_id))
+        send_message(chat_id, FILTER_MAIN_TEXT, trade_filter_management_keyboard(chat_id))
         return
     if cl=='/scenario_management':
         send_message(
             chat_id,
-            "🧭 *مدیریت ۶ سناریو PDH/PDL*\n\n"
-            "۱: برخورد به PDH بدون نفوذ + برگشت = Sell\n"
-            "۲: برخورد به PDL بدون نفوذ + برگشت = Buy\n"
-            "۳: نفوذ PDH + پولبک موفق + ادامه (با شکست سوینگ) = Buy\n"
-            "۴: نفوذ PDL + پولبک موفق + ادامه (با شکست سوینگ) = Sell\n"
-            "۵: نفوذ PDH + پولبک ناموفق (شکست کاذب) + برگشت = Sell\n"
-            "۶: نفوذ PDL + پولبک ناموفق (شکست کاذب) + برگشت = Buy\n\n"
-            "هر حالت جدا روشن/خاموش می‌شه. سه تاییدیه‌ی اختیاری هم پایین‌تر هست (پیش‌فرض خاموش).",
+            "🧭 *انتخاب حالت‌های معامله*\n\n"
+            "ربات سقف و کفِ «دیروز» را دو سطح مهم می‌داند و ۶ حالت را دنبال می‌کند:\n\n"
+            "۱: قیمت به سقف دیروز می‌خورد، از آن رد نمی‌شود و برمی‌گردد = فروش\n"
+            "۲: قیمت به کف دیروز می‌خورد، از آن رد نمی‌شود و برمی‌گردد = خرید\n"
+            "۳: قیمت سقف دیروز را می‌شکند، به آن برمی‌گردد و دوباره ادامه می‌دهد = خرید\n"
+            "۴: قیمت کف دیروز را می‌شکند، به آن برمی‌گردد و دوباره ادامه می‌دهد = فروش\n"
+            "۵: قیمت سقف دیروز را می‌شکند ولی ادامه نمی‌دهد و برمی‌گردد (شکست کاذب) = فروش\n"
+            "۶: قیمت کف دیروز را می‌شکند ولی ادامه نمی‌دهد و برمی‌گردد (شکست کاذب) = خرید\n\n"
+            "هر حالت جدا روشن/خاموش می‌شود.\n\n"
+            "سه گزینه‌ی «سخت‌گیری بیشتر» (پیش‌فرض خاموش) برای هر جفت حالت شرط اضافه می‌گذارند:\n"
+            "• حالت ۱ و ۲: کندل برگشت باید سایه‌ی بلند داشته باشد و حجم معاملاتش از میانگین بیشتر باشد.\n"
+            "• حالت ۳ و ۴: برگشت قیمت باید «سالم» باشد (حجم حرکت شکست از حجم کندل برگشت بیشتر و بدنه‌ی کندل برگشت کافی).\n"
+            "• حالت ۵ و ۶: ضعفِ شکست باید در حجم دیده شود و کندل برگشت بدنه‌ی قوی داشته باشد.\n\n"
+            "گزینه‌های «بدون نیاز به همسویی با بازار»: حالت‌های برگشتی (۱ و ۲، ۵ و ۶) ذاتاً خلاف جهت حرکت اخیر وارد می‌شوند؛ "
+            "وقتی این گزینه روشن باشد، حتی اگر «همسو بودن با اکثر بازار» روشن باشد و حالت خلاف آن باشد، باز هم صادر می‌شود.",
             get_scenario_management_keyboard(s),
         )
         return
@@ -8216,10 +8538,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس، حالت ۱/۲ (برخورد ساده) فقط وقتی صادر می‌شود که کندل واقعاً یک کندل رد‌کننده (فتیله‌ی بلند) با حجم بالاتر از میانگین باشد.'
-            if not current else 'برگشت به حالت قبلی: حالت ۱/۲ بدون بررسی اضافه‌ی کندل/حجم صادر می‌شود.'
+            'از این پس حالت ۱ و ۲ (برخورد ساده) فقط وقتی صادر می‌شود که کندل برگشت سایه‌ی بلند داشته باشد و حجمش از میانگین بیشتر باشد.'
+            if not current else 'برگشت به حالت قبلی: حالت ۱ و ۲ بدون این بررسی اضافه صادر می‌شود.'
         )
-        send_message(chat_id, f"🕯 تاییدیه حالت ۱/۲: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        send_message(chat_id, f"🕯 سخت‌گیری بیشتر در حالت ۱ و ۲: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/toggle_confirm_continuation':
         s.setdefault('strategy_config', {})
@@ -8228,10 +8550,10 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس، حالت ۳/۴ (نفوذ+پولبک+ادامه) فقط وقتی صادر می‌شود که پولبک «سالم» باشد: حجم لگ شکست بیشتر از حجم کندل پولبک و بدنه‌ی کندل پولبک کافی.'
-            if not current else 'برگشت به حالت قبلی: حالت ۳/۴ بدون بررسی اضافه‌ی سلامت پولبک صادر می‌شود.'
+            'از این پس حالت ۳ و ۴ (شکست، برگشت و ادامه) فقط وقتی صادر می‌شود که برگشت قیمت «سالم» باشد: حجم حرکت شکست بیشتر از حجم کندل برگشت و بدنه‌ی کندل برگشت کافی باشد.'
+            if not current else 'برگشت به حالت قبلی: حالت ۳ و ۴ بدون این بررسی اضافه صادر می‌شود.'
         )
-        send_message(chat_id, f"📊 تاییدیه حالت ۳/۴: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        send_message(chat_id, f"📊 سخت‌گیری بیشتر در حالت ۳ و ۴: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/toggle_confirm_fakeout':
         s.setdefault('strategy_config', {})
@@ -8240,34 +8562,34 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            'از این پس، حالت ۵/۶ (شکست کاذب) فقط وقتی صادر می‌شود که واگرایی حجم دیده شود (لگ نفوذ کم‌حجم یا کندل برگشت پرحجم‌تر) و کندل برگشت بدنه‌ی قوی داشته باشد.'
-            if not current else 'برگشت به حالت قبلی: حالت ۵/۶ بدون بررسی اضافه‌ی حجم/بدنه صادر می‌شود.'
+            'از این پس حالت ۵ و ۶ (شکست کاذب) فقط وقتی صادر می‌شود که ضعف شکست در حجم دیده شود (حرکت شکست کم‌حجم بوده یا کندل برگشت پرحجم‌تر است) و کندل برگشت بدنه‌ی قوی داشته باشد.'
+            if not current else 'برگشت به حالت قبلی: حالت ۵ و ۶ بدون این بررسی اضافه صادر می‌شود.'
         )
-        send_message(chat_id, f"📉 تاییدیه حالت ۵/۶: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        send_message(chat_id, f"📉 سخت‌گیری بیشتر در حالت ۵ و ۶: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/toggle_scenario56_exempt':
         s.setdefault('strategy_config', {})
         current = bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True))
         s['strategy_config']['scenario_56_market_gate_exempt'] = not current
         save_session(chat_id)
-        new_state = '🟢 معاف' if not current else '🔴 مشمول (مثل بقیه)'
+        new_state = '🟢 روشن (بدون نیاز به همسویی)' if not current else '🔴 خاموش (مثل بقیه)'
         note = (
-            'حالت ۵/۶ حتی اگر خلاف جهت گیت «هم‌جهتی با بازار» باشند، صادر می‌شوند - چون هدفشان دقیقاً گرفتن برگشت از حرکت ناموفق است.'
-            if not current else 'حالت ۵/۶ هم مثل بقیه‌ی حالت‌ها زیر گیت «هم‌جهتی با بازار» قرار می‌گیرند (در صورت روشن‌بودن آن گیت).'
+            'حالت ۵ و ۶ حتی اگر خلاف جهت اکثر بازار باشند صادر می‌شوند، چون هدفشان دقیقاً گرفتن برگشت از یک حرکت ناموفق است.'
+            if not current else 'حالت ۵ و ۶ هم مثل بقیه‌ی حالت‌ها باید با اکثر بازار همسو باشند (اگر «همسو بودن با اکثر بازار» روشن باشد).'
         )
-        send_message(chat_id, f"🚦 معافیت ۵/۶ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        send_message(chat_id, f"🚦 حالت ۵ و ۶ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/toggle_scenario12_exempt':
         s.setdefault('strategy_config', {})
         current = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True))
         s['strategy_config']['scenario_12_market_gate_exempt'] = not current
         save_session(chat_id)
-        new_state = '🟢 معاف' if not current else '🔴 مشمول (مثل بقیه)'
+        new_state = '🟢 روشن (بدون نیاز به همسویی)' if not current else '🔴 خاموش (مثل بقیه)'
         note = (
-            'حالت ۱/۲ (برخورد ساده) هم مثل ۵/۶ ذاتاً یک معامله‌ی برگشتی/رنجی است، نه ترندی - حتی اگر خلاف جهت گیت «هم‌جهتی با بازار» باشند، صادر می‌شوند.'
-            if not current else 'حالت ۱/۲ هم مثل حالت‌های ترندی زیر گیت «هم‌جهتی با بازار» قرار می‌گیرند (در صورت روشن‌بودن آن گیت).'
+            'حالت ۱ و ۲ (برخورد ساده) هم مثل ۵ و ۶ ذاتاً معامله‌ی برگشتی است، نه دنباله‌روی روند؛ حتی اگر خلاف جهت اکثر بازار باشند صادر می‌شوند.'
+            if not current else 'حالت ۱ و ۲ هم مثل حالت‌های دنباله‌روی روند باید با اکثر بازار همسو باشند (اگر «همسو بودن با اکثر بازار» روشن باشد).'
         )
-        send_message(chat_id, f"🚦 معافیت ۱/۲ از هم‌جهتی بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        send_message(chat_id, f"🚦 حالت ۱ و ۲ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/assist_menu':
         st = 'روشن 🟢' if s.get('assist_mode_enabled') else 'خاموش 🔴'
@@ -8352,12 +8674,12 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/my_profile_menu':
         send_message(
             chat_id,
-            "👤 *پروفایل من*\n\n"
-            "این یه پروفایل ثابت و از‌پیش‌تعیین‌شده نیست - هر وقت تنظیمات (سناریوها، "
-            "تاییدیه‌ها، هم‌جهتی بازار، سقف پوزیشن هم‌جهت، تایم‌فریم، سطوح فعال) رو دقیقاً "
-            "همون‌طوری که می‌خوای چیدی، دکمه‌ی «ذخیره» رو بزن. هر وقت بعداً خواستی برگردی "
-            "به همون حالت (مثلاً بعد از تست چیزهای دیگه)، «اعمال» رو بزن.\n\n"
-            f"وضعیت فعلی پروفایل ذخیره‌شده:\n{my_profile_summary_text(s.get('my_profile'))}",
+            "👤 *تنظیمات ذخیره‌شده‌ی من*\n\n"
+            "این یک تنظیم از پیش آماده نیست. هر وقت دکمه‌ها را دقیقاً همان‌طور که دوست داری چیدی "
+            "(حالت‌های معامله، سخت‌گیری‌ها، همسویی با بازار، سقف معامله‌ی هم‌جهت، چارت فعال و سطوح فعال)، "
+            "دکمه‌ی «ذخیره» را بزن. بعداً هر وقت خواستی به همان حالت برگردی (مثلاً بعد از امتحان کردن چیزهای دیگر)، "
+            "«بازگشت به تنظیمات ذخیره‌شده» را بزن.\n\n"
+            f"وضعیت فعلی تنظیمات ذخیره‌شده:\n{my_profile_summary_text(s.get('my_profile'))}",
             get_my_profile_keyboard(s),
         )
         return
@@ -8379,10 +8701,10 @@ def process_command(cmd,chat_id,message_id=None):
         overall = int(s.get('max_open_positions', 0) or 0)
         send_message(
             chat_id,
-            "👥 *حداکثر معاملات هم‌جهت هم‌زمان*\n\n"
-            "یعنی حداکثر چند پوزیشن Long (یا چند Short) هم‌زمان باز بماند.\n\n"
-            f"مقدار فعلی: `{cur or '∞'}`\n"
-            f"سقف کل پوزیشن‌های باز: `{overall or '∞'}` (تنظیم جدا؛ اگر کمتر از انتخاب شما باشد همان اعمال می‌شود)",
+            "👥 *حداکثر معامله‌ی هم‌جهت هم‌زمان*\n\n"
+            "یعنی حداکثر چند معامله‌ی خرید (یا چند معامله‌ی فروش) هم‌زمان باز بماند.\n\n"
+            f"مقدار فعلی: {cur or 'بدون محدودیت'}\n"
+            f"سقف کل معامله‌های باز: {overall or 'بدون محدودیت'} (تنظیم جدا؛ اگر کمتر از انتخاب شما باشد همان اعمال می‌شود)",
             same_direction_limit_keyboard(chat_id),
         )
         return
@@ -8391,39 +8713,39 @@ def process_command(cmd,chat_id,message_id=None):
         s['manual_block_buy_entries'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        note = 'از این پس هیچ معامله‌ی خریدی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات خرید دوباره آزادند.'
-        send_message(chat_id, f"🚫 بلاک دستی معاملات خرید: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
+        note = 'از این پس هیچ معامله‌ی خریدِ جدیدی باز نمی‌شود (معامله‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'خرید دوباره آزاد است.'
+        send_message(chat_id, f"🚫 {_filter_info('block_buy')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/toggle_block_sell':
         current = bool(s.get('manual_block_sell_entries', False))
         s['manual_block_sell_entries'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        note = 'از این پس هیچ معامله‌ی فروشی باز نمی‌شود (پوزیشن‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'معاملات فروش دوباره آزادند.'
-        send_message(chat_id, f"🚫 بلاک دستی معاملات فروش: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
+        note = 'از این پس هیچ معامله‌ی فروشِ جدیدی باز نمی‌شود (معامله‌های باز فعلی دست‌نخورده می‌مانند).' if not current else 'فروش دوباره آزاد است.'
+        send_message(chat_id, f"🚫 {_filter_info('block_sell')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/toggle_block_all':
         current = bool(s.get('manual_block_all_entries', False))
         s['manual_block_all_entries'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        note = 'از این پس هیچ معامله‌ی جدیدی (نه خرید نه فروش) باز نمی‌شود - این فقط جلوی ورود جدید را می‌گیرد، پوزیشن‌های باز فعلی طبق روال عادی مدیریت می‌شوند.' if not current else 'ورود به معامله برای هر دو جهت دوباره آزاد است.'
-        send_message(chat_id, f"🛑 توقف کامل ورود به معامله: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
+        note = 'از این پس هیچ معامله‌ی جدیدی (نه خرید و نه فروش) باز نمی‌شود. این فقط جلوی ورود جدید را می‌گیرد؛ معامله‌های باز فعلی طبق روال عادی مدیریت می‌شوند.' if not current else 'ورود به معامله برای هر دو جهت دوباره آزاد است.'
+        send_message(chat_id, f"🛑 {_filter_info('block_all')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl=='/noop':
         return
     if cl=='/strategy_families_menu':
-        send_message(chat_id, '🧩 *خانواده‌های استراتژی*\n\nهرکدوم رو جدا روشن/خاموش کنید.', strategy_families_keyboard(chat_id)); return
+        send_message(chat_id, '🧩 *روش‌های معامله‌گری*\n\nربات با دو روش معامله می‌کند؛ هر کدام را جدا می‌توانی روشن یا خاموش کنی:\n\n• دام قیمتی (چارت ۵ و ۱۵ دقیقه): قیمت لحظه‌ای یک سقف یا کف مهم را می‌شکند و برمی‌گردد؛ ربات در جهت برگشت وارد می‌شود.\n\n• برگشت در چارت‌های بزرگ‌تر (۱ و ۴ ساعته): همان ایده، ولی روی چارت‌های بزرگ‌تر و کندل‌های کندتر.\n\n• سطوح ساعات بازار: سقف و کف ساعت‌های کاری بازارهای لندن، نیویورک و آسیا هم به‌عنوان سطح مهم حساب شوند.', strategy_families_keyboard(chat_id)); return
     if cl in ('/toggle_strategy_sweep', '/toggle_strategy_htf', '/toggle_strategy_sessions'):
         key_map = {
-            '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'استراتژی Sweep (جاروب نقدینگی، ۵/۱۵ دقیقه)'),
-            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'استراتژی HTF Liquidity Reversal (۱h/۴h)'),
-            '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', True, 'سطوح سشن‌های معاملاتی'),
+            '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'دام قیمتی (چارت ۵ و ۱۵ دقیقه)'),
+            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'برگشت در چارت‌های بزرگ‌تر (۱ و ۴ ساعته)'),
+            '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', True, 'سطوح ساعات بازار (لندن، نیویورک، آسیا)'),
         }
         cfg_key, default_val, label = key_map[cl]
         s.setdefault('strategy_config', {})
         if cl == '/toggle_strategy_sessions' and s['strategy_config'].get('daily_p4_mode', True):
-            send_message(chat_id, "🔒 مدل PDH/PDL+P4 فعال است: سطوح سشن‌ها (و هر سطح غیر از Daily) برای معامله خاموش‌اند و قابل روشن‌شدن نیستند.", strategy_families_keyboard(chat_id)); return
+            send_message(chat_id, "🔒 مدل «سقف و کف دیروز» فعال است: سطوح ساعات بازار (و هر سطح غیر از روزانه) برای معامله خاموش‌اند و قابل روشن‌شدن نیستند.", strategy_families_keyboard(chat_id)); return
         current = bool(s['strategy_config'].get(cfg_key, default_val))
         s['strategy_config'][cfg_key] = not current
         save_session(chat_id)
@@ -8731,6 +9053,7 @@ def handle_text(chat_id,text):
 def telegram_listener():
     global TELEGRAM_OFFSET
     backlog_checked=False
+    _last_poll_return = None      # V3.42.12: لحظه‌ی برگشتن getUpdates قبلی = زودترین زمان ممکن برای لمس‌های این دسته
     while True:
         if not TELEGRAM_TOKEN:
             time.sleep(5); continue
@@ -8748,13 +9071,24 @@ def telegram_listener():
                 backlog_checked=True
                 time.sleep(1)
                 continue
+            _poll_start = time.time()
             r=requests.get(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates',params=params,timeout=30)
             if not r.ok:
                 time.sleep(2); continue
             updates=r.json().get('result',[])
+            _now_poll = time.time()
+            # برگشت فوری (<۱ث) یعنی لمس در فاصله‌ای که thread مشغول بود صف شده؛ در این حالت زودترین زمان ممکن = برگشتن poll قبلی.
+            # اگر poll منتظر ماند و بعد جواب داد، لمس همان لحظه انجام شده است.
+            # V3.42.13: قبلاً فقط «برگشت زیر ۱ ثانیه» را صفِ لمسِ قدیمی می‌دانست؛ با تاخیر شبکه/پروکسی (poll بالای ۱ ثانیه)
+            # لمسِ قدیمی «همین الان» حساب می‌شد و ذخیره‌ی به‌موقع رد می‌شد. حالا معیار «وقفه بین دو poll» است:
+            # اگر thread بین دو poll مشغول بوده، لمس می‌تواند از لحظه‌ی برگشتن poll قبلی باشد؛ وگرنه حین همین poll رخ داده.
+            _busy_gap = (_poll_start - _last_poll_return) if _last_poll_return else 0.0
+            _earliest_press = _last_poll_return if (_last_poll_return and _busy_gap > 1.0) else _poll_start
+            _last_poll_return = _now_poll
             for u in updates:
                 upd=int(u.get('update_id',0))
                 save_telegram_offset(upd+1)
+                _PRESS.earliest = _earliest_press
                 try:
                     callback=u.get('callback_query') or {}
                     msg=callback.get('message') or u.get('message') or {}
@@ -8800,13 +9134,15 @@ def telegram_listener():
                     elif data:
                         _um = u.get('message') or {}
                         if (_um.get('chat') or {}).get('type') == 'private' and _um.get('message_id'):
-                            _day_log_record(chat, _um['message_id'])
+                            _day_log_record(chat, _um['message_id'], track=False)
                         if (AUTO_DELETE_USER_MESSAGES and (_um.get('chat') or {}).get('type') == 'private'
                                 and _um.get('message_id')):
                             schedule_auto_delete(chat, _um['message_id'])
                         handle_text(chat,data)
                 except Exception:
                     logger.exception('Telegram update %s processing failed',upd)
+                finally:
+                    _PRESS.earliest = None
         except Exception as exc:
             logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
