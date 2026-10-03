@@ -6,12 +6,6 @@ from threading import Thread, RLock, Timer
 import threading, functools
 from typing import Dict, Any
 
-try:
-    import psycopg
-    from psycopg.rows import tuple_row
-except Exception:
-    psycopg = None
-    tuple_row = None
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 try:
@@ -57,8 +51,6 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 MINIAPP_BASE_URL = os.environ.get('MINIAPP_BASE_URL', '').strip().rstrip('/')
 PORT = int(os.environ.get('PORT', '10000'))
 DB_PATH = os.environ.get('BOT_DB_PATH', 'trader_bot.sqlite3')
-DB_URL = (os.environ.get('DATABASE_URL') or os.environ.get('NEON_DATABASE_URL') or os.environ.get('POSTGRES_URL') or '').strip()
-DB_BACKEND = 'postgres' if DB_URL.lower().startswith(('postgres://', 'postgresql://')) else 'sqlite'
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
 NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
@@ -350,55 +342,20 @@ def json_default(obj):
     raise TypeError
 
 
-class _DBNoopCursor:
-    def fetchone(self): return None
-    def fetchall(self): return []
-
-
-class _DBConnection:
-    def __init__(self, raw, backend):
-        self.raw = raw
-        self.backend = backend
-
-    def execute(self, sql, params=None):
-        if self.backend == 'postgres':
-            if sql.lstrip().upper().startswith('PRAGMA '):
-                return _DBNoopCursor()
-            sql = sql.replace('?', '%s')
-        try:
-            return self.raw.execute(sql) if params is None else self.raw.execute(sql, params)
-        except Exception as exc:
-            if self.backend == 'postgres' and psycopg is not None:
-                if isinstance(exc, psycopg.errors.UniqueViolation):
-                    raise sqlite3.IntegrityError(str(exc)) from exc
-            raise
-
-    def commit(self): return self.raw.commit()
-    def rollback(self): return self.raw.rollback()
-    def close(self): return self.raw.close()
-
-
 def db_connect():
-    if DB_BACKEND == 'postgres':
-        if psycopg is None:
-            raise RuntimeError('DATABASE_URL تنظیم شده ولی psycopg نصب نیست.')
-        url = DB_URL
-        if 'sslmode=' not in url.lower():
-            url += ('&' if '?' in url else '?') + 'sslmode=require'
-        return _DBConnection(psycopg.connect(url, connect_timeout=15, row_factory=tuple_row), 'postgres')
-    return _DBConnection(sqlite3.connect(DB_PATH, timeout=15), 'sqlite')
+    return sqlite3.connect(DB_PATH, timeout=15)
 
 
 def init_db():
-    db_existed_before = os.path.exists(DB_PATH) if DB_BACKEND == 'sqlite' else True
+    db_existed_before = os.path.exists(DB_PATH)
     with DB_LOCK:
         conn = db_connect()
         try:
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('PRAGMA synchronous=NORMAL')
             conn.execute('PRAGMA busy_timeout=15000')
-            fee_id_type = 'BIGSERIAL PRIMARY KEY' if DB_BACKEND == 'postgres' else 'INTEGER PRIMARY KEY AUTOINCREMENT'
-            real_type = 'DOUBLE PRECISION' if DB_BACKEND == 'postgres' else 'REAL'
+            fee_id_type = 'INTEGER PRIMARY KEY AUTOINCREMENT'
+            real_type = 'REAL'
             conn.execute('CREATE TABLE IF NOT EXISTS sessions(chat_id INTEGER PRIMARY KEY, data TEXT NOT NULL, updated_at INTEGER NOT NULL)')
             conn.execute('CREATE TABLE IF NOT EXISTS bot_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)')
             conn.execute('''CREATE TABLE IF NOT EXISTS fee_ledger(
@@ -421,6 +378,13 @@ def init_db():
                 fee_rate_pct %s NOT NULL,
                 updated_at INTEGER NOT NULL
             )''' % real_type)
+            # V3.42.14: لیست دسترسی پویا (مدیریت از پنل ادمین)
+            conn.execute('''CREATE TABLE IF NOT EXISTS allowed_users(
+                chat_id INTEGER PRIMARY KEY,
+                note TEXT,
+                added_by INTEGER,
+                added_at INTEGER NOT NULL
+            )''')
             conn.execute('''CREATE TABLE IF NOT EXISTS users(
                 chat_id INTEGER PRIMARY KEY,
                 telegram_user_id INTEGER,
@@ -434,103 +398,11 @@ def init_db():
             conn.commit()
         finally:
             conn.close()
-    if DB_BACKEND == 'postgres':
-        logger.info('Database backend: PostgreSQL (remote/Neon compatible)')
-    else:
-        if not os.environ.get('BOT_DB_PATH', '').strip():
-            logger.warning('هشدار ماندگاری داده: BOT_DB_PATH تنظیم نشده؛ دیتابیس روی مسیر پیش‌فرض محلی (%s) ذخیره می‌شود.', DB_PATH)
-        if not db_existed_before:
-            logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
+    if not os.environ.get('BOT_DB_PATH', '').strip():
+        logger.warning('هشدار ماندگاری داده: BOT_DB_PATH تنظیم نشده؛ دیتابیس روی مسیر پیش‌فرض محلی (%s) ذخیره می‌شود.', DB_PATH)
+    if not db_existed_before:
+        logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
 
-
-def _sqlite_table_exists(conn, table_name):
-    try:
-        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
-        return bool(row)
-    except Exception:
-        return False
-
-
-def migrate_legacy_sqlite_to_postgres():
-    """One-time, idempotent migration of legacy SQLite state into PostgreSQL/Neon."""
-    if DB_BACKEND != 'postgres':
-        return
-    legacy_path = os.environ.get('LEGACY_SQLITE_PATH', DB_PATH).strip() or DB_PATH
-    if not os.path.exists(legacy_path):
-        logger.info('No legacy SQLite database found at %s; nothing to migrate.', legacy_path)
-        return
-    with DB_LOCK:
-        pg = db_connect()
-        try:
-            marker = pg.execute("SELECT value FROM bot_meta WHERE key=?", ('sqlite_migration_v1',)).fetchone()
-            if marker and str(marker[0]).lower() in ('done','completed'):
-                logger.info('SQLite→PostgreSQL migration already completed.')
-                return
-            src = sqlite3.connect(legacy_path, timeout=15)
-            try:
-                src.row_factory = sqlite3.Row
-                if not _sqlite_table_exists(src, 'sessions'):
-                    pg.execute("INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", ('sqlite_migration_v1','done',int(time.time())))
-                    pg.commit()
-                    logger.info('Legacy SQLite has no sessions table; migration marked complete.')
-                    return
-                counts = {'sessions':0,'fees':0,'fee_settings':0,'users':0,'meta':0}
-                for r in src.execute('SELECT chat_id,data,updated_at FROM sessions').fetchall():
-                    existing = pg.execute('SELECT updated_at FROM sessions WHERE chat_id=?', (int(r['chat_id']),)).fetchone()
-                    if not existing or int(r['updated_at'] or 0) > int(existing[0] or 0):
-                        if existing:
-                            pg.execute('UPDATE sessions SET data=?,updated_at=? WHERE chat_id=?', (r['data'], int(r['updated_at']), int(r['chat_id'])))
-                        else:
-                            pg.execute('INSERT INTO sessions(chat_id,data,updated_at) VALUES(?,?,?)', (int(r['chat_id']), r['data'], int(r['updated_at'])))
-                        counts['sessions'] += 1
-                if _sqlite_table_exists(src, 'fee_ledger'):
-                    cols = ['id','trade_id','chat_id','mode','gross_pnl_usdt','trading_cost_usdt','net_profit_before_platform_fee_usdt','fee_rate_pct','platform_fee_usdt','user_net_profit_usdt','status','created_at','settled_at']
-                    for r in src.execute('SELECT '+','.join(cols)+' FROM fee_ledger').fetchall():
-                        vals=[r[c] for c in cols]
-                        try:
-                            pg.execute("""INSERT INTO fee_ledger(id,trade_id,chat_id,mode,gross_pnl_usdt,trading_cost_usdt,net_profit_before_platform_fee_usdt,fee_rate_pct,platform_fee_usdt,user_net_profit_usdt,status,created_at,settled_at)
-                                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trade_id) DO NOTHING""", vals)
-                            counts['fees'] += 1
-                        except Exception:
-                            logger.exception('fee migration failed trade_id=%s', r['trade_id'])
-                if _sqlite_table_exists(src, 'user_fee_settings'):
-                    for r in src.execute('SELECT chat_id,fee_rate_pct,updated_at FROM user_fee_settings').fetchall():
-                        pg.execute("""INSERT INTO user_fee_settings(chat_id,fee_rate_pct,updated_at) VALUES(?,?,?)
-                            ON CONFLICT(chat_id) DO UPDATE SET fee_rate_pct=excluded.fee_rate_pct,updated_at=excluded.updated_at
-                            WHERE excluded.updated_at > user_fee_settings.updated_at""", (int(r['chat_id']), float(r['fee_rate_pct']), int(r['updated_at'])))
-                        counts['fee_settings'] += 1
-                if _sqlite_table_exists(src, 'users'):
-                    for r in src.execute('SELECT chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active FROM users').fetchall():
-                        pg.execute("""INSERT INTO users(chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active)
-                            VALUES(?,?,?,?,?,?,?,?)
-                            ON CONFLICT(chat_id) DO UPDATE SET
-                                telegram_user_id=COALESCE(EXCLUDED.telegram_user_id,users.telegram_user_id),
-                                username=COALESCE(EXCLUDED.username,users.username),
-                                first_name=COALESCE(EXCLUDED.first_name,users.first_name),
-                                last_name=COALESCE(EXCLUDED.last_name,users.last_name),
-                                first_seen=LEAST(users.first_seen,EXCLUDED.first_seen),
-                                last_seen=GREATEST(users.last_seen,EXCLUDED.last_seen),
-                                is_active=EXCLUDED.is_active""", (int(r['chat_id']), r['telegram_user_id'], r['username'], r['first_name'], r['last_name'], int(r['first_seen']), int(r['last_seen']), int(r['is_active'])))
-                        counts['users'] += 1
-                if _sqlite_table_exists(src, 'bot_meta'):
-                    for r in src.execute('SELECT key,value,updated_at FROM bot_meta').fetchall():
-                        existing=pg.execute('SELECT updated_at FROM bot_meta WHERE key=?',(r['key'],)).fetchone()
-                        if not existing:
-                            pg.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?)',(r['key'],r['value'],int(r['updated_at'])))
-                            counts['meta'] += 1
-                # Advance BIGSERIAL after importing explicit SQLite IDs.
-                pg.execute("SELECT setval(pg_get_serial_sequence('fee_ledger','id'), COALESCE((SELECT MAX(id) FROM fee_ledger),1), true)")
-                pg.execute("INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at", ('sqlite_migration_v1','done',int(time.time())))
-                pg.commit()
-                logger.info('SQLite→PostgreSQL migration completed: %s', counts)
-            except Exception:
-                pg.rollback()
-                logger.exception('SQLite→PostgreSQL migration failed; transaction rolled back.')
-                raise
-            finally:
-                src.close()
-        finally:
-            pg.close()
 
 def upsert_telegram_user(user, chat_id=None):
     """ثبت/به‌روزرسانی پروفایل غیرحساس تلگرام برای نمایش به ادمین."""
@@ -575,7 +447,7 @@ def mark_stale_users(days=30):
             conn.close()
 
 def admin_users_report(limit=100):
-    if not USER_SESSIONS and DB_BACKEND == 'sqlite' and not os.path.exists(DB_PATH):
+    if not USER_SESSIONS and not os.path.exists(DB_PATH):
         return '👥 *کاربران ربات*\n\nهنوز کاربری ثبت نشده است.'
     mark_stale_users(30)
     with DB_LOCK:
@@ -974,8 +846,163 @@ def get_exchange(chat_id):
         return None
 
 
+# --- V3.42.14: مدیریت پویای دسترسی از پنل ادمین ---
+# منطق: ادمین‌ها همیشه مجازند. اگر هیچ محدودیتی تنظیم نشده باشد (env خالی، لیست پویا خالی، حالت «محدود» خاموش)
+# ربات مثل قبل برای همه باز است. به‌محض افزودن اولین کاربر از پنل، حالت «محدود» روشن می‌شود و فقط
+# ادمین‌ها + ALLOWED_CHAT_IDS (env) + لیست پویا مجازند. حذف آخرین کاربر، ربات را دوباره برای همه باز نمی‌کند.
+_DYN_ALLOWED = set()
+_DYN_ALLOWED_LOCK = RLock()
+_ACCESS_RESTRICTED = False
+
+
+def load_access_control():
+    global _ACCESS_RESTRICTED
+    ids = set(); restricted = False
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            for r in conn.execute('SELECT chat_id FROM allowed_users').fetchall():
+                ids.add(int(r[0]))
+            row = conn.execute('SELECT value FROM bot_meta WHERE key=?', ('access_restricted',)).fetchone()
+            restricted = bool(row and str(row[0]) == '1')
+        finally:
+            conn.close()
+    with _DYN_ALLOWED_LOCK:
+        _DYN_ALLOWED.clear(); _DYN_ALLOWED.update(ids)
+        _ACCESS_RESTRICTED = restricted
+    logger.info('Access control loaded: %s dynamic users, restricted=%s, env whitelist=%s', len(ids), restricted, len(ALLOWED_CHAT_IDS))
+
+
 def is_allowed(chat_id):
-    return (not ALLOWED_CHAT_IDS) or (chat_id in ALLOWED_CHAT_IDS)
+    try:
+        cid = int(chat_id)
+    except Exception:
+        return False
+    if cid in ADMIN_CHAT_IDS:
+        return True
+    with _DYN_ALLOWED_LOCK:
+        if not (ALLOWED_CHAT_IDS or _DYN_ALLOWED or _ACCESS_RESTRICTED):
+            return True
+        return cid in ALLOWED_CHAT_IDS or cid in _DYN_ALLOWED
+
+
+def _set_access_restricted(flag):
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+                         ('access_restricted', '1' if flag else '0', int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+    load_access_control()
+
+
+def access_toggle_restricted():
+    with _DYN_ALLOWED_LOCK:
+        new_state = not _ACCESS_RESTRICTED
+    _set_access_restricted(new_state)
+    return new_state
+
+
+def access_add_user(target_id, added_by, note=''):
+    target_id = int(target_id)
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('INSERT INTO allowed_users(chat_id,note,added_by,added_at) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET note=excluded.note',
+                         (target_id, (note or '')[:100], int(added_by), int(time.time())))
+            conn.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+                         ('access_restricted', '1', int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+    load_access_control()
+
+
+def access_remove_user(target_id):
+    """کاربر را از لیست پویا حذف و اسکن او را متوقف می‌کند. خروجی: (وجود داشت؟, تعداد پوزیشن باز)"""
+    target_id = int(target_id)
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            existed = conn.execute('SELECT 1 FROM allowed_users WHERE chat_id=?', (target_id,)).fetchone() is not None
+            conn.execute('DELETE FROM allowed_users WHERE chat_id=?', (target_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    load_access_control()
+    open_count = 0
+    sess = USER_SESSIONS.get(target_id)
+    if sess is not None and not is_allowed(target_id):
+        try:
+            sess['is_bot_active'] = False
+            open_count = len(sess.get('paper_positions') or [])
+            save_session(target_id)
+        except Exception:
+            logger.exception('stopping scan for removed user failed chat=%s', target_id)
+    return existed, open_count
+
+
+def access_resolve_target(raw):
+    """ورودی: آیدی عددی یا @username (فقط اگر کاربر قبلاً با ربات تعامل داشته). خروجی: (chat_id یا None, پیام خطا)"""
+    raw = (raw or '').strip()
+    if raw.lstrip('-').isdigit():
+        return int(raw), ''
+    uname = raw.lstrip('@').strip().lower()
+    if uname:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT chat_id FROM users WHERE LOWER(username)=?', (uname,)).fetchone()
+            finally:
+                conn.close()
+        if row:
+            return int(row[0]), ''
+    return None, 'یوزرنیم در رجیستری ربات پیدا نشد (فقط کسانی که قبلاً ربات را استارت کرده‌اند). آیدی عددی را بفرست.'
+
+
+def access_panel_text():
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute('SELECT a.chat_id,a.note,a.added_at,u.username,u.first_name FROM allowed_users a LEFT JOIN users u ON u.chat_id=a.chat_id ORDER BY a.added_at DESC LIMIT 50').fetchall()
+        finally:
+            conn.close()
+    with _DYN_ALLOWED_LOCK:
+        restricted = bool(ALLOWED_CHAT_IDS or _DYN_ALLOWED or _ACCESS_RESTRICTED)
+    lines = ['🔐 *مدیریت دسترسی کاربران*', '',
+             f"• وضعیت: {'🔒 محدود (فقط کاربران مجاز)' if restricted else '🔓 باز برای همه'}",
+             f"• ادمین‌ها (همیشه مجاز): `{len(ADMIN_CHAT_IDS)}`",
+             f"• لیست ثابت env (ALLOWED_CHAT_IDS): `{len(ALLOWED_CHAT_IDS)}`",
+             f"• لیست پنل: `{len(rows)}`", '']
+    if rows:
+        lines.append('*کاربران افزوده‌شده از پنل:*')
+        for cid, note, added_at, username, first in rows:
+            who = ' '.join(x for x in ((f'@{username}' if username else ''), (first or ''), (f'— {note}' if note else '')) if x)
+            lines.append(f"• `{cid}` {who}".rstrip())
+        lines.append('')
+        lines.append('برای حذف، روی دکمه‌ی ❌ کنار هر آیدی بزن.')
+    else:
+        lines.append('هنوز کاربری از پنل اضافه نشده است.')
+    return '\n'.join(lines)
+
+
+def access_panel_keyboard():
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute('SELECT chat_id FROM allowed_users ORDER BY added_at DESC LIMIT 20').fetchall()
+        finally:
+            conn.close()
+    kb = [[{'text': '➕ افزودن کاربر', 'callback_data': '/admin_access_add_prompt'}]]
+    for (cid,) in rows:
+        kb.append([{'text': f'❌ حذف {cid}', 'callback_data': f'/admin_access_rm_{cid}'}])
+    with _DYN_ALLOWED_LOCK:
+        restricted = bool(_ACCESS_RESTRICTED)
+    kb.append([{'text': '🔓 باز کردن برای همه' if restricted else '🔒 فقط کاربران مجاز', 'callback_data': '/admin_access_toggle'}])
+    kb.append([{'text': '👑 بازگشت به پنل مدیریت', 'callback_data': '/admin_panel'}])
+    return {'inline_keyboard': kb}
 
 
 # ---------------------------------------------------------------------------
@@ -1397,7 +1424,7 @@ _BACK_PARENT = {
     '/backtest_start': '/manage_watchlist', '/scan_signal_start': '/manage_watchlist',
     '/pending_order_start': '/menu_trading', '/market_report': '/menu_reports',
     '/export_trade_data': '/performance', '/export_trade_pipeline': '/trade_tracking_menu',
-    '/admin_set_fee_prompt': '/admin_fee_report', '/pending_side_buy': '/menu_trading',
+    '/admin_set_fee_prompt': '/admin_fee_report', '/admin_access_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
     '/pending_side_sell': '/menu_trading', '/confirm_pending_order': '/menu_trading',
     '/cancel_pending_all': '/menu_trading', '/close_longs_prompt': '/open_positions',
     '/close_shorts_prompt': '/open_positions', '/confirm_close_longs': '/open_positions',
@@ -7936,6 +7963,59 @@ def process_command(cmd,chat_id,message_id=None):
             _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
+    if cmd in ('/admin_access', '/admin_access_toggle', '/admin_access_add_prompt') or str(cmd).startswith(('/admin_access_rm_', '/admin_access_approve_', '/admin_access_deny_', '/allow ', '/disallow ')):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        _panel_btn = {'inline_keyboard': [[{'text': '🔐 مدیریت دسترسی', 'callback_data': '/admin_access'}]]}
+        if str(cmd).startswith(('/admin_access_approve_', '/admin_access_deny_')):
+            approve = str(cmd).startswith('/admin_access_approve_')
+            try:
+                target = int(str(cmd).rsplit('_', 1)[1])
+            except ValueError:
+                send_message(chat_id, '⚠️ آیدی نامعتبر است.'); return
+            label = _access_user_label(target)
+            who = f'{target}' + (f' ({label})' if label else '')
+            if approve:
+                already = is_allowed(target) and target not in ADMIN_CHAT_IDS and (target in ALLOWED_CHAT_IDS or target in _DYN_ALLOWED)
+                _ACCESS_DENIED.discard(target)
+                access_add_user(target, chat_id, label[:60])
+                if not already:
+                    try:
+                        send_message(target, '✅ دسترسی شما به ربات فعال شد. برای شروع /start را بزنید.', keep=True)
+                    except Exception:
+                        logger.exception('approval notice to user failed chat=%s', target)
+                send_message(chat_id, f'✅ دسترسی {who} تایید شد.', _panel_btn, parse_mode=None)
+            else:
+                _ACCESS_DENIED.add(target)
+                send_message(chat_id, f'🚫 درخواست {who} رد شد.', _panel_btn, parse_mode=None)
+            return
+        if cmd == '/admin_access_toggle':
+            access_toggle_restricted()
+        elif str(cmd).startswith('/admin_access_rm_'):
+            try:
+                existed, open_cnt = access_remove_user(int(str(cmd)[len('/admin_access_rm_'):]))
+                warn = f'\n⚠️ این کاربر `{open_cnt}` پوزیشن باز دارد؛ اسکن او متوقف شد ولی پوزیشن‌ها بسته نشدند.' if open_cnt else ''
+                send_message(chat_id, ('✅ کاربر از لیست حذف شد و اسکنش متوقف شد.' if existed else 'ℹ️ این آیدی در لیست پنل نبود.') + warn)
+            except ValueError:
+                send_message(chat_id, '⚠️ آیدی نامعتبر است.')
+        elif cmd == '/admin_access_add_prompt':
+            s = get_session(chat_id); s['user_state'] = 'WAIT_ADMIN_ALLOW_ADD'; save_session(chat_id)
+            send_message(chat_id, '➕ *افزودن کاربر مجاز*\n\nآیدی عددی تلگرام کاربر را بفرست (اختیاری: یک یادداشت بعدش).\nمثال: `123456789 علی`\nیا `@username` اگر قبلاً ربات را استارت کرده.')
+            return
+        elif str(cmd).startswith(('/allow ', '/disallow ')):
+            parts = str(cmd).split(None, 2)
+            target, err = access_resolve_target(parts[1] if len(parts) > 1 else '')
+            if target is None:
+                send_message(chat_id, '⚠️ ' + (err or 'فرمت: `/allow 123456789 یادداشت`')); return
+            if parts[0] == '/allow':
+                access_add_user(target, chat_id, parts[2] if len(parts) > 2 else '')
+                send_message(chat_id, f'✅ `{target}` اضافه شد.')
+            else:
+                existed, _open_cnt = access_remove_user(target)
+                send_message(chat_id, f'✅ `{target}` حذف شد.' if existed else 'ℹ️ این آیدی در لیست پنل نبود.')
+            return
+        edit_page(chat_id, access_panel_text(), access_panel_keyboard(), message_id)
+        return
     if cmd == '/admin_set_fee_prompt':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
@@ -8893,6 +8973,19 @@ def handle_text(chat_id,text):
         run_user_backtest(chat_id)
         return
 
+    if current_state == 'WAIT_ADMIN_ALLOW_ADD':
+        s['user_state'] = None
+        save_session(chat_id)
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return
+        parts = raw.split(None, 1)
+        target, err = access_resolve_target(parts[0] if parts else '')
+        if target is None:
+            send_message(chat_id, '⚠️ ' + (err or 'آیدی نامعتبر است.'), access_panel_keyboard()); return
+        access_add_user(target, chat_id, parts[1] if len(parts) > 1 else '')
+        send_message(chat_id, f'✅ کاربر `{target}` اضافه شد و می‌تواند از ربات استفاده کند.\n\n' + access_panel_text(), access_panel_keyboard())
+        return
+
     if current_state == 'WAIT_ADMIN_SET_FEE':
         s['user_state'] = None
         save_session(chat_id)
@@ -9084,6 +9177,41 @@ def handle_text(chat_id,text):
 
 
 _NOT_ALLOWED_NOTIFIED = {}
+_ACCESS_DENIED = set()   # کاربرانی که ادمین رد کرده؛ تا ری‌استارت بعدی دیگر برای ادمین درخواست نمی‌فرستند
+
+
+def _access_user_label(chat_id):
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT username,first_name,last_name FROM users WHERE chat_id=?', (int(chat_id),)).fetchone()
+            finally:
+                conn.close()
+        if row:
+            username, first, last = row
+            name = ' '.join(x for x in (first, last) if x)
+            return ' | '.join(x for x in (name, (f'@{username}' if username else '')) if x)
+    except Exception:
+        logger.exception('access label failed chat=%s', chat_id)
+    return ''
+
+
+def _notify_admins_access_request(chat_id):
+    """وقتی کاربرِ غیرمجاز پیام می‌دهد، برای ادمین‌ها پیام با دکمه‌ی تایید/رد می‌فرستد."""
+    try:
+        if int(chat_id) in _ACCESS_DENIED:
+            return
+        label = _access_user_label(chat_id)
+        text = '🔔 درخواست دسترسی به ربات\n\n' + (f'کاربر: {label}\n' if label else '') + f'آیدی: {chat_id}'
+        markup = {'inline_keyboard': [[
+            {'text': '✅ تایید', 'callback_data': f'/admin_access_approve_{int(chat_id)}'},
+            {'text': '🚫 رد', 'callback_data': f'/admin_access_deny_{int(chat_id)}'},
+        ]]}
+        for admin_id in list(ADMIN_CHAT_IDS):
+            send_message(admin_id, text, markup, keep=True, parse_mode=None)
+    except Exception:
+        logger.exception('admin access-request notice failed chat=%s', chat_id)
 
 
 def _notify_not_allowed(chat_id):
@@ -9094,8 +9222,9 @@ def _notify_not_allowed(chat_id):
         if now - _NOT_ALLOWED_NOTIFIED.get(chat_id, 0) < 600:
             return
         _NOT_ALLOWED_NOTIFIED[chat_id] = now
-        logger.warning('chat_id=%s در ALLOWED_CHAT_IDS نیست؛ درخواست نادیده گرفته شد. برای باز کردن ربات برای همه، متغیر ALLOWED_CHAT_IDS را خالی کنید یا این آیدی را اضافه کنید.', chat_id)
+        logger.warning('chat_id=%s مجاز نیست؛ درخواست نادیده گرفته شد. از پنل مدیریت > مدیریت دسترسی اضافه‌اش کنید.', chat_id)
         tg('sendMessage', {'chat_id': chat_id, 'text': '⛔ دسترسی شما به این ربات فعال نیست. برای فعال‌سازی با ادمین تماس بگیرید.\n\nشناسه‌ی شما: ' + str(chat_id)}, 10)
+        _notify_admins_access_request(chat_id)
     except Exception:
         logger.exception('not-allowed notice failed chat=%s', chat_id)
 
@@ -9444,7 +9573,7 @@ def miniapp_api_data():
     user = _validate_telegram_webapp_initdata(init_data)
     if not user or not user.get('id'): return {'error': 'احراز هویت تلگرام نامعتبر است'}, 401
     chat_id = user['id']
-    if ALLOWED_CHAT_IDS and chat_id not in ALLOWED_CHAT_IDS: return {'error': 'دسترسی مجاز نیست'}, 403
+    if not is_allowed(chat_id): return {'error': 'دسترسی مجاز نیست'}, 403
     df = get_klines(symbol, tf, 200)
     if df.empty: return {'error': 'داده کندل در دسترس نیست'}, 404
     candles = [
@@ -9491,7 +9620,8 @@ def _notify_boot_status():
     شد. هدف این است که اگر دیتابیس به هر دلیل (مثلاً دیسک غیردائمی) خالی بارگذاری شود، کاربر همان
     لحظه متوجه شود، نه اینکه بعداً و تصادفی بفهمد پوزیشن‌ها و آمارش پاک شده‌اند."""
     try:
-        targets = set(ALLOWED_CHAT_IDS) | set(USER_SESSIONS.keys())
+        with _DYN_ALLOWED_LOCK:
+            targets = set(ALLOWED_CHAT_IDS) | set(_DYN_ALLOWED) | set(USER_SESSIONS.keys())
         if not targets:
             return
         total_open = sum(len(s.get('paper_positions') or []) for s in USER_SESSIONS.values())
@@ -9590,7 +9720,7 @@ def _watchlist_refresh_loop():
 
 def main():
     init_db()
-    migrate_legacy_sqlite_to_postgres()
+    load_access_control()
     load_telegram_offset()
     load_sessions()
     logger.info('Loaded %s sessions', len(USER_SESSIONS))
