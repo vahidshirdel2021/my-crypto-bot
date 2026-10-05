@@ -307,6 +307,17 @@ STRATEGY_DEFAULTS = {
     # وقتی گیت «هم‌جهتی با بازار» (market_alignment_filters_enabled در bot.py) روشن است،
     # این کلید تعیین می‌کند حالت ۵/۶ (شکست کاذب) از آن گیت معاف باشند یا نه - چون هدف
     # ذاتی این دو حالت گرفتن برگشت از حرکت ناموفق است، حتی خلاف رژیم کلی بازار.
+    # --- V3.43: دقت‌ِ تشخیص ۶ حالت (ماشین‌حالتِ شکست: «نفوذ» = close فراتر از سطح) ---
+    # روشن: حالت ۵/۶ فقط روی «اولین کندل بازگشت به داخل» بعد از شکستِ تازه صادر می‌شود (نه هر کندل
+    # نزولی/صعودیِ دور از سطح)، حالت ۳/۴ فقط وقتی سطح بین شکست و پولبک از دست نرفته، و حالت ۱/۲
+    # دیگر نمی‌تواند یک شکست‌کاذبِ ردشده‌ی ۵/۶ را با برچسب ۱/۲ دوباره صادر کند.
+    "scenario_precision_v2": True,
+    "scenario_penetration_min_atr": 0.10,       # close باید حداقل این‌قدر (×ATR) فراتر از سطح باشد تا «نفوذ» حساب شود
+    "scenario_fakeout_max_gap_candles": 0,      # ۵/۶: حداکثر کندلِ بسته‌شده‌ی داخل رنج بین آخرین close فراتر از سطح و کندل فعلی (۰ = اولین کندلِ بازگشت)
+    # ۱/۲ دقیقاً طبق تعریف: «برخورد بدون نفوذ + برگشت»، یعنی فتیله به سطح برسد (نه لزوماً ازش رد شود)
+    "scenario_touch_enabled": True,
+    "scenario_touch_tolerance_atr": 0.10,       # فاصله‌ی مجاز تا سطح (×ATR) برای «برخورد»
+    "scenario_touch_min_wick_frac": 0.35,       # حداقل نسبتِ فتیله‌ی ردکننده به کل رنج کندل در حالت برخورد-بدون-نفوذ
     "scenario_56_market_gate_exempt": True,
     # حالت ۱/۲ (برخورد ساده) هم ذاتاً برگشتی/رنجی است، نه ترندی - طبق تصمیم کاربر همین
     # معافیت را از گیت هم‌جهتی بازار گرفت.
@@ -1027,6 +1038,52 @@ def _confirm_fakeout(d, breakout_idx, pullback_idx, cfg):
     return False, "بدون واگرایی حجم/کندل برگشت کافی"
 
 
+def _breakout_context(d, before_idx, hi, lo, lookback, pen=0.0, max_back=400):
+    """وضعیتِ شکست «تا قبل از کندل before_idx» نسبت به (hi, lo). «نفوذ» = close فراتر از سطح
+    (بیش از pen). خروجی: (direction, level, leg_start, last_beyond, gap) یا پنج‌تایی None.
+      last_beyond: آخرین کندلی که فراتر از سطح بسته شده (فقط داخل lookback)
+      gap: تعداد کندل‌های بسته‌شده بین last_beyond و کندل فعلی (۰ = کندل قبلی هنوز فراتر از سطح بود)
+      leg_start: اولین کندلِ رشته‌ی پیوسته‌ی فراتر از سطح که به last_beyond ختم می‌شود (کندل واقعیِ شکست)
+    کاملاً علّی است: فقط کندل‌های قبل از before_idx را می‌بیند."""
+    none5 = (None, None, None, None, None)
+    if d is None or before_idx is None or before_idx <= 0 or hi is None or lo is None:
+        return none5
+    closes = d["close"].to_numpy(dtype=float)
+    end = min(int(before_idx), len(closes))
+    start = max(0, end - max(1, int(lookback)))
+    if end <= start:
+        return none5
+    seg = closes[start:end]
+    up_pos = np.nonzero(seg > hi + pen)[0]
+    dn_pos = np.nonzero(seg < lo - pen)[0]
+    up_last = start + int(up_pos[-1]) if up_pos.size else None
+    dn_last = start + int(dn_pos[-1]) if dn_pos.size else None
+    if up_last is not None and (dn_last is None or up_last > dn_last):
+        direction, level, last = "UP", float(hi), up_last
+        beyond = lambda x: x > hi + pen
+    elif dn_last is not None:
+        direction, level, last = "DOWN", float(lo), dn_last
+        beyond = lambda x: x < lo - pen
+    else:
+        return none5
+    leg = last
+    floor_i = max(0, end - int(max_back))
+    while leg - 1 >= floor_i and beyond(closes[leg - 1]):
+        leg -= 1
+    return direction, level, leg, last, (end - 1) - last
+
+
+def _recent_close_beyond(d, idx, level, side, pen, n_candles):
+    """آیا در n_candles کندلِ بسته‌شده‌ی قبل از idx، close فراتر از سطح بوده؟ (side: UP/DOWN)"""
+    if d is None or idx <= 0:
+        return False
+    closes = d["close"].to_numpy(dtype=float)
+    seg = closes[max(0, idx - max(1, int(n_candles))):idx]
+    if seg.size == 0:
+        return False
+    return bool((seg > level + pen).any()) if side == "UP" else bool((seg < level - pen).any())
+
+
 def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                                cfg, require_reclaim, require_reversal):
     """Generic single-candle liquidity-sweep detector for a (hi, lo) level pair.
@@ -1043,22 +1100,33 @@ def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label
         return None, None, None
     min_sweep = atr * max(0.0, float(cfg.get("sweep_min_distance_atr", 0.10)))
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
-    if h >= hi + min_sweep:
+    # V3.43: «برخورد بدون نفوذ» (حالت ۱/۲ طبق تعریف کاربر): فتیله به سطح می‌رسد (در tolerance) ولی
+    # لزوماً ازش رد نمی‌شود؛ چون نفوذِ واقعی نیست، رد قیمت باید قوی‌تر (فتیله‌ی بلند) ثابت شود.
+    touch_on = bool(cfg.get("scenario_precision_v2", True)) and bool(cfg.get("scenario_touch_enabled", True))
+    touch_tol = atr * max(0.0, float(cfg.get("scenario_touch_tolerance_atr", 0.10)))
+    touch_wick = float(cfg.get("scenario_touch_min_wick_frac", 0.35))
+    sell_pierced = h >= hi + min_sweep
+    sell_touch = (not sell_pierced) and touch_on and h >= hi - touch_tol and _rejection_wick_ok(o, c, h, l, "SELL", touch_wick)
+    if sell_pierced or sell_touch:
         reclaimed = (not require_reclaim) or (c < hi)
         reversal = (not require_reversal) or (c < o)
         if reclaimed and reversal:
             ok, note = _confirm_simple_reject(curr, "SELL", cfg)
             if ok:
                 extra = f" + {note}" if note else ""
-                return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + ریکلیم نزولی{extra}|ANCHOR={hi:.10g}|TARGET={lo:.10g}", atr
-    if l <= lo - min_sweep:
+                how = "ریکلیم نزولی" if sell_pierced else "برخورد بدون نفوذ + رد نزولی"
+                return "SELL", f"Liquidity Sweep {hi_label} ({hi_key}={hi:.6g}) + {how}{extra}|ANCHOR={hi:.10g}|TARGET={lo:.10g}", atr
+    buy_pierced = l <= lo - min_sweep
+    buy_touch = (not buy_pierced) and touch_on and l <= lo + touch_tol and _rejection_wick_ok(o, c, h, l, "BUY", touch_wick)
+    if buy_pierced or buy_touch:
         reclaimed = (not require_reclaim) or (c > lo)
         reversal = (not require_reversal) or (c > o)
         if reclaimed and reversal:
             ok, note = _confirm_simple_reject(curr, "BUY", cfg)
             if ok:
                 extra = f" + {note}" if note else ""
-                return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + ریکلیم صعودی{extra}|ANCHOR={lo:.10g}|TARGET={hi:.10g}", atr
+                how = "ریکلیم صعودی" if buy_pierced else "برخورد بدون نفوذ + رد صعودی"
+                return "BUY", f"Liquidity Sweep {lo_label} ({lo_key}={lo:.6g}) + {how}{extra}|ANCHOR={lo:.10g}|TARGET={hi:.10g}", atr
     return None, None, None
 
 
@@ -1186,9 +1254,16 @@ def _find_recent_breakout(d, before_idx, hi, lo, lookback):
 
 def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
-    if direction is None:
-        return None, None
+    if bool(cfg.get("scenario_precision_v2", True)):
+        pen = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10)))
+        direction, level, breakout_idx, _last_beyond, _gap = _breakout_context(d, before_idx, hi, lo, lookback, pen)
+        # گپ>0 یعنی بعد از شکست، قیمت دوباره داخل رنج بسته شده: سطح از دست رفته، این پولبکِ «موفق» نیست
+        if direction is None or _gap != 0:
+            return None, None
+    else:
+        direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
+        if direction is None:
+            return None, None
     curr = d.iloc[before_idx]
     tol = atr * max(0.0, float(cfg.get("retest_tolerance_atr", 0.25)))
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
@@ -1224,14 +1299,24 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
     بین hi/lo برمی‌گردد - یعنی شکست کاذب (fakeout) بوده، پس معامله برعکسِ شکست اولیه
     گرفته می‌شود."""
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
-    if direction is None:
-        return None, None
+    precise = bool(cfg.get("scenario_precision_v2", True))
+    if precise:
+        pen = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10)))
+        direction, level, breakout_idx, _last_beyond, _gap = _breakout_context(d, before_idx, hi, lo, lookback, pen)
+        # فقط «اولین کندلِ بازگشت» (یا حداکثر max_gap کندل بعد از آخرین close فراتر از سطح)
+        if direction is None or _gap > max(0, int(cfg.get("scenario_fakeout_max_gap_candles", 0))):
+            return None, None
+    else:
+        direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
+        if direction is None:
+            return None, None
     curr = d.iloc[before_idx]
     tol = atr * max(0.0, float(cfg.get("retest_tolerance_atr", 0.25)))
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
     if direction == "UP":
-        touched = l <= level + tol
+        # نسخه‌ی قدیمی فقط l <= level+tol را می‌دید که برای هر کندلِ زیر سطح (هرچقدر دور) برقرار است؛
+        # کندل باید واقعاً به ناحیه‌ی سطح رسیده باشد (h >= level - tol).
+        touched = (l <= level + tol) and ((not precise) or h >= level - tol)
         failed_to_hold = c < level
         bearish = c < o
         if touched and failed_to_hold and bearish:
@@ -1242,7 +1327,7 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
             return "SELL", (f"شکست کاذب {hi_label} ({hi_key}={level:.6g}) + پولبک ناموفق + برگشت داخل محدوده{extra}"
                              f"|ANCHOR={level:.10g}|TARGET={lo:.10g}")
     else:
-        touched = h >= level - tol
+        touched = (h >= level - tol) and ((not precise) or l <= level + tol)
         failed_to_hold = c > level
         bullish = c > o
         if touched and failed_to_hold and bullish:
@@ -1850,6 +1935,16 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
             )
+            if sig and bool(cfg.get("scenario_precision_v2", True)):
+                # ۱/۲ یعنی «برخورد بدون نفوذِ قبلی». اگر کندل(های) قبلی همین سطح را با close شکسته بودند، این کندل
+                # در قلمرو ۵/۶ است - حتی اگر ۵/۶ خاموش باشد یا تاییدیه‌ی سخت‌گیرانه‌اش را رد کرده باشد - و نباید
+                # با برچسب ۱/۲ از در پشتی صادر شود.
+                _pen = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10)))
+                _n = max(0, int(cfg.get("scenario_fakeout_max_gap_candles", 0))) + 1
+                if sig == "SELL" and _recent_close_beyond(d, idx, hi, "UP", _pen, _n):
+                    sig = None
+                elif sig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
+                    sig = None
             if sig and _scenario_enabled("simple", sig, cfg) and (not p4_rev_tag or _p4_rev_side_ok(sig, buy_ok, sell_ok)):
                 return sig, _tag_scenario(reason, "simple", sig), atr, tag
         return None, None, None, None

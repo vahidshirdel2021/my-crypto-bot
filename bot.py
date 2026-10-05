@@ -1406,7 +1406,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 _NEW_MESSAGE_PREFIXES = (
     '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
-    '/check_entry_', '/cancel_watch_', '/chind_', '/noop', '/dummy',
+    '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/noop', '/dummy',
 )
 
 
@@ -2662,12 +2662,256 @@ def _append_channel_keep_delete_buttons(channel_id, message_id, base_markup):
             keep_row.append({'text': '💾 ذخیره برای بررسی بعدی', 'callback_data': f'/keep_channel_msg_{message_id}'})
         keep_row.append({'text': '🗑 حذف دستی', 'callback_data': f'/del_channel_msg_{message_id}'})
         rows.append(keep_row)
+        rows.extend(_channel_fixed_rows())      # V3.43: دکمه‌های ثابت (لیست بررسی‌های آتی / رژیم BTC/ETH)
         tg('editMessageReplyMarkup', {
             'chat_id': channel_id, 'message_id': message_id,
             'reply_markup': {'inline_keyboard': rows},
         }, 10)
     except Exception:
         logger.exception('failed to attach keep/delete buttons to channel message %s', message_id)
+
+
+
+# ===================== V3.43: لیست بررسی‌های آتی + دکمه‌ی رژیم BTC/ETH (کانال و ربات) =====================
+# • «💾 ذخیره برای بررسی بعدی» علاوه بر لغو حذف خودکار، نماد را در «لیست بررسی‌های آتی» ثبت می‌کند (ماندگار، در فایل JSON).
+# • دکمه‌های ثابت کانال: «📋 لیست بررسی‌های آتی» و «🧭 رژیم BTC/ETH» هم زیر هر پیام کانال هستند و هم در یک پیام پین‌شده‌ی دائمی.
+# • کانال: نتیجه به‌صورت پنجره‌ی بازشو (حداکثر ۲۰۰ کاراکتر، پس خلاصه)؛ ربات: لیست کامل با حذف تکی.
+_CHANNEL_REVIEW_FILE = os.environ.get('SIGNAL_CHANNEL_REVIEW_FILE', 'signal_channel_review.json')
+SIGNAL_CHANNEL_PANEL_REPOST = os.environ.get('SIGNAL_CHANNEL_PANEL_REPOST', 'false').lower() in ('1', 'true', 'yes')   # true = پیام پنل ثابت دوباره ارسال و پین شود
+_CHANNEL_REVIEW_LOCK = RLock()
+_CHANNEL_REVIEW_LOADED = False
+_CHANNEL_MSG_META = {}       # {message_id: اطلاعات سیگنال همان پیام کانال} - تا بتوان هنگام «ذخیره» نماد را ثبت کرد
+_CHANNEL_MSG_META_MAX = 400
+_CHANNEL_REVIEW = []         # لیست ذخیره‌شده‌ها، جدیدترین اول
+_CHANNEL_REVIEW_MAX = 100
+_CHANNEL_PANEL_ID = None
+
+
+def _review_load():
+    global _CHANNEL_REVIEW_LOADED, _CHANNEL_PANEL_ID
+    with _CHANNEL_REVIEW_LOCK:
+        if _CHANNEL_REVIEW_LOADED:
+            return
+        _CHANNEL_REVIEW_LOADED = True
+        try:
+            with open(_CHANNEL_REVIEW_FILE, 'r', encoding='utf-8') as f:
+                d = json.load(f) or {}
+            for k, v in (d.get('meta') or {}).items():
+                if isinstance(v, dict):
+                    _CHANNEL_MSG_META[int(k)] = v
+            _CHANNEL_REVIEW[:] = [x for x in (d.get('saved') or []) if isinstance(x, dict) and x.get('symbol')]
+            _CHANNEL_PANEL_ID = d.get('panel_id')
+        except FileNotFoundError:
+            pass
+        except Exception:
+            logger.exception('failed to load signal channel review list')
+
+
+def _review_save():
+    with _CHANNEL_REVIEW_LOCK:
+        try:
+            with open(_CHANNEL_REVIEW_FILE, 'w', encoding='utf-8') as f:
+                json.dump({'meta': {str(k): v for k, v in _CHANNEL_MSG_META.items()},
+                           'saved': list(_CHANNEL_REVIEW), 'panel_id': _CHANNEL_PANEL_ID}, f, ensure_ascii=False)
+        except Exception:
+            logger.exception('failed to save signal channel review list')
+
+
+def _channel_msg_meta_put(message_id, meta):
+    if not message_id or not isinstance(meta, dict):
+        return
+    _review_load()
+    with _CHANNEL_REVIEW_LOCK:
+        _CHANNEL_MSG_META[int(message_id)] = meta
+        while len(_CHANNEL_MSG_META) > _CHANNEL_MSG_META_MAX:
+            _CHANNEL_MSG_META.pop(next(iter(_CHANNEL_MSG_META)), None)
+        _review_save()
+
+
+def _review_add(message_id):
+    """نماد پیام کانال را به لیست بررسی‌های آتی اضافه می‌کند. خروجی: ('added'|'updated'|'nometa', entry)
+    اگر همان نماد قبلاً در لیست بود، رکوردش با سیگنال جدیدتر جایگزین می‌شود ('updated')."""
+    _review_load()
+    with _CHANNEL_REVIEW_LOCK:
+        meta = _CHANNEL_MSG_META.get(int(message_id))
+        if not meta or not meta.get('symbol'):
+            return 'nometa', None
+        entry = dict(meta)
+        entry['msg_id'] = int(message_id)
+        entry['saved_at'] = time.time()
+        old = [x for x in _CHANNEL_REVIEW if x.get('symbol') == entry['symbol']]
+        _CHANNEL_REVIEW[:] = [x for x in _CHANNEL_REVIEW if x.get('symbol') != entry['symbol']]
+        _CHANNEL_REVIEW.insert(0, entry)
+        del _CHANNEL_REVIEW[_CHANNEL_REVIEW_MAX:]
+        _review_save()
+        return ('updated' if old else 'added'), entry
+
+
+def _review_remove(message_id=None, clear_all=False):
+    _review_load()
+    with _CHANNEL_REVIEW_LOCK:
+        before = len(_CHANNEL_REVIEW)
+        if clear_all:
+            _CHANNEL_REVIEW.clear()
+        else:
+            _CHANNEL_REVIEW[:] = [x for x in _CHANNEL_REVIEW if x.get('msg_id') != message_id]
+        if len(_CHANNEL_REVIEW) != before:
+            _review_save()
+        return before - len(_CHANNEL_REVIEW)
+
+
+_REVIEW_FILTER_TITLE = {'BUY': 'سیگنال‌های خرید 🟢', 'SELL': 'سیگنال‌های فروش 🔴'}
+
+
+def _review_items(side=None):
+    _review_load()
+    return [x for x in _CHANNEL_REVIEW if side not in ('BUY', 'SELL') or x.get('side') == side]
+
+
+def _review_popup_text(side=None):
+    """نسخه‌ی خیلی کوتاه (زیر ۲۰۰ کاراکتر، حد پنجره‌ی بازشوی تلگرام) برای دکمه‌ی کانال. side: None (همه) / 'BUY' / 'SELL'."""
+    items = _review_items(side)
+    if not items:
+        if side in _REVIEW_FILTER_TITLE:
+            return f'📋 بررسی‌های آتی — {_REVIEW_FILTER_TITLE[side]}\nموردی در لیست نیست.'
+        return '📋 لیست بررسی‌های آتی خالی است.\nبا «💾 ذخیره برای بررسی بعدی» زیر هر سیگنال، نماد را اینجا اضافه کنید.'
+    head = f'📋 بررسی‌های آتی' + (f' — {_REVIEW_FILTER_TITLE[side]}' if side in _REVIEW_FILTER_TITLE else '') + f' ({len(items)})'
+    tail = '\nلیست کامل: ربات ← 📋 بررسی‌های آتی'
+    parts = [f"{'🟢' if x.get('side') == 'BUY' else ('🔴' if x.get('side') == 'SELL' else '⚪️')}{x['symbol']}" for x in items]
+    shown = []
+    for i, part in enumerate(parts):
+        rest = len(parts) - i
+        cand = head + '\n' + ' '.join(shown + [part]) + (f' … +{rest - 1}' if rest > 1 else '') + tail
+        if len(cand) > 195 and shown:
+            break
+        shown.append(part)
+    more = len(parts) - len(shown)
+    return head + '\n' + ' '.join(shown) + (f' … +{more}' if more > 0 else '') + tail
+
+
+_REGIME_FA = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}
+
+
+def btc_eth_regime_rows(tf):
+    """رژیم BTC و ETH روی تایم‌فریم tf با همان معیار داشبورد بازار/گیت (close نسبت به EMA50 و EMA20 نسبت به EMA50،
+    آخرین کندل بسته‌شده). خروجی: [(نماد، رژیم یا None، ADX یا None، RSI یا None)]"""
+    rows = []
+    for sym in ('BTC', 'ETH'):
+        snap = None
+        try:
+            snap = _trend_snapshot_cached(sym, tf)
+        except Exception:
+            logger.exception('btc/eth regime snapshot failed sym=%s tf=%s', sym, tf)
+        if not snap:
+            rows.append((sym, None, None, None))
+            continue
+        sc = snap.get('score', 0)
+        rows.append((sym, 'BULLISH' if sc > 0 else ('BEARISH' if sc < 0 else 'RANGE'), snap.get('adx'), snap.get('rsi')))
+    return rows
+
+
+def btc_eth_regime_text(tf, popup=False):
+    rows = btc_eth_regime_rows(tf)
+    tf_label = TF_DISPLAY.get(tf, tf)
+    icons = {'BTC': '₿', 'ETH': 'Ξ'}
+    if popup:
+        lines = [f'🧭 رژیم BTC/ETH ({tf_label})']
+        for sym, reg, adx, rsi in rows:
+            lines.append(f"{icons[sym]} {sym}: {_REGIME_FA.get(reg, '⏳ نامشخص')}" + (f' (ADX {adx:.0f})' if adx is not None else ''))
+        return '\n'.join(lines)
+    lines = [f'🧭 *رژیم BTC و ETH — تایم‌فریم فعال ({tf_label})*', '━━━━━━━━━━━━━━━━━━━━']
+    for sym, reg, adx, rsi in rows:
+        extra = f" · ADX `{adx:.0f}` · RSI `{rsi:.0f}`" if adx is not None and rsi is not None else ''
+        lines.append(f"{icons[sym]} {sym}: *{_REGIME_FA.get(reg, '⏳ نامشخص')}*{extra}")
+    regs = [r[1] for r in rows]
+    if all(regs) and regs[0] == regs[1]:
+        lines.append(f"\n✅ هر دو هم‌جهت: {_REGIME_FA[regs[0]]}")
+    elif all(regs):
+        lines.append('\n⚠️ دو رژیم هم‌جهت نیستند.')
+    lines.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
+    return '\n'.join(lines)
+
+
+def _channel_fixed_row():
+    return [{'text': '📋 لیست بررسی‌های آتی', 'callback_data': '/chlist'},
+            {'text': '🧭 رژیم BTC/ETH', 'callback_data': '/chreg'}]
+
+
+def _channel_fixed_rows():
+    """V3.43.2: ردیف‌های ثابت کانال: لیست + رژیم، و فیلتر لیست بررسی‌ها روی سیگنال‌های خرید / فروش."""
+    return [_channel_fixed_row(),
+            [{'text': '🟢 فقط خرید‌ها', 'callback_data': '/chlist_buy'},
+             {'text': '🔴 فقط فروش‌ها', 'callback_data': '/chlist_sell'}]]
+
+
+def _signal_channel_ensure_panel():
+    """یک‌بار یک پیام ثابت (بدون حذف خودکار) با دکمه‌های «لیست بررسی‌های آتی» و «رژیم BTC/ETH» در کانال می‌فرستد و پین می‌کند.
+    شناسه‌ی پیام در فایل JSON می‌ماند تا با ری‌استارت دوباره ارسال نشود (مگر SIGNAL_CHANNEL_PANEL_REPOST=true)."""
+    global _CHANNEL_PANEL_ID
+    if not SIGNAL_CHANNEL_ID:
+        return
+    _review_load()
+    if _CHANNEL_PANEL_ID and not SIGNAL_CHANNEL_PANEL_REPOST:
+        # پنل قبلاً ارسال شده؛ فقط دکمه‌هایش به‌روز می‌شود (مثلاً افزوده‌شدن دکمه‌های فیلتر خرید/فروش)
+        tg('editMessageReplyMarkup', {'chat_id': SIGNAL_CHANNEL_ID, 'message_id': _CHANNEL_PANEL_ID,
+                                      'reply_markup': {'inline_keyboard': _channel_fixed_rows()}}, 10)
+        return
+    text = '🎛 پنل ثابت کانال\nلیست نمادهای ذخیره‌شده برای بررسی و رژیم BTC/ETH روی تایم‌فریم فعال را با دکمه‌های زیر ببینید.'
+    mid = send_channel_message(SIGNAL_CHANNEL_ID, text, reply_markup={'inline_keyboard': _channel_fixed_rows()}, ttl_seconds=0)
+    if not mid:
+        return
+    _CHANNEL_PANEL_ID = mid
+    _review_save()
+    res = tg('pinChatMessage', {'chat_id': SIGNAL_CHANNEL_ID, 'message_id': mid, 'disable_notification': True}, 10)
+    if not res or not res.get('ok'):
+        logger.warning('pin of channel panel failed (ربات باید در کانال ادمین با دسترسی Pin Messages باشد)')
+
+
+def review_list_show(chat_id, message_id=None, side=None):
+    """لیست کامل بررسی‌های آتی داخل ربات (جابه‌جایی در همان پیام؛ حذف تکی/کامل + چارت)."""
+    items = _review_items(side)
+    total = len(_review_items())
+    now = time.time()
+    ftxt = f' — {_REVIEW_FILTER_TITLE[side]}' if side in _REVIEW_FILTER_TITLE else ''
+    lines = [f'📋 *بررسی‌های آتی{ftxt} ({len(items)}' + (f' از {total}' if side in _REVIEW_FILTER_TITLE else '') + ')*', '']
+    rows = [[{'text': ('✅ ' if side is None else '') + '📋 همه', 'callback_data': '/review_list'},
+             {'text': ('✅ ' if side == 'BUY' else '') + '🟢 خرید', 'callback_data': '/review_list_buy'},
+             {'text': ('✅ ' if side == 'SELL' else '') + '🔴 فروش', 'callback_data': '/review_list_sell'}]]
+    if not items:
+        lines.append('موردی با این فیلتر نیست.' if total else 'هنوز نمادی ذخیره نشده. زیر هر سیگنال کانال دکمه‌ی «💾 ذخیره برای بررسی بعدی» را بزنید.')
+    for n, it in enumerate(items[:20], 1):
+        side = it.get('side')
+        side_txt = '🟢 خرید' if side == 'BUY' else ('🔴 فروش' if side == 'SELL' else '⚪️ بدون جهت')
+        tf = it.get('tf') or '5min'
+        mins = max(0, int((now - float(it.get('saved_at') or now)) // 60))
+        age = f'{mins} دقیقه' if mins < 120 else (f'{mins // 60} ساعت' if mins < 2880 else f'{mins // 1440} روز')
+        lines.append(f"{n}) `{it['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · {age} پیش")
+        detail = f"    🎯 {it.get('level_label', '')} `{fmt(float(it['level_value']))}`" if it.get('level_value') is not None else ''
+        if it.get('pattern'):
+            detail += f" · {_signal_channel_pattern_label(it['pattern'], it.get('side_fa', ''))}"
+        if detail:
+            lines.append(detail)
+        if it.get('price'):
+            lines.append(f"    💵 قیمت هنگام سیگنال `{fmt(float(it['price']))}`")
+        rows.append([{'text': f"📈 {it['symbol']}", 'url': tradingview_chart_url(it['symbol'], tf)},
+                     {'text': '🗑 حذف', 'callback_data': f"/rvdel_{it.get('msg_id')}"}])
+    if len(items) > 20:
+        lines.append(f'\n… و {len(items) - 20} مورد دیگر (قدیمی‌ترها)')
+    ctl = [{'text': '🔄 بروزرسانی', 'callback_data': {'BUY': '/review_list_buy', 'SELL': '/review_list_sell'}.get(side, '/review_list')}]
+    if total:
+        ctl.append({'text': '🧹 خالی‌کردن لیست', 'callback_data': '/rvclear'})
+    rows.append(ctl)
+    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
+    send_message(chat_id, '\n'.join(lines), {'inline_keyboard': rows}, message_id=message_id)
+
+
+def btc_eth_regime_show(chat_id, message_id=None):
+    s = get_session(chat_id)
+    tf = s.get('timeframe', '5min')
+    send_message(chat_id, btc_eth_regime_text(tf),
+                 {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/btc_eth_regime'}],
+                                      [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]},
+                 message_id=message_id)
 
 
 def _signal_channel_timeframe():
@@ -3042,11 +3286,11 @@ def _touch_last_save():
         logger.exception('failed to persist signal channel touch state')
 
 
-def _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming):
+def _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming, trade_side=None):
     """V3.42.14: قالب ثابت پیام کانال (طبق قالب کاربر):
         🧭 رژیم بازار (15م): ...
         🧭 رژیم نماد (15م): ...
-        سیگنال : خرید / فروش
+        سیگنال : 🟢 خرید (Long) / 🔴 فروش (Short)   ← جهت معامله‌ی پیشنهادی (V3.43)
         📡 نماد · تایم‌فریم
         (خالی)
         🎯 سطح: ...
@@ -3056,7 +3300,7 @@ def _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pa
     lines = [
         _tf_regime_line(timeframe),
         _symbol_regime_line(regime, timeframe),
-        "سیگنال : خرید / فروش",
+        "سیگنال : " + ('🟢 خرید (Long)' if trade_side == 'BUY' else ('🔴 فروش (Short)' if trade_side == 'SELL' else '⚪️ جهت مشخص نیست')),
         f"📡 *{symbol}* · {TF_DISPLAY.get(timeframe, timeframe)}",
         "",
         f"🎯 سطح: {level_label} `{fmt(level_value)}`",
@@ -3111,10 +3355,10 @@ def _signal_channel_scan_once():
                 _SIGNAL_CHANNEL_TOUCH_LAST[touch_key] = time.time()
                 _SIGNAL_CHANNEL_TOUCH_DIRTY = True
             # V3.42: برچسب جهت (مناسب خرید/فروش) از پیام کانال حذف شد؛ جهت را خود کاربر با دکمه‌ها انتخاب می‌کند.
-            lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming)
+            trade_side = verdict or implied_side          # 'BUY' / 'SELL' - جهت معامله‌ی پیشنهادی (هم در سرتیتر پیام و هم برای طرح معامله)
+            lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming, trade_side)
 
             # --- طرح معامله (ورود لحظه‌ای، SL، TP + نام سطح TP، سود/زیان دقیق پس از کارمزد) و تصویر چارت ---
-            trade_side = verdict or implied_side          # 'BUY' / 'SELL'
             plan, df_ind, live = None, None, None
             try:
                 live = latest_price(symbol)
@@ -3167,6 +3411,9 @@ def _signal_channel_scan_once():
             if sent_msg_id is None:
                 sent_msg_id = send_channel_message(SIGNAL_CHANNEL_ID, full_text, reply_markup=markup)
             _channel_ind_cache_put(sent_msg_id, ind_text)
+            _channel_msg_meta_put(sent_msg_id, {'symbol': symbol, 'side': trade_side, 'tf': timeframe, 'level_label': level_label,
+                                                'level_value': float(level_value), 'pattern': pattern, 'side_fa': side_fa,
+                                                'price': (float(live) if live else None), 'created_at': time.time()})
             _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
     _touch_last_save()
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
@@ -3184,6 +3431,10 @@ def _signal_channel_loop():
         logger.info('SIGNAL_CHANNEL_ID تنظیم نشده - کانال اعلام برخورد سطوح غیرفعال است.')
         return
     _touch_last_load()
+    try:
+        _signal_channel_ensure_panel()
+    except Exception:
+        logger.exception('signal channel panel failed')
     while True:
         try:
             _signal_channel_scan_once()
@@ -7736,6 +7987,7 @@ def my_profile_summary_text(snapshot):
         f"✅ تاییدیه‌های روشن: {', '.join(confirms) or 'هیچ‌کدام'}",
         f"🚦 هم‌جهتی بازار: {'روشن' if top.get('market_alignment_filters_enabled') else 'خاموش'}" + (f" (معافیت: {', '.join(exempts)})" if top.get('market_alignment_filters_enabled') and exempts else ""),
         f"👥 سقف معاملات هم‌جهت: {top.get('max_same_direction_positions')}",
+        f"🎯 تشخیص دقیق‌تر ۶ حالت: {'روشن' if cfg.get('scenario_precision_v2', True) else 'خاموش'} | برخورد بدون نفوذ: {'روشن' if cfg.get('scenario_touch_enabled', True) else 'خاموش'}",
         f"📐 تاییدیه کندل Sweep: {'روشن' if cfg.get('sweep_require_confirmation_candle') else 'خاموش'}",
         f"📐 شکست سوینگ محلی (حالت ۳/۴): {'روشن' if cfg.get('sweep_require_swing_break', True) else 'خاموش'}",
     ]
@@ -8280,7 +8532,11 @@ def process_command(cmd,chat_id,message_id=None):
         timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
         if timer is not None:
             timer.cancel()
-            send_message(chat_id, '💾 ذخیره شد - این پیام دیگر خودکار پاک نمی‌شود.')
+        status, entry = _review_add(msg_id)       # V3.43: ثبت نماد در «لیست بررسی‌های آتی»
+        if status in ('added', 'updated'):
+            send_message(chat_id, f"💾 `{entry['symbol']}` به لیست بررسی‌های آتی اضافه شد ({len(_CHANNEL_REVIEW)} مورد) و این پیام دیگر خودکار پاک نمی‌شود.")
+        elif timer is not None:
+            send_message(chat_id, '💾 ذخیره شد - این پیام دیگر خودکار پاک نمی‌شود.\n(اطلاعات نماد این پیام قدیمی است و به لیست بررسی‌ها اضافه نشد.)')
         else:
             send_message(chat_id, 'ℹ️ این پیام از قبل ذخیره شده یا مهلت حذف خودکارش تمام شده بود.')
         return
@@ -8294,6 +8550,7 @@ def process_command(cmd,chat_id,message_id=None):
         timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
         if timer is not None:
             timer.cancel()
+        _review_remove(msg_id)      # V3.43: اگر پیام در لیست بررسی‌ها بود، از آنجا هم برداشته شود
         _delete_channel_message_later(SIGNAL_CHANNEL_ID, msg_id)
         send_message(chat_id, '🗑 پیام از کانال حذف شد.')
         return
@@ -8692,6 +8949,30 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🚦 حالت ۵ و ۶ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
+    if cl=='/toggle_scenario_precision':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('scenario_precision_v2', True))
+        s['strategy_config']['scenario_precision_v2'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'حالت ۵/۶ فقط روی «اولین کندل بازگشت به داخل رنج» بعد از یک شکستِ تازه (close فراتر از سطح) صادر می‌شود؛ حالت ۳/۴ فقط وقتی سطح بین شکست و پولبک از دست نرفته؛ و حالت ۱/۲ دیگر نمی‌تواند یک شکست‌کاذبِ ردشده را با برچسب ۱/۲ صادر کند.'
+            if not current else 'برگشت به تشخیص قبلی: حالت ۵/۶ روی هر کندلِ برگشتی در ۴۸ کندل بعد از شکست هم صادر می‌شود (حتی دور از سطح).'
+        )
+        send_message(chat_id, f"🎯 تشخیص دقیق‌تر ۶ حالت: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
+    if cl=='/toggle_scenario_touch':
+        s.setdefault('strategy_config', {})
+        current = bool(s['strategy_config'].get('scenario_touch_enabled', True))
+        s['strategy_config']['scenario_touch_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            'حالت ۱/۲ حتی وقتی فتیله فقط به سطح می‌رسد (تا ۰.۱ ATR مانده به آن) و فتیله‌ی ردکننده‌ی بلند دارد هم صادر می‌شود، نه فقط وقتی از سطح رد شده باشد.'
+            if not current else 'حالت ۱/۲ فقط وقتی صادر می‌شود که فتیله حداقل ۰.۱ ATR از سطح رد شده باشد.'
+        )
+        send_message(chat_id, f"🎯 برخورد بدون نفوذ در حالت ۱/۲: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
+        return
     if cl=='/toggle_scenario12_exempt':
         s.setdefault('strategy_config', {})
         current = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True))
@@ -8776,6 +9057,18 @@ def process_command(cmd,chat_id,message_id=None):
         assist_indicators(chat_id, cl[len('/assist_ind_'):]); return
     if cl=='/assist_pending':
         assist_pending_list(chat_id, message_id); return
+    if cl in ('/review_list', '/review_list_buy', '/review_list_sell'):
+        review_list_show(chat_id, message_id, {'/review_list_buy': 'BUY', '/review_list_sell': 'SELL'}.get(cl)); return
+    if cl=='/rvclear':
+        _review_remove(clear_all=True); review_list_show(chat_id, message_id); return
+    if cl.startswith('/rvdel_'):
+        try:
+            _review_remove(int(cl[len('/rvdel_'):]))
+        except ValueError:
+            pass
+        review_list_show(chat_id, message_id); return
+    if cl=='/btc_eth_regime':
+        btc_eth_regime_show(chat_id, message_id); return
     if cl.startswith('/assist_open_'):
         assist_open(chat_id, cl[len('/assist_open_'):]); return
     if cl.startswith('/assist_cd_'):
@@ -8916,6 +9209,7 @@ def handle_text(chat_id,text):
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all', '🆘 اضطراری':'/emergency_close_all', '🆘 بستن اضطراری':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
+        '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
     }
@@ -9289,6 +9583,16 @@ def telegram_listener():
                     else:
                         message_id_for_reply = msg.get('message_id')
                     if not chat: continue
+                    if callback.get('id') and str(callback.get('data') or '') in ('/chlist', '/chlist_buy', '/chlist_sell', '/chreg'):
+                        # V3.43: دکمه‌های ثابت کانال - پنجره‌ی بازشو (لیست بررسی‌های آتی / رژیم BTC و ETH روی تایم‌فریم فعال ادمین)
+                        try:
+                            _cd = str(callback['data'])
+                            _pop = btc_eth_regime_text(_signal_channel_timeframe(), popup=True) if _cd == '/chreg' else _review_popup_text({'/chlist_buy': 'BUY', '/chlist_sell': 'SELL'}.get(_cd))
+                        except Exception:
+                            logger.exception('channel fixed button failed')
+                            _pop = 'ℹ️ فعلاً در دسترس نیست؛ کمی بعد دوباره امتحان کنید.'
+                        answer_callback(callback['id'], text=_pop, show_alert=True)
+                        continue
                     if callback.get('id') and str(callback.get('data') or '').startswith('/chind_'):
                         # دکمه‌ی «📊 اندیکاتورها» زیر پیام کانال: خلاصه‌ی کوتاه به‌صورت پنجره‌ی بازشو (فقط نمایشی؛ برای همه‌ی بینندگان کانال)
                         try:

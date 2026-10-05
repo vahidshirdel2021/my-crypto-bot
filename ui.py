@@ -11,6 +11,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
             [{"text": "📋 سیگنال‌های در انتظار"}],
             [{"text": "🏠 منوی اصلی"}, scan_button],
             [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
+            [{"text": "📋 بررسی‌های آتی"}, {"text": "🧭 رژیم BTC/ETH"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -203,6 +204,10 @@ def get_scenario_management_keyboard(session=None):
     rows.append([{"text": f"{'🟢' if exempt56 else '🔴'} حالت ۵ و ۶ بدون نیاز به همسویی با بازار", "callback_data": "/toggle_scenario56_exempt"}])
     exempt12 = bool(cfg.get("scenario_12_market_gate_exempt", True))
     rows.append([{"text": f"{'🟢' if exempt12 else '🔴'} حالت ۱ و ۲ بدون نیاز به همسویی با بازار", "callback_data": "/toggle_scenario12_exempt"}])
+    prec = bool(cfg.get("scenario_precision_v2", True))
+    touch = bool(cfg.get("scenario_touch_enabled", True))
+    rows.append([{"text": f"{'🟢' if prec else '🔴'} تشخیص دقیق‌تر ۶ حالت (ماشین‌حالت شکست)", "callback_data": "/toggle_scenario_precision"}])
+    rows.append([{"text": f"{'🟢' if touch else '🔴'} حالت ۱ و ۲: برخورد بدون نفوذ هم حساب شود", "callback_data": "/toggle_scenario_touch"}])
     rows.append([{"text": "🧰 بازگشت به قوانین معامله", "callback_data": "/trade_filter_management"}])
     return {"inline_keyboard": rows}
 
@@ -232,6 +237,8 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
          {"text": "💹 معاملات و اوردرها", "callback_data": "/menu_trading"}],
         [{"text": "🎛 تنظیمات و مدیریت", "callback_data": "/menu_settings"},
          {"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"}],
+        [{"text": "📋 بررسی‌های آتی", "callback_data": "/review_list"},
+         {"text": "🧭 رژیم BTC/ETH", "callback_data": "/btc_eth_regime"}],
     ]
     if is_admin_user:
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
