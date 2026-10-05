@@ -1,8 +1,15 @@
-from dotenv import load_dotenv
-load_dotenv()
 import hashlib
 import copy
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
+
+# بارگذاری خودکار فایل .env (کنار bot.py) - باید قبل از هر خواندنِ os.environ و قبل از import ماژول‌های دیگر باشد.
+# اگر python-dotenv نصب نبود، ربات بدون خطا ادامه می‌دهد و فقط از متغیرهای محیطیِ خودِ سرور استفاده می‌کند.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import urllib.parse as urlparse
 from threading import Thread, RLock, Timer
 import threading, functools
@@ -677,6 +684,8 @@ def default_session():
         'trend_warn_enabled': True,
         'trend_warn_btc': True,
         'trend_warn_eth': True,
+        # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
+        'ind_warn_enabled': False,
         'auto_trend_pending': {},
         'auto_trend_seen': {},
     }
@@ -787,6 +796,7 @@ def normalize_session(data):
     s['trend_warn_enabled'] = bool(data.get('trend_warn_enabled', True))
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
+    s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', False))
     _now_n = time.time()
     s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
                                if isinstance(v, dict) and _now_n - float(v.get('created_at', 0) or 0) < 24 * 3600}
@@ -1408,7 +1418,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 _NEW_MESSAGE_PREFIXES = (
     '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
-    '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/noop', '/dummy',
+    '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
 
 
@@ -2684,7 +2694,7 @@ _CHANNEL_REVIEW_LOCK = RLock()
 _CHANNEL_REVIEW_LOADED = False
 _CHANNEL_MSG_META = {}       # {message_id: اطلاعات سیگنال همان پیام کانال} - تا بتوان هنگام «ذخیره» نماد را ثبت کرد
 _CHANNEL_MSG_META_MAX = 400
-_CHANNEL_REVIEW = []         # لیست ذخیره‌شده‌ها، جدیدترین اول
+_CHANNEL_REVIEW = {}         # V3.43.3: {آیدی تلگرام کاربر (str): [نمادهای ذخیره‌شده‌ی خودش، جدیدترین اول]} - هر اکانت ذخایر مستقل خودش را دارد
 _CHANNEL_REVIEW_MAX = 100
 _CHANNEL_PANEL_ID = None
 
@@ -2701,7 +2711,15 @@ def _review_load():
             for k, v in (d.get('meta') or {}).items():
                 if isinstance(v, dict):
                     _CHANNEL_MSG_META[int(k)] = v
-            _CHANNEL_REVIEW[:] = [x for x in (d.get('saved') or []) if isinstance(x, dict) and x.get('symbol')]
+            saved = d.get('saved')
+            if isinstance(saved, dict):
+                for uid, lst in saved.items():
+                    _CHANNEL_REVIEW[str(uid)] = [x for x in (lst or []) if isinstance(x, dict) and x.get('symbol')]
+            elif isinstance(saved, list):
+                # فرمت قدیمی (v3.43.0 تا v3.43.2: یک لیست مشترک) - به اکانت ادمین منتقل می‌شود
+                old = [x for x in saved if isinstance(x, dict) and x.get('symbol')]
+                if old:
+                    _CHANNEL_REVIEW[str(SIGNAL_CHANNEL_TF_CHAT_ID)] = old
             _CHANNEL_PANEL_ID = d.get('panel_id')
         except FileNotFoundError:
             pass
@@ -2714,7 +2732,7 @@ def _review_save():
         try:
             with open(_CHANNEL_REVIEW_FILE, 'w', encoding='utf-8') as f:
                 json.dump({'meta': {str(k): v for k, v in _CHANNEL_MSG_META.items()},
-                           'saved': list(_CHANNEL_REVIEW), 'panel_id': _CHANNEL_PANEL_ID}, f, ensure_ascii=False)
+                           'saved': {k: list(v) for k, v in _CHANNEL_REVIEW.items()}, 'panel_id': _CHANNEL_PANEL_ID}, f, ensure_ascii=False)
         except Exception:
             logger.exception('failed to save signal channel review list')
 
@@ -2730,9 +2748,9 @@ def _channel_msg_meta_put(message_id, meta):
         _review_save()
 
 
-def _review_add(message_id):
-    """نماد پیام کانال را به لیست بررسی‌های آتی اضافه می‌کند. خروجی: ('added'|'updated'|'nometa', entry)
-    اگر همان نماد قبلاً در لیست بود، رکوردش با سیگنال جدیدتر جایگزین می‌شود ('updated')."""
+def _review_add(uid, message_id):
+    """نماد پیام کانال را به لیست بررسی‌های آتیِ همین کاربر (uid = آیدی تلگرام) اضافه می‌کند.
+    خروجی: ('added'|'updated'|'nometa', entry). اگر همان نماد قبلاً در لیست خودش بود، با سیگنال جدیدتر جایگزین می‌شود ('updated')."""
     _review_load()
     with _CHANNEL_REVIEW_LOCK:
         meta = _CHANNEL_MSG_META.get(int(message_id))
@@ -2741,38 +2759,42 @@ def _review_add(message_id):
         entry = dict(meta)
         entry['msg_id'] = int(message_id)
         entry['saved_at'] = time.time()
-        old = [x for x in _CHANNEL_REVIEW if x.get('symbol') == entry['symbol']]
-        _CHANNEL_REVIEW[:] = [x for x in _CHANNEL_REVIEW if x.get('symbol') != entry['symbol']]
-        _CHANNEL_REVIEW.insert(0, entry)
-        del _CHANNEL_REVIEW[_CHANNEL_REVIEW_MAX:]
+        mine = _CHANNEL_REVIEW.setdefault(str(uid), [])
+        had = any(x.get('symbol') == entry['symbol'] for x in mine)
+        mine[:] = [x for x in mine if x.get('symbol') != entry['symbol']]
+        mine.insert(0, entry)
+        del mine[_CHANNEL_REVIEW_MAX:]
         _review_save()
-        return ('updated' if old else 'added'), entry
+        return ('updated' if had else 'added'), entry
 
 
-def _review_remove(message_id=None, clear_all=False):
+def _review_remove(uid, message_id=None, clear_all=False):
+    """فقط از لیست همین کاربر حذف می‌کند (لیست بقیه‌ی کاربران دست‌نخورده می‌ماند)."""
     _review_load()
     with _CHANNEL_REVIEW_LOCK:
-        before = len(_CHANNEL_REVIEW)
+        mine = _CHANNEL_REVIEW.get(str(uid)) or []
+        before = len(mine)
         if clear_all:
-            _CHANNEL_REVIEW.clear()
+            mine = []
         else:
-            _CHANNEL_REVIEW[:] = [x for x in _CHANNEL_REVIEW if x.get('msg_id') != message_id]
-        if len(_CHANNEL_REVIEW) != before:
+            mine = [x for x in mine if x.get('msg_id') != message_id]
+        _CHANNEL_REVIEW[str(uid)] = mine
+        if len(mine) != before:
             _review_save()
-        return before - len(_CHANNEL_REVIEW)
+        return before - len(mine)
 
 
 _REVIEW_FILTER_TITLE = {'BUY': 'سیگنال‌های خرید 🟢', 'SELL': 'سیگنال‌های فروش 🔴'}
 
 
-def _review_items(side=None):
+def _review_items(uid, side=None):
     _review_load()
-    return [x for x in _CHANNEL_REVIEW if side not in ('BUY', 'SELL') or x.get('side') == side]
+    return [x for x in (_CHANNEL_REVIEW.get(str(uid)) or []) if side not in ('BUY', 'SELL') or x.get('side') == side]
 
 
-def _review_popup_text(side=None):
+def _review_popup_text(uid, side=None):
     """نسخه‌ی خیلی کوتاه (زیر ۲۰۰ کاراکتر، حد پنجره‌ی بازشوی تلگرام) برای دکمه‌ی کانال. side: None (همه) / 'BUY' / 'SELL'."""
-    items = _review_items(side)
+    items = _review_items(uid, side)
     if not items:
         if side in _REVIEW_FILTER_TITLE:
             return f'📋 بررسی‌های آتی — {_REVIEW_FILTER_TITLE[side]}\nموردی در لیست نیست.'
@@ -2871,8 +2893,8 @@ def _signal_channel_ensure_panel():
 
 def review_list_show(chat_id, message_id=None, side=None):
     """لیست کامل بررسی‌های آتی داخل ربات (جابه‌جایی در همان پیام؛ حذف تکی/کامل + چارت)."""
-    items = _review_items(side)
-    total = len(_review_items())
+    items = _review_items(chat_id, side)
+    total = len(_review_items(chat_id))
     now = time.time()
     ftxt = f' — {_REVIEW_FILTER_TITLE[side]}' if side in _REVIEW_FILTER_TITLE else ''
     lines = [f'📋 *بررسی‌های آتی{ftxt} ({len(items)}' + (f' از {total}' if side in _REVIEW_FILTER_TITLE else '') + ')*', '']
@@ -2895,16 +2917,41 @@ def review_list_show(chat_id, message_id=None, side=None):
             lines.append(detail)
         if it.get('price'):
             lines.append(f"    💵 قیمت هنگام سیگنال `{fmt(float(it['price']))}`")
-        rows.append([{'text': f"📈 {it['symbol']}", 'url': tradingview_chart_url(it['symbol'], tf)},
-                     {'text': '🗑 حذف', 'callback_data': f"/rvdel_{it.get('msg_id')}"}])
+        rows.append([{'text': f"📌 {it['symbol']} · کارت سیگنال", 'callback_data': f"/rvshow_{it.get('msg_id')}"},
+                     {'text': '📈', 'url': tradingview_chart_url(it['symbol'], tf)},
+                     {'text': '🗑', 'callback_data': f"/rvdel_{it.get('msg_id')}"}])
     if len(items) > 20:
         lines.append(f'\n… و {len(items) - 20} مورد دیگر (قدیمی‌ترها)')
     ctl = [{'text': '🔄 بروزرسانی', 'callback_data': {'BUY': '/review_list_buy', 'SELL': '/review_list_sell'}.get(side, '/review_list')}]
     if total:
-        ctl.append({'text': '🧹 خالی‌کردن لیست', 'callback_data': '/rvclear'})
+        ctl.append({'text': '🧹 خالی‌کردن لیست من', 'callback_data': '/rvclear'})
     rows.append(ctl)
     rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
     send_message(chat_id, '\n'.join(lines), {'inline_keyboard': rows}, message_id=message_id)
+
+
+def review_card_show(chat_id, msg_id):
+    """V3.43.5: با لمس نماد در «بررسی‌های آتی»، کارت سیگنال همان نماد (همان پیام کانال: چارت + متن) در چت ربات می‌آید.
+    اول خودِ پست کانال کپی می‌شود (عکس چارت + متن اصلی)؛ اگر پست دیگر در کانال نبود، متن ذخیره‌شده‌ی کارت فرستاده می‌شود."""
+    it = next((x for x in _review_items(chat_id) if x.get('msg_id') == msg_id), None)
+    if not it:
+        send_message(chat_id, 'ℹ️ این مورد دیگر در لیست بررسی‌های آتی شما نیست.', {'inline_keyboard': [[{'text': '📋 بررسی‌های آتی', 'callback_data': '/review_list'}]]}, keep=True)
+        return
+    sym, tf = it['symbol'], it.get('tf') or '5min'
+    markup = {'inline_keyboard': [
+        [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(sym, tf)}],
+        [{'text': '🟢 خرید (Long)', 'callback_data': f'/qt_buy_{sym}'}, {'text': '🔴 فروش (Short)', 'callback_data': f'/qt_sell_{sym}'}],
+        [{'text': '📋 بازگشت به لیست', 'callback_data': '/review_list'}]]}
+    res = None
+    if SIGNAL_CHANNEL_ID:
+        res = tg('copyMessage', {'chat_id': chat_id, 'from_chat_id': SIGNAL_CHANNEL_ID, 'message_id': msg_id, 'reply_markup': markup}, 15)
+    if res and res.get('ok'):
+        return
+    text = it.get('text')
+    if text:
+        send_message(chat_id, text, markup, keep=True)
+    else:
+        send_message(chat_id, f"ℹ️ کارت قدیمیِ `{sym}` دیگر در دسترس نیست (پست کانال حذف شده).", markup, keep=True)
 
 
 def btc_eth_regime_show(chat_id, message_id=None):
@@ -2922,6 +2969,12 @@ def _signal_channel_timeframe():
     s = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID)
     tf = (s or {}).get('timeframe')
     return tf if tf in TIMEFRAME_MAP else SIGNAL_CHANNEL_TIMEFRAME
+
+
+def _user_active_timeframe(uid):
+    """V3.43.4: تایم‌فریم فعال خودِ کاربر (سشن او در ربات)؛ اگر سشن/تایم‌فریم معتبر نداشت، تایم‌فریم مشترک کانال. (session جدید نمی‌سازد.)"""
+    tf = (USER_SESSIONS.get(uid) or {}).get('timeframe')
+    return tf if tf in TIMEFRAME_MAP else _signal_channel_timeframe()
 
 
 def _signal_channel_symbol_regime(df):
@@ -3415,7 +3468,8 @@ def _signal_channel_scan_once():
             _channel_ind_cache_put(sent_msg_id, ind_text)
             _channel_msg_meta_put(sent_msg_id, {'symbol': symbol, 'side': trade_side, 'tf': timeframe, 'level_label': level_label,
                                                 'level_value': float(level_value), 'pattern': pattern, 'side_fa': side_fa,
-                                                'price': (float(live) if live else None), 'created_at': time.time()})
+                                                'price': (float(live) if live else None), 'created_at': time.time(),
+                                                'text': text})      # V3.43.5: متن کارت سیگنال (برای نمایش مجدد از لیست بررسی‌ها)
             _append_channel_keep_delete_buttons(SIGNAL_CHANNEL_ID, sent_msg_id, markup)
     _touch_last_save()
     # جلوگیری از رشد بی‌پایان حافظه - فقط قدیمی‌ترین‌ها حذف می‌شوند (پاک‌کردن کامل باعث
@@ -5967,44 +6021,110 @@ def _trend_active_symbols(chat_id, symbol=None):
     return [x for x in TREND_WARN_SYMBOLS if flags.get(x, True) and x != str(symbol or '').upper()]
 
 
-def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
-    """اگر جهت side با روند BTC یا ETH در تضاد باشد متن هشدار، وگرنه None (بدون تضاد یا داده ناکافی).
-    کلیدهای کاربر (trend_warn_enabled / trend_warn_btc / trend_warn_eth) اعمال می‌شوند."""
-    syms = _trend_active_symbols(chat_id, symbol)
-    if not syms:
-        return None
+def _ind_warn_active(chat_id):
+    """V3.43.6: کلید «هشدار تضاد با اندیکاتورها» برای این کاربر روشن است؟"""
+    if chat_id is None:
+        return False
+    return bool(get_session(chat_id).get('ind_warn_enabled', False))
+
+
+def _indicator_conflict(symbol, side, tf):
+    """(conflict, lines) - اجماع اندیکاتورها (همان رأی‌های دکمه‌ی «📊 اندیکاتورها»: RSI/MACD/ADX روی آخرین کندل بسته‌شده)
+    در برابر جهت معامله. تضاد = تعداد رأی‌های خلاف جهت معامله بیشتر از رأی‌های هم‌جهت باشد. نبود داده/اجماع = بدون تضاد."""
     try:
-        with ThreadPoolExecutor(max_workers=len(syms)) as ex:
-            snaps = dict(zip(syms, ex.map(lambda x: _trend_snapshot_cached(x, tf), syms)))
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        ind_df = calculate_indicators(df) if df is not None and not df.empty else None
+        if ind_df is None or ind_df.empty or len(ind_df) < 2:
+            return False, ['• 📊 اندیکاتورها: ⚪ داده‌ی کافی نیست — بدون تضاد']
+        row = ind_df.iloc[-2].to_dict()
+        _l, b_votes, s_votes = _signal_channel_indicator_summary(row, side)
+        popup = _signal_channel_indicator_popup(row, b_votes, s_votes) or ''
     except Exception:
-        logger.exception('trend warn: snapshot failed symbol=%s', symbol)
+        logger.exception('indicator warn failed symbol=%s', symbol)
+        return False, []
+    same, opp = (b_votes, s_votes) if side == 'BUY' else (s_votes, b_votes)
+    total = b_votes + s_votes
+    opp_fa = 'فروش' if side == 'BUY' else 'خرید'
+    same_fa = 'خرید' if side == 'BUY' else 'فروش'
+    lines = []
+    first = popup.split('\n')[0].strip() if popup else ''
+    if first:
+        lines.append(f"• {first}")
+    if total == 0:
+        lines.append('• 🧠 اندیکاتور جهت‌داری برای رأی‌دادن نیست — بدون تضاد')
+        return False, lines
+    if opp > same:
+        lines.append(f"• 🧠 {opp} از {total} اندیکاتور به سمت {opp_fa} — ⚠️ با جهت معامله‌ی شما در تضاد است")
+        return True, lines
+    if same > opp:
+        lines.append(f"• 🧠 {same} از {total} اندیکاتور به سمت {same_fa} — هم‌جهت ✅")
+    else:
+        lines.append(f"• 🧠 اجماع مشخصی نیست ({same} به {opp}) — بدون تضاد")
+    return False, lines
+
+
+def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
+    """اگر جهت side با روند BTC یا ETH (کلیدهای trend_warn_*) و/یا اجماع اندیکاتورها (کلید ind_warn_enabled) در تضاد باشد
+    متن هشدار، وگرنه None (بدون تضاد یا داده ناکافی). هر دو بررسی در یک کارت تایید می‌آیند."""
+    syms = _trend_active_symbols(chat_id, symbol)
+    ind_on = _ind_warn_active(chat_id)
+    if not syms and not ind_on:
         return None
     is_long = (side == 'BUY')
     lines, conflict = [], False
-    for sym in syms:
-        snap = snaps.get(sym)
-        name = f"{_TREND_WARN_NAMES.get(sym, sym)} ({sym})"
-        if not snap:
-            lines.append(f"• {name}: ⚪ داده در دسترس نیست")
-            continue
-        sc = int(snap.get('score', 0))
-        if sc > 0:
-            bad = not is_long
-            lines.append(f"• {name}: 🟢 صعودی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
-        elif sc < 0:
-            bad = is_long
-            lines.append(f"• {name}: 🔴 نزولی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
-        else:
-            bad = False
-            lines.append(f"• {name}: ⚪ خنثی / رنج — بدون تضاد")
-        conflict = conflict or bad
-    if not conflict:
+    if syms:
+        try:
+            with ThreadPoolExecutor(max_workers=len(syms)) as ex:
+                snaps = dict(zip(syms, ex.map(lambda x: _trend_snapshot_cached(x, tf), syms)))
+        except Exception:
+            logger.exception('trend warn: snapshot failed symbol=%s', symbol)
+            snaps = None
+        for sym in (syms if snaps is not None else []):
+            snap = snaps.get(sym)
+            name = f"{_TREND_WARN_NAMES.get(sym, sym)} ({sym})"
+            if not snap:
+                lines.append(f"• {name}: ⚪ داده در دسترس نیست")
+                continue
+            sc = int(snap.get('score', 0))
+            if sc > 0:
+                bad = not is_long
+                lines.append(f"• {name}: 🟢 صعودی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
+            elif sc < 0:
+                bad = is_long
+                lines.append(f"• {name}: 🔴 نزولی — " + ("⚠️ با جهت معامله‌ی شما در تضاد است" if bad else "هم‌جهت ✅"))
+            else:
+                bad = False
+                lines.append(f"• {name}: ⚪ خنثی / رنج — بدون تضاد")
+            conflict = conflict or bad
+    ind_conflict, ind_lines = (_indicator_conflict(symbol, side, tf) if ind_on else (False, []))
+    if not conflict and not ind_conflict:
         return None
     side_txt = '🟢 خرید (Long)' if is_long else '🔴 فروش (Short)'
-    return (f"⚠️ *هشدار: ورود با روند بازار در تضاد است*\n\n"
+    if conflict and ind_conflict:
+        title = 'ورود با روند بازار و اندیکاتورها در تضاد است'
+    elif conflict:
+        title = 'ورود با روند بازار در تضاد است'
+    else:
+        title = 'ورود با اجماع اندیکاتورها در تضاد است'
+    body = []
+    if lines and ind_lines:
+        body.append('*روند بازار (BTC/ETH):*')
+    body += lines
+    if ind_lines:
+        if body:
+            body.append('')
+            body.append('*اندیکاتورها:*')
+        else:
+            body.append('*اندیکاتورها:*')
+        body += ind_lines
+    tail = []
+    if conflict:
+        tail.append('روند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.')
+    if ind_conflict:
+        tail.append('اکثر اندیکاتورها خلاف جهت این معامله‌اند؛ شاید بهتر باشد صبر کنید.')
+    return (f"⚠️ *هشدار: {title}*\n\n"
             f"نماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم فعال: `{tf}`\n\n"
-            + "\n".join(lines) +
-            "\n\nروند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.\n"
+            + "\n".join(body) + "\n\n" + "\n".join(tail) + "\n"
             "*ورود را تایید می‌کنید؟*")
 
 
@@ -6034,7 +6154,7 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
     دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
     همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
-    if not _trend_active_symbols(chat_id, symbol):
+    if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id):
         return False
     s = get_session(chat_id)
     now = time.time()
@@ -6971,7 +7091,7 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
         logger.exception('auto trend gate failed symbol=%s', symbol)
         _held = False
     if _held:
-        return _entry_diag_result(chat_id, symbol, 'trend_hold', 'تضاد با روند BTC/ETH؛ منتظر تایید کاربر', 'trend_warn', sig)
+        return _entry_diag_result(chat_id, symbol, 'trend_hold', 'تضاد با روند BTC/ETH یا اجماع اندیکاتورها؛ منتظر تایید کاربر', 'trend_warn', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'),tp_stages=plan.get('tp_stages'))
     if ok:
         return _entry_diag_result(chat_id, symbol, 'entry_opened', full_reason, 'entry', sig)
@@ -7255,6 +7375,8 @@ def _filter_info(key):
             'ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
         'trend_warn': ('هشدار روند بیت‌کوین و اتریوم (کلید اصلی)',
             'قبل از ورود، اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، ورود نگه داشته می‌شود و از تو می‌پرسد «وارد شوم؟». روند خنثی یا نبود داده مانع نمی‌شود. دو کلید بعدی مشخص می‌کنند کدام ارز بررسی شود.'),
+        'ind_warn': ('هشدار تضاد با اندیکاتورها',
+            'قبل از ورود، اگر اکثر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). اجماع نداشتن یا نبود داده مانع نمی‌شود. پیش‌فرض خاموش.'),
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
         'profit_lock': ('قفل کردن سود',
@@ -7290,7 +7412,7 @@ def _filter_info(key):
 
 
 _FILTER_SECTION_KEYS = {
-    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth'],
+    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn'],
     'exit': ['profit_lock', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
@@ -7383,6 +7505,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('trend_warn_enabled', True)), 'trend_warn', '/toggle_trend_warn')],
             [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
              fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
+            [fcell(bool(s.get('ind_warn_enabled', False)), 'ind_warn', '/toggle_ind_warn')],
         ] + gate_rows('entry') + [back_row]}
 
     if section == 'structure':
@@ -8534,9 +8657,9 @@ def process_command(cmd,chat_id,message_id=None):
         timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
         if timer is not None:
             timer.cancel()
-        status, entry = _review_add(msg_id)       # V3.43: ثبت نماد در «لیست بررسی‌های آتی»
+        status, entry = _review_add(chat_id, msg_id)       # V3.43: ثبت نماد در «لیست بررسی‌های آتی»
         if status in ('added', 'updated'):
-            send_message(chat_id, f"💾 `{entry['symbol']}` به لیست بررسی‌های آتی اضافه شد ({len(_CHANNEL_REVIEW)} مورد) و این پیام دیگر خودکار پاک نمی‌شود.")
+            send_message(chat_id, f"💾 `{entry['symbol']}` به لیست بررسی‌های آتی اضافه شد ({len(_review_items(chat_id))} مورد) و این پیام دیگر خودکار پاک نمی‌شود.")
         elif timer is not None:
             send_message(chat_id, '💾 ذخیره شد - این پیام دیگر خودکار پاک نمی‌شود.\n(اطلاعات نماد این پیام قدیمی است و به لیست بررسی‌ها اضافه نشد.)')
         else:
@@ -8552,7 +8675,7 @@ def process_command(cmd,chat_id,message_id=None):
         timer = _CHANNEL_MSG_TIMERS.pop(msg_id, None)
         if timer is not None:
             timer.cancel()
-        _review_remove(msg_id)      # V3.43: اگر پیام در لیست بررسی‌ها بود، از آنجا هم برداشته شود
+        _review_remove(chat_id, msg_id)      # فقط از لیست خودِ این کاربر (لیست بقیه دست‌نخورده)
         _delete_channel_message_later(SIGNAL_CHANNEL_ID, msg_id)
         send_message(chat_id, '🗑 پیام از کانال حذف شد.')
         return
@@ -8788,6 +8911,17 @@ def process_command(cmd,chat_id,message_id=None):
             f"🧭 {label}: {st}\n\n"
             "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبود داده مانع نمی‌شود." + extra,
+            trade_filter_management_keyboard(chat_id, 'entry'))
+        return
+    if cl=='/toggle_ind_warn':
+        s['ind_warn_enabled'] = not bool(s.get('ind_warn_enabled', False))
+        save_session(chat_id)
+        st = '🟢 روشن' if s['ind_warn_enabled'] else '🔴 خاموش'
+        send_message(chat_id,
+            f"📊 {_filter_info('ind_warn')[0]}: {st}\n\n"
+            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر اکثر اندیکاتورها (RSI/MACD/ADX) خلاف جهت معامله باشند، "
+            "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. اگر هشدار روند BTC/ETH هم روشن باشد، هر دو تضاد در همان یک کارت می‌آیند. "
+            "نبود اجماع یا نبود داده مانع نمی‌شود.",
             trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_profit_alert':
@@ -9062,13 +9196,19 @@ def process_command(cmd,chat_id,message_id=None):
     if cl in ('/review_list', '/review_list_buy', '/review_list_sell'):
         review_list_show(chat_id, message_id, {'/review_list_buy': 'BUY', '/review_list_sell': 'SELL'}.get(cl)); return
     if cl=='/rvclear':
-        _review_remove(clear_all=True); review_list_show(chat_id, message_id); return
+        _review_remove(chat_id, clear_all=True); review_list_show(chat_id, message_id); return
     if cl.startswith('/rvdel_'):
         try:
-            _review_remove(int(cl[len('/rvdel_'):]))
+            _review_remove(chat_id, int(cl[len('/rvdel_'):]))
         except ValueError:
             pass
         review_list_show(chat_id, message_id); return
+    if cl.startswith('/rvshow_'):
+        try:
+            review_card_show(chat_id, int(cl[len('/rvshow_'):]))
+        except ValueError:
+            pass
+        return
     if cl=='/btc_eth_regime':
         btc_eth_regime_show(chat_id, message_id); return
     if cl.startswith('/assist_open_'):
@@ -9589,7 +9729,7 @@ def telegram_listener():
                         # V3.43: دکمه‌های ثابت کانال - پنجره‌ی بازشو (لیست بررسی‌های آتی / رژیم BTC و ETH روی تایم‌فریم فعال ادمین)
                         try:
                             _cd = str(callback['data'])
-                            _pop = btc_eth_regime_text(_signal_channel_timeframe(), popup=True) if _cd == '/chreg' else _review_popup_text({'/chlist_buy': 'BUY', '/chlist_sell': 'SELL'}.get(_cd))
+                            _pop = btc_eth_regime_text(_user_active_timeframe(chat), popup=True) if _cd == '/chreg' else _review_popup_text(chat, {'/chlist_buy': 'BUY', '/chlist_sell': 'SELL'}.get(_cd))
                         except Exception:
                             logger.exception('channel fixed button failed')
                             _pop = 'ℹ️ فعلاً در دسترس نیست؛ کمی بعد دوباره امتحان کنید.'
