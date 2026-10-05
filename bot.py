@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 import hashlib
 import copy
 import os, json, time, asyncio, aiohttp, requests, sqlite3, logging, math, io, hashlib, hmac, re
