@@ -249,6 +249,8 @@ _SIGNAL_CHANNEL_PATTERNS = _load_signal_channel_patterns()
 # تا وقتی قیمت در حال لمس آن است ساکت می‌ماند؛ فقط اگر دست‌کم SIGNAL_CHANNEL_TOUCH_REARM_SECONDS (پیش‌فرض ۳۰ دقیقه) از آن
 # سطح دور شده بود و دوباره برخورد کرد، دوباره پیام می‌آید. 0 = برای همان مقدار سطح هرگز تکرار نشود.
 SIGNAL_CHANNEL_TOUCH_REARM_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_TOUCH_REARM_SECONDS', '1800')))
+# V3.43.9: «نفوذ و برگشت» - قیمت چند کندل (بسته‌شدن) آن‌طرفِ سطح مانده و دوباره برگشته. حداکثر طول نفوذ (تعداد کندل) برای اینکه برگشت حساب شود (پیش‌فرض ۳؛ بیشتر از آن سیگنال کهنه می‌شود).
+SIGNAL_CHANNEL_RETURN_MAX_CANDLES = max(1, int(os.environ.get('SIGNAL_CHANNEL_RETURN_MAX_CANDLES', '3')))
 _SIGNAL_CHANNEL_TOUCH_FILE = os.environ.get('SIGNAL_CHANNEL_TOUCH_FILE', 'signal_channel_touch_last.json')
 _SIGNAL_CHANNEL_TOUCH_LAST = {}   # {"symbol|tf|tag|side|level": آخرین زمانی که قیمت روی این سطح دیده شد (بعد از ارسال پیام)}
 _SIGNAL_CHANNEL_TOUCH_DIRTY = False
@@ -3122,10 +3124,30 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
                 ts = dated_df.iloc[idx].get('timestamp')
                 forming = (idx == n - 1)
                 for tag, (hi, lo) in levels.items():
-                    if Lo[idx] <= hi <= H[idx]:
-                        hits.append((tag, 'سقف', hi, ts, 'touch', forming))
-                    if Lo[idx] <= lo <= H[idx]:
-                        hits.append((tag, 'کف', lo, ts, 'touch', forming))
+                    # V3.43.8: «خورده و برگشته» - سقف: به سقف رسیده ولی قیمتِ همان کندل (بسته‌شدن / قیمت لحظه‌ای) از سقف بالاتر نرفته؛
+                    # کف: به کف رسیده ولی از کف پایین‌تر نرفته. کندلی که سطح را شکسته و آن‌طرفِ سطح است سیگنال نمی‌دهد.
+                    # V3.43.9: «نفوذ و برگشت» ('touch_return'): قیمت یک تا SIGNAL_CHANNEL_RETURN_MAX_CANDLES کندل پشت‌سرهم آن‌طرفِ سطح
+                    # بسته شده و حالا (کندل در حال تشکیل یا بسته‌شده) دوباره به این‌طرف برگشته. سقف => فروش، کف => خرید.
+                    for side_fa_i, lvl_i, beyond, back in (
+                            ('سقف', hi, (lambda c, v=hi: c > v), (lambda c, v=hi: c <= v)),
+                            ('کف', lo, (lambda c, v=lo: c < v), (lambda c, v=lo: c >= v))):
+                        if idx < 1:
+                            continue
+                        kind = None
+                        if back(C[idx]):
+                            run = 0
+                            j = idx - 1
+                            while j >= 0 and beyond(C[j]) and run <= SIGNAL_CHANNEL_RETURN_MAX_CANDLES:
+                                run += 1
+                                j -= 1
+                            if 1 <= run <= SIGNAL_CHANNEL_RETURN_MAX_CANDLES:
+                                kind = 'touch_return'
+                        if kind is None:
+                            lo_i, hi_i = (Lo[idx], H[idx])
+                            if lo_i <= lvl_i <= hi_i and back(C[idx]):
+                                kind = 'touch'
+                        if kind:
+                            hits.append((tag, side_fa_i, lvl_i, ts, kind, forming))
 
         if hits:
             regime_val = _signal_channel_symbol_regime(df)
@@ -3147,8 +3169,8 @@ def _signal_channel_implied_side(pattern, side_fa):
     """جهتی که این الگو به‌طور طبیعی پیشنهاد می‌دهد (برای مقایسه با اندیکاتورها).
     rejection: رد سقف => فروش، رد کف => خرید.
     breakout_retest: ادامه‌ی صعودی از سقف => خرید، ادامه‌ی نزولی از کف => فروش.
-    touch: جهت مشخصی ندارد."""
-    if pattern == 'rejection':
+    touch (V3.43.8): به سقف خورده و برگشته => فروش؛ به کف خورده و برگشته => خرید. (فقط از نوع سطح؛ بدون رأی اندیکاتور)"""
+    if pattern in ('rejection', 'touch'):
         return 'SELL' if side_fa == 'سقف' else 'BUY'
     if pattern == 'breakout_retest':
         return 'BUY' if side_fa == 'سقف' else 'SELL'
@@ -3375,6 +3397,9 @@ def _signal_channel_scan_once():
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
         for tag, side_fa, level_value, candle_ts, pattern, forming, regime, ind_row in _signal_channel_touch_scan_symbol(symbol, timeframe):
+            is_return = (pattern == 'touch_return')        # V3.43.9: نفوذ و برگشت - همان الگوی «برخورد ساده» ولی بعد از چند کندل آن‌طرفِ سطح
+            if is_return:
+                pattern = 'touch'
             key = (symbol, timeframe, tag, side_fa, pattern, candle_ts)
             if key in _SIGNAL_CHANNEL_SEEN:
                 continue
@@ -3382,7 +3407,7 @@ def _signal_channel_scan_once():
             if pattern == 'touch':
                 touch_key = f"{symbol}|{timeframe}|{tag}|{side_fa}|{float(level_value):.10g}"
                 _prev = _SIGNAL_CHANNEL_TOUCH_LAST.get(touch_key)
-                if _prev is not None:
+                if _prev is not None and not is_return:      # برگشتِ بعد از نفوذ یک رویداد تازه است؛ مهلت «سکوت» برایش اعمال نمی‌شود
                     _now = time.time()
                     _since = _now - _prev
                     _SIGNAL_CHANNEL_TOUCH_LAST[touch_key] = _now      # هنوز روی سطح است؛ ساعت «دور شدن» از اول شروع شود
@@ -3395,13 +3420,15 @@ def _signal_channel_scan_once():
             implied_side = _signal_channel_implied_side(pattern, side_fa)
             detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, implied_side)
             verdict = _signal_channel_verdict(implied_side, buy_votes, sell_votes)
+            if pattern == 'touch':
+                verdict = implied_side        # V3.43.8: «برخورد ساده (بدون فیلتر)» - جهت فقط از نوع سطح؛ اندیکاتورها فقط نمایشی‌اند
             # فیلتر: حکم «معامله نکن» (verdict=None) برای هر سه الگو (touch / rejection / breakout_retest) ارسال نمی‌شود.
             # کلید فقط بعد از عبور از فیلتر ثبت می‌شود؛ پس اگر روی کندلِ در حال تشکیل حکم بعداً BUY/SELL شد، همان‌موقع یک‌بار ارسال می‌شود.
             if verdict is None and SIGNAL_CHANNEL_SKIP_NO_TRADE:
                 continue
             # فیلتر اجماع: فقط وقتی همه‌ی اندیکاتورهای رأی‌دهنده هم‌جهت باشند و تعدادشان حداقل SIGNAL_CHANNEL_MIN_CONSENSUS (پیش‌فرض ۳) باشد.
             # ADX زیر ۲۰ رأی نمی‌دهد؛ پس «۲ از ۲» کافی نیست و ارسال نمی‌شود. کلید ثبت نمی‌شود تا اگر روی کندل در حال تشکیل ۳ از ۳ شد ارسال شود.
-            if SIGNAL_CHANNEL_MIN_CONSENSUS > 0:
+            if SIGNAL_CHANNEL_MIN_CONSENSUS > 0 and pattern != 'touch':
                 _agree = buy_votes if verdict == 'BUY' else (sell_votes if verdict == 'SELL' else 0)
                 if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
                     continue
@@ -3412,6 +3439,8 @@ def _signal_channel_scan_once():
             # V3.42: برچسب جهت (مناسب خرید/فروش) از پیام کانال حذف شد؛ جهت را خود کاربر با دکمه‌ها انتخاب می‌کند.
             trade_side = verdict or implied_side          # 'BUY' / 'SELL' - جهت معامله‌ی پیشنهادی (هم در سرتیتر پیام و هم برای طرح معامله)
             lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming, trade_side)
+            if is_return:
+                lines.append('↩️ از سطح نفوذ کرده بود و دوباره برگشته')
 
             # --- طرح معامله (ورود لحظه‌ای، SL، TP + نام سطح TP، سود/زیان دقیق پس از کارمزد) و تصویر چارت ---
             plan, df_ind, live = None, None, None
