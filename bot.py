@@ -238,11 +238,48 @@ def _save_signal_channel_level_tags(tags):
     # هم سطوح و هم الگوها در یک فایل نگه‌داری می‌شوند؛ نوشتن یکی نباید دیگری را پاک کند.
     try:
         with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'w', encoding='utf-8') as f:
-            json.dump({'level_tags': tags, 'patterns': list(_SIGNAL_CHANNEL_PATTERNS)}, f)
+            json.dump({'level_tags': tags, 'patterns': list(_SIGNAL_CHANNEL_PATTERNS),
+                       'paused': bool(_SIGNAL_CHANNEL_FLAGS.get('paused', False)), 'all3': bool(_SIGNAL_CHANNEL_FLAGS.get('all3', True)),
+                       'align4': bool(_SIGNAL_CHANNEL_FLAGS.get('align4', True))}, f)
     except Exception:
         logger.exception('failed to persist signal channel settings')
 
 
+def _persist_signal_channel_settings():
+    """ذخیره‌ی همه‌ی تنظیمات کانال (سطوح، الگوها، کلیدهای توقف/هم‌رنگی) با مقدار فعلیِ متغیرهای سراسری."""
+    _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
+
+
+def _load_signal_channel_flag(name, default):
+    try:
+        with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            v = json.load(f).get(name)
+            if isinstance(v, bool):
+                return v
+    except Exception:
+        pass
+    return default
+
+
+# V3.43.12: دو کلید سراسری کانال (ادمین از «تنظیمات کانال» عوض می‌کند و در همان فایل ذخیره می‌شود):
+#   paused : توقف ارسال سیگنال به کانال (اسکن کانال هیچ پیام تازه‌ای نمی‌فرستد؛ دکمه‌های لیست/رژیم همچنان کار می‌کنند)
+#   all3   : فقط وقتی هر سه اندیکاتور (RSI، MACD، ADX) رأی داده‌اند و هم‌رنگ‌اند (هر سه سبز یا هر سه قرمز) سیگنال ارسال می‌شود
+#   align4 : هم‌جهتی کامل: رژیم بازار + رژیم نماد + هر ۳ اندیکاتور + جهت سیگنال باید یکی باشند (همه صعودی => خرید، همه نزولی => فروش)
+_SIGNAL_CHANNEL_FLAGS = {'paused': _load_signal_channel_flag('paused', False), 'all3': _load_signal_channel_flag('all3', True),
+                         'align4': _load_signal_channel_flag('align4', True)}
+
+
+def _signal_channel_align4_ok(direction, symbol_regime, market_regime, buy_votes, sell_votes):
+    """V3.43.13 - هم‌جهتی کامل. direction = 'BUY'/'SELL' (جهت سیگنال). فقط وقتی True که همه‌ی این‌ها با هم یکی باشند:
+      رژیم بازار، رژیم نماد (BULLISH برای خرید / BEARISH برای فروش؛ رنج یا نامشخص = رد)، هر ۳ اندیکاتور هم‌رنگِ جهت."""
+    if direction not in ('BUY', 'SELL'):
+        return False
+    want = 'BULLISH' if direction == 'BUY' else 'BEARISH'
+    votes_ok = (buy_votes == 3) if direction == 'BUY' else (sell_votes == 3)
+    return bool(symbol_regime == want and market_regime == want and votes_ok)
+
+# اگر true باشد، رنگ مشترک سه اندیکاتور باید با جهت معامله هم یکی باشد (سبز => خرید، قرمز => فروش)
+SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION = os.environ.get('SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION', 'false').lower() in ('1', 'true', 'yes')
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
 _SIGNAL_CHANNEL_PATTERNS = _load_signal_channel_patterns()
 # V3.42.12: «برخورد ساده» قبلاً کلیدش شامل زمان کندل بود؛ پس تا وقتی قیمت دور یک سطح می‌چرخید، هر کندل جدید یک پیام تازه
@@ -3494,6 +3531,8 @@ def _signal_channel_scan_once():
     global _SIGNAL_CHANNEL_TOUCH_DIRTY
     if not SIGNAL_CHANNEL_ID:
         return
+    if _SIGNAL_CHANNEL_FLAGS.get('paused'):
+        return          # V3.43.12: ارسال سیگنال کانال متوقف است
     timeframe = _signal_channel_timeframe()
     _ensure_tf_gate_sync(timeframe)
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
@@ -3534,6 +3573,20 @@ def _signal_channel_scan_once():
                 _agree = buy_votes if verdict == 'BUY' else (sell_votes if verdict == 'SELL' else 0)
                 if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
                     continue
+            # V3.43.12: شرط «هر سه اندیکاتور هم‌رنگ» (همه‌ی الگوها): RSI، MACD و ADX هر سه باید رأی داشته باشند (نه خنثی) و هر سه یک رنگ باشند.
+            if _SIGNAL_CHANNEL_FLAGS.get('all3'):
+                if not (buy_votes == 3 or sell_votes == 3):
+                    continue
+                if SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION:
+                    _dir = verdict or implied_side
+                    if not ((buy_votes == 3 and _dir == 'BUY') or (sell_votes == 3 and _dir == 'SELL')):
+                        continue
+            # V3.43.13: هم‌جهتی کامل (همه‌ی الگوها): رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال. در غیر این‌صورت ارسال نمی‌شود
+            # (کلید ثبت نمی‌شود؛ اگر شرایط روی همان کندل بعداً هم‌جهت شد، ارسال می‌شود).
+            if _SIGNAL_CHANNEL_FLAGS.get('align4'):
+                _mkt_regime = (TIMEFRAME_REGIME_CACHE.get(timeframe) or {}).get('gate')
+                if not _signal_channel_align4_ok(verdict or implied_side, regime, _mkt_regime, buy_votes, sell_votes):
+                    continue
             # V3.43.11: «شکست کاذب + ریتست + تأیید»: آخرین شرط = ریسک‌به‌ریوارد طرح (ورود لحظه‌ای، SL/TP همان طرح پیام) حداقل SIGNAL_CHANNEL_RULE_MIN_RR.
             # اگر کمتر بود کلید ثبت نمی‌شود؛ اگر قیمت به سطح نزدیک‌تر شد و R:R کافی شد، در همان حلقه ارسال می‌شود.
             pre_live = pre_plan = pre_df = None
@@ -3561,6 +3614,8 @@ def _signal_channel_scan_once():
             lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming, trade_side)
             if is_return:
                 lines.append('↩️ از سطح نفوذ کرده بود و دوباره برگشته')
+            if _SIGNAL_CHANNEL_FLAGS.get('align4'):
+                lines.append('✅ هم‌جهت: رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال')
             if pattern == 'sweep_retest':
                 lines.extend(['', '✅ شرط‌های قانون‌مند (همه برقرار):',
                               f"• نفوذ به آن‌طرف {side_fa} (حداکثر {SIGNAL_CHANNEL_RETURN_MAX_CANDLES} کندل) و برگشت",
@@ -3659,6 +3714,10 @@ def _signal_channel_loop():
 
 def signal_channel_settings_keyboard():
     rows = []
+    paused = bool(_SIGNAL_CHANNEL_FLAGS.get('paused'))
+    rows.append([{'text': ('▶️ ادامه‌ی ارسال سیگنال کانال' if paused else '⏸ توقف ارسال سیگنال کانال'), 'callback_data': '/toggle_signal_pause'}])
+    rows.append([{'text': f"{'🟢' if _SIGNAL_CHANNEL_FLAGS.get('align4') else '🔴'} هم‌جهتی کامل: رژیم بازار + رژیم نماد + ۳ اندیکاتور + سیگنال", 'callback_data': '/toggle_signal_align4'}])
+    rows.append([{'text': f"{'🟢' if _SIGNAL_CHANNEL_FLAGS.get('all3') else '🔴'} فقط وقتی هر ۳ اندیکاتور هم‌رنگ باشند", 'callback_data': '/toggle_signal_all3'}])
     for tag in _ALL_SIGNAL_CHANNEL_TAGS:
         on = tag in _SIGNAL_CHANNEL_LEVEL_TAGS
         rows.append([{'text': f"{'🟢' if on else '🔴'} {tag}", 'callback_data': f'/toggle_signal_tag_{tag}'}])
@@ -3676,6 +3735,9 @@ def signal_channel_settings_report():
     return (
         f"📡 *تنظیمات کانال اعلام برخورد سطوح*\n\n"
         f"وضعیت: {status}\n"
+        f"ارسال سیگنال: {'⏸ متوقف' if _SIGNAL_CHANNEL_FLAGS.get('paused') else '▶️ فعال'}\n"
+        f"شرط هم‌جهتی کامل (رژیم بازار + رژیم نماد + ۳ اندیکاتور + سیگنال): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('align4') else '🔴 خاموش'}\n"
+        f"شرط هم‌رنگی ۳ اندیکاتور (RSI/MACD/ADX): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('all3') else '🔴 خاموش'}\n"
         f"تایم‌فریم بررسی: `{_signal_channel_timeframe()}` (همان تایم‌فریم فعال ادمین)\n"
         f"سطوح فعال برای ارسال: {tags_txt}\n"
         f"الگوهای فعال: {pats_txt}\n\n"
@@ -8471,6 +8533,14 @@ def process_command(cmd,chat_id,message_id=None):
     if cmd == '/signal_channel_settings':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
+        return
+    if cmd in ('/toggle_signal_pause', '/toggle_signal_all3', '/toggle_signal_align4'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        _fk = {'/toggle_signal_pause': 'paused', '/toggle_signal_all3': 'all3', '/toggle_signal_align4': 'align4'}[cmd]
+        _SIGNAL_CHANNEL_FLAGS[_fk] = not bool(_SIGNAL_CHANNEL_FLAGS.get(_fk))
+        _persist_signal_channel_settings()
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
     if cmd.startswith('/toggle_signal_tag_'):
