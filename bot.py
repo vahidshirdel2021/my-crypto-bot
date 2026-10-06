@@ -278,6 +278,37 @@ def _signal_channel_align4_ok(direction, symbol_regime, market_regime, buy_votes
     votes_ok = (buy_votes == 3) if direction == 'BUY' else (sell_votes == 3)
     return bool(symbol_regime == want and market_regime == want and votes_ok)
 
+
+_REGIME_FA_SHORT = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
+
+
+def _regime_from_ind_row(c):
+    """رژیم نماد از یک ردیف اندیکاتور (آخرین کندل بسته‌شده): همان معیار _signal_channel_symbol_regime."""
+    try:
+        close, ema20, ema50 = float(c['close']), float(c['ema20']), float(c['ema50'])
+        if close > ema50 and ema20 >= ema50:
+            return 'BULLISH'
+        if close < ema50 and ema20 <= ema50:
+            return 'BEARISH'
+        return 'RANGE'
+    except Exception:
+        return None
+
+
+def _align4_reason(direction, symbol_regime, market_regime, buy_votes, sell_votes):
+    """متن فارسیِ مواردی که با جهت سیگنال هم‌جهت نیستند (برای لاگ تشخیصی ورود)."""
+    want = 'BULLISH' if direction == 'BUY' else 'BEARISH'
+    want_fa = _REGIME_FA_SHORT[want]
+    bad = []
+    if market_regime != want:
+        bad.append(f"رژیم بازار {_REGIME_FA_SHORT.get(market_regime, 'نامشخص')} (لازم: {want_fa})")
+    if symbol_regime != want:
+        bad.append(f"رژیم نماد {_REGIME_FA_SHORT.get(symbol_regime, 'نامشخص')} (لازم: {want_fa})")
+    agree = buy_votes if direction == 'BUY' else sell_votes
+    if agree != 3:
+        bad.append(f"اندیکاتورها {agree} از ۳ هم‌جهت")
+    return '، '.join(bad)
+
 # اگر true باشد، رنگ مشترک سه اندیکاتور باید با جهت معامله هم یکی باشد (سبز => خرید، قرمز => فروش)
 SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION = os.environ.get('SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION', 'false').lower() in ('1', 'true', 'yes')
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
@@ -732,6 +763,8 @@ def default_session():
         'trend_warn_eth': True,
         # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
         'ind_warn_enabled': False,
+        # V3.43.14: هم‌جهتی کامل برای سیگنال‌های خودِ ربات (رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال). پیش‌فرض خاموش.
+        'align4_enabled': False,
         'auto_trend_pending': {},
         'auto_trend_seen': {},
     }
@@ -843,6 +876,7 @@ def normalize_session(data):
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
     s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', False))
+    s['align4_enabled'] = bool(data.get('align4_enabled', False))
     _now_n = time.time()
     s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
                                if isinstance(v, dict) and _now_n - float(v.get('created_at', 0) or 0) < 24 * 3600}
@@ -7241,6 +7275,22 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    if s.get('align4_enabled'):
+        # V3.43.14: هم‌جهتی کامل - رژیم بازار + رژیم نماد + هر ۳ اندیکاتور + جهت سیگنال باید یکی باشند؛ وگرنه سیگنال صادر نمی‌شود.
+        _a4_mkt = market_gate
+        if _a4_mkt is None:
+            try:
+                _a4_mkt = await refresh_market_gate(http, tf)
+            except Exception:
+                _a4_mkt = None
+        try:
+            _a4_row = primary.iloc[-2]
+            _a4_reg = _regime_from_ind_row(_a4_row)
+            _a4_l, _a4_b, _a4_s = _signal_channel_indicator_summary(_a4_row.to_dict(), sig)
+        except Exception:
+            _a4_reg, _a4_b, _a4_s = None, 0, 0
+        if not _signal_channel_align4_ok(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s):
+            return _entry_diag_result(chat_id, symbol, 'blocked', 'هم‌جهتی کامل برقرار نیست: ' + _align4_reason(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s), 'align4', sig, diagnostics=diagnostics)
     if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
         # حالت ۵/۶ (شکست کاذب) و حالت ۱/۲ (برخورد ساده) هر دو ذاتاً برگشتی/رنجی‌اند نه
         # ترندی؛ طبق تصمیم کاربر هر دو جفت می‌توانند جدا از این گیت معاف شوند.
@@ -7595,6 +7645,8 @@ def _filter_info(key):
             'ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
         'trend_warn': ('هشدار روند بیت‌کوین و اتریوم (کلید اصلی)',
             'قبل از ورود، اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، ورود نگه داشته می‌شود و از تو می‌پرسد «وارد شوم؟». روند خنثی یا نبود داده مانع نمی‌شود. دو کلید بعدی مشخص می‌کنند کدام ارز بررسی شود.'),
+        'align4': ('هم‌جهتی کامل سیگنال‌های ربات',
+            'اگر روشن باشد، سیگنال ربات فقط وقتی صادر می‌شود که این چهار مورد با هم یکی باشند: رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت خود سیگنال (همه صعودی => خرید، همه نزولی => فروش). رنج یا اندیکاتور خنثی = سیگنال صادر نمی‌شود. پیش‌فرض خاموش.'),
         'ind_warn': ('هشدار تضاد با اندیکاتورها',
             'قبل از ورود، اگر اکثر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). اجماع نداشتن یا نبود داده مانع نمی‌شود. پیش‌فرض خاموش.'),
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
@@ -7632,7 +7684,7 @@ def _filter_info(key):
 
 
 _FILTER_SECTION_KEYS = {
-    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn'],
+    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
     'exit': ['profit_lock', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
@@ -7726,6 +7778,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
              fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
             [fcell(bool(s.get('ind_warn_enabled', False)), 'ind_warn', '/toggle_ind_warn')],
+            [fcell(bool(s.get('align4_enabled', False)), 'align4', '/toggle_align4')],
         ] + gate_rows('entry') + [back_row]}
 
     if section == 'structure':
@@ -9139,6 +9192,16 @@ def process_command(cmd,chat_id,message_id=None):
             f"🧭 {label}: {st}\n\n"
             "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبود داده مانع نمی‌شود." + extra,
+            trade_filter_management_keyboard(chat_id, 'entry'))
+        return
+    if cl=='/toggle_align4':
+        s['align4_enabled'] = not bool(s.get('align4_enabled', False))
+        save_session(chat_id)
+        st = '🟢 روشن' if s['align4_enabled'] else '🔴 خاموش'
+        send_message(chat_id,
+            f"🧭 {_filter_info('align4')[0]}: {st}\n\n"
+            "وقتی روشن باشد، سیگنال‌های خودِ ربات (ورود خودکار و حالت دستیار) فقط وقتی صادر می‌شوند که رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت سیگنال هم‌جهت باشند "
+            "(همه صعودی => خرید، همه نزولی => فروش). اگر رژیم رنج باشد یا یک اندیکاتور خنثی، سیگنال صادر نمی‌شود. دلیل رد در «🔍 لاگ تشخیصی ورود» دیده می‌شود.",
             trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_ind_warn':
