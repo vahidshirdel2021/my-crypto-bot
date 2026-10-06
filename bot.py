@@ -206,6 +206,7 @@ _ALL_SIGNAL_CHANNEL_PATTERNS = {
     'breakout_retest': '🚀 نفوذ + پولبک + ادامه روند',
     'rejection': '↩️ برخورد و برگشت به داخل',
     'touch': '🎯 برخورد ساده (بدون فیلتر)',
+    'sweep_retest': '🧭 شکست کاذب سطح + ریتست + تأیید (قانون‌مند)',
 }
 _DEFAULT_SIGNAL_CHANNEL_PATTERNS = ['breakout_retest', 'rejection']
 
@@ -251,6 +252,12 @@ _SIGNAL_CHANNEL_PATTERNS = _load_signal_channel_patterns()
 SIGNAL_CHANNEL_TOUCH_REARM_SECONDS = max(0, int(os.environ.get('SIGNAL_CHANNEL_TOUCH_REARM_SECONDS', '1800')))
 # V3.43.9: «نفوذ و برگشت» - قیمت چند کندل (بسته‌شدن) آن‌طرفِ سطح مانده و دوباره برگشته. حداکثر طول نفوذ (تعداد کندل) برای اینکه برگشت حساب شود (پیش‌فرض ۳؛ بیشتر از آن سیگنال کهنه می‌شود).
 SIGNAL_CHANNEL_RETURN_MAX_CANDLES = max(1, int(os.environ.get('SIGNAL_CHANNEL_RETURN_MAX_CANDLES', '3')))
+# V3.43.11: الگوی «شکست کاذب + ریتست + تأیید (قانون‌مند)» - آستانه‌ها (همه با env قابل تغییرند)
+SIGNAL_CHANNEL_RULE_SWEEP_LOOKBACK = max(3, int(os.environ.get('SIGNAL_CHANNEL_RULE_SWEEP_LOOKBACK', '10')))   # حداکثر سن ستاپ (کندل) از اولین نفوذ تا کندل تأیید
+SIGNAL_CHANNEL_RULE_RETEST_ATR = max(0.0, float(os.environ.get('SIGNAL_CHANNEL_RULE_RETEST_ATR', '0.5')))       # فاصله‌ی مجاز ریتست از سطح (ضریب ATR)
+SIGNAL_CHANNEL_RULE_ADX = float(os.environ.get('SIGNAL_CHANNEL_RULE_ADX', '25'))                                # ADX بالاتر از این + DI خلاف جهت => رد
+SIGNAL_CHANNEL_RULE_MIN_VOLUME = float(os.environ.get('SIGNAL_CHANNEL_RULE_MIN_VOLUME', '1.0'))                 # حداقل نسبت حجم کندل برگشت به میانگین
+SIGNAL_CHANNEL_RULE_MIN_RR = float(os.environ.get('SIGNAL_CHANNEL_RULE_MIN_RR', '2.0'))                         # حداقل ریسک‌به‌ریوارد طرح
 _SIGNAL_CHANNEL_TOUCH_FILE = os.environ.get('SIGNAL_CHANNEL_TOUCH_FILE', 'signal_channel_touch_last.json')
 _SIGNAL_CHANNEL_TOUCH_LAST = {}   # {"symbol|tf|tag|side|level": آخرین زمانی که قیمت روی این سطح دیده شد (بعد از ارسال پیام)}
 _SIGNAL_CHANNEL_TOUCH_DIRTY = False
@@ -3063,6 +3070,70 @@ def _signal_channel_is_breakout_retest(O, H, Lo, C, ci, level, side_fa, atr):
     return False
 
 
+def _signal_channel_sweep_retest_setup(H, Lo, C, ci, level, is_floor, atr):
+    """V3.43.11 - ستاپ «شکست کاذب + ریتست + تأیید» روی آخرین کندل بسته‌شده (ci). همه‌ی شرط‌ها باید برقرار باشند:
+      ۱) نفوذ: یک کندل (سایه کافی است) از سطح عبور کرده (کف: Low < سطح؛ سقف: High > سطح) و کندل قبلش سمتِ درست سطح بسته شده بود.
+      ۲) برگشت: حداکثر SIGNAL_CHANNEL_RETURN_MAX_CANDLES کندل بعد از اولین نفوذ، یک کندل سمتِ درست سطح بسته شده (کندل برگشت).
+      ۳) نگه‌داشتن: از کندل برگشت تا کندل تأیید هیچ کندلی آن‌طرف سطح بسته نشده.
+      ۴) ریتست: کندل تأیید (ci) بعد از کندل برگشت است، به منطقه‌ی سطح (تا RETEST_ATR × ATR) برگشته و سمتِ درست سطح بسته شده.
+      ۵) کندل تأیید اکسترم نفوذ را نشکسته (اکسترم جدید نساخته).
+    خروجی: {'sweep_idx', 'reclaim_idx', 'extreme'} یا None."""
+    start = max(1, ci - SIGNAL_CHANNEL_RULE_SWEEP_LOOKBACK)
+    if is_floor:
+        pen = (lambda j: Lo[j] < level)
+        ok = (lambda c: c > level)
+    else:
+        pen = (lambda j: H[j] > level)
+        ok = (lambda c: c < level)
+    s0 = next((j for j in range(start, ci - 1) if pen(j)), None)
+    if s0 is None or not ok(C[s0 - 1]):
+        return None                      # نفوذی نبوده، یا نفوذ قبل از پنجره شروع شده (کهنه)
+    r = next((j for j in range(s0, ci) if ok(C[j])), None)
+    if r is None or (r - s0) > SIGNAL_CHANNEL_RETURN_MAX_CANDLES:
+        return None                      # برنگشته، یا خیلی دیر برگشته
+    if not all(ok(C[j]) for j in range(r, ci + 1)):
+        return None                      # بعد از برگشت دوباره آن‌طرف سطح بسته شده
+    tol = SIGNAL_CHANNEL_RULE_RETEST_ATR * float(atr or 0.0)
+    if is_floor:
+        extreme = min(Lo[s0:ci])
+        retested = Lo[ci] <= level + tol
+        no_new_extreme = Lo[ci] > extreme
+    else:
+        extreme = max(H[s0:ci])
+        retested = H[ci] >= level - tol
+        no_new_extreme = H[ci] < extreme
+    if not (retested and no_new_extreme):
+        return None
+    return {'sweep_idx': s0, 'reclaim_idx': r, 'extreme': float(extreme)}
+
+
+def _signal_channel_rule_gate(side, regime, market_gate, ind_row, reclaim_row):
+    """V3.43.11 - فیلترهای قانون‌مند. خروجی (ok, دلیل رد).
+      • ADX ≥ SIGNAL_CHANNEL_RULE_ADX و جهت DI خلاف معامله => رد (روند قوی خلاف جهت)
+      • حجم کندل برگشت (نسبت به میانگین) < SIGNAL_CHANNEL_RULE_MIN_VOLUME => رد (برگشت ضعیف)
+      • رژیم نماد و رژیم بازار هر دو خلاف جهت => رد
+      • تعداد رأی‌های اندیکاتورها (RSI/MACD/ADX) خلاف معامله بیشتر از هم‌جهت => رد"""
+    is_buy = (side == 'BUY')
+    if ind_row:
+        adx, pdi, mdi = ind_row.get('adx'), ind_row.get('plus_di'), ind_row.get('minus_di')
+        if all(v is not None and pd.notna(v) for v in (adx, pdi, mdi)):
+            if float(adx) >= SIGNAL_CHANNEL_RULE_ADX and ((float(mdi) > float(pdi)) if is_buy else (float(pdi) > float(mdi))):
+                return False, f'ADX قوی ({float(adx):.0f}) خلاف جهت'
+    if reclaim_row:
+        vr = reclaim_row.get('volume_ratio')
+        if vr is not None and pd.notna(vr) and float(vr) < SIGNAL_CHANNEL_RULE_MIN_VOLUME:
+            return False, f'حجم کندل برگشت ضعیف ({float(vr):.2f}x)'
+    against = 'BEARISH' if is_buy else 'BULLISH'
+    if regime == against and market_gate == against:
+        return False, 'رژیم نماد و بازار هر دو خلاف جهت'
+    if ind_row:
+        _l, b_votes, s_votes = _signal_channel_indicator_summary(ind_row, side)
+        same, opp = (b_votes, s_votes) if is_buy else (s_votes, b_votes)
+        if opp > same:
+            return False, f'اجماع اندیکاتورها خلاف جهت ({opp} در برابر {same})'
+    return True, ''
+
+
 def _signal_channel_touch_scan_symbol(symbol, timeframe):
     """الگوهای روشنِ کانال را روی این نماد بررسی می‌کند.
     خروجی: [(tag, 'سقف'/'کف', level, candle_ts, pattern, forming, symbol_regime)]
@@ -3149,6 +3220,35 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
                         if kind:
                             hits.append((tag, side_fa_i, lvl_i, ts, kind, forming))
 
+        if 'sweep_retest' in patterns:
+            # V3.43.11: فقط روی آخرین کندل بسته‌شده (تأیید با بسته‌شدن کندل)؛ هر سطح/جهت یک‌بار به‌ازای هر نفوذ (کلید = زمان اولین نفوذ)
+            atr_r = _signal_channel_atr(H, Lo, C, ci)
+            cands = []
+            for tag, (hi, lo) in _signal_channel_levels_at(dated_df, ci).items():
+                for side_fa, lvl in (('سقف', hi), ('کف', lo)):
+                    st = _signal_channel_sweep_retest_setup(H, Lo, C, ci, lvl, side_fa == 'کف', atr_r)
+                    if st:
+                        cands.append((tag, side_fa, lvl, st))
+            if cands:
+                ind_df_r = None
+                try:
+                    ind_df_r = calculate_indicators(df)
+                except Exception:
+                    logger.exception('sweep_retest indicator calc failed symbol=%s', symbol)
+                last_row = ind_df_r.iloc[-2].to_dict() if (ind_df_r is not None and len(ind_df_r) >= 2) else None
+                reg_r = _signal_channel_symbol_regime(df)
+                mkt_r = (TIMEFRAME_REGIME_CACHE.get(timeframe) or {}).get('gate')
+                for tag, side_fa, lvl, st in cands:
+                    side_r = 'BUY' if side_fa == 'کف' else 'SELL'
+                    rec_row = None
+                    if ind_df_r is not None and len(ind_df_r) == n:
+                        rec_row = ind_df_r.iloc[st['reclaim_idx']].to_dict()
+                    ok_r, why_r = _signal_channel_rule_gate(side_r, reg_r, mkt_r, last_row, rec_row)
+                    if ok_r:
+                        hits.append((tag, side_fa, lvl, dated_df.iloc[st['sweep_idx']].get('timestamp'), 'sweep_retest', False))
+                    else:
+                        logger.info('sweep_retest رد شد symbol=%s tag=%s side=%s: %s', symbol, tag, side_r, why_r)
+
         if hits:
             regime_val = _signal_channel_symbol_regime(df)
             ind_row = None
@@ -3170,7 +3270,7 @@ def _signal_channel_implied_side(pattern, side_fa):
     rejection: رد سقف => فروش، رد کف => خرید.
     breakout_retest: ادامه‌ی صعودی از سقف => خرید، ادامه‌ی نزولی از کف => فروش.
     touch (V3.43.8): به سقف خورده و برگشته => فروش؛ به کف خورده و برگشته => خرید. (فقط از نوع سطح؛ بدون رأی اندیکاتور)"""
-    if pattern in ('rejection', 'touch'):
+    if pattern in ('rejection', 'touch', 'sweep_retest'):
         return 'SELL' if side_fa == 'سقف' else 'BUY'
     if pattern == 'breakout_retest':
         return 'BUY' if side_fa == 'سقف' else 'SELL'
@@ -3333,6 +3433,8 @@ def _signal_channel_pattern_label(pattern, side_fa):
         return dot + ' نفوذ + پولبک + ادامه روند ' + ('صعودی' if side_fa == 'سقف' else 'نزولی')
     if pattern == 'rejection':
         return '↩️ برخورد و برگشت به داخل (' + ('رد سقف' if side_fa == 'سقف' else 'رد کف') + ')'
+    if pattern == 'sweep_retest':
+        return '🧭 شکست کاذب ' + ('سقف' if side_fa == 'سقف' else 'کف') + ' + ریتست + تأیید (قانون‌مند)'
     return _ALL_SIGNAL_CHANNEL_PATTERNS.get(pattern, pattern)
 
 
@@ -3420,7 +3522,7 @@ def _signal_channel_scan_once():
             implied_side = _signal_channel_implied_side(pattern, side_fa)
             detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, implied_side)
             verdict = _signal_channel_verdict(implied_side, buy_votes, sell_votes)
-            if pattern == 'touch':
+            if pattern in ('touch', 'sweep_retest'):
                 verdict = implied_side        # V3.43.8: «برخورد ساده (بدون فیلتر)» - جهت فقط از نوع سطح؛ اندیکاتورها فقط نمایشی‌اند
             # فیلتر: حکم «معامله نکن» (verdict=None) برای هر سه الگو (touch / rejection / breakout_retest) ارسال نمی‌شود.
             # کلید فقط بعد از عبور از فیلتر ثبت می‌شود؛ پس اگر روی کندلِ در حال تشکیل حکم بعداً BUY/SELL شد، همان‌موقع یک‌بار ارسال می‌شود.
@@ -3428,9 +3530,27 @@ def _signal_channel_scan_once():
                 continue
             # فیلتر اجماع: فقط وقتی همه‌ی اندیکاتورهای رأی‌دهنده هم‌جهت باشند و تعدادشان حداقل SIGNAL_CHANNEL_MIN_CONSENSUS (پیش‌فرض ۳) باشد.
             # ADX زیر ۲۰ رأی نمی‌دهد؛ پس «۲ از ۲» کافی نیست و ارسال نمی‌شود. کلید ثبت نمی‌شود تا اگر روی کندل در حال تشکیل ۳ از ۳ شد ارسال شود.
-            if SIGNAL_CHANNEL_MIN_CONSENSUS > 0 and pattern != 'touch':
+            if SIGNAL_CHANNEL_MIN_CONSENSUS > 0 and pattern not in ('touch', 'sweep_retest'):
                 _agree = buy_votes if verdict == 'BUY' else (sell_votes if verdict == 'SELL' else 0)
                 if not (_agree >= SIGNAL_CHANNEL_MIN_CONSENSUS and _agree == buy_votes + sell_votes):
+                    continue
+            # V3.43.11: «شکست کاذب + ریتست + تأیید»: آخرین شرط = ریسک‌به‌ریوارد طرح (ورود لحظه‌ای، SL/TP همان طرح پیام) حداقل SIGNAL_CHANNEL_RULE_MIN_RR.
+            # اگر کمتر بود کلید ثبت نمی‌شود؛ اگر قیمت به سطح نزدیک‌تر شد و R:R کافی شد، در همان حلقه ارسال می‌شود.
+            pre_live = pre_plan = pre_df = None
+            rule_rr = None
+            if pattern == 'sweep_retest':
+                try:
+                    pre_live = latest_price(symbol)
+                    if not pre_live:
+                        continue
+                    pre_plan, pre_df = build_quick_plan_with_fallback(symbol, implied_side, get_timeframe_preset(timeframe), float(pre_live), timeframe)
+                    _risk = abs(float(pre_live) - float(pre_plan['sl']))
+                    rule_rr = (abs(float(pre_plan['tp']) - float(pre_live)) / _risk) if _risk > 0 else 0.0
+                except Exception:
+                    logger.exception('sweep_retest plan failed symbol=%s', symbol)
+                    continue
+                if rule_rr < SIGNAL_CHANNEL_RULE_MIN_RR:
+                    logger.info('sweep_retest رد شد symbol=%s: R:R %.2f کمتر از %.2f', symbol, rule_rr, SIGNAL_CHANNEL_RULE_MIN_RR)
                     continue
             _SIGNAL_CHANNEL_SEEN[key] = True
             if touch_key is not None:
@@ -3441,15 +3561,24 @@ def _signal_channel_scan_once():
             lines = _signal_channel_header_lines(symbol, timeframe, level_label, level_value, pattern, side_fa, regime, forming, trade_side)
             if is_return:
                 lines.append('↩️ از سطح نفوذ کرده بود و دوباره برگشته')
+            if pattern == 'sweep_retest':
+                lines.extend(['', '✅ شرط‌های قانون‌مند (همه برقرار):',
+                              f"• نفوذ به آن‌طرف {side_fa} (حداکثر {SIGNAL_CHANNEL_RETURN_MAX_CANDLES} کندل) و برگشت",
+                              '• ریتست سطح و بسته‌شدن کندل سمتِ درست سطح',
+                              f"• بدون ADX قوی خلاف جهت، حجم برگشت ≥ {SIGNAL_CHANNEL_RULE_MIN_VOLUME:g}x، رژیم‌ها هر دو مخالف نیستند، اجماع اندیکاتورها مخالف نیست",
+                              f"• ریسک‌به‌ریوارد ≥ {SIGNAL_CHANNEL_RULE_MIN_RR:g} (فعلی {rule_rr:.2f})"])
 
             # --- طرح معامله (ورود لحظه‌ای، SL، TP + نام سطح TP، سود/زیان دقیق پس از کارمزد) و تصویر چارت ---
             plan, df_ind, live = None, None, None
-            try:
-                live = latest_price(symbol)
-                if live:
-                    plan, df_ind = build_quick_plan_with_fallback(symbol, trade_side, get_timeframe_preset(timeframe), float(live), timeframe)
-            except Exception:
-                logger.exception('signal channel plan failed symbol=%s', symbol)
+            if pre_plan is not None:
+                plan, df_ind, live = pre_plan, pre_df, pre_live
+            else:
+                try:
+                    live = latest_price(symbol)
+                    if live:
+                        plan, df_ind = build_quick_plan_with_fallback(symbol, trade_side, get_timeframe_preset(timeframe), float(live), timeframe)
+                except Exception:
+                    logger.exception('signal channel plan failed symbol=%s', symbol)
             plan_lines = []
             if plan and live:
                 p_entry, p_sl, p_tp = float(live), float(plan['sl']), float(plan['tp'])
