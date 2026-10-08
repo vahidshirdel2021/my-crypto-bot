@@ -160,6 +160,13 @@ def get_setup_management_keyboard(session=None):
     _cfg_ui = s.get("strategy_config") or {}
     daily_only = bool(_cfg_ui.get("daily_p4_mode", True))
     p4_rev_on = bool(_cfg_ui.get("p4_reversal_enabled", False))
+    hv_on = bool(_cfg_ui.get("halving_model_enabled", False))
+    rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
+    if hv_on:
+        _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
+        rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
+        rows.append([{"text": f"سقف عمق درخت: {_md}", "callback_data": "/halving_depth_cycle"}])
+        rows.append([{"text": f"فقط سطوح اصلی: {'همه‌ی عمق‌ها' if _mt == 0 else 'تا عمق ' + str(_mt)}", "callback_data": "/halving_major_cycle"}])
     rows.append([{"text": f"{'🟢' if daily_only else '🔴'} مدل PDH/PDL + P4 (۳ حالت)", "callback_data": "/toggle_p4_model"}])
     if daily_only:
         rows.append([{"text": f"{'🟢' if p4_rev_on else '🔴'} ستاپ برگشت P4 (داخل رنج روزانه)", "callback_data": "/toggle_p4_reversal"}])

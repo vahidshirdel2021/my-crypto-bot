@@ -770,7 +770,8 @@ def default_session():
     }
 
 
-_P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled')
+_P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
+                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth')
 
 
 def _p4_keep_flags(old_cfg, new_cfg):
@@ -799,6 +800,8 @@ def _p4_sync_tags(s):
 
 
 def _setup_mgmt_text(s):
+    if (s.get('strategy_config') or {}).get('halving_model_enabled'):
+        return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید و بقیه‌ی ستاپ‌ها (PDH/PDL+P4 و ...) در این حالت استفاده نمی‌شوند."
     if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
         return "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4 روشن است: فقط Daily برای معامله فعال می‌ماند."
     return "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:"
@@ -847,6 +850,7 @@ def normalize_session(data):
         'weakness_exit_enabled', 'sweep_require_swing_break', 'sweep_require_confirmation_candle',
         'strategy_sweep_enabled', 'strategy_htf_reversal_enabled', 'adaptive_allow_session_swing_anchors',
         'daily_p4_mode', 'p4_reversal_enabled',
+        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -4575,6 +4579,74 @@ def _log_grid_levels_sync(symbol):
     return levels
 
 
+HALVING_RANGE_TTL = float(os.environ.get('HALVING_RANGE_TTL_SECONDS', '21600'))  # هر ۶ ساعت
+HALVING_RANGE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _halving_range_from_df(d):
+    """(سقف، کف) تاریخی از کندل‌های هفتگی/روزانه (سایه‌ها: high/low) یا None."""
+    try:
+        if d is None or d.empty or len(d) < 8:
+            return None
+        hi = float(pd.to_numeric(d['high'], errors='coerce').max())
+        lo = float(pd.to_numeric(d['low'], errors='coerce').min())
+        if math.isfinite(hi) and math.isfinite(lo) and lo > 0 and hi > lo:
+            return (hi, lo)
+    except Exception:
+        pass
+    return None
+
+
+async def get_halving_range(http, symbol):
+    """سقف/کف تاریخی نماد برای مدل نصف‌کردن (کش‌شده). از کندل هفتگیِ کل تاریخچه‌ی در دسترس
+    می‌گیرد؛ اگر نشد روزانه. سایه‌ها (high/low) ملاک‌اند. خروجی (high, low) یا None."""
+    now = time.time()
+    c = HALVING_RANGE_CACHE.get(symbol)
+    if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
+        return c['range']
+    rng = None
+    for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
+        try:
+            d = await get_klines_async(http, symbol, tf_, lim)
+        except Exception:
+            d = None
+        rng = _halving_range_from_df(d)
+        if rng:
+            break
+    if rng:
+        HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
+    elif c and c.get('range'):
+        return c['range']      # دادهٔ تازه نیامد: آخرین مقدار معتبر
+    return rng
+
+
+def get_halving_range_sync(symbol):
+    now = time.time()
+    c = HALVING_RANGE_CACHE.get(symbol)
+    if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
+        return c['range']
+    rng = None
+    for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
+        try:
+            rng = _halving_range_from_df(get_klines(symbol, tf_, lim))
+        except Exception:
+            rng = None
+        if rng:
+            break
+    if rng:
+        HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
+    elif c and c.get('range'):
+        return c['range']
+    return rng
+
+
+def _with_halving_cfg(cfg, rng):
+    """کپی کانفیگ با سقف/کف تاریخی برای مدل نصف‌کردن (بدون دست‌زدن به کانفیگ ذخیره‌شده)."""
+    if not (cfg or {}).get('halving_model_enabled') or not rng:
+        return cfg
+    return {**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+
+
 def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_ind=None):
     """طرح SL/TP ورود سریع (سوینگ/ATR + سطح مقابل)؛ اگر ساخته نشد، SL/TP درصدی جایگزین.
     خروجی: (plan، df با اندیکاتورها یا None). plan همیشه کلید tp_level_name دارد."""
@@ -7271,7 +7343,13 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
             live_entry_price = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         except Exception:
             live_entry_price = None
-    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], s['strategy_config'], None, live_price=live_entry_price)
+    cfg_entry = s['strategy_config']
+    if cfg_entry.get('halving_model_enabled'):
+        _hv_rng = await get_halving_range(http, symbol)
+        if not _hv_rng:
+            return _entry_diag_result(chat_id, symbol, 'no_signal', 'مدل نصف‌کردن: سقف/کف تاریخی این نماد در دسترس نیست', 'signal')
+        cfg_entry = _with_halving_cfg(cfg_entry, _hv_rng)
+    sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], cfg_entry, None, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
@@ -7333,7 +7411,7 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
         if m_active:
             active_setup_index = int(m_active.group(1))
     plan, plan_reason = build_trade_plan(
-        primary, sig, s['strategy_config'], plan_strategy_type,
+        primary, sig, cfg_entry, plan_strategy_type,
         strategy_timeframe=primary_tf, grid_levels=grid_levels,
         setup_index=active_setup_index, live_price=live_entry_price
     )
@@ -8013,7 +8091,7 @@ def analyze(chat_id,symbol):
     live_price=latest_price(symbol)
     # V3.19: تنها یک استراتژی معاملاتی هست (Liquidity Sweep + HTF Reversal)؛ همان مسیر واقعی
     # اسکن زنده (get_signal_with_reason) اینجا هم صدا زده می‌شود تا این تحلیل با تصمیم واقعی ربات یکی باشد.
-    sig,reason=get_signal_with_reason(d,None,'single',tf,'dynamic',s['filters'],s['strategy_config'],None,live_price=live_price)
+    sig,reason=get_signal_with_reason(d,None,'single',tf,'dynamic',s['filters'],_with_halving_cfg(s['strategy_config'], get_halving_range_sync(symbol) if s['strategy_config'].get('halving_model_enabled') else None),None,live_price=live_price)
 
     close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
     adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
@@ -8858,6 +8936,21 @@ def process_command(cmd,chat_id,message_id=None):
         else:
             _cfg_p4['daily_p4_mode'] = True
             _p4_sync_tags(s)
+        save_session(chat_id)
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
+    if cl in ('/toggle_halving_model', '/halving_k_cycle', '/halving_depth_cycle', '/halving_major_cycle'):
+        _cfg_hv = s.setdefault('strategy_config', {})
+        if cl == '/toggle_halving_model':
+            _cfg_hv['halving_model_enabled'] = not bool(_cfg_hv.get('halving_model_enabled', False))
+        elif cl == '/halving_k_cycle':
+            _opts = (3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
+            _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
+        elif cl == '/halving_depth_cycle':
+            _opts = (8, 10, 12); _cur = int(_cfg_hv.get('halving_max_depth', 10))
+            _cfg_hv['halving_max_depth'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 10
+        else:
+            _opts = (0, 4, 5, 6); _cur = int(_cfg_hv.get('halving_max_trade_depth', 0))
+            _cfg_hv['halving_max_trade_depth'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 0
         save_session(chat_id)
         edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
     if cl == '/toggle_p4_reversal':

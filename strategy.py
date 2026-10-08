@@ -2,6 +2,12 @@ import re
 import pandas as pd
 import numpy as np
 
+from halving_levels import (
+    choose_depth as _hv_choose_depth, spacing_at as _hv_spacing_at,
+    levels_near as _hv_levels_near, cells_around as _hv_cells_around,
+    depth_label_fa as _hv_depth_label,
+)
+
 
 def compute_log_grid_levels(df, base_steps=20, lookback=None):
     """Build a correctly spaced log grid without anchoring it to stale extremes.
@@ -474,6 +480,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_trade_plan(df, signal, strategy_config=None, strategy_type="dynamic", strategy_timeframe="5min", grid_levels=None, setup_index=None, live_price=None):
+    if isinstance(strategy_config, dict) and strategy_config.get("halving_model_enabled") and strategy_config.get("halving_high") is not None:
+        return build_halving_trade_plan(df, signal, strategy_config, grid_levels=None, setup_index=setup_index, live_price=live_price)
     if strategy_type == "dynamic" and get_v2_config(strategy_config).get("v2_enabled", True):
         sig, plan, reason = _select_v2_setup(df, None, strategy_timeframe, FILTER_DEFAULTS, strategy_config, None, grid_levels, live_price=live_price)
         if sig == signal and plan:
@@ -782,6 +790,11 @@ def _all_active_levels_at(d, idx, pdh, pdl, cfg):
     فایر شده. Cluster را عمداً شامل نمی‌شود چون خودش ترکیبی از همین سطوح است."""
     enabled = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
     out = {}
+    if cfg.get("halving_model_enabled"):
+        _hv = _halving_plan_levels(d, idx, cfg)
+        if _hv and bool(cfg.get("halving_only_targets", True)):
+            return _hv      # مدل مستقل: هدف فقط از سطوح نصف‌کردن
+        out.update(_hv)
     if "Daily" in enabled and pdh is not None and pdl is not None:
         out["PDH"] = float(pdh)
         out["PDL"] = float(pdl)
@@ -818,8 +831,14 @@ for _hi, _lo, _fa_hi, _fa_lo in LEVEL_SETUP_DEFS.values():
     _LEVEL_TOKEN_FA[_lo] = _fa_lo
 
 
+_HV_KEY_RE = re.compile(r"^HV(\d+)@([0-9.eE+-]+)$")
+
+
 def level_token_label(token):
     """«سقف روز قبل (PDH)» - یا خود توکن اگر ناشناخته بود."""
+    _m = _HV_KEY_RE.match(str(token))
+    if _m:
+        return f"سطح نصف‌کردن {_hv_depth_label(int(_m.group(1)))} ({float(_m.group(2)):.6g})"
     fa = _LEVEL_TOKEN_FA.get(token)
     return f"{fa} ({token})" if fa else str(token)
 
@@ -843,7 +862,7 @@ def extract_sweep_target_name(reason):
 
 _SETUP_TAG_RE = re.compile(r"\[SETUP\s+([A-Za-z0-9]+)\]")
 _LEVEL_TOKEN_RE = re.compile(
-    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L|CLH|CLL|CRH|CRL|CSH|CSL)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
+    r"\b(PMH|PML|PWH|PWL|PDH|PDL|P4H|P4L|P1H|P1L|CLH|CLL|CRH|CRL|CSH|CSL|HVH|HVL)=([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
 )
 _LEVEL_TOKEN_TAG = {
     "PMH": "Monthly", "PML": "Monthly",
@@ -854,6 +873,7 @@ _LEVEL_TOKEN_TAG = {
     "CLH": "Cluster", "CLL": "Cluster",
     "CRH": "Cluster", "CRL": "Cluster",
     "CSH": "Cluster", "CSL": "Cluster",
+    "HVH": "Halving", "HVL": "Halving",
 }
 
 
@@ -2625,6 +2645,171 @@ def is_reversal_family_reason(reason):
     return any(marker in (reason or '') for marker in _REVERSAL_FAMILY_MARKERS)
 
 
+# ========================= HALVING MODEL (مدل سطوح نصف‌کردن) =========================
+# مدل مستقل با کلید جداگانه (halving_model_enabled). وقتی روشن است، سیگنال فقط از سطوح درخت
+# نصف‌کردنِ خطیِ سقف/کف تاریخی نماد می‌آید و هدف هم فقط از همین سطوح است؛ گیت P4 و سطوح
+# PDH/PDL/هفتگی/ماهانه روی آن اعمال نمی‌شود. عمق درخت بر اساس ATR تایم‌فریم تعیین می‌شود
+# (عمیق‌ترین عمقی که فاصله‌ی سطوح مجاور هنوز ≥ k×ATR باشد) تا روی ۵/۱۵ دقیقه سطوح خیلی گشاد نباشند.
+HALVING_DEFAULTS = {
+    "halving_model_enabled": False,
+    "halving_k_atr": 4.0,              # حداقل فاصله‌ی سطوح مجاور = k × ATR
+    "halving_min_depth": 3,
+    "halving_max_depth": 10,
+    "halving_zone_atr": 0.30,          # ضخامت ناحیه‌ی هر سطح (برای «برخورد بدون نفوذ») به ATR
+    "halving_max_trade_depth": 0,      # 0 = همه‌ی عمق‌ها؛ n = فقط سطوحی با عمق ≤ n معامله می‌شوند
+    "halving_only_targets": True,      # هدف فقط از سطوح نصف‌کردن
+    "halving_atr_smooth_candles": 200, # ATR هموار (میانه‌ی N کندل اخیر) تا عمق هر کندل جابه‌جا نشود
+}
+
+
+def _halving_cfg(strategy_config):
+    base = _cfg(strategy_config) if isinstance(strategy_config, dict) else {}
+    return {**HALVING_DEFAULTS, **STRATEGY_DEFAULTS, **base}
+
+
+def _halving_range(d, idx, cfg):
+    """(سقف، کف) تاریخی: مقدار داده‌شده از بات + کندل‌های موجود تا idx (فقط گذشته)."""
+    try:
+        hi = float(cfg.get("halving_high")); lo = float(cfg.get("halving_low"))
+    except (TypeError, ValueError):
+        return None, None
+    if not (np.isfinite(hi) and np.isfinite(lo)) or lo <= 0 or hi <= lo:
+        return None, None
+    try:
+        hh = float(pd.to_numeric(d["high"].iloc[:idx + 1], errors="coerce").max())
+        ll = float(pd.to_numeric(d["low"].iloc[:idx + 1], errors="coerce").min())
+        if np.isfinite(hh):
+            hi = max(hi, hh)
+        if np.isfinite(ll) and ll > 0:
+            lo = min(lo, ll)
+    except Exception:
+        pass
+    return hi, lo
+
+
+def _halving_atr(d, idx, cfg):
+    n = max(20, int(cfg.get("halving_atr_smooth_candles", 200)))
+    try:
+        seg = pd.to_numeric(d["atr"].iloc[max(0, idx - n + 1):idx + 1], errors="coerce").dropna()
+        seg = seg[seg > 0]
+        return float(seg.median()) if len(seg) else 0.0
+    except Exception:
+        return 0.0
+
+
+def _halving_context(d, idx, cfg, span_cells=4):
+    """درخت نصف‌کردن را در لحظه‌ی idx می‌سازد (فقط با داده‌ی تا idx): عمق انتخاب‌شده، فاصله،
+    سطوح نزدیک قیمت و سلول‌های اطراف قیمت مرجع (close کندل قبلِ idx). None اگر داده نبود."""
+    hi, lo = _halving_range(d, idx, cfg)
+    if hi is None:
+        return None
+    atr_s = _halving_atr(d, idx, cfg)
+    depth = _hv_choose_depth(hi, lo, atr_s, float(cfg.get("halving_k_atr", 4.0)),
+                             int(cfg.get("halving_min_depth", 3)), int(cfg.get("halving_max_depth", 10)))
+    step = _hv_spacing_at(hi, lo, depth)
+    ref = float(d["close"].iloc[idx - 1]) if idx >= 1 else float(d["close"].iloc[idx])
+    levels = _hv_levels_near(hi, lo, depth, ref - span_cells * step, ref + span_cells * step)
+    return {"high": hi, "low": lo, "depth": depth, "step": step, "atr": atr_s, "ref": ref,
+            "levels": levels, "cells": _hv_cells_around(levels, ref)}
+
+
+def _halving_plan_levels(d, idx, cfg):
+    """سطوح نصف‌کردن اطراف قیمت برای هدف‌گذاری: {'HV<depth>@<price>': price}."""
+    try:
+        ctx = _halving_context(d, idx, cfg, span_cells=6)
+    except Exception:
+        return {}
+    if not ctx:
+        return {}
+    return {f"HV{lv['depth']}@{lv['price']:.8g}": float(lv["price"]) for lv in ctx["levels"]}
+
+
+def _halving_depth_of(ctx, price):
+    best = min(ctx["levels"], key=lambda lv: abs(lv["price"] - price), default=None)
+    if best is None or abs(best["price"] - price) > max(1e-9 * abs(price), ctx["step"] * 0.02):
+        return None
+    return int(best["depth"])
+
+
+def strategy_halving(df, strategy_config=None, live_price=None):
+    """مدل مستقل سطوح نصف‌کردن. همان ۶ سناریوی PDH/PDL (برخورد/برگشت، شکست/ادامه، شکست کاذب)
+    روی سلول‌های (سقف، کف) درخت اجرا می‌شود. خروجی: (sig, reason)."""
+    cfg = _halving_cfg(strategy_config)
+    d, _pdh, _pdl = _compute_prev_day_levels(df)
+    if d is None:
+        return None, "داده کافی برای مدل نصف‌کردن نیست"
+    idx = len(d) - 2
+    if idx < 2:
+        return None, "داده کافی برای مدل نصف‌کردن نیست"
+    ctx = _halving_context(d, idx, cfg)
+    if ctx is None:
+        return None, "سقف/کف تاریخی نماد برای مدل نصف‌کردن در دسترس نیست"
+    atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
+    if not np.isfinite(atr) or atr <= 0:
+        return None, "ATR نامعتبر است"
+    cfg_run = {**cfg, "scenario_touch_tolerance_atr": float(cfg.get("halving_zone_atr", 0.30))}
+    require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
+    require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
+    allow_cont = bool(cfg.get("sweep_enable_retest_continuation", True))
+    max_depth_trade = int(cfg.get("halving_max_trade_depth", 0) or 0)
+
+    for cell in ctx["cells"]:
+        hi, lo = float(cell["hi"]["price"]), float(cell["lo"]["price"])
+        hi_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['hi']['depth'])})"
+        lo_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['lo']['depth'])})"
+        sig = reason = None
+        if allow_cont:
+            rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
+            if rsig and _scenario_enabled("continuation", rsig, cfg_run):
+                sig, reason = rsig, _tag_scenario(rreason, "continuation", rsig)
+        if not sig:
+            fsig, freason = _detect_failed_retest_reversal(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
+            if fsig and _scenario_enabled("fakeout", fsig, cfg_run):
+                sig, reason = fsig, _tag_scenario(freason, "fakeout", fsig)
+        if not sig:
+            ssig, sreason, _ = _detect_named_level_sweep(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label,
+                                                          cfg_run, require_reclaim, require_reversal)
+            if ssig and bool(cfg_run.get("scenario_precision_v2", True)):
+                _pen = atr * max(0.0, float(cfg_run.get("scenario_penetration_min_atr", 0.10)))
+                _n = max(0, int(cfg_run.get("scenario_fakeout_max_gap_candles", 0))) + 1
+                if ssig == "SELL" and _recent_close_beyond(d, idx, hi, "UP", _pen, _n):
+                    ssig = None
+                elif ssig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
+                    ssig = None
+            if ssig and _scenario_enabled("simple", ssig, cfg_run):
+                sig, reason = ssig, _tag_scenario(sreason, "simple", ssig)
+        if not sig:
+            continue
+
+        anchor, _tgt = extract_sweep_anchor_target(reason)
+        a_depth = _halving_depth_of(ctx, anchor) if anchor is not None else None
+        if max_depth_trade > 0 and a_depth is not None and a_depth > max_depth_trade:
+            continue   # فقط سطوح اصلی (کم‌عمق) معامله می‌شوند
+        # گارد تعقیب قیمت: اگر قیمت زنده از سطح خیلی دور شده، ورود ممنوع
+        try:
+            lp = float(live_price) if live_price is not None else float(d.iloc[idx]["close"])
+        except Exception:
+            lp = float(d.iloc[idx]["close"])
+        if anchor is not None and np.isfinite(lp) and lp > 0:
+            max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
+            if (sig == "BUY" and lp > anchor + max_dist) or (sig == "SELL" and lp < anchor - max_dist):
+                continue
+        extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}"
+        return sig, tag_setup_reason("Halving", f"{reason}{extra}")
+
+    return None, (f"مدل نصف‌کردن: ستاپی روی سطوح ثبت نشد (عمق درخت {ctx['depth']}، "
+                  f"فاصله‌ی سطوح {ctx['step']:.6g})")
+
+
+def build_halving_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None):
+    """طرح معامله‌ی مدل نصف‌کردن: همان پلنر Sweep با SL از extreme کندل و TP = نزدیک‌ترین سطح
+    نصف‌کردن در مسیر (گیت R:R بات هم سر جایش). شبکه‌ی لگاریتمی و مدل P4 عمداً خاموش‌اند."""
+    cfg_in = dict(_cfg(strategy_config) or {})
+    cfg_in.update({"halving_model_enabled": True, "daily_p4_mode": False})
+    return build_sweep_trade_plan(df, signal, cfg_in, grid_levels=None,
+                                  setup_index=setup_index, live_price=live_price)
+
+
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None):
     """تنها دو مسیر معاملاتی وجود دارد (V3.19): Liquidity Sweep پنج‌سطحی روی ۵/۱۵ دقیقه
     (از طریق strategy_dynamic_v2 -> _select_v2_setup -> _select_enhanced_v1_setup) و
@@ -2633,6 +2818,8 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     می‌شود تا اگر جایی (مثلاً backtest.py) هنوز مقدار قدیمی پاس بدهد خطا نگیرد."""
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
+    if isinstance(strategy_config, dict) and strategy_config.get("halving_model_enabled"):
+        return strategy_halving(df_primary, strategy_config, live_price=live_price)
     cfg_top = get_v2_config(strategy_config)
     if timeframe in ("1h", "4h", "1hour", "4hour"):
         if not bool(cfg_top.get("strategy_htf_reversal_enabled", True)):
