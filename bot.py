@@ -61,7 +61,44 @@ from ui import (
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN', '').strip()
 MINIAPP_BASE_URL = os.environ.get('MINIAPP_BASE_URL', '').strip().rstrip('/')
 PORT = int(os.environ.get('PORT', '10000'))
-DB_PATH = os.environ.get('BOT_DB_PATH', 'trader_bot.sqlite3')
+def _resolve_db_path():
+    """V3.43.16: مسیر دیتابیس.
+    ۱) اگر BOT_DB_PATH تنظیم شده باشد همان.
+    ۲) وگرنه پوشه‌ی هم‌سطح پروژه (مثلاً /root/trader_bot_data) - بیرون از پوشه‌ی گیت، تا git reset/pull/clone
+       و آپلود فایل‌های جدید هیچ‌وقت دیتابیس (پوزیشن‌ها و تاریخچه) را پاک نکند.
+    ۳) اگر ساخت آن پوشه ممکن نبود، همان مسیر قدیمی کنار برنامه.
+    اگر دیتابیس قدیمی کنار برنامه بود و مسیر جدید خالی بود، یک‌بار به مسیر جدید کپی می‌شود."""
+    explicit = os.environ.get('BOT_DB_PATH', '').strip()
+    if explicit:
+        return explicit
+    legacy = 'trader_bot.sqlite3'
+    try:
+        base = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.normpath(os.path.join(base, '..', 'trader_bot_data'))
+        os.makedirs(data_dir, exist_ok=True)
+        probe = os.path.join(data_dir, '.write_test')
+        with open(probe, 'w') as f:
+            f.write('ok')
+        os.remove(probe)
+        new_path = os.path.join(data_dir, 'trader_bot.sqlite3')
+        legacy_abs = os.path.join(base, legacy)
+        if (not os.path.exists(new_path) or os.path.getsize(new_path) == 0) \
+                and os.path.exists(legacy_abs) and os.path.getsize(legacy_abs) > 0:
+            import sqlite3 as _sq
+            src = _sq.connect(legacy_abs); dst = _sq.connect(new_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close(); src.close()
+        return new_path
+    except Exception:
+        return legacy
+
+
+DB_PATH = _resolve_db_path()
+DB_BACKUP_INTERVAL_SECONDS = max(600, int(os.environ.get('BOT_DB_BACKUP_INTERVAL_SECONDS', str(3 * 3600))))
+DB_BACKUP_KEEP = max(3, int(os.environ.get('BOT_DB_BACKUP_KEEP', '30')))
+DB_AUTORESTORE = os.environ.get('BOT_DB_AUTORESTORE', '1').strip() not in ('0', 'false', 'False', 'no')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
 NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
@@ -434,6 +471,78 @@ def db_connect():
     return sqlite3.connect(DB_PATH, timeout=15)
 
 
+def _db_backup_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'backups')
+
+
+def _db_sessions_count(path):
+    try:
+        c = sqlite3.connect(path, timeout=15)
+        try:
+            return int(c.execute('SELECT COUNT(*) FROM sessions').fetchone()[0])
+        finally:
+            c.close()
+    except Exception:
+        return 0
+
+
+def backup_db_now(reason='periodic'):
+    """نسخه‌ی پشتیبان سازگار (SQLite backup API) در پوشه‌ی backups کنار دیتابیس. فقط وقتی دیتابیس سشن دارد."""
+    try:
+        if not os.path.exists(DB_PATH) or _db_sessions_count(DB_PATH) <= 0:
+            return None
+        os.makedirs(_db_backup_dir(), exist_ok=True)
+        dst_path = os.path.join(_db_backup_dir(), 'trader_bot_%s.sqlite3' % datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S'))
+        src = sqlite3.connect(DB_PATH, timeout=15); dst = sqlite3.connect(dst_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close(); src.close()
+        files = sorted(f for f in os.listdir(_db_backup_dir()) if f.startswith('trader_bot_') and f.endswith('.sqlite3'))
+        for old_f in files[:-DB_BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(_db_backup_dir(), old_f))
+            except OSError:
+                pass
+        logger.info('بکاپ دیتابیس ساخته شد (%s): %s', reason, dst_path)
+        return dst_path
+    except Exception:
+        logger.exception('db backup failed')
+        return None
+
+
+_DB_LAST_BACKUP_TS = 0.0
+
+
+def maybe_backup_db():
+    global _DB_LAST_BACKUP_TS
+    if time.time() - _DB_LAST_BACKUP_TS >= DB_BACKUP_INTERVAL_SECONDS:
+        _DB_LAST_BACKUP_TS = time.time()
+        backup_db_now('periodic')
+
+
+def restore_db_from_latest_backup_if_empty():
+    """اگر دیتابیس فعلی هیچ سشنی ندارد (مثلاً با یک فایل خالی جایگزین شده) و بکاپی با سشن وجود دارد،
+    آخرین بکاپ سالم برگردانده می‌شود. خاموش‌کردن: BOT_DB_AUTORESTORE=0."""
+    try:
+        if not DB_AUTORESTORE or _db_sessions_count(DB_PATH) > 0 or not os.path.isdir(_db_backup_dir()):
+            return False
+        files = sorted((f for f in os.listdir(_db_backup_dir()) if f.startswith('trader_bot_') and f.endswith('.sqlite3')), reverse=True)
+        for f in files:
+            bpath = os.path.join(_db_backup_dir(), f)
+            if _db_sessions_count(bpath) > 0:
+                src = sqlite3.connect(bpath, timeout=15); dst = sqlite3.connect(DB_PATH, timeout=15)
+                try:
+                    src.backup(dst)
+                finally:
+                    dst.close(); src.close()
+                logger.warning('دیتابیس خالی بود؛ از آخرین بکاپ سالم برگردانده شد: %s', bpath)
+                return True
+    except Exception:
+        logger.exception('db auto-restore failed')
+    return False
+
+
 def init_db():
     db_existed_before = os.path.exists(DB_PATH)
     with DB_LOCK:
@@ -486,8 +595,8 @@ def init_db():
             conn.commit()
         finally:
             conn.close()
-    if not os.environ.get('BOT_DB_PATH', '').strip():
-        logger.warning('هشدار ماندگاری داده: BOT_DB_PATH تنظیم نشده؛ دیتابیس روی مسیر پیش‌فرض محلی (%s) ذخیره می‌شود.', DB_PATH)
+    restore_db_from_latest_backup_if_empty()
+    logger.info('مسیر دیتابیس: %s', DB_PATH)
     if not db_existed_before:
         logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
 
@@ -4028,6 +4137,50 @@ def compute_trade_setup_levels(df, tf, trade):
     return d, pdh, pdl, setup_tag, setup_level_name, setup_level_value
 
 
+_HV_TRADE_RE = re.compile(r'\b(?:HVH|HVL)=|HVTREE=|\[SETUP Halving')
+
+
+def _is_halving_trade(trade):
+    """معامله‌ای که از مدل سطوح نصف‌کردن آمده (در reason نشانه‌ی HVH/HVL/HVTREE دارد)."""
+    try:
+        return bool(_HV_TRADE_RE.search(str(trade.get('entry_reason') or trade.get('signal_reason') or '')))
+    except Exception:
+        return False
+
+
+def compute_halving_chart_levels(symbol, df, trade, price_lo, price_hi, max_levels=9):
+    """سطوح درخت نصف‌کردن اطراف قیمت برای رسم روی کارت/چارت: [(price, depth)] (نزدیک‌ترین‌ها به ورود).
+    عمق درخت از HVTREE داخل reason خوانده می‌شود (همان عمقی که سیگنال با آن صادر شد)؛ اگر نبود از ATR تخمین زده می‌شود."""
+    try:
+        from halving_levels import levels_near as _ln, choose_depth as _cd
+        rng = get_halving_range_sync(symbol)
+        if not rng:
+            return []
+        hi, lo = float(rng[0]), float(rng[1])
+        reason = str(trade.get('entry_reason') or trade.get('signal_reason') or '')
+        m = re.search(r'HVTREE=(\d+)', reason)
+        if m:
+            depth = int(m.group(1))
+        else:
+            h = pd.to_numeric(df['high'], errors='coerce'); l = pd.to_numeric(df['low'], errors='coerce')
+            c = pd.to_numeric(df['close'], errors='coerce')
+            tr = pd.concat([(h - l), (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+            atr = float(tr.tail(200).median())
+            depth = _cd(hi, lo, atr, 3.0)
+        lv = _ln(hi, lo, depth, float(price_lo), float(price_hi))
+        ref = float(trade.get('entry_price') or 0)
+        lv.sort(key=lambda x: abs(x['price'] - ref))
+        lv = sorted(lv[:max_levels], key=lambda x: x['price'])
+        return [(float(x['price']), int(x['depth'])) for x in lv]
+    except Exception:
+        logger.exception('halving chart levels failed symbol=%s', symbol)
+        return []
+
+
+def _hv_level_label(depth):
+    return 'HV top/bottom' if int(depth) == 0 else f'HV d{int(depth)}'
+
+
 def render_trade_chart_png(symbol, df, trade):
     """چارت PNG معامله (کندل‌ها + ENTRY/TP/SL + سطح ستاپ). هم برای پوزیشن باز‌شده و هم برای
     سیگنال منتظر تایید (trade['assist_pending']=True) استفاده می‌شود. خروجی: (BytesIO, ctx) یا (None, None)."""
@@ -4037,6 +4190,16 @@ def render_trade_chart_png(symbol, df, trade):
         tf = trade.get('timeframe', '5min')
         tf_label = TF_DISPLAY.get(tf, tf)
         d, pdh, pdl, setup_tag, setup_level_name, setup_level_value = compute_trade_setup_levels(df, tf, trade)
+        # V3.43.16: معامله‌ی مدل نصف‌کردن → کارت بر اساس سطوح جدید (نه PDH/PDL): سطح ورود + سطوح نصف‌کردن اطراف، در همه‌ی تایم‌فریم‌ها
+        _hv_mode = _is_halving_trade(trade)
+        if _hv_mode:
+            pdh = pdl = None
+            if setup_level_value is None:
+                _t, _tok, _val = extract_setup_level(trade.get('entry_reason') or trade.get('signal_reason') or '')
+                if _tok is not None:
+                    setup_level_name, setup_level_value = _tok, float(_val)
+            if setup_tag is None:
+                setup_tag = 'Halving'
 
         fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
         fig.patch.set_facecolor('#0f172a')
@@ -4066,7 +4229,18 @@ def render_trade_chart_png(symbol, df, trade):
             (tp, '#22c55e', 'TP', '--', 2.0),
             (sl, '#ef4444', 'SL', '--', 2.0),
         ]
-        if setup_level_name is not None and setup_level_value is not None:
+        if _hv_mode:
+            _ymin0 = float(d['low'].min()); _ymax0 = float(d['high'].max())
+            _lo_b = min(_ymin0, sl, tp); _hi_b = max(_ymax0, sl, tp)
+            _pad0 = max((_hi_b - _lo_b) * 0.08, abs(entry) * 0.002)
+            _skip = [v for v in (entry, tp, sl, setup_level_value) if v is not None]
+            for _pr, _dp in compute_halving_chart_levels(symbol, df, trade, _lo_b - _pad0, _hi_b + _pad0):
+                if any(abs(_pr - v) <= max(1e-9 * abs(v), 1e-12) * 10 for v in _skip):
+                    continue
+                levels.append((_pr, '#8b5cf6', _hv_level_label(_dp), ':', 1.0))
+            if setup_level_value is not None:
+                levels.append((float(setup_level_value), '#f97316', 'ENTRY LEVEL', ':', 1.8))
+        elif setup_level_name is not None and setup_level_value is not None:
             # فقط سطحی که واقعاً معامله روی آن باز شده رسم می‌شود (Daily/1h/4h/Weekly/Monthly)،
             # نه همیشه PDH/PDL پیش‌فرض.
             levels.append((float(setup_level_value), '#f97316', setup_level_name, ':', 1.6))
@@ -5792,6 +5966,10 @@ def _profit_lock_loop():
             four_h_close_alert_scan_once()
         except Exception:
             logger.exception('4h close alert loop failed')
+        try:
+            maybe_backup_db()
+        except Exception:
+            logger.exception('db backup loop failed')
         try:
             profit_lock_scan_once()
         except Exception:
@@ -9231,7 +9409,7 @@ def process_command(cmd,chat_id,message_id=None):
             _cfg_hv['halving_model_enabled'] = not bool(_cfg_hv.get('halving_model_enabled', False))
             s['setup_legacy_view'] = False
         elif cl == '/halving_k_cycle':
-            _opts = (3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
+            _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
         elif cl == '/halving_depth_cycle':
             _opts = (8, 10, 12); _cur = int(_cfg_hv.get('halving_max_depth', 10))
@@ -10748,6 +10926,26 @@ def miniapp_api_data():
                     levels.append({'name': 'PDL', 'value': round(float(pdl), 8)})
         except Exception:
             logger.exception('miniapp setup level compute failed symbol=%s', symbol)
+        # V3.43.16: معامله‌ی مدل نصف‌کردن → همان سطوح جدیدِ کارت تصویری (نه PDH/PDL)
+        try:
+            if _is_halving_trade(pos):
+                levels = []
+                _e = float(pos['entry_price']); _s = float(pos['sl']); _t = float(pos['tp'])
+                _lo_b = min(float(df['low'].min()), _s, _t); _hi_b = max(float(df['high'].max()), _s, _t)
+                _pad0 = max((_hi_b - _lo_b) * 0.08, abs(_e) * 0.002)
+                _skip = [_e, _s, _t]
+                _tok = extract_setup_level(pos.get('entry_reason') or pos.get('signal_reason') or '')[2]
+                if _tok is not None:
+                    _skip.append(float(_tok))
+                for _pr, _dp in compute_halving_chart_levels(symbol, df, pos, _lo_b - _pad0, _hi_b + _pad0):
+                    if any(abs(_pr - v) <= max(1e-9 * abs(v), 1e-12) * 10 for v in _skip):
+                        continue
+                    levels.append({'name': _hv_level_label(_dp), 'value': round(_pr, 8)})
+                if _tok is not None:
+                    levels.append({'name': 'ENTRY LEVEL', 'value': round(float(_tok), 8)})
+                position['setup_tag'] = position.get('setup_tag') or 'Halving'
+        except Exception:
+            logger.exception('miniapp halving levels failed symbol=%s', symbol)
     return {'symbol': symbol, 'candles': candles, 'position': position, 'levels': levels}, 200
 
 
