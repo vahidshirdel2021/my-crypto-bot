@@ -4297,6 +4297,10 @@ def _blk(chat_id, reason):
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
+    # V3.43.15: ۳۰ دقیقه‌ی آخر کندل ۴ ساعته - هیچ معامله‌ای باز نمی‌شود (حتی force/دستی/دستیار)
+    _blocked_4h, _rem_4h = four_h_close_block_active(s)
+    if _blocked_4h:
+        return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
     # لایه V1.5 Enhanced Selection رشته دلیل را با فرمت انگلیسی «Quality XX/100»
@@ -5557,9 +5561,11 @@ def profit_lock_scan_once():
 
 
 # V3.42: هشدار سود - وقتی سود لحظه‌ای (ناخالص، همان فرمول «سود/زیان فعلی») یک پوزیشن باز به
-# PROFIT_ALERT_USDT دلار و هر مضرب بعدی آن (۴، ۸، ۱۲، ...) برسد، برای هر پله یک‌بار پیام می‌فرستد. مستقل از «قفل سود» است و چیزی را نمی‌بندد.
+# PROFIT_ALERT_USDT دلار و هر مضرب بعدی آن (۵، ۱۰، ۱۵، ...) برسد، برای هر پله یک‌بار پیام می‌فرستد. مستقل از «قفل سود» است و چیزی را نمی‌بندد.
 # PROFIT_ALERT_USDT=0 آن را کاملاً خاموش می‌کند؛ کلید روشن/خاموش هم در منوی «مدیریت خروج» هست.
-PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '4')))
+PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '5')))
+# V3.43.15: دکمه‌های زیر هشدار سود (بستن ۵۰/۷۵/۱۰۰٪) تا این مدت (ثانیه) روی پیام می‌مانند؛ بعد پیام حذف می‌شود.
+PROFIT_ALERT_BUTTONS_TTL = max(60, int(os.environ.get('PROFIT_ALERT_BUTTONS_TTL', '1800')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -5584,6 +5590,77 @@ def _fade_indicator_lines(s, p):
         return [head] + [f"   - {r}" for r in list(wreasons)[:3]]
     except Exception:
         return []
+
+
+def _profit_alert_markup(symbol):
+    """V3.43.15: سه دکمه‌ی زیر هشدار سود: بستن ۵۰٪ / ۷۵٪ / ۱۰۰٪ از معامله."""
+    sym = str(symbol).upper()
+    return {'inline_keyboard': [[
+        {'text': '🔸 بستن ۵۰٪ معامله', 'callback_data': f'/pclose_50_{sym}'},
+        {'text': '🔸 بستن ۷۵٪ معامله', 'callback_data': f'/pclose_75_{sym}'},
+    ], [
+        {'text': '🔴 بستن ۱۰۰٪ معامله', 'callback_data': f'/pclose_100_{sym}'},
+    ]]}
+
+
+def _send_profit_alert_with_buttons(chat_id, symbol, text):
+    """هشدار سود را با دکمه‌های بستن می‌فرستد. پیام به‌جای ۳ دقیقه، PROFIT_ALERT_BUTTONS_TTL ثانیه می‌ماند
+    تا کاربر وقت کافی برای زدن دکمه داشته باشد."""
+    if not is_allowed(chat_id):
+        return False
+    res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown',
+                             'reply_markup': _profit_alert_markup(symbol)}, 10)
+    ok = bool(res and res.get('ok'))
+    if ok:
+        _mid = (res.get('result') or {}).get('message_id')
+        if _mid:
+            schedule_auto_delete(chat_id, _mid, ttl=PROFIT_ALERT_BUTTONS_TTL)
+    return ok
+
+
+def handle_profit_alert_close(chat_id, pct, symbol):
+    """کلیک روی دکمه‌ی هشدار سود: بستن pct درصد از «باقی‌ماندهی» پوزیشن (۵۰/۷۵/۱۰۰)."""
+    s = get_session(chat_id)
+    sym = str(symbol).upper()
+    p = next((x for x in s['paper_positions'] if x.get('symbol') == sym), None)
+    back = {'inline_keyboard': [[{'text': '📂 نمایش پوزیشن‌های باز', 'callback_data': '/positions'}]]}
+    if not p:
+        send_message(chat_id, f'ℹ️ پوزیشن `{sym}` دیگر باز نیست (قبلاً بسته شده).', back)
+        return
+    if pct >= 100:
+        ok = close_position(chat_id, p, reason=f'بستن ۱۰۰٪ از دکمه‌ی هشدار سود')
+        if not ok:
+            send_message(chat_id, f'❌ بستن `{sym}` انجام نشد.', back)
+        return
+    if p.get('is_real'):
+        send_message(chat_id, f'⚠️ بستن بخشی از پوزیشن *REAL* فعلاً پشتیبانی نمی‌شود. برای `{sym}` فقط «بستن ۱۰۰٪» را بزنید.', back)
+        return
+    price = latest_price(sym)
+    if not price:
+        send_message(chat_id, f'❌ قیمت لحظه‌ای `{sym}` دریافت نشد؛ دوباره امتحان کنید.', back)
+        return
+    cur_margin = float(p.get('margin') or 0)
+    orig_margin = float(p.get('orig_margin') or cur_margin)
+    if cur_margin <= 0 or orig_margin <= 0:
+        send_message(chat_id, f'❌ مارجین پوزیشن `{sym}` نامعتبر است.', back)
+        return
+    frac_orig = (pct / 100.0) * (cur_margin / orig_margin)   # partial_close_position سهم را از مارجین «اولیه» حساب می‌کند
+    if not p.get('orig_margin'):
+        p['orig_margin'] = orig_margin
+    ok = partial_close_position(chat_id, p, float(price), frac_orig, f'دستی از هشدار سود ({pct}٪)')
+    if not ok:
+        send_message(chat_id, f'❌ بستن {pct}٪ از `{sym}` انجام نشد (حجم باقی‌مانده خیلی کم است؛ «بستن ۱۰۰٪» را بزنید).', back)
+        return
+    # آستانه‌های هشدار سود/ضعف را نسبت به حجم باقی‌مانده دوباره تنظیم کن تا هشدار تکراری/کاذب نیاید
+    try:
+        _pnl_now = _profit_lock_pnl(p, float(price))
+        if _pnl_now is not None and PROFIT_ALERT_USDT > 0:
+            p['profit_peak_pnl'] = max(0.0, float(_pnl_now))
+            p['profit_alert_level'] = math.floor(max(0.0, _pnl_now) / PROFIT_ALERT_USDT + 1e-9) * PROFIT_ALERT_USDT
+            p.pop('profit_fade_alert_peak', None)
+        save_session(chat_id)
+    except Exception:
+        logger.exception('profit alert rebase failed')
 
 
 def profit_alert_scan_once():
@@ -5647,12 +5724,62 @@ def profit_alert_scan_once():
                                 f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`\n"
                                 f"سود ناخالص (بدون کارمزد) است و پوزیشن همچنان باز است."
                             )
-                            send_message(chat_id, msg)
+                            _send_profit_alert_with_buttons(chat_id, p['symbol'], msg)
                             save_session(chat_id)
                 except Exception:
                     logger.exception('profit alert failed chat=%s symbol=%s', chat_id, p.get('symbol'))
         except Exception:
             logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'profit_alert_scan_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
+
+
+# V3.43.15: ۳۰ دقیقه‌ی آخر هر کندل ۴ ساعته (مرز کندل‌ها: مضرب ۴ ساعت از epoch-UTC، مثل بایننس/کوینکس) ورود جدید ممنوع است
+# و یک هشدار برای کاربر می‌آید. کلید روشن/خاموش: «شرایط ورود» ← «بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته».
+FOUR_H_CLOSE_BLOCK_MINUTES = max(0.0, float(os.environ.get('FOUR_H_CLOSE_BLOCK_MINUTES', '30')))
+_FOUR_H_SECONDS = 4 * 3600
+
+
+def minutes_to_4h_close(now_ts=None):
+    """چند دقیقه تا بسته‌شدن کندل ۴ ساعته‌ی جاری مانده (۰ تا ۲۴۰)."""
+    t = float(time.time() if now_ts is None else now_ts)
+    return (_FOUR_H_SECONDS - (t % _FOUR_H_SECONDS)) / 60.0
+
+
+def four_h_close_block_active(s, now_ts=None):
+    """(فعال؟, دقیقه‌ی باقی‌مانده). فعال یعنی کلید روشن است و در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته هستیم."""
+    if FOUR_H_CLOSE_BLOCK_MINUTES <= 0 or not gate_on(s, 'gate_4h_close_block_enabled'):
+        return False, minutes_to_4h_close(now_ts)
+    rem = minutes_to_4h_close(now_ts)
+    return rem < FOUR_H_CLOSE_BLOCK_MINUTES, rem
+
+
+def _tehran_hhmm(ts):
+    return datetime.fromtimestamp(ts + 3.5 * 3600, tz=timezone.utc).strftime('%H:%M')
+
+
+def four_h_close_alert_scan_once():
+    """وقتی وارد ۳۰ دقیقه‌ی آخر کندل ۴ ساعته شدیم، برای هر کاربرِ فعال یک‌بار (به‌ازای هر کندل) هشدار می‌فرستد."""
+    now = time.time()
+    rem = minutes_to_4h_close(now)
+    if FOUR_H_CLOSE_BLOCK_MINUTES <= 0 or rem >= FOUR_H_CLOSE_BLOCK_MINUTES:
+        return
+    candle_key = int(now // _FOUR_H_SECONDS)
+    close_ts = (candle_key + 1) * _FOUR_H_SECONDS
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not s.get('is_bot_active') or not gate_on(s, 'gate_4h_close_block_enabled'):
+                continue
+            if s.get('cg4h_alert_key') == candle_key:
+                continue
+            s['cg4h_alert_key'] = candle_key
+            send_message(chat_id, (
+                f"⏳ *هشدار: ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته*\n"
+                f"• تا بسته شدن کندل حدود `{rem:.0f}` دقیقه مانده (بسته شدن: `{_tehran_hhmm(close_ts)}` به وقت ایران / `{datetime.fromtimestamp(close_ts, tz=timezone.utc).strftime('%H:%M')}` UTC).\n"
+                f"• تا شروع کندل جدید *هیچ معامله‌ی جدیدی باز نمی‌شود* (سیگنال‌ها و ورود دستی هم مسدودند).\n"
+                f"• معامله‌های باز مثل قبل مدیریت می‌شوند."
+            ))
+            save_session(chat_id)
+        except Exception:
+            logger.exception('4h close alert failed chat=%s', chat_id)
 
 
 def _profit_lock_loop():
@@ -5661,6 +5788,10 @@ def _profit_lock_loop():
             profit_alert_scan_once()
         except Exception:
             logger.exception('profit alert loop failed')
+        try:
+            four_h_close_alert_scan_once()
+        except Exception:
+            logger.exception('4h close alert loop failed')
         try:
             profit_lock_scan_once()
         except Exception:
@@ -7836,6 +7967,7 @@ GATE_REGISTRY = {
     'htf_trend_filter_enabled':   ('همسو بودن با روند بزرگ‌تر (چارت ۴ ساعته)', False, 'entry', 'اگر روند چارت ۴ ساعته نزولی است، ربات خرید نمی‌کند؛ اگر صعودی است، فروش نمی‌کند. وقتی روند مشخص نیست، هر دو مجازند.'),
     'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
+    'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', True, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
@@ -9296,6 +9428,13 @@ def process_command(cmd,chat_id,message_id=None):
             if p['symbol']==sym:
                 send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym, p.get('timeframe','5min')), p.get('timeframe','5min'))); return
         send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl.startswith('/pclose_'):
+        _m = re.match(r'^/pclose_(50|75|100)_(.+)$', cl)
+        if _m:
+            handle_profit_alert_close(chat_id, int(_m.group(1)), _m.group(2))
+        else:
+            send_message(chat_id, '❌ دستور بستن نامعتبر است.')
+        return
     if cl.startswith('/close_prompt_'):
         sym=cl.replace('/close_prompt_','').upper()
         for p in s['paper_positions']:
