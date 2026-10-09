@@ -153,20 +153,13 @@ SETUP_TAG_CALLBACK = {
 }
 
 
-def get_setup_management_keyboard(session=None):
-    s = session or {}
+def _legacy_setup_rows(s):
+    """دکمه‌های مدل‌های قدیمی (PDH/PDL+P4، ستاپ برگشت P4 و تگ‌های سطوح)."""
     enabled = set(s.get("enabled_setup_tags") or SETUP_TAG_ORDER)
-    rows = []
     _cfg_ui = s.get("strategy_config") or {}
     daily_only = bool(_cfg_ui.get("daily_p4_mode", True))
     p4_rev_on = bool(_cfg_ui.get("p4_reversal_enabled", False))
-    hv_on = bool(_cfg_ui.get("halving_model_enabled", False))
-    rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
-    if hv_on:
-        _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
-        rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
-        rows.append([{"text": f"سقف عمق درخت: {_md}", "callback_data": "/halving_depth_cycle"}])
-        rows.append([{"text": f"فقط سطوح اصلی: {'همه‌ی عمق‌ها' if _mt == 0 else 'تا عمق ' + str(_mt)}", "callback_data": "/halving_major_cycle"}])
+    rows = []
     rows.append([{"text": f"{'🟢' if daily_only else '🔴'} مدل PDH/PDL + P4 (۳ حالت)", "callback_data": "/toggle_p4_model"}])
     if daily_only:
         rows.append([{"text": f"{'🟢' if p4_rev_on else '🔴'} ستاپ برگشت P4 (داخل رنج روزانه)", "callback_data": "/toggle_p4_reversal"}])
@@ -179,6 +172,30 @@ def get_setup_management_keyboard(session=None):
             # مدل PDH/PDL+P4: فقط Daily روشن و قفل است؛ بقیه‌ی سطوح برای معامله خاموش‌اند
             icon = "🟢🔒" if tag == "Daily" else "🔒"
         rows.append([{"text": f"{icon} {SETUP_TAG_LABELS[tag]}", "callback_data": SETUP_TAG_CALLBACK[tag]}])
+    return rows
+
+
+def get_setup_management_keyboard(session=None):
+    s = session or {}
+    rows = []
+    _cfg_ui = s.get("strategy_config") or {}
+    hv_on = bool(_cfg_ui.get("halving_model_enabled", False))
+    legacy_view = bool(s.get("setup_legacy_view", False))
+    if hv_on and legacy_view:
+        # زیرمنوی «سطوح قدیمی»: فقط وقتی مدل نصف‌کردن خاموش شود روی معامله اثر دارند
+        rows.extend(_legacy_setup_rows(s))
+        rows.append([{"text": "🔙 بازگشت به مدیریت ستاپ‌ها", "callback_data": "/setup_management"}])
+        rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
+        return {"inline_keyboard": rows}
+    rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
+    if hv_on:
+        _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
+        rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
+        rows.append([{"text": f"سقف عمق درخت: {_md}", "callback_data": "/halving_depth_cycle"}])
+        rows.append([{"text": f"فقط سطوح اصلی: {'همه‌ی عمق‌ها' if _mt == 0 else 'تا عمق ' + str(_mt)}", "callback_data": "/halving_major_cycle"}])
+        rows.append([{"text": "📦 سطوح قدیمی (PDH/PDL، P4 و ...)", "callback_data": "/setup_legacy"}])
+    else:
+        rows.extend(_legacy_setup_rows(s))
     rows.append([{"text": "🔙 بازگشت", "callback_data": "/menu_settings"}])
     rows.append([{"text": "🏠 منوی اصلی", "callback_data": "/menu"}])
     return {"inline_keyboard": rows}

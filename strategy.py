@@ -2408,9 +2408,21 @@ QUICK_TRADE_MIN_SL_ATR = 1.0   # کف فاصله‌ی استاپ (ATR) تا اس
 QUICK_TRADE_TP_BUFFER_ATR = 0.10  # هدف کمی قبل از سطح مقابل بسته می‌شود، نه دقیقاً روی آن
 
 
-def _quick_opposing_levels(df, entry, is_long, grid_levels=None):
+def _quick_opposing_levels(df, entry, is_long, grid_levels=None, cfg=None):
     """سطوح مقابلِ مسیر معامله: PDH/PDL و سقف/کف ۱س/۴س/هفته/ماه قبل + سطوح شبکه‌ی لگاریتمی.
+    وقتی مدل نصف‌کردن روشن (و سقف/کف تاریخی در cfg) باشد، فقط سطوح درخت نصف‌کردن برمی‌گردد.
     خروجی: لیست (قیمت، نام فارسی سطح)."""
+    if isinstance(cfg, dict) and cfg.get("halving_model_enabled") and cfg.get("halving_high") is not None \
+            and bool(cfg.get("halving_only_targets", True)):
+        try:
+            d_h, _a, _b = _compute_prev_day_levels(df)
+            if d_h is not None:
+                hv = _halving_plan_levels(d_h, len(d_h) - 2, _halving_cfg(cfg))
+                if hv:
+                    return [(float(p_), level_token_label(k_)) for k_, p_ in hv.items()
+                            if np.isfinite(p_) and ((p_ > entry) if is_long else (p_ < entry))]
+        except Exception:
+            pass
     items = []
     try:
         d, pdh, pdl = _compute_prev_day_levels(df)
@@ -2484,13 +2496,16 @@ def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, l
     tp_source = f"{target_rr:.2f}R"
 
     tp_level_name = f"بدون سطح مشخص - هدف {target_rr:.2f}R"
-    candidates = sorted((abs(p - entry), n) for p, n in _quick_opposing_levels(df, entry, is_long, grid_levels))
+    candidates = sorted((abs(p - entry), n) for p, n in _quick_opposing_levels(df, entry, is_long, grid_levels, cfg))
     buf = atr * QUICK_TRADE_TP_BUFFER_ATR
+    # مدل نصف‌کردن: هدف = نزدیک‌ترین سطح معتبر درخت (حتی اگر دورتر از R ثابت باشد)، نه R ثابت
+    _hv_targets = bool(cfg.get("halving_model_enabled") and cfg.get("halving_high") is not None
+                       and cfg.get("halving_only_targets", True))
     for gap, lvl_name in candidates:
         capped_gap = gap - buf
         if capped_gap / dist < min_rr:
             continue          # این سطح خیلی نزدیک است؛ سراغ سطح بعدی
-        if capped_gap < abs(tp - entry):
+        if _hv_targets or capped_gap < abs(tp - entry):
             tp = entry + direction * capped_gap
             tp_source = "قبل از سطح مقابل"
             tp_level_name = f"قبل از {lvl_name}"
@@ -2729,6 +2744,24 @@ def _halving_depth_of(ctx, price):
     if best is None or abs(best["price"] - price) > max(1e-9 * abs(price), ctx["step"] * 0.02):
         return None
     return int(best["depth"])
+
+
+def _halving_cells_named(ctx):
+    """سلول‌های اطراف قیمت مرجع با نام پایدار: Halving (سلولِ شامل قیمت)، HalvingUp (بالاتر)، HalvingDn (پایین‌تر).
+    هر سلول {'hi': {price, depth}, 'lo': {price, depth}}. برای کانال سیگنال (که با جفت سقف/کف کار می‌کند)."""
+    lv = ctx.get("levels") or []
+    ref = ctx.get("ref")
+    if len(lv) < 2 or ref is None:
+        return {}
+    idxs = [i for i, x in enumerate(lv) if x["price"] <= ref]
+    if not idxs:
+        return {}
+    i = min(idxs[-1], len(lv) - 2)
+    out = {}
+    for name, j in (("Halving", i), ("HalvingUp", i + 1), ("HalvingDn", i - 1)):
+        if 0 <= j < len(lv) - 1:
+            out[name] = {"hi": lv[j + 1], "lo": lv[j]}
+    return out
 
 
 def strategy_halving(df, strategy_config=None, live_price=None):

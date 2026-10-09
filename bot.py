@@ -40,7 +40,9 @@ from strategy import (
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
     is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, extract_p4_case, MIN_RR_FLOOR,
+    _halving_cfg, _halving_context, _halving_cells_named,
 )
+from halving_levels import depth_label_fa as _hv_depth_label
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
@@ -646,6 +648,7 @@ def audit_trade_record(p):
         'peak_adverse_price': p.get('peak_adverse_price'),
         'trailing_activated': p.get('trailing_activated', False),
         'trailing_locked_r': p.get('trailing_locked_r', 0.0),
+        'ladder_stage': p.get('ladder_stage', 0),
     }
 
 
@@ -705,6 +708,8 @@ def default_session():
         'market_alignment_filters_enabled': False,
         # V3.42: کلید روشن/خاموش قفل سود (دکمه در «مدیریت فیلتر معاملات»). پیش‌فرض از PROFIT_LOCK_ENABLED (خاموش).
         'profit_lock_enabled': PROFIT_LOCK_ENABLED,
+        # نردبان درختی سود (مدل نصف‌کردن): ۵۰٪ مسیر تا هدف => SL روی ورود+کارمزد، ۷۵٪ => SL روی نیمی از مسیر. پیش‌فرض خاموش.
+        'halving_ladder_enabled': False,
         # V3.42: کلید جدا برای ترلینگ سوینگ (جابه‌جایی SL به آخرین سوینگ تأییدشده). پیش‌فرض روشن (رفتار قبلی).
         'swing_trailing_enabled': True,
         # V3.42: کلید بستن اجباری معاملات ۵/۱۵ دقیقه‌ای در پایان روز UTC. پیش‌فرض روشن (رفتار قبلی).
@@ -732,7 +737,8 @@ def default_session():
         'user_state': None,
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
-        'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT},
+        'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
+                            'halving_model_enabled': True, 'halving_k_atr': 3.0},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
         'risk_per_trade_pct': RISK_PER_TRADE_PCT,
         'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT,
@@ -801,7 +807,9 @@ def _p4_sync_tags(s):
 
 def _setup_mgmt_text(s):
     if (s.get('strategy_config') or {}).get('halving_model_enabled'):
-        return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید و بقیه‌ی ستاپ‌ها (PDH/PDL+P4 و ...) در این حالت استفاده نمی‌شوند."
+        if s.get('setup_legacy_view'):
+            return "📦 *سطوح قدیمی*\nتا وقتی مدل نصف‌کردن روشن است این‌ها روی معامله اثری ندارند. فقط اگر مدل نصف‌کردن را خاموش کنی دوباره کار می‌کنند."
+        return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید. سطوح قدیمی (PDH/PDL+P4 و ...) در زیرمنوی «سطوح قدیمی» هستند و فعلاً استفاده نمی‌شوند."
     if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
         return "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4 روشن است: فقط Daily برای معامله فعال می‌ماند."
     return "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:"
@@ -2325,6 +2333,76 @@ def _apply_profit_protection(chat_id, s, p, favorable_price, current_price=None)
         return False
 
 
+HALVING_LADDER_STAGE1 = max(0.1, min(0.9, float(os.environ.get('HALVING_LADDER_STAGE1', '0.50'))))   # پیشرفت تا هدف برای مرحله‌ی ۱
+HALVING_LADDER_STAGE2 = max(0.2, min(0.95, float(os.environ.get('HALVING_LADDER_STAGE2', '0.75'))))  # مرحله‌ی ۲
+HALVING_LADDER_LOCK2 = max(0.1, min(0.9, float(os.environ.get('HALVING_LADDER_LOCK2', '0.50'))))      # در مرحله‌ی ۲ چه کسری از مسیر قفل شود
+HALVING_LADDER_FEE_MULT = max(1.0, float(os.environ.get('HALVING_LADDER_FEE_MULT', '1.3')))
+
+
+def halving_ladder_target_sl(entry, tp, is_long, progress, fee_frac, stage_done=0):
+    """نردبان درختی سود (تابع خالص؛ قابل تست):
+    progress = پیشرفت قیمت (بهترین قیمت دیده‌شده) از ورود تا TP، بین ۰ و ۱.
+    مرحله ۱ (progress ≥ STAGE1): SL = ورود ± کارمزد×ضریب  (دیگر ضرر ندارد)
+    مرحله ۲ (progress ≥ STAGE2): SL = ورود ± LOCK2 × کل مسیر (حداقل همان کارمزد)
+    خروجی (stage, new_sl) یا (None, None) اگر مرحله‌ی جدیدی فعال نشد. SL فقط به نفع معامله می‌رود."""
+    entry = float(entry); tp = float(tp)
+    path = (tp - entry) if is_long else (entry - tp)
+    if path <= 0 or not math.isfinite(path):
+        return None, None
+    if progress >= HALVING_LADDER_STAGE2:
+        stage = 2
+    elif progress >= HALVING_LADDER_STAGE1:
+        stage = 1
+    else:
+        return None, None
+    if stage <= int(stage_done or 0):
+        return None, None
+    fee_px = entry * float(fee_frac) * HALVING_LADDER_FEE_MULT
+    lock = fee_px if stage == 1 else max(fee_px, HALVING_LADDER_LOCK2 * path)
+    lock = min(lock, path * 0.95)
+    return stage, (entry + lock if is_long else entry - lock)
+
+
+def _apply_halving_ladder(chat_id, s, p, favorable_price, price):
+    """نردبان درختی سود: SL را پله‌به‌پله و فقط به نفع معامله جلو می‌برد. نیاز به TP معتبر دارد."""
+    if not bool(s.get('halving_ladder_enabled', False)):
+        return False
+    try:
+        entry = float(p['entry_price']); tp = float(p['tp']); is_long = side_long(p['side'])
+        path = (tp - entry) if is_long else (entry - tp)
+        if path <= 0:
+            return False
+        fav = float(favorable_price if favorable_price is not None else price)
+        cur = float(price)
+        progress = ((fav - entry) if is_long else (entry - fav)) / path
+        fee_frac = TAKER_FEE_PCT / 100.0 * 2
+        stage, new_sl = halving_ladder_target_sl(entry, tp, is_long, progress, fee_frac, p.get('ladder_stage', 0))
+        if stage is None:
+            return False
+        old_sl = float(p['sl'])
+        is_better = (new_sl > old_sl) if is_long else (new_sl < old_sl)
+        if not is_better:
+            p['ladder_stage'] = stage          # SL از قبل بهتر است؛ این پله دیگر لازم نیست
+            return False
+        # SL باید پشت قیمت لحظه‌ای بماند؛ اگر قیمت همین حالا برگشته و SL جدید بالای/زیر آن می‌افتد، پله ثبت نمی‌شود
+        if (is_long and new_sl >= cur) or ((not is_long) and new_sl <= cur):
+            return False
+        if p.get('is_real'):
+            ok, err = move_stop_loss(chat_id, p['symbol'], normalize_price(chat_id, p['symbol'], new_sl))
+            if not ok:
+                logger.warning('halving ladder SL move failed symbol=%s: %s', p.get('symbol'), err)
+                return False
+        p['sl'] = new_sl
+        p['ladder_stage'] = stage
+        p['trailing_activated'] = True
+        label = 'ورود + کارمزد (دیگر ضرر نداری)' if stage == 1 else f'{int(HALVING_LADDER_LOCK2*100)}٪ مسیر تا هدف'
+        send_message(chat_id, f"🪜 نردبان سود پله {stage}: `{p['symbol']}`\n• پیشرفت تا هدف: `{progress*100:.0f}%`\n• حد ضرر جدید: `{fmt(new_sl)}` ({label})")
+        return True
+    except Exception as exc:
+        logger.debug('halving ladder failed trade=%s symbol=%s: %s', p.get('trade_id'), p.get('symbol'), exc)
+        return False
+
+
 def _check_swing_trailing_stop(chat_id, s, p, price, sdf=None):
     """
     استاپ‌لاس را بر اساس آخرین سوینگ معاملاتی تأییدشده بازبینی می‌کند (هر بار که پوزیشن
@@ -3084,6 +3162,51 @@ SIGNAL_CHANNEL_RETEST_ATR = float(os.environ.get('SIGNAL_CHANNEL_RETEST_ATR', '0
 SIGNAL_CHANNEL_BREAKOUT_LOOKBACK = max(3, int(os.environ.get('SIGNAL_CHANNEL_BREAKOUT_LOOKBACK', '8')))  # حداکثر فاصله‌ی کندل نفوذ تا پولبک
 
 
+_HV_CH_TAGS = ('Halving', 'HalvingUp', 'HalvingDn')
+_HV_CH_DEPTH = {}
+
+
+def _signal_channel_halving_enabled():
+    """کانال از کلید مدل نصف‌کردنِ ادمین (SIGNAL_CHANNEL_TF_CHAT_ID) پیروی می‌کند، مثل تایم‌فریم."""
+    s = USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}
+    return bool((s.get('strategy_config') or {}).get('halving_model_enabled'))
+
+
+def _signal_channel_halving_cfg_for(symbol, timeframe):
+    """کانفیگ مدل نصف‌کردن برای این نماد (با سقف/کف تاریخی)؛ None اگر سقف/کف در دسترس نباشد."""
+    rng = get_halving_range_sync(symbol)
+    if not rng:
+        return None
+    scfg = ((USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}).get('strategy_config') or {})
+    cfg = {**get_timeframe_preset(timeframe), 'halving_model_enabled': True,
+           'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth'):
+        if k in scfg:
+            cfg[k] = scfg[k]
+    return cfg
+
+
+def _signal_channel_halving_levels_at(dated_df, idx, hv_cfg, symbol):
+    """سطوح نصف‌کردنِ همین کندل به‌صورت {tag: (سقف, کف)} - سه سلول: شامل قیمت، بالاتر، پایین‌تر.
+    هر سطح هم نقش مقاومت (از سلول پایینی) و هم حمایت (از سلول بالایی) می‌گیرد."""
+    try:
+        ctx = _halving_context(dated_df, idx, _halving_cfg(hv_cfg))
+    except Exception:
+        logger.exception('channel halving context failed symbol=%s', symbol)
+        return {}
+    if not ctx:
+        return {}
+    if len(_HV_CH_DEPTH) > 6000:
+        _HV_CH_DEPTH.clear()
+    out = {}
+    for tag, cell in _halving_cells_named(ctx).items():
+        hi, lo = float(cell['hi']['price']), float(cell['lo']['price'])
+        out[tag] = (hi, lo)
+        _HV_CH_DEPTH[(symbol, f"{hi:.10g}")] = int(cell['hi']['depth'])
+        _HV_CH_DEPTH[(symbol, f"{lo:.10g}")] = int(cell['lo']['depth'])
+    return out
+
+
 def _signal_channel_levels_at(dated_df, idx):
     """سطوح فعالِ مخصوص همین کندل: {tag: (سقف, کف)}."""
     levels = {}
@@ -3215,7 +3338,8 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
     - breakout_retest / rejection: فقط روی آخرین کندل بسته‌شده (تأییدی) - forming همیشه False.
     - touch: رفتار قدیمی؛ کندل در حال تشکیل + آخرین بسته‌شده."""
     patterns = set(_SIGNAL_CHANNEL_PATTERNS)
-    if not patterns or not _SIGNAL_CHANNEL_LEVEL_TAGS:
+    hv_mode = _signal_channel_halving_enabled()
+    if not patterns or (not _SIGNAL_CHANNEL_LEVEL_TAGS and not hv_mode):
         return []
     try:
         # نکته‌ی مهم: قبلاً اینجا فقط ۳۲۰ کندل (≈۲۶.۷ ساعت روی ۵ دقیقه‌ای) خوانده می‌شد -
@@ -3233,6 +3357,21 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
         dated_df, _, _ = _compute_prev_day_levels(df)
         if dated_df is None:
             return []
+        hv_cfg = None
+        if hv_mode:
+            # کانال فقط روی سطوح نصف‌کردن سیگنال می‌دهد؛ اگر سقف/کف یا ATR نبود، بی‌سیگنال (نه برگشت به سطوح قدیمی)
+            hv_cfg = _signal_channel_halving_cfg_for(symbol, timeframe)
+            if hv_cfg is None:
+                logger.info('channel halving: سقف/کف تاریخی %s در دسترس نیست', symbol)
+                return []
+            _ind_h = calculate_indicators(df)
+            if _ind_h is None or len(_ind_h) != len(dated_df) or 'atr' not in _ind_h.columns:
+                return []
+            dated_df['atr'] = _ind_h['atr'].values
+
+        def _lv_at(i_):
+            return _signal_channel_halving_levels_at(dated_df, i_, hv_cfg, symbol) if hv_cfg is not None \
+                else _signal_channel_levels_at(dated_df, i_)
         n = len(dated_df)
         ci = n - 2  # آخرین کندل بسته‌شده (کندل آخر همان کندل در حال تشکیل است)
         O = dated_df['open'].astype(float).tolist()
@@ -3242,7 +3381,7 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
         hits = []
 
         if patterns & {'breakout_retest', 'rejection'}:
-            levels_c = _signal_channel_levels_at(dated_df, ci)
+            levels_c = _lv_at(ci)
             ts_c = dated_df.iloc[ci].get('timestamp')
             atr = None
             regime_box = []
@@ -3266,7 +3405,7 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
 
         if 'touch' in patterns:
             for idx in (n - 1, n - 2):
-                levels = _signal_channel_levels_at(dated_df, idx)
+                levels = _lv_at(idx)
                 ts = dated_df.iloc[idx].get('timestamp')
                 forming = (idx == n - 1)
                 for tag, (hi, lo) in levels.items():
@@ -3299,7 +3438,7 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
             # V3.43.11: فقط روی آخرین کندل بسته‌شده (تأیید با بسته‌شدن کندل)؛ هر سطح/جهت یک‌بار به‌ازای هر نفوذ (کلید = زمان اولین نفوذ)
             atr_r = _signal_channel_atr(H, Lo, C, ci)
             cands = []
-            for tag, (hi, lo) in _signal_channel_levels_at(dated_df, ci).items():
+            for tag, (hi, lo) in _lv_at(ci).items():
                 for side_fa, lvl in (('سقف', hi), ('کف', lo)):
                     st = _signal_channel_sweep_retest_setup(H, Lo, C, ci, lvl, side_fa == 'کف', atr_r)
                     if st:
@@ -3595,6 +3734,9 @@ def _signal_channel_scan_once():
                         continue
             defs = LEVEL_SETUP_DEFS.get(tag)
             level_label = (defs[2] if side_fa == 'سقف' else defs[3]) if defs else f'{side_fa} {tag}'
+            if tag in _HV_CH_TAGS:
+                _hd = _HV_CH_DEPTH.get((symbol, f"{float(level_value):.10g}"))
+                level_label = ('مقاومت' if side_fa == 'سقف' else 'حمایت') + ' نصف‌کردن' + (f' ({_hv_depth_label(_hd)})' if _hd is not None else '')
             regime_label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(regime)
             implied_side = _signal_channel_implied_side(pattern, side_fa)
             detail_lines, buy_votes, sell_votes = _signal_channel_indicator_summary(ind_row, implied_side)
@@ -3634,7 +3776,7 @@ def _signal_channel_scan_once():
                     pre_live = latest_price(symbol)
                     if not pre_live:
                         continue
-                    pre_plan, pre_df = build_quick_plan_with_fallback(symbol, implied_side, get_timeframe_preset(timeframe), float(pre_live), timeframe)
+                    pre_plan, pre_df = build_quick_plan_with_fallback(symbol, implied_side, (_signal_channel_halving_cfg_for(symbol, timeframe) if _signal_channel_halving_enabled() else None) or get_timeframe_preset(timeframe), float(pre_live), timeframe)
                     _risk = abs(float(pre_live) - float(pre_plan['sl']))
                     rule_rr = (abs(float(pre_plan['tp']) - float(pre_live)) / _risk) if _risk > 0 else 0.0
                 except Exception:
@@ -3669,7 +3811,7 @@ def _signal_channel_scan_once():
                 try:
                     live = latest_price(symbol)
                     if live:
-                        plan, df_ind = build_quick_plan_with_fallback(symbol, trade_side, get_timeframe_preset(timeframe), float(live), timeframe)
+                        plan, df_ind = build_quick_plan_with_fallback(symbol, trade_side, (_signal_channel_halving_cfg_for(symbol, timeframe) if _signal_channel_halving_enabled() else None) or get_timeframe_preset(timeframe), float(live), timeframe)
                 except Exception:
                     logger.exception('signal channel plan failed symbol=%s', symbol)
             plan_lines = []
@@ -3707,7 +3849,7 @@ def _signal_channel_scan_once():
                 try:
                     _tr = {'entry_price': float(live), 'tp': float(plan['tp']), 'sl': float(plan['sl']),
                            'side': 'BUY (Long)' if main_buy else 'SELL (Short)', 'timeframe': timeframe,
-                           'entry_reason': f"[SETUP {tag}] {(defs[0] if side_fa == 'سقف' else defs[1])}={level_value:.10g}" if defs else '',
+                           'entry_reason': (f"[SETUP {tag}] {(defs[0] if side_fa == 'سقف' else defs[1])}={level_value:.10g}" if defs else (f"[SETUP Halving] {'HVH' if side_fa == 'سقف' else 'HVL'}={level_value:.10g}" if tag in _HV_CH_TAGS else '')),
                            'is_real': False, 'assist_pending': True, 'hide_direction': True}
                     png, _ctx = render_trade_chart_png(symbol, df_ind, _tr)
                     if png is not None:
@@ -3777,7 +3919,7 @@ def signal_channel_settings_report():
         f"شرط هم‌جهتی کامل (رژیم بازار + رژیم نماد + ۳ اندیکاتور + سیگنال): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('align4') else '🔴 خاموش'}\n"
         f"شرط هم‌رنگی ۳ اندیکاتور (RSI/MACD/ADX): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('all3') else '🔴 خاموش'}\n"
         f"تایم‌فریم بررسی: `{_signal_channel_timeframe()}` (همان تایم‌فریم فعال ادمین)\n"
-        f"سطوح فعال برای ارسال: {tags_txt}\n"
+        f"سطوح فعال برای ارسال: {('🪜 فقط سطوح نصف‌کردن (طبق کلید مدل نصف‌کردنِ ادمین؛ سطوح قدیمی زیر فعلاً استفاده نمی‌شوند)') if _signal_channel_halving_enabled() else tags_txt}\n"
         f"الگوهای فعال: {pats_txt}\n\n"
         f"هرکدوم از سطوح و الگوهای زیر رو بزنید تا روشن/خاموش بشه - فقط الگوهای روشن روی سطوح روشن به کانال ارسال می‌شن. "
         f"الگوهای «نفوذ + پولبک» و «برگشت به داخل» به بسته‌شدن کندل نیاز دارن و بعد از بسته‌شدن کندل اعلام می‌شن."
@@ -4652,6 +4794,8 @@ def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_i
     خروجی: (plan، df با اندیکاتورها یا None). plan همیشه کلید tp_level_name دارد."""
     is_long = side == 'BUY'
     plan, why = None, 'داده‌ی بازار در دسترس نبود'
+    if isinstance(strategy_config, dict) and strategy_config.get('halving_model_enabled') and strategy_config.get('halving_high') is None:
+        strategy_config = _with_halving_cfg(strategy_config, get_halving_range_sync(symbol))   # هدف‌ها از سطوح نصف‌کردن
     try:
         if df_ind is None:
             df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
@@ -5622,6 +5766,10 @@ def update_positions(chat_id):
             _apply_profit_protection(chat_id,s,p,favorable_price,price)
             # Re-read current R after a possible stop update.
             current_r=((price-entry)/risk_distance if side_long(p['side']) else (entry-price)/risk_distance)
+
+        if reason is None and bool(s.get('halving_ladder_enabled', False)) and risk_distance>0:
+            _lad_fav=(high if side_long(p['side']) else low) if s['trading_mode']=='PAPER' else (p.get('peak_favorable_price') or price)
+            _apply_halving_ladder(chat_id,s,p,_lad_fav,price)
 
         if reason is None:
             # Structural swing stop intentionally remains on the primary trading timeframe.
@@ -7731,6 +7879,8 @@ def _filter_info(key):
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
         'profit_lock': ('قفل کردن سود',
             'وقتی سود معامله به پله‌های مشخص می‌رسد، حد ضرر جلو می‌آید تا بخشی از سود تضمین شود؛ اگر قیمت برگردد، معامله با همان سودِ قفل‌شده بسته می‌شود.'),
+        'halving_ladder': ('نردبان سود با سطوح درخت',
+            'مسیر ورود تا هدف را به پله تقسیم می‌کند: وقتی قیمت به ۵۰٪ مسیر برسد حد ضرر روی ورود + کارمزد می‌رود (دیگر ضرر نداری)، و در ۷۵٪ مسیر روی نیمی از مسیر قفل می‌شود. حد ضرر فقط جلو می‌رود. برای مدل نصف‌کردن طراحی شده (هدف = سطح بعدی درخت). پیش‌فرض خاموش.'),
         'swing_trailing': ('دنبال کردن قیمت با حد ضرر',
             'با شکل گرفتن هر سقف یا کفِ کوچکِ جدید، حد ضرر به آن نزدیک می‌شود (هرگز دورتر نمی‌شود)، تا سود بیشتری حفظ شود.'),
         'weakness_exit': ('خروج زودتر وقتی حرکت ضعیف می‌شود',
@@ -7763,7 +7913,7 @@ def _filter_info(key):
 
 _FILTER_SECTION_KEYS = {
     'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
-    'exit': ['profit_lock', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
+    'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
 }
@@ -7869,6 +8019,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         weakness_on = bool(scfg.get('weakness_exit_enabled', False))
         return {'inline_keyboard': [
             [fcell(bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)), 'profit_lock', '/toggle_profit_lock')],
+            [fcell(bool(s.get('halving_ladder_enabled', False)), 'halving_ladder', '/toggle_halving_ladder')],
             [fcell(bool(s.get('swing_trailing_enabled', True)), 'swing_trailing', '/toggle_swing_trailing')],
             [fcell(weakness_on, 'weakness_exit', '/toggle_weakness_exit')],
             [fcell(bool(s.get('day_end_close_enabled', True)), 'day_end_close', '/toggle_day_end_close')],
@@ -8923,6 +9074,10 @@ def process_command(cmd,chat_id,message_id=None):
             edit_page(chat_id, f"⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[sec]}", get_entry_diag_keyboard(s.get('entry_diag_enabled', True), sec), message_id)
         return
     if cl == '/setup_management':
+        s['setup_legacy_view'] = False
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
+    if cl == '/setup_legacy':
+        s['setup_legacy_view'] = True
         edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
     if cl == '/toggle_p4_model':
         _cfg_p4 = s.setdefault('strategy_config', {})
@@ -8942,6 +9097,7 @@ def process_command(cmd,chat_id,message_id=None):
         _cfg_hv = s.setdefault('strategy_config', {})
         if cl == '/toggle_halving_model':
             _cfg_hv['halving_model_enabled'] = not bool(_cfg_hv.get('halving_model_enabled', False))
+            s['setup_legacy_view'] = False
         elif cl == '/halving_k_cycle':
             _opts = (3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
@@ -9343,6 +9499,18 @@ def process_command(cmd,chat_id,message_id=None):
             'خاموش شد: حد ضرر معامله‌ها با سقف و کف‌های جدید جابه‌جا نمی‌شود.'
         )
         send_message(chat_id, f"🔄 {_filter_info('swing_trailing')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl=='/toggle_halving_ladder':
+        current = bool(s.get('halving_ladder_enabled', False))
+        s['halving_ladder_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            f'نردبان سود روشن شد: با ۵۰٪ مسیر تا هدف، حد ضرر روی ورود + کارمزد می‌رود و با ۷۵٪ مسیر نیمی از مسیر قفل می‌شود. برای معامله‌های باز و جدید اعمال می‌شود. بهتر است با مدل نصف‌کردن استفاده شود.'
+            if not current else
+            'نردبان سود خاموش شد: حد ضرر معامله‌ها دیگر با این روش جلو نمی‌آید.'
+        )
+        send_message(chat_id, f"🪜 {_filter_info('halving_ladder')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_lock':
         current = bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED))
