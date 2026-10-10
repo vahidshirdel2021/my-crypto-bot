@@ -4329,7 +4329,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
             alignment_line = ""
         swing_line = "• 📐 تایید شده با شکست سوینگ محلی\n" if trade.get('swing_break_confirmed') else ""
         scenario_tag = extract_scenario_tag(trade.get('entry_reason') or trade.get('signal_reason') or '')
-        scenario_line = f"• سناریو: `{scenario_tag} - {_SCENARIO_LABELS_PLAIN.get(scenario_tag, '')}`\n" if scenario_tag else ""
+        scenario_line = f"• سناریو: `{scenario_tag} - {_scenario_label(scenario_tag, trade.get('entry_reason') or trade.get('signal_reason') or '')}`\n" if scenario_tag else ""
         level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
         tp_lvl_line = f"• سطح هدف (TP): `{trade['tp_level_name']}`\n" if trade.get('tp_level_name') else ''
         fee_c = round_trip_fee_usdt(trade.get('margin'), trade.get('leverage'))
@@ -4468,6 +4468,66 @@ def _blk(chat_id, reason):
     return False
 
 
+# V3.43.18: فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردنِ خودش (کلید: gate_btc_level_position_enabled، پیش‌فرض خاموش)
+BTC_LEVEL_LOOKBACK_CANDLES = max(6, int(os.environ.get('BTC_LEVEL_LOOKBACK_CANDLES', '36')))   # ۳۶ کندل ۵ دقیقه = ۳ ساعت
+BTC_LEVEL_TOL_ATR = max(0.05, float(os.environ.get('BTC_LEVEL_TOL_ATR', '0.5')))               # حاشیه‌ی «روی سطح بودن» (ضریب ATR)
+_BTC_LEVEL_CACHE = {'ts': 0.0, 'state': None}
+
+
+def _btc_level_state(s):
+    """وضعیت بیتکوین نسبت به سطوح نصف‌کردن: {'price','support','resistance','broke_down','broke_up','on_level'} یا None."""
+    now = time.time()
+    if _BTC_LEVEL_CACHE['state'] is not None and now - _BTC_LEVEL_CACHE['ts'] < 30:
+        return _BTC_LEVEL_CACHE['state']
+    import strategy as _S
+    rng = get_halving_range_sync('BTC')
+    if not rng:
+        return None
+    df = get_klines('BTC', '5min', 260)
+    if df is None or df.empty or len(df) < 80:
+        return None
+    df = calculate_indicators(df)
+    cfg = _with_halving_cfg({**(s.get('strategy_config') or {}), 'halving_model_enabled': True}, rng)
+    d, _a, _b = _S._compute_prev_day_levels(df)
+    if d is None:
+        return None
+    ctx = _S._halving_context(d, len(d) - 2, _S._halving_cfg(cfg), span_cells=6)
+    if not ctx or not ctx.get('levels'):
+        return None
+    price = float(latest_price('BTC') or d['close'].iloc[-1])
+    levels = sorted(float(l['price']) for l in ctx['levels'])
+    tol = BTC_LEVEL_TOL_ATR * float(ctx['atr'])
+    closes = pd.to_numeric(d['close'], errors='coerce').iloc[-(BTC_LEVEL_LOOKBACK_CANDLES + 1):-1]
+    cmax, cmin = float(closes.max()), float(closes.min())
+    broke_down = next((L for L in reversed(levels) if price < L - tol and cmax >= L), None)
+    broke_up = next((L for L in levels if price > L + tol and cmin <= L), None)
+    below = [L for L in levels if L <= price]
+    above = [L for L in levels if L > price]
+    state = {'price': price, 'support': (below[-1] if below else None), 'resistance': (above[0] if above else None),
+             'broke_down': broke_down, 'broke_up': broke_up,
+             'on_level': any(abs(price - L) <= tol for L in levels)}
+    _BTC_LEVEL_CACHE.update(ts=now, state=state)
+    return state
+
+
+def btc_level_position_check(s, is_long):
+    """(مجاز؟, دلیل). در هر خطا یا نبود داده مجاز برمی‌گرداند (فیلتر معامله را الکی نمی‌بندد)."""
+    try:
+        st = _btc_level_state(s)
+    except Exception:
+        logger.exception('btc level state failed')
+        return True, ''
+    if not st:
+        return True, ''
+    if is_long and st['broke_down'] is not None:
+        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES * 5 // 60} ساعت اخیر از سطح "
+                       f"{fmt(st['broke_down'])} به پایین شکسته؛ سیگنال خرید رد شد")
+    if (not is_long) and st['broke_up'] is not None:
+        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES * 5 // 60} ساعت اخیر از سطح "
+                       f"{fmt(st['broke_up'])} به بالا شکسته؛ سیگنال فروش رد شد")
+    return True, ''
+
+
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
@@ -4475,6 +4535,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
         return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
+    if (not force) and gate_on(s, 'gate_btc_level_position_enabled'):
+        _btc_ok, _btc_why = btc_level_position_check(s, side_long(side))
+        if not _btc_ok:
+            return _blk(chat_id, _btc_why)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
     # لایه V1.5 Enhanced Selection رشته دلیل را با فرمت انگلیسی «Quality XX/100»
@@ -6599,7 +6663,7 @@ def _assist_describe_source(reason, level_token, level_value, scn):
         a_name, a_val = extract_adaptive_anchor(reason)
         level_txt = f"{a_name} = {fmt(float(a_val))}" if (a_name and a_val is not None) else '-'
     if scn:
-        scn_txt = f"{scn} - {_SCENARIO_LABELS_PLAIN.get(scn, '')}"
+        scn_txt = f"{scn} - {_scenario_label(scn, reason)}"
     elif 'ADAPTIVE_SWEEP' in (reason or ''):
         scn_txt = 'آداپتیو: سوییپ روی سطح سشن/سوینگ (خارج از ۶ سناریو)'
     elif 'ADAPTIVE_CONTINUATION' in (reason or ''):
@@ -8137,6 +8201,20 @@ _SCENARIO_LABELS_PLAIN = {
 }
 
 
+# V3.43.17: برای معاملات مدل نصف‌کردن، توضیح سناریوها «سطح نصف‌کردن» است، نه «سقف/کف دیروز».
+_SCENARIO_LABELS_HV = {
+    "1": "برخورد به سطح بالایی و برگشت (فروش)", "2": "برخورد به سطح پایینی و برگشت (خرید)",
+    "3": "شکست سطح بالایی و ادامه صعود (خرید)", "4": "شکست سطح پایینی و ادامه نزول (فروش)",
+    "5": "شکست کاذب سطح بالایی (فروش)", "6": "شکست کاذب سطح پایینی (خرید)",
+}
+
+
+def _scenario_label(scn, reason=''):
+    if _HV_TRADE_RE.search(str(reason or '')):
+        return _SCENARIO_LABELS_HV.get(scn, '')
+    return _SCENARIO_LABELS_PLAIN.get(scn, '')
+
+
 # V3.42: رجیستری کلیدهای روشن/خاموش گیت‌ها. هر فیلتر/گیتی که سیگنال یا ورود را رد می‌کند باید اینجا
 # یک ردیف داشته باشد (کلید در strategy_config ذخیره می‌شود). برای افزودن فیلتر جدید فقط یک ردیف اضافه کن:
 #   key: (برچسب دکمه، پیش‌فرض، بخش منو، توضیح)
@@ -8146,6 +8224,7 @@ GATE_REGISTRY = {
     'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در چند ساعت اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
     'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', True, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
