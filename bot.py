@@ -886,6 +886,7 @@ def default_session():
         'align4_enabled': False,
         'auto_trend_pending': {},
         'auto_trend_seen': {},
+        'tg_refresh': {},
     }
 
 
@@ -1622,7 +1623,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 # عمداً مسیر قبلی خودشان را نگه می‌دارند.
 _NEW_MESSAGE_PREFIXES = (
     '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
-    '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
+    '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
     '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
 
@@ -7086,6 +7087,170 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
             "*ورود را تایید می‌کنید؟*")
 
 
+# ===================== V3.43.25: «🔄 بروزرسانی داده‌ها» روی کارت هشدار تضاد =====================
+# اندیکاتورها و رژیم BTC/ETH همه روی «آخرین کندل بسته‌شده» حساب می‌شوند؛ پس نتیجه فقط با بسته شدن کندل تازه
+# عوض می‌شود. دکمه کَش داده را دور می‌زند، دوباره می‌سنجد و زیر کارت یک بلوک وضعیت می‌گذارد (جایگزین بلوک قبلی؛
+# کارت بزرگ نمی‌شود). ورود خودکار انجام نمی‌دهد: فقط مشورتی است و تصمیم با کاربر می‌ماند.
+_TF_SECONDS = {'1min': 60, '5min': 300, '15min': 900, '30min': 1800, '1hour': 3600, '4hour': 14400, '1day': 86400}
+TGREF_COOLDOWN_SECONDS = 10
+TGREF_MAX_AGE_SECONDS = 3600
+_TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها'}
+_TGREF_DIV = '━━━━━━━━━━━━━━━━━━━━'
+
+
+def _drop_kline_cache(sym):
+    """کَش کندل و کَش روند این نماد پاک می‌شود تا بروزرسانی واقعاً داده‌ی تازه بگیرد."""
+    try:
+        with DATA_LOCK:
+            for k in [k for k in DATA_CACHE if str(k).startswith(f'{sym}:')]:
+                DATA_CACHE.pop(k, None)
+        for k in [k for k in list(_TREND_SNAP_CACHE) if k[0] == sym]:
+            _TREND_SNAP_CACHE.pop(k, None)
+    except Exception:
+        logger.exception('drop kline cache failed sym=%s', sym)
+
+
+def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
+    """وضعیت فعلی تضادها: {'items': {BTC/ETH/IND: ('ok'|'bad'|'na', score)}, 'ind_lines', 'candle_close'}.
+    همان معیارِ کارت هشدار (روند BTC/ETH و اجماع اندیکاتورها)؛ فقط کلیدهای روشن بررسی می‌شوند."""
+    is_long = (side == 'BUY')
+    syms = _trend_active_symbols(chat_id, symbol)
+    ind_on = _ind_warn_active(chat_id)
+    if fresh:
+        for x in set(syms) | {symbol}:
+            _drop_kline_cache(x)
+    out = {'items': {}, 'ind_lines': [], 'candle_close': None}
+    for sym in syms:
+        snap = _market_snapshot(sym, tf)
+        if not snap:
+            out['items'][sym] = ('na', None)
+            continue
+        _TREND_SNAP_CACHE[(sym, tf)] = (time.time(), snap)
+        sc = int(snap.get('score', 0))
+        bad = (sc < 0 and is_long) or (sc > 0 and not is_long)
+        out['items'][sym] = ('bad' if bad else 'ok', sc)
+    if ind_on:
+        conflict, lines = _indicator_conflict(symbol, side, tf)
+        no_data = bool(lines) and 'داده‌ی کافی نیست' in lines[0]
+        out['items']['IND'] = ('na' if no_data else ('bad' if conflict else 'ok'), None)
+        out['ind_lines'] = lines
+    try:
+        df = get_klines(symbol, tf, 160)
+        ts = float(df.iloc[-2]['timestamp'])
+        if ts > 1e11:
+            ts /= 1000.0
+        out['candle_close'] = ts + _TF_SECONDS.get(tf, 300)
+    except Exception:
+        pass
+    return out
+
+
+def _hm(ts, secs=False):
+    t = fmt_scan_time(ts)
+    return t[11:19] if secs else t[11:16]
+
+
+def _entry_refresh_block(rec, res, now):
+    items = res['items']
+    base = rec.get('base') or {}
+    tf_s = _TF_SECONDS.get(rec.get('tf') or '5min', 300)
+    lines = [_TGREF_DIV, f"🔄 *بروزرسانی داده‌ها* — `{_hm(now, True)}`"]
+    cc = res.get('candle_close')
+    new_candle = False
+    if cc:
+        created_boundary = (float(rec.get('created_at', now)) // tf_s) * tf_s
+        new_candle = cc > created_boundary + 1
+        lines.append(f"• آخرین کندل بسته‌شده: `{_hm(cc)}` " + ("(بعد از ارسال هشدار بسته شده)" if new_candle else "(از زمان هشدار تغییری نکرده)"))
+    for key in ('BTC', 'ETH', 'IND'):
+        if key not in items:
+            continue
+        st, sc = items[key]
+        name = _TGREF_NAMES[key]
+        back = ' — برطرف شد ✅' if (base.get(key) == 'bad' and st == 'ok') else (' — تازه به تضاد رسید ⚠️' if (base.get(key) == 'ok' and st == 'bad') else '')
+        if key == 'IND':
+            verdict = (res.get('ind_lines') or [''])[-1].lstrip('• ').strip()
+            lines.append(f"• {verdict or name}" + back if st != 'na' else f"• {name}: ⚪ داده‌ی کافی نیست")
+        elif st == 'na':
+            lines.append(f"• {name}: ⚪ داده در دسترس نیست")
+        else:
+            icon = '🟢 صعودی' if sc > 0 else ('🔴 نزولی' if sc < 0 else '⚪ خنثی')
+            lines.append(f"• {name}: {icon} — " + ('⚠️ در تضاد' if st == 'bad' else 'بدون تضاد ✅') + back)
+    bad = [_TGREF_NAMES[k] for k, v in items.items() if v[0] == 'bad']
+    na = [k for k, v in items.items() if v[0] == 'na']
+    if not items:
+        lines.append('ℹ️ هیچ بررسی هشداری روشن نیست.')
+    elif na:
+        lines.append('⚪ بخشی از داده‌ها در دسترس نبود؛ چند ثانیه بعد دوباره بروزرسانی کن. (تصمیم نهایی با توست)')
+    elif not bad:
+        far = None
+        try:
+            if rec.get('entry') and rec.get('sl') and rec.get('tp'):
+                live = exchange_latest_price(rec['chat_id'], rec['symbol']) if get_session(rec['chat_id']).get('trading_mode') == 'REAL' else latest_price(rec['symbol'])
+                if live:
+                    live = float(live); is_long = rec['side'] == 'BUY'
+                    entry, sl, tp = float(rec['entry']), float(rec['sl']), float(rec['tp'])
+                    risk = abs(entry - sl)
+                    crossed = (live <= sl or live >= tp) if is_long else (live >= sl or live <= tp)
+                    drift = abs(live - entry) / risk if risk > 0 else 0.0
+                    if crossed or drift > ASSIST_MAX_DRIFT_R:
+                        far = (live, drift, crossed)
+        except Exception:
+            logger.exception('refresh price check failed symbol=%s', rec.get('symbol'))
+        if far:
+            lines.append(f"🚫 تضادها برطرف شده، ولی قیمت لحظه‌ای (`{fmt(far[0])}`) از ستاپ دور شده (`{far[1]:.2f}R`)"
+                         + (" و از SL/TP عبور کرده" if far[2] else "") + "؛ ورود توصیه نمی‌شود.")
+        else:
+            lines.append('✅ *در این لحظه ورود تایید می‌شود:* تضادی با روند BTC/ETH و اندیکاتورها نیست. (تصمیم نهایی با توست)')
+    else:
+        was = [k for k, v in base.items() if v == 'bad']
+        trend = ''
+        if was:
+            trend = ' (نسبت به هشدار: ' + ('بهتر شده' if len(bad) < len(was) else ('بدتر شده' if len(bad) > len(was) else 'بدون تغییر')) + ')'
+        lines.append(f"⚠️ *هنوز در تضاد است:* {'، '.join(bad)}{trend}.")
+    return '\n'.join(lines)
+
+
+def entry_refresh_press(chat_id, token, message_id=None):
+    s = get_session(chat_id)
+    rec = (s.get('tg_refresh') or {}).get(token)
+    now = time.time()
+    if not rec or now - float(rec.get('created_at', 0) or 0) > TGREF_MAX_AGE_SECONDS:
+        send_message(chat_id, 'ℹ️ این کارت قدیمی شده؛ بروزرسانی ممکن نیست.', keep=False); return
+    if rec.get('kind') == 'auto':
+        a = (s.get('auto_trend_pending') or {}).get(token)
+        if not a or a.get('status') != 'pending' or now > float(a.get('expires_at', 0) or 0):
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر در انتظار تصمیم نیست.', keep=False); return
+    if now - float(rec.get('last_refresh', 0) or 0) < TGREF_COOLDOWN_SECONDS:
+        return      # لمس‌های پشت‌سرهم: جلوگیری از فشار به صرافی
+    rec['last_refresh'] = now
+    try:
+        res = _entry_refresh_check(chat_id, rec['symbol'], rec['side'], rec.get('tf') or '5min', fresh=True)
+        block = _entry_refresh_block(rec, res, now)
+    except Exception:
+        logger.exception('entry refresh failed symbol=%s', rec.get('symbol'))
+        send_message(chat_id, '⚠️ بروزرسانی انجام نشد؛ چند ثانیه بعد دوباره امتحان کن.', keep=False); return
+    markup = _warn_card_markup(token, rec['symbol'], rec.get('tf') or '5min', rec['ok_cb'], rec['no_cb'])
+    send_message(chat_id, rec['text'] + '\n\n' + block, markup, message_id=message_id, keep=True)
+    save_session(chat_id)
+
+
+def _tgref_register(chat_id, token, kind, symbol, side, tf, text, ok_cb, no_cb, entry=None, sl=None, tp=None):
+    """رکورد لازم برای دکمه‌ی بروزرسانی را ذخیره می‌کند (وضعیت پایه‌ی تضادها هم برای مقایسه‌ی «بهتر/بدتر شد»)."""
+    s = get_session(chat_id)
+    base = None
+    try:
+        base = {k: v[0] for k, v in _entry_refresh_check(chat_id, symbol, side, tf, fresh=False)['items'].items()}
+    except Exception:
+        logger.exception('refresh baseline failed symbol=%s', symbol)
+    store = s.setdefault('tg_refresh', {})
+    now = time.time()
+    for k in [k for k, v in store.items() if now - float(v.get('created_at', 0) or 0) > 3 * 3600]:
+        store.pop(k, None)
+    store[token] = {'kind': kind, 'chat_id': chat_id, 'symbol': symbol, 'side': side, 'tf': tf, 'text': text,
+                    'ok_cb': ok_cb, 'no_cb': no_cb, 'entry': entry, 'sl': sl, 'tp': tp,
+                    'created_at': now, 'base': base, 'last_refresh': 0}
+
+
 def _assist_trend_warn(chat_id, symbol, side, ok_cb, no_cb):
     """True = هشدار فرستاده شد و ورود تا تصمیم کاربر نگه داشته می‌شود؛ False = ورود می‌تواند ادامه یابد."""
     try:
@@ -7099,20 +7264,22 @@ def _assist_trend_warn(chat_id, symbol, side, ok_cb, no_cb):
         if not text:
             return False
         _TREND_WARN_RECENT[key] = now
-        send_message(chat_id, text, {'inline_keyboard': [[
-            {'text': '✅ بله، وارد شو', 'callback_data': ok_cb},
-            {'text': '❌ نه', 'callback_data': no_cb}],
-            [{'text': '📈 نمایش چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}]]}, keep=True)
+        token = hashlib.sha1(f"{chat_id}{symbol}{ok_cb}{now}".encode()).hexdigest()[:8]
+        _tgref_register(chat_id, token, 'assist', symbol, side, tf, text, ok_cb, no_cb)
+        send_message(chat_id, text, _warn_card_markup(token, symbol, tf, ok_cb, no_cb), keep=True)
+        save_session(chat_id)
         return True
     except Exception:
         logger.exception('trend warn failed symbol=%s', symbol)
         return False
 
 
-def _auto_gate_markup(rid, symbol, tf):
-    """V3.43.24: کیبورد کارت «ورود خودکار نگه داشته شد»: بله/نه + دکمه‌های نمایش چارت (MiniApp و TradingView)."""
-    rows = [[{'text': '✅ بله، وارد شو', 'callback_data': f'/autotg_ok_{rid}'},
-             {'text': '❌ نه', 'callback_data': f'/autotg_no_{rid}'}]]
+def _warn_card_markup(token, symbol, tf, ok_cb, no_cb):
+    """V3.43.25: کیبورد کارت‌های هشدار تضاد (ورود خودکار نگه‌داشته‌شده و حالت دستیار):
+    بله/نه + «🔄 بروزرسانی داده‌ها» + دکمه‌های نمایش چارت (MiniApp و TradingView)."""
+    rows = [[{'text': '✅ بله، وارد شو', 'callback_data': ok_cb},
+             {'text': '❌ نه', 'callback_data': no_cb}],
+            [{'text': '🔄 بروزرسانی داده‌ها', 'callback_data': f'/tgref_{token}'}]]
     try:
         mini = miniapp_chart_url(symbol, tf)
     except Exception:
@@ -7121,6 +7288,11 @@ def _auto_gate_markup(rid, symbol, tf):
         rows.append([{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': mini}}])
     rows.append([{'text': '📈 نمایش چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}])
     return {'inline_keyboard': rows}
+
+
+def _auto_gate_markup(rid, symbol, tf):
+    """V3.43.24: کیبورد کارت «ورود خودکار نگه داشته شد» (توکن بروزرسانی = شناسه‌ی همان سیگنال)."""
+    return _warn_card_markup(rid, symbol, tf, f'/autotg_ok_{rid}', f'/autotg_no_{rid}')
 
 
 def _auto_gate_mark(s, rid, status):
@@ -7186,6 +7358,8 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
         return False       # ارسال نشد: به‌جای از دست دادن سیگنال، مثل fail-open ادامه می‌دهد
     rec['message_id'] = (res.get('result') or {}).get('message_id')
     s.setdefault('auto_trend_pending', {})[rid] = rec
+    _tgref_register(chat_id, rid, 'auto', symbol, sig, tf, head + text, f'/autotg_ok_{rid}', f'/autotg_no_{rid}',
+                    entry=float(entry), sl=float(sl), tp=float(tp))
     # V3.43.24: همین سیگنال در «📋 سیگنال‌های در انتظار» هم ثبت می‌شود (هم‌مهلت با کارت: expiry بالا، پیش‌فرض ۱۵ دقیقه)
     try:
         _risk = abs(float(entry) - float(sl))
@@ -10320,6 +10494,8 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/assist_revok_'):
         _strip_all_buttons(chat_id, message_id)
         assist_reverse(chat_id, cl[len('/assist_revok_'):], skip_trend=True); return
+    if cl.startswith('/tgref_'):      # V3.43.25: بروزرسانی داده‌های کارت هشدار تضاد
+        entry_refresh_press(chat_id, cl[len('/tgref_'):], message_id); return
     if cl.startswith('/autotg_ok_'):      # تایید ورود خودکارِ نگه‌داشته‌شده بعد از هشدار روند BTC/ETH
         auto_trend_decide(chat_id, cl[len('/autotg_ok_'):], True); return
     if cl.startswith('/autotg_no_'):
