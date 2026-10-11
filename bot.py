@@ -101,7 +101,7 @@ DB_BACKUP_KEEP = max(3, int(os.environ.get('BOT_DB_BACKUP_KEEP', '30')))
 DB_AUTORESTORE = os.environ.get('BOT_DB_AUTORESTORE', '1').strip() not in ('0', 'false', 'False', 'no')
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
 SCAN_INTERVAL_SECONDS = max(20, int(os.environ.get('SCAN_INTERVAL_SECONDS', '45')))
-NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '600')))
+NO_ENTRY_REPORT_SECONDS = max(120, int(os.environ.get('NO_ENTRY_REPORT_SECONDS', '3600')))   # V3.43.22: پیش‌فرض گزارش ورود (لاگ) هر ۱ ساعت
 # گزینه‌های قابل انتخاب کاربر برای فاصله‌ی گزارش دوره‌ای لاگ: ۱۰ دقیقه / ۳۰ دقیقه / ۱ ساعت / ۴ ساعت
 ENTRY_REPORT_CHOICES = (600, 1800, 3600, 14400)
 _ENTRY_REPORT_LABELS = {600: '۱۰ دقیقه', 1800: '۳۰ دقیقه', 3600: '۱ ساعت', 14400: '۴ ساعت'}
@@ -214,7 +214,7 @@ MAX_TOTAL_OPEN_RISK_PCT = max(0.0, float(os.environ.get('MAX_TOTAL_OPEN_RISK_PCT
 # اگر روی true تنظیم شود، سیگنال Liquidity Sweep به‌جای صدور فوری روی کندل ریکلیم، یک
 # کندل دیگر صبر می‌کند تا مطمئن شود جهت ریکلیم نقض نشده - قیمت ورود کمی بدتر می‌شود در
 # ازای فیلتر شدن فیک‌اوت‌های زودهنگام. پیش‌فرض خاموش است.
-SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIRMATION_CANDLE', 'false').strip().lower() not in ('0', 'false', 'off', '')
+SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIRMATION_CANDLE', 'true').strip().lower() not in ('0', 'false', 'off', '')
 PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
@@ -820,11 +820,13 @@ def default_session():
         # نردبان درختی سود (مدل نصف‌کردن): ۵۰٪ مسیر تا هدف => SL روی ورود+کارمزد، ۷۵٪ => SL روی نیمی از مسیر. پیش‌فرض خاموش.
         'halving_ladder_enabled': False,
         # V3.42: کلید جدا برای ترلینگ سوینگ (جابه‌جایی SL به آخرین سوینگ تأییدشده). پیش‌فرض روشن (رفتار قبلی).
-        'swing_trailing_enabled': True,
+        'swing_trailing_enabled': False,
         # V3.42: کلید بستن اجباری معاملات ۵/۱۵ دقیقه‌ای در پایان روز UTC. پیش‌فرض روشن (رفتار قبلی).
-        'day_end_close_enabled': True,
+        'day_end_close_enabled': False,
         # V3.42: هشدار وقتی سود پوزیشن باز به PROFIT_ALERT_USDT برسد (دکمه در «مدیریت خروج»).
         'profit_alert_enabled': True,
+        # V3.43.21: بستن خودکار معامله در سود PROFIT_AUTOCLOSE_USDT (۵$). پیش‌فرض روشن.
+        'profit_autoclose_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
@@ -847,7 +849,7 @@ def default_session():
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
-                            'halving_model_enabled': True, 'halving_k_atr': 3.0},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
+                            'halving_model_enabled': True, 'halving_k_atr': 3.0, 'halving_max_depth': 12},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
         'risk_per_trade_pct': RISK_PER_TRADE_PCT,
         'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT,
@@ -859,7 +861,7 @@ def default_session():
         'bottom_menu_open': True,
         'entry_diag_enabled': True,
         'entry_report_seconds': min(ENTRY_REPORT_CHOICES, key=lambda c: abs(c - NO_ENTRY_REPORT_SECONDS)),
-        'trade_pipeline_enabled': False,
+        'trade_pipeline_enabled': True,
         'trade_pipeline_audit': [],
         'platform_fee_rate_pct': PLATFORM_FEE_RATE_PCT,
         'platform_fee_total_usdt': 0.0,
@@ -869,7 +871,7 @@ def default_session():
         'priority_watch': {},
         # حالت دستیار: وقتی روشن باشد ربات سیگنال را می‌سازد ولی فقط بعد از تایید دستی وارد می‌شود.
         'assist_mode_enabled': False,
-        'assist_expiry_seconds': 300,
+        'assist_expiry_seconds': 900,
         'assist_log': [],
         'assist_seen': {},
         # V3.42.7: هشدار هم‌جهتی با روند BTC/ETH (کلیدها در «ورود و فیلتر سیگنال»). پیش‌فرض روشن.
@@ -877,7 +879,7 @@ def default_session():
         'trend_warn_btc': True,
         'trend_warn_eth': True,
         # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
-        'ind_warn_enabled': False,
+        'ind_warn_enabled': True,
         # V3.43.14: هم‌جهتی کامل برای سیگنال‌های خودِ ربات (رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال). پیش‌فرض خاموش.
         'align4_enabled': False,
         'auto_trend_pending': {},
@@ -931,7 +933,7 @@ def normalize_session(data):
     s['paper_positions'] = list(data.get('paper_positions') or [])
     s['closed_positions'] = list(data.get('closed_positions') or [])
     s['trade_audit'] = list(data.get('trade_audit') or [])[-2000:]
-    s['trade_pipeline_enabled'] = bool(data.get('trade_pipeline_enabled', False))
+    s['trade_pipeline_enabled'] = bool(data.get('trade_pipeline_enabled', True))
     s['trade_pipeline_audit'] = list(data.get('trade_pipeline_audit') or [])[-5000:]
     ss = data.get('scan_stats') or {}
     s['scan_stats'] = {**default_session()['scan_stats'], **ss}
@@ -987,16 +989,16 @@ def normalize_session(data):
     # PRIORITY_WATCH_TTL_SECONDS) در همین‌جا پاک‌سازی می‌شوند تا صف بی‌نهایت رشد نکند.
     s['assist_mode_enabled'] = bool(data.get('assist_mode_enabled', False))
     try:
-        s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 300) or 300)
+        s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 900) or 900)
     except Exception:
-        s['assist_expiry_seconds'] = 300
+        s['assist_expiry_seconds'] = 900
     if s['assist_expiry_seconds'] not in (180, 300, 600, 900):
-        s['assist_expiry_seconds'] = 300
+        s['assist_expiry_seconds'] = 900
     s['assist_log'] = list(data.get('assist_log') or [])[-500:]
     s['trend_warn_enabled'] = bool(data.get('trend_warn_enabled', True))
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
-    s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', False))
+    s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', True))
     s['align4_enabled'] = bool(data.get('align4_enabled', False))
     _now_n = time.time()
     s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
@@ -2569,7 +2571,7 @@ def _maybe_close_before_day_end(chat_id, p, price, s=None):
     باشد، پوزیشن همین الان با قیمت بازار بسته می‌شود.
     """
     # V3.42: کلید «بستن پایان روز» (دکمه در مدیریت فیلتر معاملات). پیش‌فرض روشن (رفتار قبلی).
-    if s is not None and not bool(s.get('day_end_close_enabled', True)):
+    if s is not None and not bool(s.get('day_end_close_enabled', False)):
         return False
     tf = p.get('timeframe', '5min')
     if tf not in NO_OVERNIGHT_TIMEFRAMES:
@@ -4469,7 +4471,7 @@ def _blk(chat_id, reason):
 
 
 # V3.43.18: فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردنِ خودش (کلید: gate_btc_level_position_enabled، پیش‌فرض خاموش)
-BTC_LEVEL_LOOKBACK_CANDLES = max(6, int(os.environ.get('BTC_LEVEL_LOOKBACK_CANDLES', '36')))   # ۳۶ کندل ۵ دقیقه = ۳ ساعت
+BTC_LEVEL_LOOKBACK_CANDLES = max(1, int(os.environ.get('BTC_LEVEL_LOOKBACK_CANDLES', '3')))     # ۳ کندل ۵ دقیقه‌ی بسته‌شده = ۱۵ دقیقه
 BTC_LEVEL_TOL_ATR = max(0.05, float(os.environ.get('BTC_LEVEL_TOL_ATR', '0.5')))               # حاشیه‌ی «روی سطح بودن» (ضریب ATR)
 _BTC_LEVEL_CACHE = {'ts': 0.0, 'state': None}
 
@@ -4506,6 +4508,9 @@ def _btc_level_state(s):
     state = {'price': price, 'support': (below[-1] if below else None), 'resistance': (above[0] if above else None),
              'broke_down': broke_down, 'broke_up': broke_up,
              'on_level': any(abs(price - L) <= tol for L in levels)}
+    logger.info('BTC level state: price=%.2f support=%s resistance=%s broke_down=%s broke_up=%s tol=%.2f depth=%s step=%.2f atr=%.2f levels=%d',
+                price, state['support'], state['resistance'], state['broke_down'], state['broke_up'], tol,
+                ctx.get('depth'), float(ctx.get('step') or 0), float(ctx['atr']), len(levels))
     _BTC_LEVEL_CACHE.update(ts=now, state=state)
     return state
 
@@ -4520,10 +4525,12 @@ def btc_level_position_check(s, is_long):
     if not st:
         return True, ''
     if is_long and st['broke_down'] is not None:
-        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES * 5 // 60} ساعت اخیر از سطح "
+        logger.warning('BTC level gate BLOCKED a BUY: price=%.2f broke_down=%s', st['price'], st['broke_down'])
+        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES} کندل ۵ دقیقه‌ی اخیر از سطح "
                        f"{fmt(st['broke_down'])} به پایین شکسته؛ سیگنال خرید رد شد")
     if (not is_long) and st['broke_up'] is not None:
-        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES * 5 // 60} ساعت اخیر از سطح "
+        logger.warning('BTC level gate BLOCKED a SELL: price=%.2f broke_up=%s', st['price'], st['broke_up'])
+        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES} کندل ۵ دقیقه‌ی اخیر از سطح "
                        f"{fmt(st['broke_up'])} به بالا شکسته؛ سیگنال فروش رد شد")
     return True, ''
 
@@ -5514,6 +5521,8 @@ def _build_open_positions_view(chat_id, prices=None):
         return 'پوزیشن بازی وجود ندارد.', get_positions_keyboard([])
     prices = prices or {}
     lines = [f'🔄 *پوزیشن‌ها ({len(positions)})*', '━━━━━━━━━━━━━━━━━━━━']
+    total_pnl = 0.0
+    counted = 0
     for p in positions:
         try:
             symbol = p['symbol']
@@ -5527,6 +5536,8 @@ def _build_open_positions_view(chat_id, prices=None):
             pct = ((live-entry)/entry*100.0) if side_long(p['side']) and entry>0 else ((entry-live)/entry*100.0 if entry>0 else 0.0)
             risk = float(p.get('risk_usdt') or 0.0)
             r = (pnl/risk) if risk>0 else 0.0
+            total_pnl += pnl
+            counted += 1
             side_label = '🟢 LONG' if side_long(p['side']) else '🔴 SHORT'
             _p_reason = p.get('entry_reason') or p.get('signal_reason') or ''
             _p_setup_tag = extract_setup_tag(_p_reason)
@@ -5550,6 +5561,11 @@ def _build_open_positions_view(chat_id, prices=None):
             lines = [ln for ln in lines if ln is not None]
         except Exception as exc:
             logger.debug('open positions view failed chat=%s trade=%s: %s', chat_id, p.get('trade_id'), exc)
+    # V3.43.22: مجموع سود/زیان لحظه‌ای همه‌ی پوزیشن‌ها (ناخالص، بدون کارمزد) بالای کارت
+    if counted:
+        _icon = '🟢' if total_pnl > 0 else ('🔴' if total_pnl < 0 else '⚪')
+        lines.insert(2, f'{_icon} مجموع سود/زیان لحظه‌ای: `{total_pnl:+.2f} USDT` ({counted} پوزیشن، ناخالص بدون کارمزد)')
+        lines.insert(3, '━━━━━━━━━━━━━━━━━━━━')
     chart_urls = {}
     for p in positions:
         try:
@@ -5804,6 +5820,8 @@ def profit_lock_scan_once():
 PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '5')))
 # V3.43.15: دکمه‌های زیر هشدار سود (بستن ۵۰/۷۵/۱۰۰٪) تا این مدت (ثانیه) روی پیام می‌مانند؛ بعد پیام حذف می‌شود.
 PROFIT_ALERT_BUTTONS_TTL = max(60, int(os.environ.get('PROFIT_ALERT_BUTTONS_TTL', '1800')))
+# V3.43.21: بستن خودکار معامله وقتی سود ناخالص (بدون کارمزد) به این مقدار (USDT) برسد. کلید روشن/خاموش: «خروج و حفظ سود». پیش‌فرض روشن.
+PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('PROFIT_AUTOCLOSE_USDT', '5')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -5899,6 +5917,33 @@ def handle_profit_alert_close(chat_id, pct, symbol):
         save_session(chat_id)
     except Exception:
         logger.exception('profit alert rebase failed')
+
+
+def profit_autoclose_scan_once():
+    """V3.43.21: اگر کلید روشن باشد و سود ناخالص یک معامله‌ی باز به PROFIT_AUTOCLOSE_USDT برسد، با قیمت بازار بسته می‌شود."""
+    thr = PROFIT_AUTOCLOSE_USDT
+    if thr <= 0:
+        return
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not bool(s.get('profit_autoclose_enabled', True)):
+                continue
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    pnl = _profit_lock_pnl(p, float(price))
+                    if pnl is None or pnl < thr:
+                        continue
+                    logger.info('profit autoclose chat=%s symbol=%s pnl=%.2f thr=%.2f', chat_id, p.get('symbol'), pnl, thr)
+                    close_position(chat_id, p, float(price), reason=f'بستن خودکار: سود به {thr:g}$ رسید')
+                except Exception:
+                    logger.exception('profit autoclose failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('profit autoclose scan failed chat=%s', chat_id)
 
 
 def profit_alert_scan_once():
@@ -6023,6 +6068,10 @@ def four_h_close_alert_scan_once():
 def _profit_lock_loop():
     while True:
         try:
+            profit_autoclose_scan_once()
+        except Exception:
+            logger.exception('profit autoclose loop failed')
+        try:
             profit_alert_scan_once()
         except Exception:
             logger.exception('profit alert loop failed')
@@ -6146,7 +6195,7 @@ def update_positions(chat_id):
 
         if reason is None:
             # Structural swing stop intentionally remains on the primary trading timeframe.
-            if not primary_df.empty and bool(s.get('swing_trailing_enabled', True)):
+            if not primary_df.empty and bool(s.get('swing_trailing_enabled', False)):
                 _check_swing_trailing_stop(chat_id,s,p,price,primary_df)
 
         if reason is None:
@@ -8224,16 +8273,16 @@ GATE_REGISTRY = {
     'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در چند ساعت اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
-    'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', True, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
+    'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در ۳ کندل ۵ دقیقه‌ی اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
+    'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', False, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
     'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', True, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
-    'active_setup_enabled':       ('فرصتِ چند کندل قبل هنوز معتبر بماند', True, 'structure', 'اگر فرصت معتبری همین چند کندل پیش پیدا شده و زمانش کامل از دست نرفته، تا چند کندل دیگر هم می‌شود واردش شد.'),
-    'active_setup_require_daily_breakout': ('شکست قطعی سقف یا کف دیروز لازم است', True, 'structure', 'فرصتِ چند کندل قبل فقط وقتی قابل استفاده است که قیمت سقف یا کف دیروز را قطعی شکسته باشد.'),
-    'active_structure_confirmation': ('تایید با حرکت‌های ریز قیمت', True, 'structure', 'فرصتِ چند کندل قبل باید با حرکت‌های ریز قیمت (در چارت کوچک‌تر) هم تایید شود.'),
-    'level_cluster_enabled':      ('یکی حساب کردن سطوح نزدیک به هم', True, 'structure', 'اگر چند سطح مهم خیلی به هم نزدیک باشند، به‌جای چند سطح جدا یک سطح حساب می‌شوند.'),
+    'active_setup_enabled':       ('فرصتِ چند کندل قبل هنوز معتبر بماند', False, 'structure', 'اگر فرصت معتبری همین چند کندل پیش پیدا شده و زمانش کامل از دست نرفته، تا چند کندل دیگر هم می‌شود واردش شد.'),
+    'active_setup_require_daily_breakout': ('شکست قطعی سقف یا کف دیروز لازم است', False, 'structure', 'فرصتِ چند کندل قبل فقط وقتی قابل استفاده است که قیمت سقف یا کف دیروز را قطعی شکسته باشد.'),
+    'active_structure_confirmation': ('تایید با حرکت‌های ریز قیمت', False, 'structure', 'فرصتِ چند کندل قبل باید با حرکت‌های ریز قیمت (در چارت کوچک‌تر) هم تایید شود.'),
+    'level_cluster_enabled':      ('یکی حساب کردن سطوح نزدیک به هم', False, 'structure', 'اگر چند سطح مهم خیلی به هم نزدیک باشند، به‌جای چند سطح جدا یک سطح حساب می‌شوند.'),
     # --- کیفیت و کنترل ریسک ---
     'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', True, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
     'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
@@ -8276,6 +8325,8 @@ def _filter_info(key):
             'اگر نشانه‌ها بگویند حرکت قیمت ضعیف شده یا بخش مهمی از سودِ بالاترین نقطه پس داده شده، معامله قبل از رسیدن به حد ضرر بسته می‌شود. در حالت خاموش فقط با حد ضرر یا حد سود (و بستن اجباری آخر روز) بسته می‌شود.'),
         'day_end_close': ('بستن معامله‌ها آخر روز',
             'معامله‌های ۵ و ۱۵ دقیقه‌ای نزدیک ساعت ۰۰:۰۰ به وقت جهانی UTC (حدود ۰۳:۳۰ بامداد ایران) با قیمت بازار بسته می‌شوند. اگر خاموش باشد به روز بعد منتقل می‌شوند.'),
+        'profit_autoclose': (f'بستن خودکار معامله در سود {PROFIT_AUTOCLOSE_USDT:g}$',
+            f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش کن. پیش‌فرض: روشن.'),
         'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
@@ -8302,7 +8353,7 @@ def _filter_info(key):
 
 _FILTER_SECTION_KEYS = {
     'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
-    'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_alert', 'profit_fade_alert'],
+    'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
 }
@@ -8394,7 +8445,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('trend_warn_enabled', True)), 'trend_warn', '/toggle_trend_warn')],
             [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
              fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
-            [fcell(bool(s.get('ind_warn_enabled', False)), 'ind_warn', '/toggle_ind_warn')],
+            [fcell(bool(s.get('ind_warn_enabled', True)), 'ind_warn', '/toggle_ind_warn')],
             [fcell(bool(s.get('align4_enabled', False)), 'align4', '/toggle_align4')],
         ] + gate_rows('entry') + [back_row]}
 
@@ -8409,9 +8460,10 @@ def trade_filter_management_keyboard(chat_id, section=None):
         return {'inline_keyboard': [
             [fcell(bool(s.get('profit_lock_enabled', PROFIT_LOCK_ENABLED)), 'profit_lock', '/toggle_profit_lock')],
             [fcell(bool(s.get('halving_ladder_enabled', False)), 'halving_ladder', '/toggle_halving_ladder')],
-            [fcell(bool(s.get('swing_trailing_enabled', True)), 'swing_trailing', '/toggle_swing_trailing')],
+            [fcell(bool(s.get('swing_trailing_enabled', False)), 'swing_trailing', '/toggle_swing_trailing')],
             [fcell(weakness_on, 'weakness_exit', '/toggle_weakness_exit')],
-            [fcell(bool(s.get('day_end_close_enabled', True)), 'day_end_close', '/toggle_day_end_close')],
+            [fcell(bool(s.get('day_end_close_enabled', False)), 'day_end_close', '/toggle_day_end_close')],
+            [fcell(bool(s.get('profit_autoclose_enabled', True)), 'profit_autoclose', '/toggle_profit_autoclose')],
             [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
             [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             back_row,
@@ -8481,7 +8533,7 @@ def strategy_families_keyboard(chat_id):
     # نسخه‌ی هم‌مفهومش برای ۱h/۴h (HTF Reversal). Trend Following، Breakout، Mean Reversion و
     # ORB/Judas موتورهای جداگانه‌ای بودند که کامل از کد حذف شدند؛ دیگر دکمه‌ای ندارند.
     sweep_on = bool(scfg.get('strategy_sweep_enabled', True))
-    htf_on = bool(scfg.get('strategy_htf_reversal_enabled', True))
+    htf_on = bool(scfg.get('strategy_htf_reversal_enabled', False))
     session_on = bool(scfg.get('adaptive_allow_session_swing_anchors', True))
 
     return {
@@ -9850,7 +9902,7 @@ def process_command(cmd,chat_id,message_id=None):
             trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_ind_warn':
-        s['ind_warn_enabled'] = not bool(s.get('ind_warn_enabled', False))
+        s['ind_warn_enabled'] = not bool(s.get('ind_warn_enabled', True))
         save_session(chat_id)
         st = '🟢 روشن' if s['ind_warn_enabled'] else '🔴 خاموش'
         send_message(chat_id,
@@ -9859,6 +9911,18 @@ def process_command(cmd,chat_id,message_id=None):
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. اگر هشدار روند BTC/ETH هم روشن باشد، هر دو تضاد در همان یک کارت می‌آیند. "
             "نبود اجماع یا نبود داده مانع نمی‌شود.",
             trade_filter_management_keyboard(chat_id, 'entry'))
+        return
+    if cl=='/toggle_profit_autoclose':
+        current = bool(s.get('profit_autoclose_enabled', True))
+        s['profit_autoclose_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            _filter_info('profit_autoclose')[1]
+            if not current else
+            'بستن خودکار در سود خاموش شد؛ معامله‌ها فقط با SL/TP یا دستی بسته می‌شوند.'
+        )
+        send_message(chat_id, f"🎯 {_filter_info('profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_alert':
         current = bool(s.get('profit_alert_enabled', True))
@@ -9873,7 +9937,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"💰 {_filter_info('profit_alert')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_day_end_close':
-        current = bool(s.get('day_end_close_enabled', True))
+        current = bool(s.get('day_end_close_enabled', False))
         s['day_end_close_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -9885,7 +9949,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🕛 {_filter_info('day_end_close')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_swing_trailing':
-        current = bool(s.get('swing_trailing_enabled', True))
+        current = bool(s.get('swing_trailing_enabled', False))
         s['swing_trailing_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -10235,7 +10299,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl in ('/toggle_strategy_sweep', '/toggle_strategy_htf', '/toggle_strategy_sessions'):
         key_map = {
             '/toggle_strategy_sweep': ('strategy_sweep_enabled', True, 'دام قیمتی (چارت ۵ و ۱۵ دقیقه)'),
-            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', True, 'برگشت در چارت‌های بزرگ‌تر (۱ و ۴ ساعته)'),
+            '/toggle_strategy_htf': ('strategy_htf_reversal_enabled', False, 'برگشت در چارت‌های بزرگ‌تر (۱ و ۴ ساعته)'),
             '/toggle_strategy_sessions': ('adaptive_allow_session_swing_anchors', True, 'سطوح ساعات بازار (لندن، نیویورک، آسیا)'),
         }
         cfg_key, default_val, label = key_map[cl]

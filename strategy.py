@@ -225,20 +225,20 @@ STRATEGY_DEFAULTS = {
     # اجرا می‌شود — دقیقاً مثل هر سطح دیگر. وقتی Cluster فعال است (سطوح فعلاً
     # فشرده‌اند)، اسکن تک‌سطحی معمول برای همان کندل موقتاً کنار گذاشته می‌شود تا
     # از سیگنال‌های متناقضِ چند سطح هم‌پوشان جلوگیری شود.
-    "level_cluster_enabled": True,
+    "level_cluster_enabled": False,
     "level_cluster_max_atr": 1.2,
     # فرصت از دست‌رفته: ستاپ معتبرِ اخیر برای مدت کوتاه زنده می‌ماند، اما تعقیب قیمت ممنوع است.
-    "active_setup_enabled": True,
+    "active_setup_enabled": False,
     "active_setup_lookback_candles": 3,
     "active_setup_max_age_candles": 3,
     "active_setup_max_distance_atr": 0.80,
     "active_setup_invalidation_atr": 0.25,
     # Active setup only becomes valid after a confirmed PDH/PDL breakout
     # and sufficient distance from the previous-day range.
-    "active_setup_require_daily_breakout": True,
+    "active_setup_require_daily_breakout": False,
     "active_setup_breakout_distance_atr": 1.00,
     "active_setup_breakout_confirm_candles": 1,
-    "active_structure_confirmation": True,
+    "active_structure_confirmation": False,
     "active_structure_lookback": 8,
     "active_structure_confirm_candles": 2,
     "min_sl_percent": 0.005,
@@ -265,20 +265,20 @@ STRATEGY_DEFAULTS = {
     # سطح سویپ‌شده) تا سیگنال واقعاً صادر شود. قیمت ورود بدتر می‌شود ولی فیک‌اوت‌های
     # زودهنگام (که در تحلیل معاملات واقعی دیدیم MFE نزدیک صفر داشتند) فیلتر می‌شوند.
     # پیش‌فرض False است تا هیچ رفتار فعلی بی‌اجازه تغییر نکند.
-    "sweep_require_confirmation_candle": False,
+    "sweep_require_confirmation_candle": True,
     # وقتی True باشد (پیش‌فرض روشن)، اگر سیگنال درست در دقایق پایانی کندلِ تایم‌فریمی
     # که سطح ازش اومده (مثلاً [SETUP 1h] در ۸ دقیقه‌ی آخر همان ساعت) شکل بگیره،
     # صادر نمی‌شود؛ چون به‌زودی کندل جدید باز می‌شود و همان سطح (که هنوز میخکوب همون
     # نقطه‌ی قبلیه) دیگه تازه نیست - منتظر کندل بعدی و ارزیابی نسبت به سطح تازه‌بسته‌شده
     # می‌مونیم. این قانون برای تمام سطوح (ماهانه تا ۱ساعته) یکسان اعمال می‌شود.
-    "htf_close_guard_enabled": True,
+    "htf_close_guard_enabled": False,
     "htf_close_guard_minutes": 10,
     # وقتی True باشد، صرفاً «نقض‌نشدن» کندل بعدی کافی نیست - قیمت باید واقعاً از
     # سقف/کف نوسانیِ محلی که بین کندل ریکلیم تا الان تشکیل شده رد بشه (شکست ادامه‌دار)
     # تا سیگنال صادر شود. اگر فعال باشد، جایگزین sweep_require_confirmation_candle
     # می‌شود (منطق قوی‌تری دارد) و آن تنظیم را نادیده می‌گیرد. پیش‌فرض خاموش - نیاز به
     # اعتبارسنجی با داده دارد، مثل sweep_require_confirmation_candle.
-    "sweep_require_swing_break": True,
+    "sweep_require_swing_break": False,
     "sweep_swing_break_lookback": 6,
     "adaptive_allow_session_swing_anchors": True,
     # --- ۶ حالت معاملاتی صریح PDH/PDL (طبق تعریف کاربر) ---
@@ -2667,9 +2667,9 @@ def is_reversal_family_reason(reason):
 # (عمیق‌ترین عمقی که فاصله‌ی سطوح مجاور هنوز ≥ k×ATR باشد) تا روی ۵/۱۵ دقیقه سطوح خیلی گشاد نباشند.
 HALVING_DEFAULTS = {
     "halving_model_enabled": False,
-    "halving_k_atr": 4.0,              # حداقل فاصله‌ی سطوح مجاور = k × ATR
+    "halving_k_atr": 3.0,              # حداقل فاصله‌ی سطوح مجاور = k × ATR
     "halving_min_depth": 3,
-    "halving_max_depth": 10,
+    "halving_max_depth": 12,
     "halving_zone_atr": 0.30,          # ضخامت ناحیه‌ی هر سطح (برای «برخورد بدون نفوذ») به ATR
     "halving_max_trade_depth": 0,      # 0 = همه‌ی عمق‌ها؛ n = فقط سطوحی با عمق ≤ n معامله می‌شوند
     "halving_only_targets": True,      # هدف فقط از سطوح نصف‌کردن
@@ -2855,7 +2855,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
         return strategy_halving(df_primary, strategy_config, live_price=live_price)
     cfg_top = get_v2_config(strategy_config)
     if timeframe in ("1h", "4h", "1hour", "4hour"):
-        if not bool(cfg_top.get("strategy_htf_reversal_enabled", True)):
+        if not bool(cfg_top.get("strategy_htf_reversal_enabled", False)):
             sig, reason = None, "استراتژی HTF Liquidity Reversal دستی خاموش است"
         else:
             sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
@@ -2910,7 +2910,7 @@ V2_DEFAULTS = {
     # V3.19: تنها دو موتور معاملاتی وجود دارد (کد بقیه حذف شد، این‌ها دیگر سوییچ روشن/خاموش
     # نیستند، صرفاً برای سازگاری تنظیمات قدیمی نگه داشته شده‌اند و در کد جایی خوانده نمی‌شوند):
     "strategy_sweep_enabled": True,           # Liquidity Sweep ۵/۱۵ دقیقه‌ای - همیشه فعال
-    "strategy_htf_reversal_enabled": True,    # نسخه‌ی همین مدل برای ۱h/۴h - قابل خاموش‌کردن
+    "strategy_htf_reversal_enabled": False,    # نسخه‌ی همین مدل برای ۱h/۴h - قابل خاموش‌کردن
     "regime_adx_trend": 23.0,
     "regime_adx_strong": 30.0,
     "regime_atr_high": 1.35,
