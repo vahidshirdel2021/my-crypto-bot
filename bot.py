@@ -827,8 +827,8 @@ def default_session():
         'profit_alert_enabled': True,
         # V3.43.21: بستن خودکار معامله در سود PROFIT_AUTOCLOSE_USDT (۵$). پیش‌فرض روشن.
         'profit_autoclose_enabled': True,
-        # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۷$) برسد. پیش‌فرض خاموش.
-        'total_profit_autoclose_enabled': False,
+        # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۷$) برسد. پیش‌فرض روشن.
+        'total_profit_autoclose_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
@@ -5825,7 +5825,7 @@ PROFIT_ALERT_BUTTONS_TTL = max(60, int(os.environ.get('PROFIT_ALERT_BUTTONS_TTL'
 # V3.43.21: بستن خودکار معامله وقتی سود ناخالص (بدون کارمزد) به این مقدار (USDT) برسد. کلید روشن/خاموش: «خروج و حفظ سود». پیش‌فرض روشن.
 PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('PROFIT_AUTOCLOSE_USDT', '5')))
 # V3.43.24: بستن همه‌ی پوزیشن‌های باز وقتی «مجموع» سود/زیان لحظه‌ای آن‌ها (ناخالص، بدون کارمزد؛ همان عددی که بالای کارت پوزیشن‌ها
-# نمایش داده می‌شود) به این مقدار (USDT) برسد. کلید روشن/خاموش جدا در «مدیریت خروج». پیش‌فرض خاموش. 0 = کاملاً غیرفعال.
+# نمایش داده می‌شود) به این مقدار (USDT) برسد. کلید روشن/خاموش جدا در «مدیریت خروج». پیش‌فرض روشن. 0 = کاملاً غیرفعال.
 TOTAL_PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('TOTAL_PROFIT_AUTOCLOSE_USDT', '7')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
@@ -5960,7 +5960,7 @@ def total_profit_autoclose_scan_once():
         return
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
-            if not bool(s.get('total_profit_autoclose_enabled', False)):
+            if not bool(s.get('total_profit_autoclose_enabled', True)):
                 continue
             positions = []
             for p in list(s.get('paper_positions') or []):
@@ -7101,11 +7101,50 @@ def _assist_trend_warn(chat_id, symbol, side, ok_cb, no_cb):
         _TREND_WARN_RECENT[key] = now
         send_message(chat_id, text, {'inline_keyboard': [[
             {'text': '✅ بله، وارد شو', 'callback_data': ok_cb},
-            {'text': '❌ نه', 'callback_data': no_cb}]]}, keep=True)
+            {'text': '❌ نه', 'callback_data': no_cb}],
+            [{'text': '📈 نمایش چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}]]}, keep=True)
         return True
     except Exception:
         logger.exception('trend warn failed symbol=%s', symbol)
         return False
+
+
+def _auto_gate_markup(rid, symbol, tf):
+    """V3.43.24: کیبورد کارت «ورود خودکار نگه داشته شد»: بله/نه + دکمه‌های نمایش چارت (MiniApp و TradingView)."""
+    rows = [[{'text': '✅ بله، وارد شو', 'callback_data': f'/autotg_ok_{rid}'},
+             {'text': '❌ نه', 'callback_data': f'/autotg_no_{rid}'}]]
+    try:
+        mini = miniapp_chart_url(symbol, tf)
+    except Exception:
+        mini = None
+    if mini:
+        rows.append([{'text': '🌐 چارت تعاملی (MiniApp)', 'web_app': {'url': mini}}])
+    rows.append([{'text': '📈 نمایش چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}])
+    return {'inline_keyboard': rows}
+
+
+def _auto_gate_mark(s, rid, status):
+    """وضعیت رکوردِ هم‌نام در «سیگنال‌های در انتظار» (assist_log) را با تصمیم/انقضای ورود نگه‌داشته‌شده هماهنگ می‌کند."""
+    try:
+        with _ASSIST_LOCK:
+            a = _assist_find(s, rid)
+            if a and a.get('auto_gate') and a.get('status') == 'pending':
+                a['status'] = status
+                a[f'{status}_at'] = time.time()
+    except Exception:
+        logger.exception('auto gate mark failed rid=%s', rid)
+
+
+def _auto_gate_strip(chat_id, s, rid, rec):
+    """دکمه‌های عملیاتی کارت (و کارتی که از لیست انتظار دوباره پایین چت آمده) برداشته می‌شود؛ دکمه‌ی چارت می‌ماند."""
+    info = {'symbol': rec.get('symbol'), 'tf': rec.get('tf') or '5min'}
+    mids = [rec.get('message_id')]
+    a = _assist_find(s, rid)
+    if a:
+        mids.append(a.get('message_id'))
+        mids += list(a.get('old_mids') or [])
+    for mid in dict.fromkeys(m for m in mids if m):
+        _assist_strip_buttons(chat_id, mid, info)
 
 
 def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
@@ -7139,15 +7178,35 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     head = (f"🤖 *ورود خودکار نگه داشته شد*\n"
             f"• `{symbol}` | ورود: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}` | TP: `{fmt(float(tp))}`{rr_txt}\n"
             f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n")
+    rec['tf'] = tf
     res = tg('sendMessage', {'chat_id': chat_id, 'text': head + text, 'parse_mode': 'Markdown',
-                             'reply_markup': {'inline_keyboard': [[
-                                 {'text': '✅ بله، وارد شو', 'callback_data': f'/autotg_ok_{rid}'},
-                                 {'text': '❌ نه', 'callback_data': f'/autotg_no_{rid}'}]]}}, 10)
+                             'reply_markup': _auto_gate_markup(rid, symbol, tf)}, 10)
     if not (res and res.get('ok')):
         logger.warning('auto trend warn send failed symbol=%s', symbol)
         return False       # ارسال نشد: به‌جای از دست دادن سیگنال، مثل fail-open ادامه می‌دهد
     rec['message_id'] = (res.get('result') or {}).get('message_id')
     s.setdefault('auto_trend_pending', {})[rid] = rec
+    # V3.43.24: همین سیگنال در «📋 سیگنال‌های در انتظار» هم ثبت می‌شود (هم‌مهلت با کارت: expiry بالا، پیش‌فرض ۱۵ دقیقه)
+    try:
+        _risk = abs(float(entry) - float(sl))
+        _rr = float(plan.get('rr')) if plan.get('rr') is not None else (abs(float(tp) - float(entry)) / _risk if _risk > 0 else 0.0)
+        _scn = extract_scenario_tag(full_reason)
+        with _ASSIST_LOCK:
+            s.setdefault('assist_log', []).append({
+                'id': rid, 'auto_gate': True, 'card_text': head + text,
+                'symbol': symbol, 'sig': sig, 'side_label': rec['side_label'],
+                'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'rr': round(_rr, 3),
+                'score': plan.get('score'), 'quality_label': plan.get('quality_label'),
+                'structural_tp': bool(plan.get('structural_target', False)),
+                'tp_level_name': plan.get('tp_level_name'), 'tp_stages': plan.get('tp_stages'),
+                'exp_tp_pnl_net': None, 'exp_sl_pnl_net': None, 'symbol_regime': None,
+                'reason': full_reason, 'scn': _scn, 'level_token': level_token, 'level_value': level_value,
+                'tf': tf, 'created_at': now, 'expires_at': now + expiry, 'status': 'pending',
+                'ext': 0, 'message_id': rec['message_id'], 'trend_checked': True,
+            })
+            _assist_prune_log(s)
+    except Exception:
+        logger.exception('auto gate: pending-list registration failed symbol=%s', symbol)
     seen[seen_key] = now
     save_session(chat_id)
     return True
@@ -7158,18 +7217,18 @@ def auto_trend_decide(chat_id, rid, approve):
     rec = (s.get('auto_trend_pending') or {}).get(rid)
     if not rec:
         send_message(chat_id, 'ℹ️ این درخواست پیدا نشد (احتمالاً قدیمی شده است).'); return
-    _strip_all_buttons(chat_id, rec.get('message_id'))
+    _auto_gate_strip(chat_id, s, rid, rec)
     if rec.get('status') != 'pending':
         send_message(chat_id, f"ℹ️ درباره‌ی این سیگنال قبلاً تصمیم گرفته شده ({rec.get('status')})."); return
     if not approve:
-        rec['status'] = 'rejected'; save_session(chat_id)
+        rec['status'] = 'rejected'; _auto_gate_mark(s, rid, 'rejected'); save_session(chat_id)
         send_message(chat_id, f"❌ ورود `{rec['symbol']}` رد شد.", keep=False); return
     symbol = rec['symbol']
     if time.time() > float(rec.get('expires_at', 0)):
-        rec['status'] = 'expired'; save_session(chat_id)
+        rec['status'] = 'expired'; _auto_gate_mark(s, rid, 'expired'); save_session(chat_id)
         send_message(chat_id, '⌛ مهلت تایید این سیگنال تمام شده؛ ورودی انجام نشد.'); return
     if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
-        rec['status'] = 'skipped'; save_session(chat_id)
+        rec['status'] = 'skipped'; _auto_gate_mark(s, rid, 'blocked'); save_session(chat_id)
         send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
     try:
         live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
@@ -7183,7 +7242,7 @@ def auto_trend_decide(chat_id, rid, approve):
     crossed = (live <= rec['sl'] or live >= rec['tp']) if is_long else (live >= rec['sl'] or live <= rec['tp'])
     drift_r = abs(live - rec['entry']) / risk_dist if risk_dist > 0 else 0.0
     if crossed or drift_r > ASSIST_MAX_DRIFT_R:
-        rec['status'] = 'invalidated'; save_session(chat_id)
+        rec['status'] = 'invalidated'; _auto_gate_mark(s, rid, 'invalidated'); save_session(chat_id)
         send_message(chat_id, f"🚫 ورود `{symbol}` انجام نشد: قیمت لحظه‌ای (`{fmt(live)}`) از ورود/SL/TP پیشنهادی فاصله گرفته و ستاپ دیگر معتبر نیست.")
         return
     ok = execute_trade(chat_id, symbol, rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
@@ -7192,7 +7251,7 @@ def auto_trend_decide(chat_id, rid, approve):
                        tp_level_name=rec.get('tp_level_name'), tp_stages=rec.get('tp_stages'))
     s = get_session(chat_id)
     if ok:
-        rec['status'] = 'approved'; save_session(chat_id)
+        rec['status'] = 'approved'; _auto_gate_mark(s, rid, 'approved'); save_session(chat_id)
     else:
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         send_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}")
@@ -7529,7 +7588,11 @@ def assist_pending_list(chat_id, message_id=None):
         is_long = r['sig'] == 'BUY'
         tf = r.get('tf') or '5min'
         side_txt = '🟢 خرید' if is_long else '🔴 فروش'
-        state_txt = '💾 ذخیره‌شده (بدون مهلت)' if r.get('saved') else 'منتظر تصمیم'
+        if r.get('saved'):
+            state_txt = '💾 ذخیره‌شده (بدون مهلت)'
+        else:
+            _rem_min = max(0, int((float(r.get('expires_at', 0) or 0) - time.time() + 59) // 60))
+            state_txt = ('⚠️ منتظر تایید (هشدار روند)' if r.get('auto_gate') else 'منتظر تصمیم') + f' · ⏳ {_rem_min} دقیقه'
         try:
             live = latest_price(r['symbol'])
         except Exception:
@@ -7554,6 +7617,8 @@ def assist_pending_list(chat_id, message_id=None):
 
 def _assist_card_text(rec):
     """متن کارت سیگنال را از رکورد دوباره می‌سازد (فقط برای حالتی که پیام اصلی دیگر قابل کپی نیست)."""
+    if rec.get('auto_gate') and rec.get('card_text'):
+        return rec['card_text']
     tf = rec.get('tf') or '5min'
     is_long = rec['sig'] == 'BUY'
     level_txt, scn_txt = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
@@ -7579,7 +7644,7 @@ def assist_open(chat_id, aid):
     if not rec:
         return
     old_mid = rec.get('message_id')
-    markup = _assist_markup(rec)
+    markup = _auto_gate_markup(aid, rec['symbol'], rec.get('tf') or '5min') if rec.get('auto_gate') else _assist_markup(rec)
     new_mid = None
     if old_mid:
         res = tg('copyMessage', {'chat_id': chat_id, 'from_chat_id': chat_id, 'message_id': old_mid, 'reply_markup': markup}, 15)
@@ -8390,7 +8455,7 @@ def _filter_info(key):
         'profit_autoclose': (f'معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند',
             f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش کن. پیش‌فرض: روشن.'),
         'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$',
-            f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {PROFIT_AUTOCLOSE_USDT:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: خاموش.'),
+            f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {PROFIT_AUTOCLOSE_USDT:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: روشن.'),
         'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
@@ -8528,7 +8593,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(weakness_on, 'weakness_exit', '/toggle_weakness_exit')],
             [fcell(bool(s.get('day_end_close_enabled', False)), 'day_end_close', '/toggle_day_end_close')],
             [fcell(bool(s.get('profit_autoclose_enabled', True)), 'profit_autoclose', '/toggle_profit_autoclose')],
-            [fcell(bool(s.get('total_profit_autoclose_enabled', False)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
+            [fcell(bool(s.get('total_profit_autoclose_enabled', True)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
             [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
             [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             back_row,
@@ -9990,7 +10055,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🎯 {_filter_info('profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_total_profit_autoclose':
-        current = bool(s.get('total_profit_autoclose_enabled', False))
+        current = bool(s.get('total_profit_autoclose_enabled', True))
         s['total_profit_autoclose_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
