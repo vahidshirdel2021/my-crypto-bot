@@ -827,6 +827,8 @@ def default_session():
         'profit_alert_enabled': True,
         # V3.43.21: بستن خودکار معامله در سود PROFIT_AUTOCLOSE_USDT (۵$). پیش‌فرض روشن.
         'profit_autoclose_enabled': True,
+        # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۷$) برسد. پیش‌فرض خاموش.
+        'total_profit_autoclose_enabled': False,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
@@ -5822,6 +5824,9 @@ PROFIT_ALERT_USDT = max(0.0, float(os.environ.get('PROFIT_ALERT_USDT', '5')))
 PROFIT_ALERT_BUTTONS_TTL = max(60, int(os.environ.get('PROFIT_ALERT_BUTTONS_TTL', '1800')))
 # V3.43.21: بستن خودکار معامله وقتی سود ناخالص (بدون کارمزد) به این مقدار (USDT) برسد. کلید روشن/خاموش: «خروج و حفظ سود». پیش‌فرض روشن.
 PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('PROFIT_AUTOCLOSE_USDT', '5')))
+# V3.43.24: بستن همه‌ی پوزیشن‌های باز وقتی «مجموع» سود/زیان لحظه‌ای آن‌ها (ناخالص، بدون کارمزد؛ همان عددی که بالای کارت پوزیشن‌ها
+# نمایش داده می‌شود) به این مقدار (USDT) برسد. کلید روشن/خاموش جدا در «مدیریت خروج». پیش‌فرض خاموش. 0 = کاملاً غیرفعال.
+TOTAL_PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('TOTAL_PROFIT_AUTOCLOSE_USDT', '7')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -5946,6 +5951,59 @@ def profit_autoclose_scan_once():
             logger.exception('profit autoclose scan failed chat=%s', chat_id)
 
 
+def total_profit_autoclose_scan_once():
+    """V3.43.24: اگر کلید روشن باشد و «مجموع» سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز (ناخالص، بدون کارمزد)
+    به TOTAL_PROFIT_AUTOCLOSE_USDT برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند (سود ثبت/ذخیره می‌شود).
+    اگر قیمت حتی یکی از پوزیشن‌ها در دسترس نباشد، تصمیم گرفته نمی‌شود (مجموع ناقص نباید ماشه بزند)."""
+    thr = TOTAL_PROFIT_AUTOCLOSE_USDT
+    if thr <= 0:
+        return
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not bool(s.get('total_profit_autoclose_enabled', False)):
+                continue
+            positions = []
+            for p in list(s.get('paper_positions') or []):
+                if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                    continue
+                positions.append(p)
+            if not positions:
+                continue
+            priced = []
+            total = 0.0
+            complete = True
+            for p in positions:
+                price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                pnl = _profit_lock_pnl(p, float(price)) if price else None
+                if pnl is None:
+                    complete = False
+                    break
+                priced.append((p, float(price), pnl))
+                total += pnl
+            if not complete or total < thr:
+                continue
+            logger.info('total profit autoclose chat=%s positions=%d total=%.2f thr=%.2f', chat_id, len(priced), total, thr)
+            closed = 0
+            for p, price, pnl in priced:
+                try:
+                    close_position(chat_id, p, price, reason=f'بستن خودکار: مجموع سود پوزیشن‌ها به {thr:g}$ رسید')
+                    if p not in (s.get('paper_positions') or []):
+                        closed += 1
+                except Exception:
+                    logger.exception('total profit autoclose failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+            try:
+                send_message(chat_id,
+                    f"✅ *مجموع سود به {thr:g}$ رسید*\n"
+                    f"• مجموع سود لحظه‌ای هنگام بستن: `{total:+.2f} USDT` (ناخالص، بدون کارمزد)\n"
+                    f"• {closed} از {len(priced)} پوزیشن بسته شد."
+                    + ("" if closed == len(priced) else "\n• بقیه تا چند ثانیه‌ی دیگر دوباره تلاش می‌شود."))
+                save_session(chat_id)
+            except Exception:
+                logger.exception('total profit autoclose notify failed chat=%s', chat_id)
+        except Exception:
+            logger.exception('total profit autoclose scan failed chat=%s', chat_id)
+
+
 def profit_alert_scan_once():
     step = PROFIT_ALERT_USDT
     if step <= 0:
@@ -6067,6 +6125,10 @@ def four_h_close_alert_scan_once():
 
 def _profit_lock_loop():
     while True:
+        try:
+            total_profit_autoclose_scan_once()
+        except Exception:
+            logger.exception('total profit autoclose loop failed')
         try:
             profit_autoclose_scan_once()
         except Exception:
@@ -8327,6 +8389,8 @@ def _filter_info(key):
             'معامله‌های ۵ و ۱۵ دقیقه‌ای نزدیک ساعت ۰۰:۰۰ به وقت جهانی UTC (حدود ۰۳:۳۰ بامداد ایران) با قیمت بازار بسته می‌شوند. اگر خاموش باشد به روز بعد منتقل می‌شوند.'),
         'profit_autoclose': (f'معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند',
             f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش کن. پیش‌فرض: روشن.'),
+        'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$',
+            f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {PROFIT_AUTOCLOSE_USDT:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: خاموش.'),
         'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
@@ -8353,7 +8417,7 @@ def _filter_info(key):
 
 _FILTER_SECTION_KEYS = {
     'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
-    'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'profit_alert', 'profit_fade_alert'],
+    'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
 }
@@ -8464,6 +8528,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(weakness_on, 'weakness_exit', '/toggle_weakness_exit')],
             [fcell(bool(s.get('day_end_close_enabled', False)), 'day_end_close', '/toggle_day_end_close')],
             [fcell(bool(s.get('profit_autoclose_enabled', True)), 'profit_autoclose', '/toggle_profit_autoclose')],
+            [fcell(bool(s.get('total_profit_autoclose_enabled', False)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
             [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
             [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             back_row,
@@ -9923,6 +9988,18 @@ def process_command(cmd,chat_id,message_id=None):
             'بستن خودکار در سود خاموش شد؛ معامله‌ها فقط با SL/TP یا دستی بسته می‌شوند.'
         )
         send_message(chat_id, f"🎯 {_filter_info('profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl=='/toggle_total_profit_autoclose':
+        current = bool(s.get('total_profit_autoclose_enabled', False))
+        s['total_profit_autoclose_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            _filter_info('total_profit_autoclose')[1]
+            if not current else
+            'بستن خودکار با مجموع سود خاموش شد.'
+        )
+        send_message(chat_id, f"💵 {_filter_info('total_profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_alert':
         current = bool(s.get('profit_alert_enabled', True))
