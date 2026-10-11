@@ -758,6 +758,7 @@ def audit_trade_record(p):
         'trailing_activated': p.get('trailing_activated', False),
         'trailing_locked_r': p.get('trailing_locked_r', 0.0),
         'ladder_stage': p.get('ladder_stage', 0),
+        'entry_snapshot': p.get('entry_snapshot'),
     }
 
 
@@ -829,6 +830,8 @@ def default_session():
         'profit_autoclose_enabled': True,
         # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۷$) برسد. پیش‌فرض روشن.
         'total_profit_autoclose_enabled': True,
+        # V3.43.28: ورود/سیگنال فقط وقتی BTC و ETH (روی تایم‌فریم فعال) هر دو هم‌جهت و غیررنج باشند. پیش‌فرض روشن.
+        'btc_eth_same_dir_gate_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
@@ -3110,6 +3113,21 @@ def btc_eth_regime_rows(tf):
     return rows
 
 
+def _btc_eth_same_dir_block_reason(rows, tf):
+    """V3.43.28: None = ورود مجاز؛ وگرنه متن دلیل مسدود شدن. فقط «هر دو صعودی» یا «هر دو نزولی» مجاز است.
+    اگر جهت‌شان فرق کند، یا هر دو رنج باشند، یا داده‌ی یکی از آن‌ها در دسترس نباشد (محافظه‌کارانه) ورودی/سیگنالی صادر نمی‌شود."""
+    tfl = TF_DISPLAY.get(tf, tf)
+    regs = {sym: reg for sym, reg, _a, _r in (rows or [])}
+    if 'BTC' not in regs or 'ETH' not in regs or regs['BTC'] is None or regs['ETH'] is None:
+        return f'گیت BTC/ETH ({tfl}): داده‌ی رژیم در دسترس نیست — هیچ ورودی/سیگنالی مجاز نیست'
+    b, e = regs['BTC'], regs['ETH']
+    if b != e:
+        return f"گیت BTC/ETH ({tfl}): BTC {_REGIME_FA[b]} و ETH {_REGIME_FA[e]} هم‌جهت نیستند — هیچ ورودی/سیگنالی مجاز نیست"
+    if b == 'RANGE':
+        return f'گیت BTC/ETH ({tfl}): هر دو در رژیم رنج‌اند — هیچ ورودی/سیگنالی مجاز نیست'
+    return None
+
+
 def btc_eth_regime_text(tf, popup=False):
     rows = btc_eth_regime_rows(tf)
     tf_label = TF_DISPLAY.get(tf, tf)
@@ -4428,6 +4446,75 @@ def _paper_stop_fill_price(pos, low, high, risk_distance):
     return (sl - charged) if is_long else (sl + charged)
 
 
+def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
+    """V3.43.26: عکس‌فوری لحظه‌ی ورود برای تحلیل بعدیِ معامله‌ها (فقط ثبت؛ هیچ تصمیم ورود/خروجی را عوض نمی‌کند):
+    ۱) جهت رژیم BTC/ETH (امتیاز EMA روی آخرین کندل بسته‌شده) نسبت به جهت معامله
+    ۲) رأی RSI/MACD/ADX نسبت به جهت معامله (هم‌جهت / مخالف / خنثی) + مقدارهای خام
+    ۳) آخرین کندل‌های بسته‌شده نسبت به سطح سیگنال (HVL یا ANCHOR داخل متن دلیل ورود)، و فاصله‌ی قیمت ورود از سطح به‌اندازه‌ی فاصله‌ی استاپ
+    ۴) حجم: نسبت حجم آخرین کندل بسته‌شده به میانگین ۲۰ کندل (و میانگین ۳ کندل آخر)
+    هر بخشی که داده‌اش نبود None می‌ماند."""
+    is_long = str(side).upper().startswith('BUY')
+    out = {'btc': None, 'eth': None, 'indicators': None, 'level': None, 'volume': None, 'checked_at': time.time()}
+    for key, sym in (('btc', 'BTC'), ('eth', 'ETH')):
+        try:
+            snap = _market_snapshot(sym, timeframe)
+            if snap:
+                sc = int(snap.get('score', 0))
+                out[key] = {'score': sc, 'label': 'صعودی' if sc > 0 else ('نزولی' if sc < 0 else 'خنثی'),
+                            'with_trade': None if sc == 0 else ((sc > 0) == is_long)}
+        except Exception:
+            logger.exception('entry snapshot regime failed sym=%s', sym)
+    try:
+        d = get_klines(symbol, timeframe, 160)
+        if d is None or d.empty or len(d) < 60:
+            return out
+        ind = calculate_indicators(d)
+        row = ind.iloc[-2]
+        def _f(v):
+            return None if v is None or pd.isna(v) else round(float(v), 4)
+        rsi, macd_h, adx = _f(row.get('rsi')), _f(row.get('macd_hist')), _f(row.get('adx'))
+        pdi, mdi = _f(row.get('plus_di')), _f(row.get('minus_di'))
+        def _vote(bias):
+            if bias is None:
+                return 'neutral'
+            return 'agree' if ((bias == 'BUY') == is_long) else 'against'
+        rsi_bias = None
+        if rsi is not None:
+            rsi_bias = 'SELL' if rsi >= 70 else ('BUY' if rsi <= 30 else ('BUY' if rsi >= 55 else ('SELL' if rsi <= 45 else None)))
+        macd_bias = None if macd_h in (None, 0) else ('BUY' if macd_h > 0 else 'SELL')
+        adx_bias = None
+        if adx is not None and adx >= 20 and pdi is not None and mdi is not None and pdi != mdi:
+            adx_bias = 'BUY' if pdi > mdi else 'SELL'
+        votes = {'rsi': _vote(rsi_bias), 'macd': _vote(macd_bias), 'adx': _vote(adx_bias)}
+        out['indicators'] = {'rsi': rsi, 'macd_hist': macd_h, 'adx': adx, 'plus_di': pdi, 'minus_di': mdi, 'votes': votes,
+                             'agree': sum(v == 'agree' for v in votes.values()), 'against': sum(v == 'against' for v in votes.values())}
+        vol = d['volume'].astype(float)
+        vma = vol.rolling(20).mean()
+        ratios = []
+        for i in (-2, -3, -4):
+            try:
+                ratios.append(float(vol.iloc[i] / vma.iloc[i]) if float(vma.iloc[i]) > 0 else None)
+            except Exception:
+                ratios.append(None)
+        good = [r for r in ratios if r is not None]
+        out['volume'] = {'last_closed_ratio': round(ratios[0], 2) if ratios and ratios[0] is not None else None,
+                         'avg3_ratio': round(sum(good) / len(good), 2) if good else None}
+        m = re.search(r'HVL=([0-9.]+)', reason or '') or re.search(r'ANCHOR=([0-9.]+)', reason or '')
+        if m:
+            lvl = float(m.group(1))
+            closes = [float(ind.iloc[i].close) for i in (-2, -3, -4)]
+            beyond = [(c > lvl) if is_long else (c < lvl) for c in closes]
+            risk_px = abs(float(price) - float(sl))
+            out['level'] = {'level': lvl, 'last_close': closes[0],
+                            'last_close_side': 'above' if closes[0] > lvl else ('below' if closes[0] < lvl else 'at'),
+                            'last_close_confirms': beyond[0],
+                            'closed_candles_beyond_of_3': sum(beyond),
+                            'entry_vs_level_r': round(((float(price) - lvl) * (1 if is_long else -1)) / risk_px, 3) if risk_px > 0 else None}
+    except Exception:
+        logger.exception('entry snapshot failed symbol=%s', symbol)
+    return out
+
+
 def _regime_alignment_snapshot(symbol, timeframe):
     """
     عکس‌فوری عددی سه لایه‌ای که در بحث «هم‌جهتی چندلایه» مطرح شد، در لحظه‌ی ورود:
@@ -4692,7 +4779,8 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'swing_break_confirmed':swing_break_confirmed,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None}
+    _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'swing_break_confirmed':swing_break_confirmed,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'trailing_activated':False,'risk_distance':gap_sl,'trailing_locked_r':0.0,'swing_sl_level':None,'entry_snapshot':_entry_snap}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
 
@@ -5318,6 +5406,124 @@ def partial_close_position(chat_id,pos,price,frac_orig,label=''):
         return True
 
 
+# ===================== V3.43.27: ژورنال معاملات (JSON) + سود/زیان روزانه =====================
+# ژورنال: برای هر پوزیشنِ بسته‌شده یک رکورد در یک فایل JSON ذخیره می‌شود (وضعیت لحظه‌ی ورود: رژیم BTC/ETH، RSI/MACD/ADX،
+# سطح، حجم + نتیجه‌ی معامله). مسیر پیش‌فرض: کنار دیتابیس (پوشه‌ی trader_bot_data) با نام trade_journal.json؛ با TRADE_JOURNAL_PATH عوض می‌شود.
+_JOURNAL_LOCK = RLock()
+TRADE_JOURNAL_MAX = 20000
+DAILY_PNL_TZ = os.environ.get('DAILY_PNL_TZ', '').strip()      # خالی = همان مرز روز کریپتو (CRYPTO_DAY_TZ؛ پیش‌فرض ۰۰:۰۰ UTC)
+
+
+def _journal_path():
+    p = os.environ.get('TRADE_JOURNAL_PATH', '').strip()
+    return p or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'trade_journal.json')
+
+
+def _snap_dir_fa(is_with):
+    return 'هم‌جهت ✅' if is_with is True else ('در تضاد ⚠️' if is_with is False else 'خنثی')
+
+
+def _vote_fa(v):
+    return {'agree': 'هم‌جهت ✅', 'against': 'مخالف ⚠️', 'neutral': 'خنثی'}.get(v, '—')
+
+
+def _close_snapshot_lines(pos):
+    """خطوط وضعیتِ لحظه‌ی ورود برای پیام بسته‌شدن پوزیشن؛ اگر پوزیشن قبل از این نسخه باز شده باشد خالی برمی‌گردد."""
+    snap = pos.get('entry_snapshot')
+    if not snap:
+        return ''
+    out = []
+    lv = snap.get('level')
+    if lv:
+        side_txt = {'above': 'بالای سطح', 'below': 'پایین سطح', 'at': 'روی سطح'}.get(lv.get('last_close_side'), '—')
+        conf = 'جهت معامله را تایید می‌کرد ✅' if lv.get('last_close_confirms') else 'جهت معامله را تایید نمی‌کرد ⚠️'
+        out.append(f"\n• سطح: `{fmt(lv.get('level'))}` — آخرین کندل بسته‌شده {side_txt} ({conf})")
+    else:
+        out.append("\n• سطح: —")
+    for key, name in (('btc', 'BTC'), ('eth', 'ETH')):
+        r = snap.get(key)
+        out.append(f"\n• رژیم {name} در لحظه ورود: " + ((r['label'] if r.get('with_trade') is None else f"{r['label']} — {_snap_dir_fa(r.get('with_trade'))}") if r else '—'))
+    ind = snap.get('indicators') or {}
+    votes = ind.get('votes') or {}
+    def _n(x, d=1):
+        return '—' if x is None else f'{x:.{d}f}'
+    out.append(f"\n• اندیکاتور RSI: `{_n(ind.get('rsi'))}` — {_vote_fa(votes.get('rsi'))}")
+    out.append(f"\n• اندیکاتور MACD: `{_n(ind.get('macd_hist'), 4)}` — {_vote_fa(votes.get('macd'))}")
+    out.append(f"\n• اندیکاتور ADX: `{_n(ind.get('adx'))}` — {_vote_fa(votes.get('adx'))}")
+    vol = snap.get('volume') or {}
+    if vol.get('last_closed_ratio') is not None:
+        a3 = f" (میانگین ۳ کندل: `{vol['avg3_ratio']:.2f}x`)" if vol.get('avg3_ratio') is not None else ''
+        out.append(f"\n• حجم معامله: `{vol['last_closed_ratio']:.2f}x` میانگین ۲۰ کندل{a3}")
+    else:
+        out.append("\n• حجم معامله: —")
+    return ''.join(out)
+
+
+def journal_append_closed(chat_id, pos):
+    """رکورد پوزیشن بسته‌شده را به فایل ژورنال JSON اضافه می‌کند (نوشتن اتمیک؛ خطا هیچ‌وقت جلوی بستن پوزیشن را نمی‌گیرد)."""
+    try:
+        setup_tag = extract_setup_tag(pos.get('entry_reason') or '')
+        m = re.search(r'SCN=(\d+)', pos.get('entry_reason') or '')
+        rec = {
+            'chat_id': chat_id, 'trade_id': pos.get('trade_id'), 'symbol': pos.get('symbol'), 'side': pos.get('side'),
+            'is_real': bool(pos.get('is_real')), 'timeframe': pos.get('timeframe'), 'setup': setup_tag,
+            'scenario': int(m.group(1)) if m else None,
+            'opened_at': pos.get('opened_at'), 'closed_at': pos.get('close_timestamp'),
+            'opened_at_text': fmt_scan_time(pos.get('opened_at')), 'closed_at_text': fmt_scan_time(pos.get('close_timestamp')),
+            'entry_price': pos.get('entry_price'), 'close_price': pos.get('close_price'), 'sl': pos.get('sl'), 'tp': pos.get('tp'),
+            'pnl_usdt': pos.get('pnl_usdt'), 'close_reason': pos.get('close_reason'), 'realized_r': pos.get('realized_r'),
+            'mfe_r': pos.get('mfe_r'), 'mae_r': pos.get('mae_r'), 'duration_seconds': pos.get('duration_seconds'),
+            'entry_snapshot': pos.get('entry_snapshot'),
+        }
+        path = _journal_path()
+        with _JOURNAL_LOCK:
+            data = {'version': 1, 'trades': []}
+            if os.path.exists(path):
+                try:
+                    with open(path, 'r', encoding='utf-8') as fh:
+                        loaded = json.load(fh)
+                    if isinstance(loaded, dict) and isinstance(loaded.get('trades'), list):
+                        data = loaded
+                except Exception:
+                    try:
+                        os.replace(path, f'{path}.corrupt-{int(time.time())}')     # فایل خراب دور ریخته نمی‌شود
+                    except Exception:
+                        pass
+            data['trades'].append(rec)
+            data['trades'] = data['trades'][-TRADE_JOURNAL_MAX:]
+            data['updated_at'] = time.time()
+            tmp = f'{path}.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=1, default=str)
+            os.replace(tmp, path)
+    except Exception:
+        logger.exception('trade journal append failed trade=%s', (pos or {}).get('trade_id'))
+
+
+def _daily_pnl_day_start_ts():
+    name = DAILY_PNL_TZ or CRYPTO_DAY_TZ
+    tz = timezone.utc
+    if name.strip().upper() != 'UTC' and ZoneInfo is not None:
+        try:
+            tz = ZoneInfo(name)
+        except Exception:
+            tz = timezone.utc
+    return datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def daily_pnl_text(chat_id):
+    """فقط سود/زیان خالص امروز (جمع PnL پوزیشن‌های بسته‌شده‌ی امروز؛ بعد از کارمزدها و خروج‌های پله‌ای)."""
+    s = get_session(chat_id)
+    start = _daily_pnl_day_start_ts()
+    total = sum(float(p.get('pnl_usdt') or 0.0) for p in (s.get('closed_positions') or [])
+                if float(p.get('close_timestamp', 0) or 0) >= start)
+    if total > 0.005:
+        return f"💰 سود امروز: `{total:+.2f} USDT`"
+    if total < -0.005:
+        return f"📉 زیان امروز: `{total:+.2f} USDT`"
+    return "⚖️ سود/زیان امروز: `0.00 USDT`"
+
+
 def close_position(chat_id,pos,price=None,reason='manual'):
     # قفل سراسری هر چت (همان قفلی که execute_trade/execute_manual_trade برای باز کردن
     # معامله استفاده می‌کنند): چند حلقه‌ی پس‌زمینه‌ی جدا (اسکنر هر ۴۵ث، پروفیت‌لاک هر ۵ث،
@@ -5410,7 +5616,9 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         side_fa = 'خرید (Long)' if side_long(pos.get('side')) else 'فروش (Short)'
         entry_time_line = f"\n• زمان ورود: `{fmt_scan_time(pos.get('opened_at'))}`"
         close_time_line = f"\n• زمان خروج: `{fmt_scan_time(pos.get('close_timestamp'))}`"
-        send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
+        snapshot_lines = _close_snapshot_lines(pos)
+        journal_append_closed(chat_id, pos)
+        send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
         return True
 
 
@@ -8606,6 +8814,8 @@ def _filter_info(key):
             'بعد از اینکه قیمت یک سطح مهم را لحظه‌ای می‌شکند و برمی‌گردد (دام قیمتی)، ربات یک کندل دیگر صبر می‌کند تا برگشت واقعاً تایید شود. ورود کمی دیرتر و با قیمت بدتر می‌شود، ولی برگشت‌های دروغین کمتر می‌شوند.'),
         'swing_break': ('تایید با عبور از آخرین سقف/کف کوچک',
             'بعد از برگشت قیمت، ربات فقط وقتی وارد می‌شود که قیمت آخرین سقفِ کوچک (برای خرید) یا کفِ کوچک (برای فروش) را هم رد کند. از «صبر برای یک کندل تایید اضافه» سخت‌گیرانه‌تر است و اگر هر دو روشن باشند همین ملاک است.'),
+        'btc_eth_same_dir': ('ورود فقط وقتی BTC و ETH هم‌جهت‌اند',
+            'ربات رژیم بیت‌کوین و اتریوم را روی تایم‌فریم فعال می‌سنجد (همان عددی که در «🧭 رژیم BTC/ETH» می‌بینی). فقط وقتی هر دو صعودی یا هر دو نزولی باشند ورود و سیگنال صادر می‌شود. اگر جهت‌شان فرق کند، هر دو رنج باشند، یا داده‌ی یکی‌شان در دسترس نباشد، هیچ معامله یا سیگنالی صادر نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند. پیش‌فرض: روشن.'),
         'market_alignment': ('همسو بودن با اکثر بازار',
             'ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
         'trend_warn': ('هشدار روند بیت‌کوین و اتریوم (کلید اصلی)',
@@ -8655,7 +8865,7 @@ def _filter_info(key):
 
 
 _FILTER_SECTION_KEYS = {
-    'entry': ['sweep_confirm', 'swing_break', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
+    'entry': ['sweep_confirm', 'swing_break', 'btc_eth_same_dir', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'align4'],
     'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
@@ -8744,6 +8954,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         return {'inline_keyboard': [
             [fcell(sweep_confirm, 'sweep_confirm', '/toggle_sweep_confirm')],
             [fcell(swing_break, 'swing_break', '/toggle_swing_break')],
+            [fcell(bool(s.get('btc_eth_same_dir_gate_enabled', True)), 'btc_eth_same_dir', '/toggle_btc_eth_same_dir')],
             [fcell(align_on, 'market_alignment', '/toggle_market_alignment')],
             [fcell(bool(s.get('trend_warn_enabled', True)), 'trend_warn', '/toggle_trend_warn')],
             [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
@@ -10155,6 +10366,18 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"📐 {_filter_info('swing_break')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
+    if cl=='/toggle_btc_eth_same_dir':
+        current = bool(s.get('btc_eth_same_dir_gate_enabled', True))
+        s['btc_eth_same_dir_gate_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            _filter_info('btc_eth_same_dir')[1]
+            if not current else
+            'این قانون خاموش شد: ورود و سیگنال به هم‌جهت بودن BTC و ETH وابسته نیست.'
+        )
+        send_message(chat_id, f"🧭 {_filter_info('btc_eth_same_dir')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
+        return
     if cl=='/toggle_market_alignment':
         current = bool(s.get('market_alignment_filters_enabled', False))
         s['market_alignment_filters_enabled'] = not current
@@ -10449,6 +10672,8 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🚦 حالت ۱ و ۲ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
+    if cl=='/daily_pnl':
+        send_message(chat_id, daily_pnl_text(chat_id)); return
     if cl=='/assist_menu':
         st = 'روشن 🟢' if s.get('assist_mode_enabled') else 'خاموش 🔴'
         send_message(chat_id, f"🤝 *حالت دستیار معاملاتی*\n\nوضعیت: {st}\n\nوقتی روشن باشد، ربات همه‌چیز را مثل قبل اسکن و تحلیل می‌کند ولی به‌جای ورود خودکار، هر سیگنال را با دکمه‌ی ✅ ورود / ❌ رد برای شما می‌فرستد. ورود بعد از تایید با قیمت لحظه‌ای انجام می‌شود. سیگنال‌های ردشده هم پیگیری می‌شوند تا معلوم شود تشخیص شما ارزش افزوده دارد یا نه.", assist_keyboard(chat_id))
@@ -10683,6 +10908,7 @@ def handle_text(chat_id,text):
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
         '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
+        '💰 سود و زیان امروز':'/daily_pnl', 'سود و زیان امروز':'/daily_pnl',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
     }
     if raw in fixed_buttons:
@@ -11149,6 +11375,16 @@ async def scan_loop():
                 for tf in active_timeframes:
                     gate_by_tf[tf] = await refresh_market_gate(http, tf)
                     base_watchlist_by_tf[tf] = scan_watchlist_for_timeframe(tf, loose_regime)
+                # V3.43.28: رژیم BTC/ETH فقط برای تایم‌فریم‌هایی که کاربرِ فعالِ دارای کلید روشن دارند، یک‌بار در هر چرخه
+                be_rows_by_tf = {}
+                for tf in active_timeframes:
+                    if any(sess.get('is_bot_active') and not sess.get('daily_stopped') and sess.get('timeframe', '5min') == tf
+                           and sess.get('btc_eth_same_dir_gate_enabled', True) for sess in USER_SESSIONS.values()):
+                        try:
+                            be_rows_by_tf[tf] = await asyncio.get_running_loop().run_in_executor(None, btc_eth_regime_rows, tf)
+                        except Exception:
+                            logger.exception('btc/eth same-dir gate fetch failed tf=%s', tf)
+                            be_rows_by_tf[tf] = None
                 for cid,s in list(USER_SESSIONS.items()):
                     try:
                         if not s['is_bot_active'] or s['daily_stopped']: continue
@@ -11157,6 +11393,12 @@ async def scan_loop():
                             _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                             continue
                         user_tf = s.get('timeframe', '5min')
+                        if bool(s.get('btc_eth_same_dir_gate_enabled', True)):
+                            _be_reason = _btc_eth_same_dir_block_reason(be_rows_by_tf.get(user_tf), user_tf)
+                            if _be_reason:
+                                # BTC/ETH هم‌جهت نیستند یا رنج‌اند => هیچ ورودی/سیگنالی (شامل صف اولویت‌دار) صادر نمی‌شود
+                                _entry_diag_batch_update(cid, [{'status':'blocked','reason':_be_reason}])
+                                continue
                         align_on = bool(s.get('market_alignment_filters_enabled', False))
                         gate = gate_by_tf.get(user_tf) if align_on else None
                         if gate == 'RANGE':

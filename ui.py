@@ -12,6 +12,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
             [{"text": "🏠 منوی اصلی"}, scan_button],
             [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
             [{"text": "📋 بررسی‌های آتی"}, {"text": "🧭 رژیم BTC/ETH"}],
+            [{"text": "💰 سود و زیان امروز"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -111,7 +112,7 @@ def get_start_keyboard():
 
 
 def get_balance_keyboard():
-    return {"inline_keyboard": [[{"text": "500 USDT", "callback_data": "/set_bal_500"}, {"text": "1000 USDT", "callback_data": "/set_bal_1000"}], [{"text": "5000 USDT", "callback_data": "/set_bal_5000"}, {"text": "10000 USDT", "callback_data": "/set_bal_10000"}]]}
+    return {"inline_keyboard": [[{"text": "300 USDT", "callback_data": "/set_bal_300"}, {"text": "500 USDT", "callback_data": "/set_bal_500"}], [{"text": "1000 USDT", "callback_data": "/set_bal_1000"}, {"text": "5000 USDT", "callback_data": "/set_bal_5000"}], [{"text": "10000 USDT", "callback_data": "/set_bal_10000"}]]}
 
 
 def get_margin_keyboard():
