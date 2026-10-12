@@ -1701,6 +1701,9 @@ def _register_kb_anchor(chat_id, message_id, markup):
 def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdown', keep=False):
     """keep=True: این پیام (مثلاً سیگنال) هرگز خودکار حذف نمی‌شود."""
     if not is_allowed(chat_id): return False
+    if isinstance(text, str) and len(text) > 4000:
+        # V3.43.24: شبکه‌ی ایمنی: پیامِ بیشتر از ۴۰۹۶ کاراکتر در تلگرام کلاً رد می‌شود؛ روی مرز یک پاراگراف می‌بُریم
+        text = text[:3980].rsplit('\n\n', 1)[0] + '\n\n…'
     s = get_session(chat_id)
     _ctx = getattr(_CB_CTX, 'data', None)
     _can_inplace = bool(not keep and _ctx and not _ctx['used'] and _ctx['chat_id'] == chat_id)
@@ -9059,7 +9062,22 @@ def filter_section_text(section):
         if v[2] == section:
             items.append(f'• {v[0]}: {v[3]}')
     has_toggles = section in ('entry', 'structure', 'quality', 'exit', 'limits')
-    return f'{title}\n\n{intro}' + (f'\n{_FILTER_HOW_TO}' if has_toggles else '') + '\n\n' + '\n\n'.join(items)
+    head = f'{title}\n\n{intro}' + (f'\n{_FILTER_HOW_TO}' if has_toggles else '') + '\n\n'
+    full = head + '\n\n'.join(items)
+    # V3.43.24: تلگرام پیام بیشتر از ۴۰۹۶ کاراکتر را رد می‌کند (صفحه‌ی «شرایط ورود» بعد از افزودن فیلترهای جدید
+    # از این سقف رد شده بود و دکمه «کار نمی‌کرد»). اگر طولانی بود، از هر توضیح فقط جمله‌ی اول می‌ماند.
+    if len(full) <= 3800:
+        return full
+    short = []
+    for it in items:
+        cut = it.find('. ')
+        if cut == -1:
+            cut = it.find('.\n')
+        short.append(it[:cut + 1] if cut != -1 else it)
+    full = head + '\n\n'.join(short)
+    if len(full) > 3900:
+        full = full[:3850].rsplit('\n\n', 1)[0]
+    return full
 
 
 FILTER_MAIN_TEXT = (
