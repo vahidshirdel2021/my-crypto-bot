@@ -320,6 +320,11 @@ STRATEGY_DEFAULTS = {
     "scenario_precision_v2": True,
     "scenario_penetration_min_atr": 0.10,       # close باید حداقل این‌قدر (×ATR) فراتر از سطح باشد تا «نفوذ» حساب شود
     "scenario_fakeout_max_gap_candles": 0,      # ۵/۶: حداکثر کندلِ بسته‌شده‌ی داخل رنج بین آخرین close فراتر از سطح و کندل فعلی (۰ = اولین کندلِ بازگشت)
+    # V3.43.28: تعریف دقیق «شکست کاذب» ۵/۶ - قیمت باید از داخل محدوده به بیرون سطح رفته، فقط کوتاه آن‌طرف مانده و برگشته باشد.
+    # اگر قیمت ساعت‌ها بیرون سطح بوده و حالا از همان سمت وارد محدوده می‌شود، این شکست کاذب نیست (ورود به محدوده است).
+    "fakeout_context_check": True,              # کلید کل بررسی؛ False = رفتار قبلی
+    "fakeout_max_leg_candles": 6,               # حداکثر تعداد کندلِ پیاپی که close بیرون سطح مانده (بیشتر = شکست پذیرفته‌شده، نه کاذب). 0 = بدون محدودیت
+    "fakeout_min_inside_candles": 2,            # قبل از شکست، حداقل این‌قدر کندل پیاپی داخل محدوده بسته شده باشد. 0 = بررسی نشود
     # ۱/۲ دقیقاً طبق تعریف: «برخورد بدون نفوذ + برگشت»، یعنی فتیله به سطح برسد (نه لزوماً ازش رد شود)
     "scenario_touch_enabled": True,
     "scenario_touch_tolerance_atr": 0.10,       # فاصله‌ی مجاز تا سطح (×ATR) برای «برخورد»
@@ -1312,6 +1317,53 @@ def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label,
     return None, None
 
 
+def _fakeout_context_ok(d, before_idx, hi, lo, direction, pen, cfg):
+    """V3.43.28 - آیا «پیش‌زمینه»‌ی شکست کاذب درست است؟ (خروجی: (ok, توضیح))
+    شکست کاذب یعنی: ۱) قیمت قبلاً «داخل محدوده» (بین lo و hi) بسته می‌شد، ۲) فقط چند کندلِ کوتاه close
+    بیرون سطح بود، ۳) دوباره داخل محدوده برگشت. دو حالتی که شکست کاذب نیست و رد می‌شوند:
+      • رشته‌ی کندل‌های بیرون سطح خیلی بلند بوده (قیمت ساعت‌ها بیرون بوده؛ شکست پذیرفته شده)
+      • قبل از آن رشته، قیمت داخل محدوده نبوده (از بیرون آمده و فقط دارد از همان سمت وارد محدوده می‌شود)
+    کاملاً علّی است: فقط کندل‌های قبل از before_idx را می‌بیند."""
+    if not bool(cfg.get("fakeout_context_check", True)):
+        return True, ""
+    max_leg = max(0, int(cfg.get("fakeout_max_leg_candles", 6)))
+    min_inside = max(0, int(cfg.get("fakeout_min_inside_candles", 2)))
+    if max_leg == 0 and min_inside == 0:
+        return True, ""
+    closes = d["close"].to_numpy(dtype=float)
+    end = min(int(before_idx), len(closes))
+    if end <= 0:
+        return True, ""
+    if direction == "UP":
+        beyond = lambda x: x > hi + pen
+        inside = lambda x: lo <= x <= hi + pen
+    else:
+        beyond = lambda x: x < lo - pen
+        inside = lambda x: lo - pen <= x <= hi
+    gap_ok = max(0, int(cfg.get("scenario_fakeout_max_gap_candles", 0)))
+    i = end - 1
+    while i >= 0 and (end - 1 - i) <= gap_ok and not beyond(closes[i]):
+        i -= 1
+    if i < 0 or not beyond(closes[i]):
+        return True, ""          # رشته‌ی شکستی پیدا نشد؛ قضاوتش با خود تشخیص‌دهنده است
+    floor_i = max(0, end - 400)
+    j, leg_len = i, 0
+    while j >= floor_i and beyond(closes[j]):
+        leg_len += 1
+        j -= 1
+    if max_leg > 0 and leg_len > max_leg:
+        return False, f"قیمت {leg_len} کندل پیاپی بیرون سطح بسته شده (حداکثر مجاز {max_leg}) - شکست پذیرفته شده، نه کاذب"
+    if min_inside > 0:
+        n_in = 0
+        k = j
+        while k >= floor_i and inside(closes[k]) and n_in < min_inside:
+            n_in += 1
+            k -= 1
+        if n_in < min_inside:
+            return False, "قبل از شکست، قیمت داخل محدوده نبوده (از بیرون آمده) - ورود به محدوده است، نه شکست کاذب"
+    return True, ""
+
+
 def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
     """حالت ۵/۶ کاربر: سطح شکسته شده (نفوذ)، قیمت به سطح پولبک می‌زند، اما پولبک
     نمی‌تواند سطح را نگه دارد (بر خلاف _detect_retest_continuation که نگه‌داشتن را
@@ -1330,6 +1382,10 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
         direction, level, breakout_idx = _find_recent_breakout(d, before_idx, hi, lo, lookback)
         if direction is None:
             return None, None
+    _pen_fx = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10))) if precise else 0.0
+    _ctx_ok, _ctx_note = _fakeout_context_ok(d, before_idx, hi, lo, direction, _pen_fx, cfg)
+    if not _ctx_ok:
+        return None, None
     curr = d.iloc[before_idx]
     tol = atr * max(0.0, float(cfg.get("retest_tolerance_atr", 0.25)))
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
