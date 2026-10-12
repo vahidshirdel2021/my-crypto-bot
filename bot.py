@@ -834,6 +834,8 @@ def default_session():
         'btc_eth_same_dir_gate_enabled': True,
         # V3.43.29: هشدار وقتی رژیم خودِ نماد روی ۵ و ۱۵ دقیقه هم‌جهت نیست (ورود نگه داشته می‌شود و تایید می‌گیرد). پیش‌فرض روشن.
         'symbol_tf_regime_warn_enabled': True,
+        # V3.43.30: هشدار وقتی جهت معامله با رژیم ۴ ساعته‌ی نماد نمی‌خواند (خرید فقط در ۴ساعته‌ی صعودی، فروش فقط در ۴ساعته‌ی نزولی). پیش‌فرض روشن.
+        'symbol_h4_regime_warn_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
@@ -4456,7 +4458,11 @@ def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
     ۴) حجم: نسبت حجم آخرین کندل بسته‌شده به میانگین ۲۰ کندل (و میانگین ۳ کندل آخر)
     هر بخشی که داده‌اش نبود None می‌ماند."""
     is_long = str(side).upper().startswith('BUY')
-    out = {'btc': None, 'eth': None, 'indicators': None, 'level': None, 'volume': None, 'symbol_tf_regimes': None, 'checked_at': time.time()}
+    out = {'btc': None, 'eth': None, 'indicators': None, 'level': None, 'volume': None, 'symbol_tf_regimes': None, 'symbol_h4_regime': None, 'checked_at': time.time()}
+    try:
+        out['symbol_h4_regime'] = _symbol_h4_regime(symbol)
+    except Exception:
+        logger.exception('entry snapshot h4 failed symbol=%s', symbol)
     try:
         out['symbol_tf_regimes'] = _symbol_tf_regimes(symbol)
     except Exception:
@@ -4478,8 +4484,13 @@ def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
         row = ind.iloc[-2]
         def _f(v):
             return None if v is None or pd.isna(v) else round(float(v), 4)
-        rsi, macd_h, adx = _f(row.get('rsi')), _f(row.get('macd_hist')), _f(row.get('adx'))
+        rsi, adx = _f(row.get('rsi')), _f(row.get('adx'))
         pdi, mdi = _f(row.get('plus_di')), _f(row.get('minus_di'))
+        # V3.43.31: MACD hist برای نمادهای ارزان (مثلاً قیمت ۰.۰۱) ~1e-5 است؛ گرد کردن به ۴ رقم اعشار آن را صفر و رأی را اشتباهاً «خنثی» می‌کرد.
+        # حالا رأی از مقدار خام محاسبه می‌شود و مقدار ذخیره‌شده ۶ رقم معنادار دارد.
+        _macd_raw = row.get('macd_hist')
+        _macd_raw = None if _macd_raw is None or pd.isna(_macd_raw) else float(_macd_raw)
+        macd_h = None if _macd_raw is None else float(f'{_macd_raw:.6g}')
         def _vote(bias):
             if bias is None:
                 return 'neutral'
@@ -4487,7 +4498,7 @@ def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
         rsi_bias = None
         if rsi is not None:
             rsi_bias = 'SELL' if rsi >= 70 else ('BUY' if rsi <= 30 else ('BUY' if rsi >= 55 else ('SELL' if rsi <= 45 else None)))
-        macd_bias = None if macd_h in (None, 0) else ('BUY' if macd_h > 0 else 'SELL')
+        macd_bias = None if _macd_raw in (None, 0) else ('BUY' if _macd_raw > 0 else 'SELL')
         adx_bias = None
         if adx is not None and adx >= 20 and pdi is not None and mdi is not None and pdi != mdi:
             adx_bias = 'BUY' if pdi > mdi else 'SELL'
@@ -5449,6 +5460,12 @@ def _close_snapshot_lines(pos):
     for key, name in (('btc', 'BTC'), ('eth', 'ETH')):
         r = snap.get(key)
         out.append(f"\n• رژیم {name} در لحظه ورود: " + ((r['label'] if r.get('with_trade') is None else f"{r['label']} — {_snap_dir_fa(r.get('with_trade'))}") if r else '—'))
+    h4 = snap.get('symbol_h4_regime')
+    if h4:
+        is_long_pos = str(pos.get('side', '')).upper().startswith('BUY')
+        fa_h = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}.get(h4, '—')
+        rel = 'هم‌جهت ✅' if ((h4 == 'BULLISH' and is_long_pos) or (h4 == 'BEARISH' and not is_long_pos)) else '⚠️ با جهت معامله نمی‌خواند'
+        out.append(f"\n• رژیم ۴ ساعته‌ی نماد در لحظه ورود: {fa_h} — {rel}")
     tfr = snap.get('symbol_tf_regimes')
     if tfr:
         fa_s = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
@@ -5458,7 +5475,8 @@ def _close_snapshot_lines(pos):
     def _n(x, d=1):
         return '—' if x is None else f'{x:.{d}f}'
     out.append(f"\n• اندیکاتور RSI: `{_n(ind.get('rsi'))}` — {_vote_fa(votes.get('rsi'))}")
-    out.append(f"\n• اندیکاتور MACD: `{_n(ind.get('macd_hist'), 4)}` — {_vote_fa(votes.get('macd'))}")
+    _mh = ind.get('macd_hist')
+    out.append(f"\n• اندیکاتور MACD: `{'—' if _mh is None else format(_mh, '.3g')}` — {_vote_fa(votes.get('macd'))}")
     out.append(f"\n• اندیکاتور ADX: `{_n(ind.get('adx'))}` — {_vote_fa(votes.get('adx'))}")
     vol = snap.get('volume') or {}
     if vol.get('last_closed_ratio') is not None:
@@ -7228,15 +7246,19 @@ def _indicator_conflict(symbol, side, tf):
     if first:
         lines.append(f"• {first}")
     if total == 0:
-        lines.append('• 🧠 اندیکاتور جهت‌داری برای رأی‌دادن نیست — بدون تضاد')
-        return False, lines
+        # V3.43.31: هیچ اندیکاتوری جهت نمی‌دهد (همه خنثی) = ورود بدون هیچ تاییدی => هشدار
+        lines.append('• 🧠 هیچ اندیکاتوری از این معامله پشتیبانی نمی‌کند (RSI/MACD/ADX همه خنثی‌اند) — ⚠️ بدون تایید')
+        return True, lines
     if opp > same:
         lines.append(f"• 🧠 {opp} از {total} اندیکاتور به سمت {opp_fa} — ⚠️ با جهت معامله‌ی شما در تضاد است")
+        return True, lines
+    if same == 0:
+        lines.append(f"• 🧠 هیچ اندیکاتوری از این معامله پشتیبانی نمی‌کند ({opp} مخالف، بقیه خنثی) — ⚠️ بدون تایید")
         return True, lines
     if same > opp:
         lines.append(f"• 🧠 {same} از {total} اندیکاتور به سمت {same_fa} — هم‌جهت ✅")
     else:
-        lines.append(f"• 🧠 اجماع مشخصی نیست ({same} به {opp}) — بدون تضاد")
+        lines.append(f"• 🧠 اجماع مشخصی نیست ({same} به {opp}) — حداقل یک اندیکاتور هم‌جهت است")
     return False, lines
 
 
@@ -7271,20 +7293,64 @@ def _symbol_tf_regimes(symbol):
     return dict(zip(_TFR_TIMEFRAMES, vals))
 
 
-def _tfr_conflict(symbol):
-    """(conflict, lines, regs): conflict فقط وقتی True است که رژیم هر دو تایم‌فریم معلوم باشد و با هم فرق کند
-    (نبود داده = بدون تضاد، مثل بقیه‌ی هشدارها)."""
+def _tfr_conflict(symbol, side=None):
+    """(conflict, lines, regs): V3.43.31 - تضاد وقتی است که (الف) رژیم نماد روی ۵ و ۱۵ دقیقه با هم فرق کند، یا
+    (ب) رژیم هرکدام از این دو خلاف جهت معامله باشد (خرید در رژیم نزولی / فروش در رژیم صعودی). رنج خلاف جهت حساب نمی‌شود.
+    نبود داده = بدون تضاد (مثل بقیه‌ی هشدارها)."""
     regs = _symbol_tf_regimes(symbol)
     fa = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}
-    lines = [f"• {TF_DISPLAY.get(tf, tf)}: {fa.get(regs.get(tf), '⚪ داده در دسترس نیست')}" for tf in _TFR_TIMEFRAMES]
+    is_long = (side == 'BUY') if side in ('BUY', 'SELL') else None
+    lines, opposed = [], []
+    for tf in _TFR_TIMEFRAMES:
+        reg = regs.get(tf)
+        txt = f"• {TF_DISPLAY.get(tf, tf)}: {fa.get(reg, '⚪ داده در دسترس نیست')}"
+        if is_long is not None and reg in ('BULLISH', 'BEARISH') and ((reg == 'BULLISH') != is_long):
+            txt += ' — ⚠️ خلاف جهت ' + ('خرید' if is_long else 'فروش')
+            opposed.append(tf)
+        lines.append(txt)
     r5, r15 = regs.get(_TFR_TIMEFRAMES[0]), regs.get(_TFR_TIMEFRAMES[1])
-    if r5 is None or r15 is None:
-        return False, lines, regs
-    if r5 != r15:
+    mismatch = (r5 is not None and r15 is not None and r5 != r15)
+    if mismatch:
         lines.append('• ⚠️ رژیم نماد در این دو تایم‌فریم هم‌جهت نیست')
-        return True, lines, regs
-    lines.append('• هم‌جهت ✅')
-    return False, lines, regs
+    elif r5 is not None and r15 is not None and not opposed:
+        lines.append('• هم‌جهت با هم و با معامله ✅' if is_long is not None else '• هم‌جهت ✅')
+    return bool(mismatch or opposed), lines, regs
+
+
+def _h4_warn_active(chat_id):
+    """V3.43.30: کلید «هشدار خلاف رژیم ۴ ساعته» برای این کاربر روشن است؟"""
+    if chat_id is None:
+        return False
+    return bool(get_session(chat_id).get('symbol_h4_regime_warn_enabled', True))
+
+
+def _symbol_h4_regime(symbol):
+    """رژیم خودِ نماد روی ۴ ساعته ('BULLISH'/'BEARISH'/'RANGE' یا None) - همان معیار «رژیم نماد»
+    (close نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده)."""
+    try:
+        df = get_klines(symbol, '4hour', 160)
+        if df is None or df.empty or len(df) < 60:
+            return None
+        return _signal_channel_symbol_regime(df)
+    except Exception:
+        logger.exception('symbol h4 regime failed symbol=%s', symbol)
+        return None
+
+
+def _h4_conflict(symbol, side):
+    """(conflict, lines, regime): خرید فقط با ۴ساعته‌ی صعودی و فروش فقط با ۴ساعته‌ی نزولی هم‌جهت است.
+    نزولی برای خرید / صعودی برای فروش / رنج => تضاد. نبود داده => بدون تضاد (مثل بقیه‌ی هشدارها)."""
+    is_long = (side == 'BUY')
+    reg = _symbol_h4_regime(symbol)
+    fa = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}
+    if reg is None:
+        return False, ['• ۴ ساعته: ⚪ داده در دسترس نیست — بدون تضاد'], reg
+    ok = (reg == 'BULLISH' and is_long) or (reg == 'BEARISH' and not is_long)
+    if ok:
+        return False, [f"• ۴ ساعته: {fa[reg]} — هم‌جهت ✅"], reg
+    need = 'صعودی' if is_long else 'نزولی'
+    why = 'خلاف جهت معامله' if reg != 'RANGE' else 'جهت‌دار نیست'
+    return True, [f"• ۴ ساعته: {fa[reg]} — ⚠️ {why} (این معامله فقط با ۴ ساعته‌ی {need} هم‌جهت است)"], reg
 
 
 def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
@@ -7293,7 +7359,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     syms = _trend_active_symbols(chat_id, symbol)
     ind_on = _ind_warn_active(chat_id)
     tfr_on = _tfr_warn_active(chat_id)
-    if not syms and not ind_on and not tfr_on:
+    h4_on = _h4_warn_active(chat_id)
+    if not syms and not ind_on and not tfr_on and not h4_on:
         return None
     is_long = (side == 'BUY')
     lines, conflict = [], False
@@ -7322,25 +7389,31 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
                 lines.append(f"• {name}: ⚪ خنثی / رنج — بدون تضاد")
             conflict = conflict or bad
     ind_conflict, ind_lines = (_indicator_conflict(symbol, side, tf) if ind_on else (False, []))
-    tfr_conflict, tfr_lines = ((_tfr_conflict(symbol)[:2]) if tfr_on else (False, []))
-    if not conflict and not ind_conflict and not tfr_conflict:
+    tfr_conflict, tfr_lines = ((_tfr_conflict(symbol, side)[:2]) if tfr_on else (False, []))
+    h4_conflict, h4_lines = ((_h4_conflict(symbol, side)[:2]) if h4_on else (False, []))
+    if not conflict and not ind_conflict and not tfr_conflict and not h4_conflict:
         return None
     side_txt = '🟢 خرید (Long)' if is_long else '🔴 فروش (Short)'
-    if conflict and ind_conflict:
-        title = 'ورود با روند بازار و اندیکاتورها در تضاد است'
-    elif conflict:
-        title = 'ورود با روند بازار در تضاد است'
-    elif ind_conflict:
-        title = 'ورود با اجماع اندیکاتورها در تضاد است'
+    main_parts = []
+    if conflict:
+        main_parts.append('روند بازار')
+    if ind_conflict:
+        main_parts.append('اجماع اندیکاتورها')
+    if h4_conflict:
+        main_parts.append('رژیم ۴ ساعته‌ی نماد')
+    if main_parts:
+        title = 'ورود با ' + ' و '.join(main_parts) + ' در تضاد است'
+        if tfr_conflict:
+            title = title[:-len(' در تضاد است')] + ' و رژیم ۵/۱۵ دقیقه‌ی نماد در تضاد است'
     else:
-        title = 'رژیم نماد در ۵ و ۱۵ دقیقه هم‌جهت نیست'
-    if tfr_conflict and (conflict or ind_conflict):
-        title = title[:-len(' در تضاد است')] + ' و رژیم ۵/۱۵ دقیقه‌ی نماد در تضاد است'
+        title = 'رژیم نماد در ۵ و ۱۵ دقیقه با این ورود نمی‌خواند'
     sections = []
     if lines:
         sections.append(('*روند بازار (BTC/ETH):*', lines, True))
     if ind_lines:
         sections.append(('*اندیکاتورها:*', ind_lines, False))
+    if h4_lines:
+        sections.append((f'*رژیم ۴ ساعته‌ی نماد ({symbol}):*', h4_lines, False))
     if tfr_lines:
         sections.append((f'*رژیم نماد ({symbol}) روی ۵ و ۱۵ دقیقه:*', tfr_lines, False))
     body = []
@@ -7354,9 +7427,11 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     if conflict:
         tail.append('روند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.')
     if ind_conflict:
-        tail.append('اکثر اندیکاتورها خلاف جهت این معامله‌اند؛ شاید بهتر باشد صبر کنید.')
+        tail.append('اندیکاتورها (RSI/MACD/ADX) یا خلاف این معامله‌اند یا هیچ‌کدام از آن پشتیبانی نمی‌کنند؛ شاید بهتر باشد صبر کنید.')
+    if h4_conflict:
+        tail.append('قاعده: خرید فقط وقتی رژیم ۴ ساعته‌ی نماد صعودی است و فروش فقط وقتی نزولی؛ این ورود با آن نمی‌خواند.')
     if tfr_conflict:
-        tail.append('رژیم نماد در دو تایم‌فریم ۵ و ۱۵ دقیقه هم‌جهت نیست و اعتبار ورود کمتر است.')
+        tail.append('رژیم خودِ نماد روی ۵ و ۱۵ دقیقه یا با هم هم‌جهت نیست یا خلاف جهت این معامله است؛ اعتبار ورود کمتر است.')
     return (f"⚠️ *هشدار: {title}*\n\n"
             f"نماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم فعال: `{tf}`\n\n"
             + "\n".join(body) + "\n\n" + "\n".join(tail) + "\n"
@@ -7370,7 +7445,7 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
 _TF_SECONDS = {'1min': 60, '5min': 300, '15min': 900, '30min': 1800, '1hour': 3600, '4hour': 14400, '1day': 86400}
 TGREF_COOLDOWN_SECONDS = 10
 TGREF_MAX_AGE_SECONDS = 3600
-_TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها', 'TFR': 'رژیم نماد ۵/۱۵ دقیقه'}
+_TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها', 'TFR': 'رژیم نماد ۵/۱۵ دقیقه', 'H4': 'رژیم ۴ ساعته‌ی نماد'}
 _TGREF_DIV = '━━━━━━━━━━━━━━━━━━━━'
 
 
@@ -7410,8 +7485,12 @@ def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
         no_data = bool(lines) and 'داده‌ی کافی نیست' in lines[0]
         out['items']['IND'] = ('na' if no_data else ('bad' if conflict else 'ok'), None)
         out['ind_lines'] = lines
+    if _h4_warn_active(chat_id):
+        h4_bad, _hl, h4_reg = _h4_conflict(symbol, side)
+        out['h4'] = h4_reg
+        out['items']['H4'] = ('na' if h4_reg is None else ('bad' if h4_bad else 'ok'), None)
     if _tfr_warn_active(chat_id):
-        tfr_bad, _tl, regs = _tfr_conflict(symbol)
+        tfr_bad, _tl, regs = _tfr_conflict(symbol, side)
         out['tfr'] = regs
         out['items']['TFR'] = ('na' if any(v is None for v in regs.values()) else ('bad' if tfr_bad else 'ok'), None)
     try:
@@ -7441,12 +7520,16 @@ def _entry_refresh_block(rec, res, now):
         created_boundary = (float(rec.get('created_at', now)) // tf_s) * tf_s
         new_candle = cc > created_boundary + 1
         lines.append(f"• آخرین کندل بسته‌شده: `{_hm(cc)}` " + ("(بعد از ارسال هشدار بسته شده)" if new_candle else "(از زمان هشدار تغییری نکرده)"))
-    for key in ('BTC', 'ETH', 'IND', 'TFR'):
+    for key in ('BTC', 'ETH', 'IND', 'H4', 'TFR'):
         if key not in items:
             continue
         st, sc = items[key]
         name = _TGREF_NAMES[key]
         back = ' — برطرف شد ✅' if (base.get(key) == 'bad' and st == 'ok') else (' — تازه به تضاد رسید ⚠️' if (base.get(key) == 'ok' and st == 'bad') else '')
+        if key == 'H4':
+            fa_h4 = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(res.get('h4'), '⚪ ؟')
+            lines.append(f"• {name}: {fa_h4} — " + ('هم‌جهت ✅' if st == 'ok' else ('⚠️ با جهت معامله نمی‌خواند' if st == 'bad' else 'داده کافی نیست')) + back)
+            continue
         if key == 'TFR':
             fa_short = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}
             regs = res.get('tfr') or {}
@@ -7609,7 +7692,7 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
     دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
     همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
-    if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id):
+    if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id) and not _h4_warn_active(chat_id):
         return False
     s = get_session(chat_id)
     now = time.time()
@@ -8901,9 +8984,11 @@ def _filter_info(key):
         'align4': ('هم‌جهتی کامل سیگنال‌های ربات',
             'اگر روشن باشد، سیگنال ربات فقط وقتی صادر می‌شود که این چهار مورد با هم یکی باشند: رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت خود سیگنال (همه صعودی => خرید، همه نزولی => فروش). رنج یا اندیکاتور خنثی = سیگنال صادر نمی‌شود. پیش‌فرض خاموش.'),
         'symbol_tf_regime_warn': ('هشدار ناهم‌جهتی رژیم ۵ و ۱۵ دقیقه',
-            'قبل از ورود، رژیم خودِ نماد روی تایم‌فریم ۵ دقیقه و ۱۵ دقیقه (همان معیار «رژیم نماد»: قیمت نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده) سنجیده می‌شود. اگر این دو هم‌جهت نباشند (مثلاً ۵ دقیقه صعودی و ۱۵ دقیقه نزولی یا رنج)، ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد؛ در همان کارت هشدار روند و اندیکاتورها می‌آید. نبود داده مانع نمی‌شود. پیش‌فرض: روشن.'),
+            'قبل از ورود، رژیم خودِ نماد روی تایم‌فریم ۵ دقیقه و ۱۵ دقیقه (همان معیار «رژیم نماد»: قیمت نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده) سنجیده می‌شود. اگر این دو هم‌جهت نباشند، یا هرکدام خلاف جهت معامله باشد (مثلاً خرید در رژیم نزولی)، ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد؛ در همان کارت هشدار روند و اندیکاتورها می‌آید. نبود داده مانع نمی‌شود. پیش‌فرض: روشن.'),
+        'symbol_h4_regime_warn': ('هشدار خلاف رژیم ۴ ساعته',
+            'قبل از ورود، رژیم خودِ نماد روی تایم‌فریم ۴ ساعته (قیمت نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده) سنجیده می‌شود. خرید فقط وقتی ۴ ساعته صعودی است و فروش فقط وقتی ۴ ساعته نزولی؛ اگر برعکس یا رنج باشد، ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد (در همان کارت هشدار بقیه). نبود داده مانع نمی‌شود. پیش‌فرض: روشن.'),
         'ind_warn': ('هشدار تضاد با اندیکاتورها',
-            'قبل از ورود، اگر اکثر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). اجماع نداشتن یا نبود داده مانع نمی‌شود. پیش‌فرض خاموش.'),
+            'قبل از ورود، اگر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، یا هیچ‌کدام از معامله پشتیبانی نکنند (همه خنثی)، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). نبود داده مانع نمی‌شود. پیش‌فرض روشن.'),
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
         'profit_lock': ('قفل کردن سود',
@@ -8945,7 +9030,7 @@ def _filter_info(key):
 
 
 _FILTER_SECTION_KEYS = {
-    'entry': ['sweep_confirm', 'swing_break', 'btc_eth_same_dir', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'align4'],
+    'entry': ['sweep_confirm', 'swing_break', 'btc_eth_same_dir', 'market_alignment', 'trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn', 'align4'],
     'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
@@ -9041,6 +9126,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
              fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
             [fcell(bool(s.get('ind_warn_enabled', True)), 'ind_warn', '/toggle_ind_warn')],
             [fcell(bool(s.get('symbol_tf_regime_warn_enabled', True)), 'symbol_tf_regime_warn', '/toggle_symbol_tf_regime_warn')],
+            [fcell(bool(s.get('symbol_h4_regime_warn_enabled', True)), 'symbol_h4_regime_warn', '/toggle_symbol_h4_regime_warn')],
             [fcell(bool(s.get('align4_enabled', False)), 'align4', '/toggle_align4')],
         ] + gate_rows('entry') + [back_row]}
 
@@ -10508,6 +10594,18 @@ def process_command(cmd,chat_id,message_id=None):
             "وقتی روشن باشد، سیگنال‌های خودِ ربات (ورود خودکار و حالت دستیار) فقط وقتی صادر می‌شوند که رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت سیگنال هم‌جهت باشند "
             "(همه صعودی => خرید، همه نزولی => فروش). اگر رژیم رنج باشد یا یک اندیکاتور خنثی، سیگنال صادر نمی‌شود. دلیل رد در «🔍 لاگ تشخیصی ورود» دیده می‌شود.",
             trade_filter_management_keyboard(chat_id, 'entry'))
+        return
+    if cl=='/toggle_symbol_h4_regime_warn':
+        current = bool(s.get('symbol_h4_regime_warn_enabled', True))
+        s['symbol_h4_regime_warn_enabled'] = not current
+        save_session(chat_id)
+        new_state = '🟢 روشن' if not current else '🔴 خاموش'
+        note = (
+            _filter_info('symbol_h4_regime_warn')[1]
+            if not current else
+            'این هشدار خاموش شد: ورود خلاف رژیم ۴ ساعته‌ی نماد تایید نمی‌خواهد.'
+        )
+        send_message(chat_id, f"🧭 {_filter_info('symbol_h4_regime_warn')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry'))
         return
     if cl=='/toggle_symbol_tf_regime_warn':
         current = bool(s.get('symbol_tf_regime_warn_enabled', True))
