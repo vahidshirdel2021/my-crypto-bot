@@ -7543,8 +7543,12 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
 # همه‌ی مواردی که در پیام بسته‌شدن پوزیشن با «هم‌جهت ✅» نشان داده می‌شوند، قبل از صدور سیگنال باید برقرار باشند:
 # رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد در ۵ و ۱۵ دقیقه، هر سه اندیکاتور، و آخرین کندل بسته‌شده سمتِ درستِ سطح.
 # سخت‌گیرانه: خنثی/رنج یا نبودِ داده = شرط برقرار نیست = سیگنال صادر نمی‌شود. حجم شرط نیست.
-def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None):
-    """(ok, [موارد ناهم‌جهت]) - sync است؛ از thread صدا زده شود."""
+def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None, use=None):
+    """(ok, [موارد ناهم‌جهت]) - sync است؛ از thread صدا زده شود.
+    use: دیکشنری کلیدهای فعال‌بودن هر گروه شرط {'btceth','h4','tf','ind','level'} (پیش‌فرض: همه فعال)."""
+    use = use or {}
+    def _on(k):
+        return bool(use.get(k, True))
     if sig not in ('BUY', 'SELL'):
         return False, ['جهت سیگنال نامشخص']
     is_long = (sig == 'BUY')
@@ -7553,7 +7557,7 @@ def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None):
     fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
     bad = []
     sym_u = str(symbol or '').upper()
-    for sym in ('BTC', 'ETH'):
+    for sym in (('BTC', 'ETH') if _on('btceth') else ()):
         if sym == sym_u:
             continue
         try:
@@ -7566,13 +7570,17 @@ def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None):
         sc = int(snap.get('score', 0))
         if sc == 0 or (sc > 0) != is_long:
             bad.append(f"رژیم {sym} {'صعودی' if sc > 0 else ('نزولی' if sc < 0 else 'خنثی')} (لازم: {want_fa})")
-    h4 = _symbol_h4_regime(symbol)
-    if h4 != want:
-        bad.append(f"رژیم ۴ ساعته {fa.get(h4, 'نامشخص')} (لازم: {want_fa})")
-    regs = _symbol_tf_regimes(symbol)
-    for t in _TFR_TIMEFRAMES:
-        if regs.get(t) != want:
-            bad.append(f"رژیم {TF_DISPLAY.get(t, t)} {fa.get(regs.get(t), 'نامشخص')} (لازم: {want_fa})")
+    if _on('h4'):
+        h4 = _symbol_h4_regime(symbol)
+        if h4 != want:
+            bad.append(f"رژیم ۴ ساعته {fa.get(h4, 'نامشخص')} (لازم: {want_fa})")
+    if _on('tf'):
+        regs = _symbol_tf_regimes(symbol)
+        for t in _TFR_TIMEFRAMES:
+            if regs.get(t) != want:
+                bad.append(f"رژیم {TF_DISPLAY.get(t, t)} {fa.get(regs.get(t), 'نامشخص')} (لازم: {want_fa})")
+    if not (_on('ind') or _on('level')):
+        return (not bad), bad
     try:
         ind = ind_df
         if ind is None:
@@ -7583,9 +7591,9 @@ def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None):
         row = ind.iloc[-2]
         _l, b_votes, s_votes = _signal_channel_indicator_summary(row.to_dict(), sig)
         agree = b_votes if is_long else s_votes
-        if agree != 3:
+        if _on('ind') and agree != 3:
             bad.append(f'اندیکاتورها: فقط {agree} از ۳ هم‌جهت‌اند (RSI، MACD و ADX هر سه لازم است)')
-        m = re.search(r'HVL=([0-9.]+)', reason or '') or re.search(r'ANCHOR=([0-9.]+)', reason or '')
+        m = (re.search(r'HVL=([0-9.]+)', reason or '') or re.search(r'ANCHOR=([0-9.]+)', reason or '')) if _on('level') else None
         if m:
             lvl = float(m.group(1))
             last = float(row['close'])
@@ -8771,7 +8779,8 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     if gate_on(s, 'gate_full_confirm_enabled'):
         # V3.43.24: تایید کامل هم‌جهتی (BTC/ETH، ۴ ساعته، ۵/۱۵ دقیقه، ۳ اندیکاتور، سمتِ سطح)؛ وگرنه سیگنال صادر نمی‌شود.
         try:
-            _fc_ok, _fc_bad = await asyncio.to_thread(_full_confirm_check, symbol, sig, tf, reason, primary)
+            _fc_use = {k: gate_on(s, f'gate_fc_{k}_enabled') for k in ('btceth', 'h4', 'tf', 'ind', 'level')}
+            _fc_ok, _fc_bad = await asyncio.to_thread(_full_confirm_check, symbol, sig, tf, reason, primary, _fc_use)
         except Exception:
             logger.exception('full confirm gate failed symbol=%s', symbol)
             _fc_ok, _fc_bad = False, ['خطا در بررسی']
@@ -9111,7 +9120,12 @@ GATE_REGISTRY = {
     'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry_filter', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry_filter', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_filter', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_full_confirm_enabled':  ('سیگنال فقط با تایید کامل هم‌جهتی', True, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که همه‌ی این‌ها هم‌جهت با معامله باشند: رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد روی ۵ و ۱۵ دقیقه، هر سه اندیکاتور RSI/MACD/ADX، و آخرین کندل بسته‌شده سمتِ درستِ سطح ستاپ. اگر حتی یکی هم‌جهت نباشد (یا خنثی/رنج باشد یا داده‌اش نرسد) سیگنال داده نمی‌شود. حجم معامله فقط نمایشی است و شرط نیست. پیش‌فرض: روشن.'),
+    'gate_full_confirm_enabled':  ('سیگنال فقط با تایید کامل هم‌جهتی', True, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که همه‌ی این‌ها هم‌جهت با معامله باشند: رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد روی ۵ و ۱۵ دقیقه، هر سه اندیکاتور RSI/MACD/ADX، و آخرین کندل بسته‌شده سمتِ درستِ سطح ستاپ. اگر حتی یکی هم‌جهت نباشد (یا خنثی/رنج باشد یا داده‌اش نرسد) سیگنال داده نمی‌شود. حجم معامله فقط نمایشی است و شرط نیست. با پنج کلید «↳ تایید کامل» زیرش می‌توانی تعیین کنی کدام شرط‌ها لازم باشند. پیش‌فرض: روشن، با هر پنج شرط.'),
+    'gate_fc_btceth_enabled':     ('↳ تایید کامل: رژیم BTC و ETH', True, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
+    'gate_fc_h4_enabled':         ('↳ تایید کامل: رژیم ۴ ساعته‌ی نماد', True, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
+    'gate_fc_tf_enabled':         ('↳ تایید کامل: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'entry_filter', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
+    'gate_fc_ind_enabled':        ('↳ تایید کامل: RSI و MACD و ADX', True, 'entry_filter', 'هر سه اندیکاتور باید هم‌جهت با معامله باشند.'),
+    'gate_fc_level_enabled':      ('↳ تایید کامل: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry_filter', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در ۳ کندل ۵ دقیقه‌ی اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
     'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', False, 'entry_filter', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
