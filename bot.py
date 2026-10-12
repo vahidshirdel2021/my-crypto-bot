@@ -321,6 +321,66 @@ def _signal_channel_align4_ok(direction, symbol_regime, market_regime, buy_votes
 _REGIME_FA_SHORT = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
 
 
+# ===================== V3.43.25: تشخیص رژیم دقیق‌تر (یک تابع مرکزی برای همه‌ی جاها) =====================
+# قبلاً رژیم فقط از EMA20/EMA50 ساخته می‌شد (close نسبت به EMA50 و EMA20 نسبت به EMA50) و در چند جا هم معیار متفاوتی بود.
+# حالا جهت از همان EMA می‌آید، ولی برای «صعودی/نزولی» این‌ها هم لازم است (وگرنه RANGE):
+#   ۱) ADX >= REGIME_ADX_MIN      (قدرت روند؛ زیر آن بازار بی‌روند است)
+#   ۲) +DI/−DI هم‌جهت            (خریدارها/فروشنده‌ها واقعاً غالب‌اند)
+#   ۳) شیب EMA50 هم‌جهت            (EMA50 نسبت به REGIME_SLOPE_BARS کندل قبل، بالا/پایین رفته باشد)
+#   ۴) فاصله‌ی قیمت از EMA50 حداقل REGIME_MIN_DIST_ATR × ATR  (چسبیدن قیمت به EMA50 = رنج)
+# REGIME_MODE=ema همه‌چیز را به معیار قدیمی (فقط EMA) برمی‌گرداند. همه‌ی مقدارها با متغیر محیطی قابل تنظیم‌اند.
+REGIME_MODE = os.environ.get('REGIME_MODE', 'advanced').strip().lower()
+REGIME_ADX_MIN = float(os.environ.get('REGIME_ADX_MIN', '18'))
+REGIME_SLOPE_BARS = max(2, int(os.environ.get('REGIME_SLOPE_BARS', '5')))
+REGIME_MIN_DIST_ATR = float(os.environ.get('REGIME_MIN_DIST_ATR', '0.1'))
+
+
+def _rg_num(v):
+    try:
+        f = float(v)
+        return None if f != f else f
+    except Exception:
+        return None
+
+
+def regime_from_ind_df(ind):
+    """'BULLISH' / 'BEARISH' / 'RANGE' یا None (داده‌ی ناکافی). ind = دیتافریم خروجی calculate_indicators؛
+    رژیم روی آخرین کندل «بسته‌شده» (iloc[-2]) سنجیده می‌شود، نه کندل در حال تشکیل."""
+    try:
+        if ind is None or len(ind) < 3:
+            return None
+        c = ind.iloc[-2]
+        close, e20, e50 = _rg_num(c['close']), _rg_num(c['ema20']), _rg_num(c['ema50'])
+        if close is None or e20 is None or e50 is None:
+            return None
+        if close > e50 and e20 >= e50:
+            direction = 'BULLISH'
+        elif close < e50 and e20 <= e50:
+            direction = 'BEARISH'
+        else:
+            return 'RANGE'
+        if REGIME_MODE != 'advanced':
+            return direction
+        bull = (direction == 'BULLISH')
+        adx = _rg_num(c.get('adx'))
+        if adx is not None and adx < REGIME_ADX_MIN:
+            return 'RANGE'
+        pdi, mdi = _rg_num(c.get('plus_di')), _rg_num(c.get('minus_di'))
+        if pdi is not None and mdi is not None and (pdi == mdi or (pdi > mdi) != bull):
+            return 'RANGE'
+        n = REGIME_SLOPE_BARS
+        if len(ind) >= n + 3:
+            prev = _rg_num(ind['ema50'].iloc[-2 - n])
+            if prev is not None and (e50 == prev or (e50 > prev) != bull):
+                return 'RANGE'
+        atr = _rg_num(c.get('atr'))
+        if atr is not None and atr > 0 and abs(close - e50) < REGIME_MIN_DIST_ATR * atr:
+            return 'RANGE'
+        return direction
+    except Exception:
+        return None
+
+
 def _regime_from_ind_row(c):
     """رژیم نماد از یک ردیف اندیکاتور (آخرین کندل بسته‌شده): همان معیار _signal_channel_symbol_regime."""
     try:
@@ -3153,6 +3213,8 @@ def btc_eth_regime_text(tf, popup=False):
         lines.append(f"\n✅ هر دو هم‌جهت: {_REGIME_FA[regs[0]]}")
     elif all(regs):
         lines.append('\n⚠️ دو رژیم هم‌جهت نیستند.')
+    if REGIME_MODE == 'advanced':
+        lines.append(f"ℹ️ صعودی/نزولی یعنی: EMA20/50 هم‌جهت + ADX ≥ {REGIME_ADX_MIN:g} + DI هم‌جهت + شیب EMA50 هم‌جهت؛ وگرنه رنج.")
     lines.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
     return '\n'.join(lines)
 
@@ -3283,13 +3345,7 @@ def _signal_channel_symbol_regime(df):
     دقیقاً همان معیار «داشبورد بازار» و گیت جهت بازار، روی آخرین کندل بسته‌شده (نه کندل در
     حال تشکیل - تا رژیم وسط کندل مدام تغییر نکند)."""
     try:
-        c = calculate_indicators(df).iloc[-2]
-        close, ema20, ema50 = float(c.close), float(c.ema20), float(c.ema50)
-        if close > ema50 and ema20 >= ema50:
-            return 'BULLISH'
-        if close < ema50 and ema20 <= ema50:
-            return 'BEARISH'
-        return 'RANGE'
+        return regime_from_ind_df(calculate_indicators(df))   # V3.43.25: معیار مرکزی (EMA + ADX + DI + شیب EMA50)
     except Exception:
         return None
 
@@ -7441,6 +7497,64 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
             "*ورود را تایید می‌کنید؟*")
 
 
+# ===================== V3.43.24: «تایید کامل هم‌جهتی» (کلید gate_full_confirm_enabled، پیش‌فرض روشن) =====================
+# همه‌ی مواردی که در پیام بسته‌شدن پوزیشن با «هم‌جهت ✅» نشان داده می‌شوند، قبل از صدور سیگنال باید برقرار باشند:
+# رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد در ۵ و ۱۵ دقیقه، هر سه اندیکاتور، و آخرین کندل بسته‌شده سمتِ درستِ سطح.
+# سخت‌گیرانه: خنثی/رنج یا نبودِ داده = شرط برقرار نیست = سیگنال صادر نمی‌شود. حجم شرط نیست.
+def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None):
+    """(ok, [موارد ناهم‌جهت]) - sync است؛ از thread صدا زده شود."""
+    if sig not in ('BUY', 'SELL'):
+        return False, ['جهت سیگنال نامشخص']
+    is_long = (sig == 'BUY')
+    want = 'BULLISH' if is_long else 'BEARISH'
+    want_fa = 'صعودی' if is_long else 'نزولی'
+    fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
+    bad = []
+    sym_u = str(symbol or '').upper()
+    for sym in ('BTC', 'ETH'):
+        if sym == sym_u:
+            continue
+        try:
+            snap = _trend_snapshot_cached(sym, tf)
+        except Exception:
+            snap = None
+        if not snap:
+            bad.append(f'رژیم {sym}: داده در دسترس نیست')
+            continue
+        sc = int(snap.get('score', 0))
+        if sc == 0 or (sc > 0) != is_long:
+            bad.append(f"رژیم {sym} {'صعودی' if sc > 0 else ('نزولی' if sc < 0 else 'خنثی')} (لازم: {want_fa})")
+    h4 = _symbol_h4_regime(symbol)
+    if h4 != want:
+        bad.append(f"رژیم ۴ ساعته {fa.get(h4, 'نامشخص')} (لازم: {want_fa})")
+    regs = _symbol_tf_regimes(symbol)
+    for t in _TFR_TIMEFRAMES:
+        if regs.get(t) != want:
+            bad.append(f"رژیم {TF_DISPLAY.get(t, t)} {fa.get(regs.get(t), 'نامشخص')} (لازم: {want_fa})")
+    try:
+        ind = ind_df
+        if ind is None:
+            d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+            ind = calculate_indicators(d) if d is not None and not d.empty else None
+        if ind is None or len(ind) < 4:
+            raise ValueError('no indicator data')
+        row = ind.iloc[-2]
+        _l, b_votes, s_votes = _signal_channel_indicator_summary(row.to_dict(), sig)
+        agree = b_votes if is_long else s_votes
+        if agree != 3:
+            bad.append(f'اندیکاتورها: فقط {agree} از ۳ هم‌جهت‌اند (RSI، MACD و ADX هر سه لازم است)')
+        m = re.search(r'HVL=([0-9.]+)', reason or '') or re.search(r'ANCHOR=([0-9.]+)', reason or '')
+        if m:
+            lvl = float(m.group(1))
+            last = float(row['close'])
+            if not ((last > lvl) if is_long else (last < lvl)):
+                bad.append(f"آخرین کندل بسته‌شده {'بالای' if is_long else 'پایین'} سطح {fmt(lvl)} نیست")
+    except Exception:
+        logger.exception('full confirm indicators failed symbol=%s', symbol)
+        bad.append('اندیکاتورها/سطح: داده در دسترس نیست')
+    return (not bad), bad
+
+
 # ===================== V3.43.25: «🔄 بروزرسانی داده‌ها» روی کارت هشدار تضاد =====================
 # اندیکاتورها و رژیم BTC/ETH همه روی «آخرین کندل بسته‌شده» حساب می‌شوند؛ پس نتیجه فقط با بسته شدن کندل تازه
 # عوض می‌شود. دکمه کَش داده را دور می‌زند، دوباره می‌سنجد و زیر کارت یک بلوک وضعیت می‌گذارد (جایگزین بلوک قبلی؛
@@ -8606,12 +8720,21 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
                 _a4_mkt = None
         try:
             _a4_row = primary.iloc[-2]
-            _a4_reg = _regime_from_ind_row(_a4_row)
+            _a4_reg = regime_from_ind_df(primary)
             _a4_l, _a4_b, _a4_s = _signal_channel_indicator_summary(_a4_row.to_dict(), sig)
         except Exception:
             _a4_reg, _a4_b, _a4_s = None, 0, 0
         if not _signal_channel_align4_ok(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s):
             return _entry_diag_result(chat_id, symbol, 'blocked', 'هم‌جهتی کامل برقرار نیست: ' + _align4_reason(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s), 'align4', sig, diagnostics=diagnostics)
+    if gate_on(s, 'gate_full_confirm_enabled'):
+        # V3.43.24: تایید کامل هم‌جهتی (BTC/ETH، ۴ ساعته، ۵/۱۵ دقیقه، ۳ اندیکاتور، سمتِ سطح)؛ وگرنه سیگنال صادر نمی‌شود.
+        try:
+            _fc_ok, _fc_bad = await asyncio.to_thread(_full_confirm_check, symbol, sig, tf, reason, primary)
+        except Exception:
+            logger.exception('full confirm gate failed symbol=%s', symbol)
+            _fc_ok, _fc_bad = False, ['خطا در بررسی']
+        if not _fc_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', 'تایید کامل هم‌جهتی برقرار نیست: ' + '؛ '.join(_fc_bad), 'full_confirm', sig, diagnostics=diagnostics)
     if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
         # حالت ۵/۶ (شکست کاذب) و حالت ۱/۲ (برخورد ساده) هر دو ذاتاً برگشتی/رنجی‌اند نه
         # ترندی؛ طبق تصمیم کاربر هر دو جفت می‌توانند جدا از این گیت معاف شوند.
@@ -8946,6 +9069,7 @@ GATE_REGISTRY = {
     'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_full_confirm_enabled':  ('سیگنال فقط با تایید کامل هم‌جهتی', True, 'entry', 'سیگنال فقط وقتی صادر می‌شود که همه‌ی این‌ها هم‌جهت با معامله باشند: رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد روی ۵ و ۱۵ دقیقه، هر سه اندیکاتور RSI/MACD/ADX، و آخرین کندل بسته‌شده سمتِ درستِ سطح ستاپ. اگر حتی یکی هم‌جهت نباشد (یا خنثی/رنج باشد یا داده‌اش نرسد) سیگنال داده نمی‌شود. حجم معامله فقط نمایشی است و شرط نیست. پیش‌فرض: روشن.'),
     'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در ۳ کندل ۵ دقیقه‌ی اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
     'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', False, 'entry', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
@@ -9388,9 +9512,10 @@ def analyze(chat_id,symbol):
     close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
     adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
 
-    if close>ema20>ema50 and plus_di>minus_di and adx>=MARKET_REGIME_MIN_ADX:
+    _rg_an = regime_from_ind_df(d)      # V3.43.25: همان معیار مرکزی رژیم که گیت‌ها و سیگنال‌ها استفاده می‌کنند
+    if _rg_an == 'BULLISH':
         trend_text='📈 صعودی'
-    elif close<ema20<ema50 and minus_di>plus_di and adx>=MARKET_REGIME_MIN_ADX:
+    elif _rg_an == 'BEARISH':
         trend_text='📉 نزولی'
     else:
         trend_text='➡️ رنج (بدون روند مشخص)'
@@ -9495,7 +9620,9 @@ def _market_snapshot(symbol, tf):
         d = calculate_indicators(d); c = d.iloc[-2]
         close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50); adx = float(c.adx); rsi = float(c.rsi); atr = float(c.atr)
         vol_ratio = float(c.volume / d['volume'].rolling(20).mean().iloc[-2]) if float(d['volume'].rolling(20).mean().iloc[-2]) > 0 else 0.0
-        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+        _rg = regime_from_ind_df(d)
+        if _rg is None: return None
+        score = 1 if _rg == 'BULLISH' else (-1 if _rg == 'BEARISH' else 0)
         return {'symbol': symbol, 'close': close, 'adx': adx, 'rsi': rsi, 'atr_pct': atr / close * 100 if close else 0.0, 'volume_ratio': vol_ratio, 'score': score}
     except Exception:
         return None
@@ -9520,7 +9647,9 @@ async def _market_snapshot_async(http, symbol, tf):
         if d is None or d.empty or len(d) < 60: return None
         d = calculate_indicators(d); c = d.iloc[-2]
         close = float(c.close); ema20 = float(c.ema20); ema50 = float(c.ema50)
-        score = 1 if close > ema50 and ema20 >= ema50 else (-1 if close < ema50 and ema20 <= ema50 else 0)
+        _rg = regime_from_ind_df(d)
+        if _rg is None: return None
+        score = 1 if _rg == 'BULLISH' else (-1 if _rg == 'BEARISH' else 0)
         return score
     except Exception:
         return None
