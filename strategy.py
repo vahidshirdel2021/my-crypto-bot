@@ -38,7 +38,6 @@ def nearest_grid_level(price, levels):
 
 FILTER_DEFAULTS = {
     "volume_filter": True,
-    "trailing_stop": True,
     "candlestick_filter": True,
     "no_short_filter": True,
     "no_buy_filter": False,
@@ -229,35 +228,19 @@ STRATEGY_DEFAULTS = {
     "swing_buffer_atr": 0.40,       # فاصله اضافه (بر حسب ATR) زیر/بالای سوینگ برای جلوگیری از شکار استاپ
     # --- مدیریت هوشمند هدف سود (PDL/PDH) ---
     "extend_tp_to_pdl": True,       # هدف اصلی معامله = سقف/کف روز قبل، به‌جای هدف کوتاه RR ثابت
-    "weakness_exit_min_r": 1.0,     # حداقل سود (بر حسب R) قبل از فعال شدن بررسی ضعف روند
-    # سوییچ اصلی: وقتی False باشد، «مدیریت هوشمند (ضعف روند)» کاملاً غیرفعال می‌شود -
-    # نه قفل سود پله‌ای زودهنگام، نه خروج زودهنگام به‌خاطر ضعف اندیکاتورها. پوزیشن‌ها
-    # فقط با SL/TP معمولی بسته می‌شوند (به‌علاوه‌ی بستن اجباری آخر روز، که جداست).
-    "weakness_exit_enabled": False,
-    "weakness_exit_score": 55.0,    # آستانه سخت‌تر برای بستن زودهنگام با سود
-    "weakness_profit_lock_min_r": 1.0,
-    "early_loss_weakness_exit_enabled": False,
+    "weakness_exit_score": 55.0,    # آستانه تایید «ضعف اندیکاتوری» (فقط برای نمایش در پیام هشدار سود؛ خروجی را نمی‌بندد)
     "use_edge_proxy_gate": False,   # proxy فقط diagnostic است مگر اینکه صراحتاً فعال شود
-    "early_loss_weakness_exit_enabled": False,
     # وقتی True باشد، سیگنال Liquidity Sweep بلافاصله روی کندل ریکلیم صادر نمی‌شود؛
     # باید یک کندل دیگر هم بسته شود و جهت ریکلیم را نقض نکند (یعنی برنگردد زیر/بالای
     # سطح سویپ‌شده) تا سیگنال واقعاً صادر شود. قیمت ورود بدتر می‌شود ولی فیک‌اوت‌های
     # زودهنگام (که در تحلیل معاملات واقعی دیدیم MFE نزدیک صفر داشتند) فیلتر می‌شوند.
     # پیش‌فرض False است تا هیچ رفتار فعلی بی‌اجازه تغییر نکند.
     "sweep_require_confirmation_candle": True,
-    # وقتی True باشد، صرفاً «نقض‌نشدن» کندل بعدی کافی نیست - قیمت باید واقعاً از
-    # سقف/کف نوسانیِ محلی که بین کندل ریکلیم تا الان تشکیل شده رد بشه (شکست ادامه‌دار)
-    # تا سیگنال صادر شود. اگر فعال باشد، جایگزین sweep_require_confirmation_candle
-    # می‌شود (منطق قوی‌تری دارد) و آن تنظیم را نادیده می‌گیرد. پیش‌فرض خاموش - نیاز به
-    # اعتبارسنجی با داده دارد، مثل sweep_require_confirmation_candle.
-    "sweep_require_swing_break": False,
-    "sweep_swing_break_lookback": 6,
-    "adaptive_allow_session_swing_anchors": True,
     # --- ۶ حالت معاملاتی صریح PDH/PDL (طبق تعریف کاربر) ---
     # ۱: برخورد به PDH بدون نفوذ قطعی + برگشت به داخل = Sell
     # ۲: برخورد به PDL بدون نفوذ قطعی + برگشت به داخل = Buy
-    # ۳: نفوذ PDH + پولبک + ادامه (با شکست سوینگ) = Buy
-    # ۴: نفوذ PDL + پولبک + ادامه (با شکست سوینگ) = Sell
+    # ۳: نفوذ PDH + پولبک + ادامه = Buy
+    # ۴: نفوذ PDL + پولبک + ادامه = Sell
     # ۵: نفوذ PDH + پولبک ناموفق (شکست کاذب) + برگشت داخل محدوده = Sell
     # ۶: نفوذ PDL + پولبک ناموفق (شکست کاذب) + برگشت داخل محدوده = Buy
     # هرکدام جدا قابل خاموش/روشن‌کردن‌اند. پیش‌فرض: همه فعال.
@@ -322,17 +305,6 @@ STRATEGY_DEFAULTS = {
     "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
     "gate_fee_ratio_enabled": True,     # نسبت ریسک به کارمزد (پلن)
     "gate_min_score_enabled": True,     # حداقل امتیاز کیفیت
-    # --- V3.42: فیلترهای جدید (پیش‌فرض خاموش؛ باید با داده اعتبارسنجی شوند) ---
-    # روند تایم بالا: از روی همان کندل‌های تایم‌فریم اصلی به ۴ساعته تبدیل می‌شود (EMA8 در برابر EMA21).
-    # خرید وقتی روند ۴ساعته نزولی است و فروش وقتی صعودی است رد می‌شود؛ روند خنثی مجاز است.
-    "htf_trend_filter_enabled": False,
-    "htf_trend_ema_fast": 8,
-    "htf_trend_ema_slow": 21,
-    "htf_trend_min_candles": 24,
-    # سشن: فقط در بازه‌ی ساعتی (UTC) مجاز؛ start==end یعنی ۲۴ ساعته. اگر start > end بازه از نیمه‌شب می‌گذرد.
-    "session_filter_enabled": False,
-    "session_filter_start_hour_utc": 7,
-    "session_filter_end_hour_utc": 21,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -655,56 +627,6 @@ def _adaptive_intraday_levels(d, before_idx, cfg):
         return {}
 
     levels = {}
-
-    # Session/opening-range/swing anchors are OFF by default: with the primary
-    # multi-timeframe scan already checking Monthly/Weekly/Daily/4h/1h directly on
-    # every closed candle, fresh 1h/4h levels arrive every 1-4 hours, so this
-    # secondary "Intraday" pool (London/NY/Asia/Opening-Range/Swing) is rarely
-    # needed and made it too easy for the bot to always find *some* setup. Set
-    # `adaptive_allow_session_swing_anchors: True` in strategy_config to re-enable.
-    if bool(cfg.get("adaptive_allow_session_swing_anchors", False)):
-        min_candles = max(3, int(cfg.get("adaptive_min_level_candles", 6)))
-
-        # UTC session buckets are intentional and configurable.  They are stable for
-        # crypto and do not introduce exchange-local DST ambiguity.
-        sessions = {
-            "ASIA": (0, 8),
-            "LONDON": (8, 13),
-            "NEW_YORK": (13, 21),
-        }
-        for name, (h0, h1) in sessions.items():
-            part = day[(day["_dt"].dt.hour >= h0) & (day["_dt"].dt.hour < h1)]
-            if len(part) >= min_candles:
-                levels[f"{name}_HIGH"] = {"price": float(part["high"].max()), "kind": f"{name}_HIGH", "count": len(part)}
-                levels[f"{name}_LOW"] = {"price": float(part["low"].min()), "kind": f"{name}_LOW", "count": len(part)}
-
-        # Opening range: first N minutes of the UTC day. It becomes static once formed.
-        or_minutes = max(15, int(cfg.get("adaptive_opening_range_minutes", 30)))
-        day_start = pd.Timestamp(today, tz="UTC")
-        opening = day[(day["_dt"] >= day_start) & (day["_dt"] < day_start + pd.Timedelta(minutes=or_minutes))]
-        if len(opening) >= max(3, min_candles // 2) and len(work) >= len(opening) + 2:
-            levels["OPENING_RANGE_HIGH"] = {"price": float(opening["high"].max()), "kind": "OPENING_RANGE_HIGH", "count": len(opening)}
-            levels["OPENING_RANGE_LOW"] = {"price": float(opening["low"].min()), "kind": "OPENING_RANGE_LOW", "count": len(opening)}
-
-        # Confirmed intraday swings. The last two candles are excluded; a swing must
-        # have candles on both sides, so the level is not based on the current move.
-        swing_left = max(2, int(cfg.get("adaptive_swing_left", 2)))
-        swing_right = max(2, int(cfg.get("adaptive_swing_right", 2)))
-        if len(day) >= swing_left + swing_right + 3:
-            highs = day["high"].to_numpy(dtype=float)
-            lows = day["low"].to_numpy(dtype=float)
-            best_h = None; best_l = None
-            for i in range(swing_left, len(day) - swing_right):
-                if i >= len(day) - 2:
-                    continue
-                if highs[i] >= np.max(highs[i-swing_left:i]) and highs[i] > np.max(highs[i+1:i+1+swing_right]):
-                    best_h = float(highs[i])
-                if lows[i] <= np.min(lows[i-swing_left:i]) and lows[i] < np.min(lows[i+1:i+1+swing_right]):
-                    best_l = float(lows[i])
-            if best_h is not None:
-                levels["SWING_HIGH"] = {"price": best_h, "kind": "SWING_HIGH", "count": swing_left + swing_right + 1}
-            if best_l is not None:
-                levels["SWING_LOW"] = {"price": best_l, "kind": "SWING_LOW", "count": swing_left + swing_right + 1}
 
     # Higher-timeframe anchors: high/low of the most recently *closed* 1h and 4h
     # candle, calendar week, and calendar month. Causal by construction (shift(1) per
@@ -1135,7 +1057,7 @@ def _adaptive_anchor_candidates(d, idx, atr, cfg):
     c = float(d.iloc[idx]["close"])
     max_dist = atr * float(cfg.get("adaptive_max_anchor_distance_atr", 1.60))
     min_dist = atr * float(cfg.get("adaptive_min_anchor_distance_atr", 0.20))
-    priority = {"PMH": 5, "PML": 5, "PWH": 4, "PWL": 4, "LONDON": 3, "NEW_YORK": 3, "P4H": 3, "P4L": 3, "P1H": 2, "P1L": 2, "ASIA": 2, "OPENING_RANGE": 2, "SWING": 1}
+    priority = {"PMH": 5, "PML": 5, "PWH": 4, "PWL": 4, "P4H": 3, "P4L": 3, "P1H": 2, "P1L": 2}
     out = []
     for name, item in levels.items():
         p = float(item["price"])
@@ -1500,82 +1422,15 @@ def _tag_scenario(reason, kind, sig):
     return f"{reason}|SCN={n}"
 
 
-def _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, cfg):
-    """به‌جای «نقض‌نشدن» ساده، دنبال جدیدترین ستاپ Sweep در چند کندل اخیر می‌گردد و
-    سقف/کف نوسانیِ محلی (بین کندل ریکلیم تا الان) را می‌سازد. فقط وقتی قیمت واقعاً
-    از آن سقف/کف رد شده باشد (شکست ادامه‌دار، نه صرفاً عدم نقض) سیگنال صادر می‌شود.
-
-    این دقیقاً همان چیزی است که در تحلیل چارت واقعی دیده شد: بعد از ریکلیم، یک
-    سوینگ کوچک محلی تشکیل شده بود که هنوز شکسته نشده بود، ولی ورود انجام شده بود.
-    """
-    max_lookback = max(1, int(cfg.get("sweep_swing_break_lookback", 6)))
-    if df is None or len(df) < max_lookback + 10:
-        return None, "داده کافی برای بررسی شکست سوینگ محلی نیست"
-    # نکته‌ی مهم: «بازیابی ستاپ فعال» خودش تا چند کندل به عقب می‌گردد دنبال یک ستاپ
-    # قدیمی‌تر که هنوز معتبر مانده. اگر همین‌جا هم فعال بماند، جست‌وجوی رو-به-عقبِ
-    # خودمان (برای پیدا کردن «کندل ریکلیم واقعی») گمراه می‌شود - چون حتی روی یک
-    # trial_df خیلی کوچک هم ممکن است بازیابی ستاپ یک سیگنال قدیمی را زودتر از موعد
-    # واقعی‌اش پیدا کند و اندیس ریکلیم را اشتباه محاسبه کنیم. برای همین در این جست‌وجو
-    # مسیر بازیابی را موقتاً خاموش می‌کنیم تا فقط سیگنال‌های تازه/مستقیم را ببینیم.
-    probe_config = {**(_cfg(strategy_config) or {})}
-    n = len(df)
-    for back in range(1, max_lookback + 1):
-        trial_df = df.iloc[:n - back].reset_index(drop=True)
-        if len(trial_df) < 10:
-            break
-        sig, reason = _strategy_liquidity_sweep_5m_impl(
-            trial_df, filters, probe_config, None, timeframe, _skip_confirmation_wrap=True
-        )
-        if sig not in ("BUY", "SELL"):
-            continue
-        # این گیت فقط برای حالت‌های ۳/۴ (نفوذ+پولبک+ادامه) معناداره - حالت‌های ۱/۲/۵/۶
-        # همین که پیدا بشن مستقیم صادر می‌شن (توسط strategy_liquidity_sweep_5m قبل از
-        # رسیدن به اینجا) و نباید اینجا دوباره منتظر شکست سوینگ بمانند.
-        scn = extract_scenario_tag(reason)
-        if scn not in (None, "3", "4"):
-            continue
-        reclaim_idx = n - back - 2  # اندیس کندل ریکلیم در df اصلی
-        if reclaim_idx < 0:
-            continue
-        # پنجره‌ی سوینگ: از کندل ریکلیم تا یکی‌مانده‌به‌کندل‌فعلی - خودِ کندل فعلی
-        # (که داریم چک می‌کنیم آیا سوینگ رو شکسته) عمداً از این پنجره حذف شده، وگرنه
-        # سقف/کفِ خودش باعث می‌شد هیچ‌وقت از خودش رد نشه.
-        window_end = max(reclaim_idx + 1, n - 2)
-        window = df.iloc[reclaim_idx: window_end]
-        last_closed = df.iloc[-2]
-        if sig == "BUY":
-            swing_high = float(window["high"].max())
-            if float(last_closed["close"]) > swing_high:
-                return "BUY", f"[شکست سوینگ محلی بعد از ریکلیم] {reason}"
-        else:
-            swing_low = float(window["low"].min())
-            if float(last_closed["close"]) < swing_low:
-                return "SELL", f"[شکست سوینگ محلی بعد از ریکلیم] {reason}"
-        # ستاپ پیدا شد ولی سوینگ محلی‌اش هنوز شکسته نشده - نه رد قطعی، فقط این چرخه صبر
-        return None, f"سوینگ محلی بعد از ریکلیم هنوز شکسته نشده (منتظر ادامه) | {reason}"
-    return None, "ستاپ Sweep تازه‌ای برای بررسی شکست سوینگ محلی پیدا نشد"
-
-
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min", _skip_confirmation_wrap=False):
     """پوسته‌ی نهاییِ عمومی: تشخیص اصلی را بدون تغییر از _strategy_liquidity_sweep_5m_impl
-    می‌گیرد (یا در صورت فعال بودن sweep_require_swing_break، از تشخیص شکست سوینگ محلی)
-    و یک گیت آخر روی آن اعمال می‌کند - گیت مرز کندل. اگر سیگنال درست در دقایق پایانیِ
+    می‌گیرد و یک گیت آخر روی آن اعمال می‌کند - گیت مرز کندل. اگر سیگنال درست در دقایق پایانیِ
     کندلِ تایم‌فریمِ سطحِ صادرکننده (طبق تگ [SETUP ...]) شکل گرفته باشد، نادیده گرفته
     می‌شود تا کندل جدید باز شود و سطوح نسبت به کندل تازه‌بسته‌شده دوباره ارزیابی شوند."""
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    # گیت «شکست سوینگ محلی» فقط برای حالت‌های ۳/۴ (نفوذ+پولبک+ادامه) معنا دارد - دقیقاً
-    # همان شرطی که کاربر برایشان تعریف کرد. حالت‌های ۱/۲ (برخورد ساده) و ۵/۶ (شکست کاذب)
-    # خودشان روی همان کندل تأیید نهایی‌اند و نباید منتظر شکست سوینگ بمانند.
-    immediate_sig, immediate_reason = _strategy_liquidity_sweep_5m_impl(
+    sig, reason = _strategy_liquidity_sweep_5m_impl(
         df, filters, strategy_config, live_price, timeframe, _skip_confirmation_wrap
     )
-    immediate_scn = extract_scenario_tag(immediate_reason)
-    if immediate_sig in ("BUY", "SELL") and immediate_scn in ("1", "2", "5", "6"):
-        sig, reason = immediate_sig, immediate_reason
-    elif bool(cfg.get("sweep_require_swing_break", False)) and not _skip_confirmation_wrap:
-        sig, reason = _sweep_swing_confirmed(df, filters, strategy_config, live_price, timeframe, cfg)
-    else:
-        sig, reason = immediate_sig, immediate_reason
     if sig not in ("BUY", "SELL"):
         return sig, reason
     if bool(cfg.get("daily_p4_mode", True)):
@@ -1869,52 +1724,6 @@ def _gate_on(cfg, key, default=True):
         return default
 
 
-def _htf_trend_label(d, upto_idx, cfg):
-    """روند ۴ساعته از روی کندل‌های تایم‌فریم اصلی: 'UP' | 'DOWN' | 'NEUTRAL' | None (داده کافی نیست)."""
-    try:
-        if "_dt" not in d.columns:
-            return None
-        x = d.iloc[: int(upto_idx) + 1]
-        c4 = x.set_index("_dt")["close"].astype(float).resample("4h").last().dropna()
-        n_min = int(cfg.get("htf_trend_min_candles", 24))
-        if len(c4) < max(n_min, 5):
-            return None
-        fast = c4.ewm(span=int(cfg.get("htf_trend_ema_fast", 8)), adjust=False).mean()
-        slow = c4.ewm(span=int(cfg.get("htf_trend_ema_slow", 21)), adjust=False).mean()
-        last = float(c4.iloc[-1])
-        if float(fast.iloc[-1]) > float(slow.iloc[-1]) and last > float(slow.iloc[-1]):
-            return "UP"
-        if float(fast.iloc[-1]) < float(slow.iloc[-1]) and last < float(slow.iloc[-1]):
-            return "DOWN"
-        return "NEUTRAL"
-    except Exception:
-        return None
-
-
-def _extra_signal_filters(d, idx, risk_idx, signal, cfg):
-    """V3.42: فیلترهای اختیاری (همه پیش‌فرض خاموش). خروجی: None یا متن دلیل رد.
-    اگر داده کافی نباشد فیلتر «بی‌اثر» است (fail-open)، نه رد."""
-    # 1) سشن
-    if _gate_on(cfg, "session_filter_enabled", False):
-        try:
-            h = int(pd.Timestamp(d.iloc[risk_idx]["_dt"]).hour)
-            a = int(cfg.get("session_filter_start_hour_utc", 7)) % 24
-            b = int(cfg.get("session_filter_end_hour_utc", 21)) % 24
-            ok = True if a == b else ((a <= h < b) if a < b else (h >= a or h < b))
-            if not ok:
-                return f"فیلتر سشن: ساعت {h:02d}:00 UTC خارج از بازه‌ی مجاز {a:02d}:00-{b:02d}:00 است"
-        except Exception:
-            pass
-    # 2) روند تایم بالا
-    if _gate_on(cfg, "htf_trend_filter_enabled", False):
-        trend = _htf_trend_label(d, risk_idx, cfg)
-        if trend == "UP" and signal == "SELL":
-            return "فیلتر روند تایم بالا: روند ۴ساعته صعودی است و فروش خلاف آن است"
-        if trend == "DOWN" and signal == "BUY":
-            return "فیلتر روند تایم بالا: روند ۴ساعته نزولی است و خرید خلاف آن است"
-    return None
-
-
 def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None, anchor_level=None, target_level=None, continuation=False, target_name=None):
     if df is None or len(df) < 100 or signal not in ("BUY", "SELL"):
         return None, "داده کافی برای طراحی معامله وجود ندارد"
@@ -2053,10 +1862,6 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
         rr = abs(tp - entry) / risk_dist
     if _gate_on(cfg, "gate_min_rr_enabled") and rr < min_rr:
         return None, f"R:R کافی نیست ({rr:.2f}R < {min_rr:.2f}R)"
-
-    _extra_reason = _extra_signal_filters(d, idx, risk_idx, signal, cfg)
-    if _extra_reason:
-        return None, _extra_reason
 
     reclaim_score = min(35.0, max(0.0, reclaim_depth * 35.0))
     candle_score = min(20.0, max(0.0, body_ratio * 27.0))
@@ -2213,10 +2018,8 @@ def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, l
 def evaluate_trend_weakness(df, side, strategy_config=None):
     """
     بررسی می‌کند که آیا روند معامله باز، در حال از دست دادن قدرت است یا نه.
-    برای استفاده در مدیریت خودکار پوزیشن: وقتی معامله سود دارد ولی هنوز به هدف
-    ساختاری (PDH/PDL) نرسیده، این تابع علائم ضعف را روی آخرین کندل بسته‌شده
-    می‌سنجد تا در صورت لزوم با سود بسته شود؛ در غیر این صورت اجازه می‌دهد
-    معامله تا رسیدن به هدف ادامه یابد.
+    فقط برای نمایش در پیام «هشدار کم شدن سود»: علائم ضعف را روی آخرین کندل بسته‌شده
+    می‌سنجد؛ هیچ معامله‌ای را نمی‌بندد.
 
     df باید از قبل با calculate_indicators پردازش شده باشد (حداقل ۶۰ کندل).
     side: 'BUY'/'LONG' یا 'SELL'/'SHORT'
@@ -2278,62 +2081,8 @@ def evaluate_trend_weakness(df, side, strategy_config=None):
 
 
 # V3.19: strategy_trend_following / strategy_breakout / strategy_mean_reversion حذف شدند.
-# طبق درخواست کاربر، تنها استراتژی معاملاتی همان Liquidity Sweep پنج‌سطحی (Monthly/Weekly/
-# Daily/4h/1h، تابع strategy_liquidity_sweep_5m) به‌علاوه‌ی نسخه‌ی هم‌مفهومش برای تایم‌فریم بالا
-# (strategy_htf_liquidity_reversal) است. Trend Following، Breakout و Mean Reversion موتورهای
-# جداگانه‌ای بودند که کاربر هرگز نمی‌خواسته روشن باشند؛ کدشان کامل حذف شد، نه فقط غیرفعال.
-
-
-def strategy_htf_liquidity_reversal(df_primary, market_data_dict=None, timeframe="1h", filters=None, strategy_config=None):
-    """HTF liquidity reversal model for 1H/4H.
-    Uses higher-timeframe liquidity events instead of intraday breakout chasing.
-    Entry requires sweep/reclaim + structure confirmation.
-    """
-    if df_primary is None or len(df_primary) < 80:
-        return None, "HTF: داده کافی نیست"
-
-    d = df_primary.copy()
-    try:
-        atr = float(d.iloc[-2].get("atr", 0) or 0)
-    except Exception:
-        atr = 0
-    if atr <= 0:
-        return None, "HTF: ATR نامعتبر"
-
-    high = float(d.iloc[-2]["high"])
-    low = float(d.iloc[-2]["low"])
-    close = float(d.iloc[-2]["close"])
-
-    # HTF liquidity anchors. Prefer supplied higher timeframe levels;
-    # fallback to local structure if unavailable.
-    anchors = market_data_dict or {}
-    prev_week_high = anchors.get("prev_week_high")
-    prev_week_low = anchors.get("prev_week_low")
-    prev_month_high = anchors.get("prev_month_high")
-    prev_month_low = anchors.get("prev_month_low")
-    prev_day_high = anchors.get("prev_day_high")
-    prev_day_low = anchors.get("prev_day_low")
-
-    if timeframe in ("4h", "4hour"):
-        resistance = prev_month_high or prev_week_high
-        support = prev_month_low or prev_week_low
-    else:
-        resistance = prev_week_high or prev_day_high
-        support = prev_week_low or prev_day_low
-
-    # Fallback keeps old datasets compatible.
-    highs = float(resistance) if resistance is not None else d["high"].rolling(20).max().iloc[-3]
-    lows = float(support) if support is not None else d["low"].rolling(20).min().iloc[-3]
-
-    # Long: liquidity grab below support + reclaim + bullish structure candle
-    if low < lows and close > lows and close > float(d.iloc[-3]["close"]):
-        return "BUY", "HTF Liquidity Sweep + Reclaim + ساختار صعودی تأیید شد"
-
-    # Short: liquidity grab above resistance + reclaim + bearish structure candle
-    if high > highs and close < highs and close < float(d.iloc[-3]["close"]):
-        return "SELL", "HTF Liquidity Sweep + Reclaim + ساختار نزولی تأیید شد"
-
-    return None, "HTF: ستاپ نقدینگی تشکیل نشده"
+# strategy_htf_liquidity_reversal (برگشت در ۱ و ۴ ساعته) هم به‌درخواست کاربر کامل حذف شد.
+# تنها استراتژی معاملاتی همان Liquidity Sweep پنج‌سطحی (Monthly/Weekly/Daily/4h/1h) روی ۵/۱۵ دقیقه است.
 
 
 _REVERSAL_FAMILY_MARKERS = ('liquidity_sweep', 'Liquidity Sweep', 'ADAPTIVE_SWEEP')
@@ -2532,21 +2281,18 @@ def build_halving_trade_plan(df, signal, strategy_config=None, grid_levels=None,
 
 
 def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="single", timeframe="5min", strategy_type="dynamic", filters=None, strategy_config=None, regime=None, live_price=None):
-    """تنها دو مسیر معاملاتی وجود دارد (V3.19): Liquidity Sweep پنج‌سطحی روی ۵/۱۵ دقیقه
-    (از طریق strategy_dynamic_v2 -> _select_v2_setup -> _select_enhanced_v1_setup) و
-    HTF Liquidity Reversal روی ۱h/۴h. strategy_type='trend'/'breakout'/'mean_reversion' دیگر
-    وجود ندارد (آن موتورها کامل حذف شدند)؛ هر مقداری غیر از این دو مسیر هم مثل 'dynamic' اجرا
-    می‌شود تا اگر جایی (مثلاً backtest.py) هنوز مقدار قدیمی پاس بدهد خطا نگیرد."""
+    """تنها یک مسیر معاملاتی وجود دارد: Liquidity Sweep پنج‌سطحی روی ۵/۱۵ دقیقه
+    (از طریق strategy_dynamic_v2 -> _select_v2_setup -> _select_enhanced_v1_setup).
+    تایم‌فریم ۱h/۴h استراتژی ندارد (HTF Reversal حذف شد). strategy_type='trend'/'breakout'/'mean_reversion'
+    هم وجود ندارد؛ هر مقداری مثل 'dynamic' اجرا می‌شود تا اگر جایی (مثلاً backtest.py)
+    هنوز مقدار قدیمی پاس بدهد خطا نگیرد."""
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     if isinstance(strategy_config, dict) and strategy_config.get("halving_model_enabled"):
         return strategy_halving(df_primary, strategy_config, live_price=live_price)
     cfg_top = get_v2_config(strategy_config)
     if timeframe in ("1h", "4h", "1hour", "4hour"):
-        if not bool(cfg_top.get("strategy_htf_reversal_enabled", False)):
-            sig, reason = None, "استراتژی HTF Liquidity Reversal دستی خاموش است"
-        else:
-            sig, reason = strategy_htf_liquidity_reversal(df_primary, market_data_dict, timeframe, filters, strategy_config)
+        sig, reason = None, "برای تایم‌فریم ۱ و ۴ ساعته استراتژی معاملاتی وجود ندارد"
     elif cfg_top.get("v2_enabled", True):
         sig, reason = strategy_dynamic_v2(df_primary, market_data_dict, timeframe, filters, strategy_config, regime, live_price=live_price)
     elif timeframe in ("5min", "15min"):
@@ -2598,7 +2344,6 @@ V2_DEFAULTS = {
     # V3.19: تنها دو موتور معاملاتی وجود دارد (کد بقیه حذف شد، این‌ها دیگر سوییچ روشن/خاموش
     # نیستند، صرفاً برای سازگاری تنظیمات قدیمی نگه داشته شده‌اند و در کد جایی خوانده نمی‌شوند):
     "strategy_sweep_enabled": True,           # Liquidity Sweep ۵/۱۵ دقیقه‌ای - همیشه فعال
-    "strategy_htf_reversal_enabled": False,    # نسخه‌ی همین مدل برای ۱h/۴h - قابل خاموش‌کردن
     "regime_adx_trend": 23.0,
     "regime_adx_strong": 30.0,
     "regime_atr_high": 1.35,
@@ -2620,10 +2365,6 @@ V2_DEFAULTS = {
     "max_atr_ratio_for_entry": 2.20,
     # Adaptive intraday liquidity: deliberately conservative to prevent signal spam.
     "adaptive_activation_distance_atr": 1.00,
-    "adaptive_min_level_candles": 6,
-    "adaptive_opening_range_minutes": 30,
-    "adaptive_swing_left": 2,
-    "adaptive_swing_right": 2,
     "adaptive_max_anchor_distance_atr": 1.60,
     "adaptive_min_anchor_distance_atr": 0.20,
     "adaptive_sweep_min_distance_atr": 0.15,

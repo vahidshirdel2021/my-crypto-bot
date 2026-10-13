@@ -1,12 +1,10 @@
-import os
 # -*- coding: utf-8 -*-
 """
 بک‌تست استراتژی‌های ربات روی داده تاریخی CoinEx
 =================================================
 
 این اسکریپت دقیقاً همان منطق فایل strategy.py (تولید سیگنال، محاسبه SL/TP و
-امتیاز کیفیت) و همان منطق حد ضرر دنبال‌کننده (trailing stop) که در bot.py
-پیاده‌سازی شده را روی داده کندل تاریخی اجرا می‌کند تا نتیجه واقعی هر
+امتیاز کیفیت) را روی داده کندل تاریخی اجرا می‌کند تا نتیجه واقعی هر
 استراتژی/جهت را روی یک بازه زمانی مشخص (مثلاً یک ماه صعودی یا نزولی) بسنجد.
 
 ⚠️ این اسکریپت باید جایی اجرا شود که به اینترنت و API عمومی CoinEx دسترسی
@@ -27,54 +25,30 @@ import os
         --strategy breakout --side short
 
 مثال اجرا — تست استراتژی واقعی زنده (Liquidity Sweep روی 5 دقیقه‌ای، همان
-چیزی که در ربات با active_strategy=dynamic اجرا می‌شود، شامل هدف PDH/PDL و
-خروج زودهنگام روی ضعف روند):
+چیزی که در ربات با active_strategy=dynamic اجرا می‌شود، شامل هدف PDH/PDL):
     python backtest.py --symbol DOT/USDT:USDT --timeframe 5m \
         --start 2026-07-01 --end 2026-08-01 \
         --strategy dynamic --side both
 
 استراتژی‌های قابل انتخاب: trend | breakout | mean_reversion | dynamic
 (دقیقاً همان‌هایی که در منوی ربات هستند. برای 5m/15m، dynamic دقیقاً همان
-منطق Liquidity Sweep + هدف PDH/PDL + خروج زودهنگام روی ضعف روند را که در
+منطق Liquidity Sweep + هدف PDH/PDL را که در
 bot.py فعال است شبیه‌سازی می‌کند. برای تایم‌فریم‌های بالاتر [1h/4h]، dynamic
 معادل breakout با فیلتر جهت دستی شبیه‌سازی می‌شود؛ یعنی --strategy breakout
 --side long/short همان رفتار dynamic را در یک رژیم قطعی شبیه‌سازی می‌کند.)
 """
 
 import argparse
-import math
 
 import pandas as pd
 
 from strategy import (
     calculate_indicators, get_signal_with_reason, build_trade_plan,
-    evaluate_trend_weakness, extract_scenario_tag,
+    extract_scenario_tag,
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, TIMEFRAME_PARAM_ADJUST,
 )
 
 PAPER_CONSERVATIVE_OHLC = True  # اگر در یک کندل هم SL و هم TP لمس شود، بدترین حالت (SL) فرض می‌شود؛ دقیقاً مطابق bot.py
-
-
-# ---------------------------------------------------------------------------
-# همان فرمول قفل حد ضرر دنبال‌کننده که در bot.py هست (خط به خط یکسان)
-# ---------------------------------------------------------------------------
-def trailing_locked_r(entry, risk_distance, current_price, is_long):
-    try:
-        entry = float(entry); risk_distance = float(risk_distance); current_price = float(current_price)
-    except Exception:
-        return None
-    if risk_distance <= 0 or not math.isfinite(risk_distance):
-        return None
-    r = (current_price - entry) / risk_distance if is_long else (entry - current_price) / risk_distance
-    if r < 1.0:
-        return None
-    frac = max(0.0, min(0.9, float(os.environ.get('TRAILING_LOCK_FRACTION', '0.6'))))
-    if frac > 0:
-        if r < 1.5:
-            return 0.0
-        return max(0.0, math.floor(r * frac * 5 + 1e-9) / 5.0)
-    step = math.floor(r * 2) / 2.0
-    return max(0.0, step - 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +115,7 @@ CCXT_TO_STRATEGY_TF = {
 
 
 def run_backtest(df, strategy_type='breakout', side='both', filters=None, strategy_config=None,
-                  margin_usdt=50.0, leverage=5, taker_fee_pct=0.05, use_trailing=True,
+                  margin_usdt=50.0, leverage=5, taker_fee_pct=0.05,
                   strategy_timeframe='1hour'):
     filters = {**FILTER_DEFAULTS, **(filters or {})}
     strategy_config = {**STRATEGY_DEFAULTS, **(strategy_config or {})}
@@ -182,8 +156,6 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
         entry_time = ind.iloc[entry_idx]['ts'] if 'ts' in ind.columns else entry_idx
 
         cur_sl = sl
-        locked_r = 0.0
-        trailing_activated = False
         exit_price = None
         exit_reason = None
         exit_idx = None
@@ -211,31 +183,6 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
                 exit_idx = j
                 break
 
-            if use_trailing and filters.get('trailing_stop', True):
-                lr = trailing_locked_r(entry, risk_distance, close, is_long)
-                if lr is not None:
-                    new_sl = entry + (lr * risk_distance if is_long else -lr * risk_distance)
-                    is_better = (new_sl > cur_sl) if is_long else (new_sl < cur_sl)
-                    if is_better and lr > locked_r:
-                        cur_sl = new_sl
-                        locked_r = lr
-                        trailing_activated = True
-
-            # --- مدیریت هوشمند: خروج زودهنگام با سود اگر علائم ضعف روند دیده شود
-            # (دقیقاً همان منطق _weakness_exit_check در bot.py) ---
-            current_r = ((close - entry) / risk_distance) if is_long else ((entry - close) / risk_distance)
-            weak_min_r = float(strategy_config.get('weakness_exit_min_r', 0.8))
-            if current_r >= weak_min_r:
-                wdf = ind.iloc[: j + 2]
-                if len(wdf) >= 60:
-                    is_weak, _wscore, _wreasons = evaluate_trend_weakness(
-                        wdf, 'BUY' if is_long else 'SELL', strategy_config
-                    )
-                    if is_weak:
-                        exit_price, exit_reason = close, 'مدیریت هوشمند (ضعف روند)'
-                        exit_idx = j
-                        break
-
             j += 1
 
         if exit_price is None:
@@ -256,7 +203,6 @@ def run_backtest(df, strategy_type='breakout', side='both', filters=None, strate
             'entry_time': entry_time,
             'entry': entry, 'sl_initial': sl, 'tp': tp,
             'exit': exit_price, 'exit_reason': exit_reason,
-            'trailing_activated': trailing_activated, 'locked_r': locked_r,
             'quality_score': plan['score'], 'planned_rr': plan['rr'],
             'realized_r': realized_r, 'pnl_usdt': pnl_usdt, 'fee_usdt': fee_usdt,
         })
@@ -281,7 +227,6 @@ def summarize(trades, initial_balance=1000.0):
     equity = initial_balance + df['pnl_usdt'].cumsum()
     running_max = equity.cummax()
     max_dd = (equity - running_max).min()
-    trail_rate = df['trailing_activated'].mean() * 100
 
     print('\n' + '=' * 50)
     print(f'📊 نتیجه بک‌تست  |  {len(df)} معامله')
@@ -291,7 +236,6 @@ def summarize(trades, initial_balance=1000.0):
     print(f'📈 Profit Factor: {"∞" if pf == float("inf") else f"{pf:.2f}"}')
     print(f'⚖️ میانگین R هر معامله: {avg_r:+.2f}R')
     print(f'📉 حداکثر افت سرمایه: {max_dd:+.2f} USDT')
-    print(f'🛡️ درصد معاملاتی که تریلینگ‌استاپ فعال شد: {trail_rate:.1f}%')
     print('=' * 50)
     if 'scenario' in df.columns and df['scenario'].notna().any():
         print('\n📌 تفکیک بر اساس سناریو:')
@@ -314,7 +258,6 @@ def main():
     ap.add_argument('--side', default='both', choices=['long', 'short', 'both'])
     ap.add_argument('--margin', type=float, default=50.0)
     ap.add_argument('--leverage', type=int, default=5)
-    ap.add_argument('--no-trailing', action='store_true', help='تریلینگ‌استاپ را خاموش کن (برای مقایسه)')
     ap.add_argument('--strategy-timeframe', default=None, choices=list(TIMEFRAME_PARAM_ADJUST.keys()),
                      help='کلید تایم‌فریم برای آستانه‌های ADX/امتیاز/R:R (پیش‌فرض: نگاشت خودکار از --timeframe)')
     ap.add_argument('--disable-scenarios', default='', help='لیست شماره‌ی حالت‌های ۱ تا ۶ که باید خاموش شوند، با کاما جدا (مثال: 5,6)')
@@ -337,7 +280,6 @@ def main():
     trades = run_backtest(
         df, strategy_type=args.strategy, side=args.side,
         margin_usdt=args.margin, leverage=args.leverage,
-        use_trailing=not args.no_trailing,
         strategy_timeframe=strategy_tf,
         strategy_config=strategy_config_overrides or None,
     )

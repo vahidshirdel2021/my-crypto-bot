@@ -59,12 +59,14 @@ plan2,_=bot.build_quick_plan_with_fallback('BTCUSDT','SELL',{'halving_model_enab
 check("ورود سریع کاربر: هدف از سطح نصف‌کردن است", 'نصف‌کردن' in plan2['tp_level_name'], plan2['tp_level_name'])
 
 # keyboard (exit section) with mocked session
-bot.get_session=lambda cid:{'profit_lock_enabled':False,'swing_trailing_enabled':True,'halving_ladder_enabled':True,'strategy_config':{}, 'filters':{}}
+bot.get_session=lambda cid:{'strategy_config':{}, 'filters':{}}
 try:
     kb=bot.trade_filter_management_keyboard(1,'exit')
     cbs=[r[0]['callback_data'] for r in kb['inline_keyboard']]
     print("exit keyboard:",cbs)
-    check("منوی خروج: دکمه‌ی نردبان سود هست", '/toggle_halving_ladder' in cbs)
+    _removed = ('/toggle_profit_lock', '/toggle_halving_ladder', '/toggle_swing_trailing', '/toggle_weakness_exit', '/toggle_day_end_close')
+    check("منوی خروج: پنج کلید حذف‌شده دیگر نیستند", not any(x in cbs for x in _removed), cbs)
+    check("منوی خروج: کلید بستن خودکار با سود هست", '/toggle_profit_autoclose' in cbs, cbs)
 except Exception as e:
     import traceback; traceback.print_exc(); ok=False
 print("\nALL PASS" if ok else "\nSOME FAILED")
