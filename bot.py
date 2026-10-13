@@ -7564,7 +7564,25 @@ def fav_queue_list(chat_id, message_id=None):
     if len(waiting) > 20:
         lines.append(f"\n… و {len(waiting) - 20} سیگنال دیگر")
     lines.append("\nتایید فقط روی کلوز کندل بسته‌شده انجام می‌شود؛ ✅ یعنی قیمت لحظه‌ای الان در محدوده است.")
-    send_message(chat_id, "\n".join(lines), refresh, message_id=message_id)
+    # دکمه‌ی چارت برای هر نماد: TradingView (و MiniApp اگر در دسترس باشد)
+    chart_rows = []
+    for r in waiting[:20]:
+        tf = r.get('tf') or '5min'
+        row = []
+        try:
+            row.append({'text': f"📈 {r['symbol']} TradingView", 'url': tradingview_chart_url(r['symbol'], tf)})
+        except Exception:
+            logger.exception('fav queue: tradingview url failed symbol=%s', r.get('symbol'))
+        try:
+            mini = miniapp_chart_url(r['symbol'], tf)
+        except Exception:
+            mini = None
+        if mini:
+            row.append({'text': '🌐 چارت تعاملی', 'web_app': {'url': mini}})
+        if row:
+            chart_rows.append(row)
+    markup = {'inline_keyboard': chart_rows + refresh['inline_keyboard']}
+    send_message(chat_id, "\n".join(lines), markup, message_id=message_id)
 
 
 def fav_confirm_tick(chat_id):
