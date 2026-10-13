@@ -11033,7 +11033,7 @@ def handle_text(chat_id,text):
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all', '🆘 اضطراری':'/emergency_close_all', '🆘 بستن اضطراری':'/emergency_close_all',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
         '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
-        '⏳ در صف تایید':'/fav_queue', 'صف تایید':'/fav_queue', 'آمار فیلتر':'/fav_stats',
+        '⏳ در صف تایید':'/fav_queue', 'صف تایید':'/fav_queue', '⏳ سیگنال‌های در حال تایید':'/fav_queue', 'سیگنال‌های در حال تایید':'/fav_queue', 'آمار فیلتر':'/fav_stats',
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
         '💰 سود و زیان امروز':'/daily_pnl', 'سود و زیان امروز':'/daily_pnl',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',

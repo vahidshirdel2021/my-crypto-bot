@@ -11,7 +11,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
             [{"text": "📋 سیگنال‌های در انتظار"}],
             [{"text": "🏠 منوی اصلی"}, scan_button],
             [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
-            [{"text": "📋 بررسی‌های آتی"}, {"text": "🧭 رژیم BTC/ETH"}],
+            [{"text": "⏳ سیگنال‌های در حال تایید"}, {"text": "🧭 رژیم BTC/ETH"}],
             [{"text": "💰 سود و زیان امروز"}],
         ],
         "resize_keyboard": True,
