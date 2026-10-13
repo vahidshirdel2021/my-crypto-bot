@@ -87,7 +87,7 @@ def build(day2_rows, vols=None):
     df['timestamp'] = [t0 + i*step for i in range(len(df))]
     return S.calculate_indicators(df)
 
-base = dict(daily_p4_mode=False, enabled_setup_tags=['Daily'], level_cluster_enabled=False, active_setup_enabled=False)
+base = dict(daily_p4_mode=False, enabled_setup_tags=['Daily'])
 def run(day2_rows, vols=None, **kw):
     df = build(day2_rows, vols)
     sig, reason = S._strategy_liquidity_sweep_5m_impl(df, None, {**base, **kw}, None, '5min', True)

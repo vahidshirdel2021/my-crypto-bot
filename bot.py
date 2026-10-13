@@ -436,20 +436,6 @@ def _regime_from_ind_row(c):
         return None
 
 
-def _align4_reason(direction, symbol_regime, market_regime, buy_votes, sell_votes):
-    """متن فارسیِ مواردی که با جهت سیگنال هم‌جهت نیستند (برای لاگ تشخیصی ورود)."""
-    want = 'BULLISH' if direction == 'BUY' else 'BEARISH'
-    want_fa = _REGIME_FA_SHORT[want]
-    bad = []
-    if market_regime != want:
-        bad.append(f"رژیم بازار {_REGIME_FA_SHORT.get(market_regime, 'نامشخص')} (لازم: {want_fa})")
-    if symbol_regime != want:
-        bad.append(f"رژیم نماد {_REGIME_FA_SHORT.get(symbol_regime, 'نامشخص')} (لازم: {want_fa})")
-    agree = buy_votes if direction == 'BUY' else sell_votes
-    if agree != 3:
-        bad.append(f"اندیکاتورها {agree} از ۳ هم‌جهت")
-    return '، '.join(bad)
-
 # اگر true باشد، رنگ مشترک سه اندیکاتور باید با جهت معامله هم یکی باشد (سبز => خرید، قرمز => فروش)
 SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION = os.environ.get('SIGNAL_CHANNEL_ALL3_MATCH_DIRECTION', 'false').lower() in ('1', 'true', 'yes')
 _SIGNAL_CHANNEL_LEVEL_TAGS = _load_signal_channel_level_tags()
@@ -913,11 +899,6 @@ def default_session():
         'max_same_direction_positions': 2,
         'same_direction_entry_cooldown_seconds': 120,
         'max_total_open_risk_pct': MAX_TOTAL_OPEN_RISK_PCT,
-        # سوییچ «هم‌جهتی با بازار» - فقط یک منطق دارد (گیت جهت بازار، refresh_market_gate):
-        # وقتی True باشد، ۱۰ نماد شاخص روی تایم‌فریم فعال بررسی می‌شوند؛ اگر ≥۷ نماد صعودی
-        # باشند ورود فروش، اگر ≥۷ نماد نزولی باشند ورود خرید مسدود می‌شود و اگر هیچ‌کدام
-        # (رنج) باشد اصلاً ورودی انجام نمی‌شود. پیش‌فرض False (خاموش).
-        'market_alignment_filters_enabled': False,
         # V3.42: کلید روشن/خاموش قفل سود (دکمه در «مدیریت فیلتر معاملات»). پیش‌فرض از PROFIT_LOCK_ENABLED (خاموش).
         'profit_lock_enabled': PROFIT_LOCK_ENABLED,
         # نردبان درختی سود (مدل نصف‌کردن): ۵۰٪ مسیر تا هدف => SL روی ورود+کارمزد، ۷۵٪ => SL روی نیمی از مسیر. پیش‌فرض خاموش.
@@ -930,10 +911,10 @@ def default_session():
         'profit_alert_enabled': True,
         # V3.43.21: بستن خودکار معامله در سود PROFIT_AUTOCLOSE_USDT (۵$). پیش‌فرض روشن.
         'profit_autoclose_enabled': True,
-        # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۷$) برسد. پیش‌فرض روشن.
+        # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۵$) برسد. پیش‌فرض روشن.
         'total_profit_autoclose_enabled': True,
-        # V3.43.28: ورود/سیگنال فقط وقتی BTC و ETH (روی تایم‌فریم فعال) هر دو هم‌جهت و غیررنج باشند. پیش‌فرض روشن.
-        'btc_eth_same_dir_gate_enabled': True,
+        # V3.43.28: ورود/سیگنال فقط وقتی BTC و ETH (روی تایم‌فریم فعال) هر دو هم‌جهت و غیررنج باشند. پیش‌فرض خاموش.
+        'btc_eth_same_dir_gate_enabled': False,
         # V3.43.29: هشدار وقتی رژیم خودِ نماد روی ۵ و ۱۵ دقیقه هم‌جهت نیست (ورود نگه داشته می‌شود و تایید می‌گیرد). پیش‌فرض روشن.
         'symbol_tf_regime_warn_enabled': True,
         # V3.43.30: هشدار وقتی جهت معامله با رژیم ۴ ساعته‌ی نماد نمی‌خواند (خرید فقط در ۴ساعته‌ی صعودی، فروش فقط در ۴ساعته‌ی نزولی). پیش‌فرض روشن.
@@ -991,8 +972,6 @@ def default_session():
         'trend_warn_eth': True,
         # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
         'ind_warn_enabled': True,
-        # V3.43.14: هم‌جهتی کامل برای سیگنال‌های خودِ ربات (رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال). پیش‌فرض خاموش.
-        'align4_enabled': False,
         'auto_trend_pending': {},
         'auto_trend_seen': {},
         'tg_refresh': {},
@@ -1111,7 +1090,6 @@ def normalize_session(data):
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
     s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', True))
-    s['align4_enabled'] = bool(data.get('align4_enabled', False))
     _now_n = time.time()
     s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
                                if isinstance(v, dict) and _now_n - float(v.get('created_at', 0) or 0) < 24 * 3600}
@@ -4678,71 +4656,6 @@ def _blk(chat_id, reason):
     return False
 
 
-# V3.43.18: فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردنِ خودش (کلید: gate_btc_level_position_enabled، پیش‌فرض خاموش)
-BTC_LEVEL_LOOKBACK_CANDLES = max(1, int(os.environ.get('BTC_LEVEL_LOOKBACK_CANDLES', '3')))     # ۳ کندل ۵ دقیقه‌ی بسته‌شده = ۱۵ دقیقه
-BTC_LEVEL_TOL_ATR = max(0.05, float(os.environ.get('BTC_LEVEL_TOL_ATR', '0.5')))               # حاشیه‌ی «روی سطح بودن» (ضریب ATR)
-_BTC_LEVEL_CACHE = {'ts': 0.0, 'state': None}
-
-
-def _btc_level_state(s):
-    """وضعیت بیتکوین نسبت به سطوح نصف‌کردن: {'price','support','resistance','broke_down','broke_up','on_level'} یا None."""
-    now = time.time()
-    if _BTC_LEVEL_CACHE['state'] is not None and now - _BTC_LEVEL_CACHE['ts'] < 30:
-        return _BTC_LEVEL_CACHE['state']
-    import strategy as _S
-    rng = get_halving_range_sync('BTC')
-    if not rng:
-        return None
-    df = get_klines('BTC', '5min', 260)
-    if df is None or df.empty or len(df) < 80:
-        return None
-    df = calculate_indicators(df)
-    cfg = _with_halving_cfg({**(s.get('strategy_config') or {}), 'halving_model_enabled': True}, rng)
-    d, _a, _b = _S._compute_prev_day_levels(df)
-    if d is None:
-        return None
-    ctx = _S._halving_context(d, len(d) - 2, _S._halving_cfg(cfg), span_cells=6)
-    if not ctx or not ctx.get('levels'):
-        return None
-    price = float(latest_price('BTC') or d['close'].iloc[-1])
-    levels = sorted(float(l['price']) for l in ctx['levels'])
-    tol = BTC_LEVEL_TOL_ATR * float(ctx['atr'])
-    closes = pd.to_numeric(d['close'], errors='coerce').iloc[-(BTC_LEVEL_LOOKBACK_CANDLES + 1):-1]
-    cmax, cmin = float(closes.max()), float(closes.min())
-    broke_down = next((L for L in reversed(levels) if price < L - tol and cmax >= L), None)
-    broke_up = next((L for L in levels if price > L + tol and cmin <= L), None)
-    below = [L for L in levels if L <= price]
-    above = [L for L in levels if L > price]
-    state = {'price': price, 'support': (below[-1] if below else None), 'resistance': (above[0] if above else None),
-             'broke_down': broke_down, 'broke_up': broke_up,
-             'on_level': any(abs(price - L) <= tol for L in levels)}
-    logger.info('BTC level state: price=%.2f support=%s resistance=%s broke_down=%s broke_up=%s tol=%.2f depth=%s step=%.2f atr=%.2f levels=%d',
-                price, state['support'], state['resistance'], state['broke_down'], state['broke_up'], tol,
-                ctx.get('depth'), float(ctx.get('step') or 0), float(ctx['atr']), len(levels))
-    _BTC_LEVEL_CACHE.update(ts=now, state=state)
-    return state
-
-
-def btc_level_position_check(s, is_long):
-    """(مجاز؟, دلیل). در هر خطا یا نبود داده مجاز برمی‌گرداند (فیلتر معامله را الکی نمی‌بندد)."""
-    try:
-        st = _btc_level_state(s)
-    except Exception:
-        logger.exception('btc level state failed')
-        return True, ''
-    if not st:
-        return True, ''
-    if is_long and st['broke_down'] is not None:
-        logger.warning('BTC level gate BLOCKED a BUY: price=%.2f broke_down=%s', st['price'], st['broke_down'])
-        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES} کندل ۵ دقیقه‌ی اخیر از سطح "
-                       f"{fmt(st['broke_down'])} به پایین شکسته؛ سیگنال خرید رد شد")
-    if (not is_long) and st['broke_up'] is not None:
-        logger.warning('BTC level gate BLOCKED a SELL: price=%.2f broke_up=%s', st['price'], st['broke_up'])
-        return False, (f"₿ بیتکوین ({fmt(st['price'])}) در {BTC_LEVEL_LOOKBACK_CANDLES} کندل ۵ دقیقه‌ی اخیر از سطح "
-                       f"{fmt(st['broke_up'])} به بالا شکسته؛ سیگنال فروش رد شد")
-    return True, ''
-
-
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
@@ -4750,10 +4663,6 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
         return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
-    if (not force) and gate_on(s, 'gate_btc_level_position_enabled'):
-        _btc_ok, _btc_why = btc_level_position_check(s, side_long(side))
-        if not _btc_ok:
-            return _blk(chat_id, _btc_why)
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
     # لایه V1.5 Enhanced Selection رشته دلیل را با فرمت انگلیسی «Quality XX/100»
@@ -6164,7 +6073,7 @@ PROFIT_ALERT_BUTTONS_TTL = max(60, int(os.environ.get('PROFIT_ALERT_BUTTONS_TTL'
 PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('PROFIT_AUTOCLOSE_USDT', '5')))
 # V3.43.24: بستن همه‌ی پوزیشن‌های باز وقتی «مجموع» سود/زیان لحظه‌ای آن‌ها (ناخالص، بدون کارمزد؛ همان عددی که بالای کارت پوزیشن‌ها
 # نمایش داده می‌شود) به این مقدار (USDT) برسد. کلید روشن/خاموش جدا در «مدیریت خروج». پیش‌فرض روشن. 0 = کاملاً غیرفعال.
-TOTAL_PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('TOTAL_PROFIT_AUTOCLOSE_USDT', '7')))
+TOTAL_PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('TOTAL_PROFIT_AUTOCLOSE_USDT', '5')))
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -6758,7 +6667,6 @@ def _entry_diag_label(reason):
         (r'روند ضعیف|شرایط روندی برقرار نیست', 'بازار هنوز روند واضحی برای ورود ندارد'),
         (r'Mean Reversion|محدوده میانگین|RSI خنثی|اشباع .*برگشت', 'بازار هنوز به نقطه مناسب برای برگشت نرسیده'),
         (r'ستاپ جدیدی ثبت نشد|ستاپ مناسب پیدا نشد|بدون Pullback|V2:', 'فعلاً ستاپ تمیز و قابل معامله‌ای شکل نگرفته'),
-        (r'ACTIVE_SETUP|فرصت بازیابی', 'یک ستاپ قبلی زیر نظر است، اما ورود هنوز تأیید نشده'),
     ]
     import re as _re
     for pattern, label in rules:
@@ -6788,7 +6696,7 @@ def _entry_diag_stage(item):
         return '❌', 'رد شد', 'طرح معامله کیفیت لازم را نداشت'
     if 'pullback' in r or 'پولبک' in reason or 'retest' in r or 'بازآزمایی' in reason:
         return '🔄', 'منتظر پولبک', 'حرکت انجام شده؛ منتظر برگشت امن به ناحیه ورودیم'
-    if 'active_setup' in r or 'ستاپ قبلی' in reason or 'نزدیک' in reason:
+    if 'ستاپ قبلی' in reason or 'نزدیک' in reason:
         return '👀', 'نزدیک ورود', 'ستاپ در حال شکل‌گیری است و یک تأیید دیگر لازم دارد'
     if 'تأیید' in reason or 'confirmation' in r or 'قدرت' in reason or 'حجم' in reason:
         return '⏳', 'منتظر تأیید', 'ناحیه مناسب است ولی تأیید نهایی هنوز نیامده'
@@ -6898,20 +6806,18 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
         lines.append('\n' + _entry_diag_next_step([x[0] for x in active_items]))
     return '\n'.join(lines)
 
-def _active_tf_regime_status(tf, align_on=False):
-    """وضعیت گیت جهت بازار روی تایم‌فریم فعال (فقط نمایش؛ منطق در refresh_market_gate)."""
-    if not align_on:
-        return '⚪️ خاموش (سوییچ هم‌جهتی با بازار غیرفعال است)'
+def _active_tf_regime_status(tf):
+    """رژیم بازار روی تایم‌فریم فعال (فقط نمایش؛ منطق در refresh_market_gate)."""
     c = TIMEFRAME_REGIME_CACHE.get(tf) or {}
     gate = c.get('gate')
     if not gate:
         return '⏳ هنوز محاسبه نشده'
     counts = f"{c.get('bull_n', 0)} صعودی / {c.get('bear_n', 0)} نزولی از {c.get('total', 0)} نماد"
     if gate == 'BULLISH':
-        return f'🟢 صعودی ({counts}) — ورود فروش مسدود'
+        return f'🟢 صعودی ({counts})'
     if gate == 'BEARISH':
-        return f'🔴 نزولی ({counts}) — ورود خرید مسدود'
-    return f'⚪️ رنج ({counts}) — هیچ ورودی مجاز نیست'
+        return f'🔴 نزولی ({counts})'
+    return f'⚪️ رنج ({counts})'
 
 
 def _simple_status_report(chat_id):
@@ -6922,7 +6828,7 @@ def _simple_status_report(chat_id):
     regime_label = {'BULLISH': '📈 صعودی', 'BEARISH': '📉 نزولی', 'NEUTRAL': '➡️ رنج'}.get(regime, '➡️ رنج')
     tf = s.get('timeframe', '5min')
     tf_label = TF_DISPLAY.get(tf, tf)
-    active_tf_status = _active_tf_regime_status(tf, bool(s.get('market_alignment_filters_enabled', False)))
+    active_tf_status = _active_tf_regime_status(tf)
 
     btc_price = latest_price('BTC')
     eth_price = latest_price('ETH')
@@ -7539,7 +7445,7 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
             "*ورود را تایید می‌کنید؟*")
 
 
-# ===================== V3.43.24: «تایید کامل هم‌جهتی» (کلید gate_full_confirm_enabled، پیش‌فرض روشن) =====================
+# ===================== V3.43.24: «تایید کامل هم‌جهتی» (پنج کلید gate_fc_*_enabled، هرکدام مستقل، پیش‌فرض روشن) =====================
 # همه‌ی مواردی که در پیام بسته‌شدن پوزیشن با «هم‌جهت ✅» نشان داده می‌شوند، قبل از صدور سیگنال باید برقرار باشند:
 # رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد در ۵ و ۱۵ دقیقه، هر سه اندیکاتور، و آخرین کندل بسته‌شده سمتِ درستِ سطح.
 # سخت‌گیرانه: خنثی/رنج یا نبودِ داده = شرط برقرار نیست = سیگنال صادر نمی‌شود. حجم شرط نیست.
@@ -8695,14 +8601,11 @@ def assist_keyboard(chat_id):
     ]}
 
 
-async def scan_symbol(http,chat_id,symbol,market_gate=None):
-    """market_gate: None (سوییچ خاموش) یا خروجی refresh_market_gate: 'BULLISH' / 'BEARISH' / 'RANGE'."""
+async def scan_symbol(http,chat_id,symbol):
     s=get_session(chat_id)
     _pipeline_start(chat_id, symbol)
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
-    if market_gate == 'RANGE':
-        return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason('RANGE', s['timeframe']), 'market_gate')
     scan_generation=int(s.get('scan_generation',0))
     if time.time() < float(s['cooldowns'].get(symbol,0)):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
@@ -8760,52 +8663,25 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    if s.get('align4_enabled'):
-        # V3.43.14: هم‌جهتی کامل - رژیم بازار + رژیم نماد + هر ۳ اندیکاتور + جهت سیگنال باید یکی باشند؛ وگرنه سیگنال صادر نمی‌شود.
-        _a4_mkt = market_gate
-        if _a4_mkt is None:
-            try:
-                _a4_mkt = await refresh_market_gate(http, tf)
-            except Exception:
-                _a4_mkt = None
+    _fc_use = {k: gate_on(s, f'gate_fc_{k}_enabled') for k in ('btceth', 'h4', 'tf', 'ind', 'level')}
+    if any(_fc_use.values()):      # هر کلید روشن مستقل کار می‌کند؛ کلید اصلی حذف شد
         try:
-            _a4_row = primary.iloc[-2]
-            _a4_reg = regime_from_ind_df(primary)
-            _a4_l, _a4_b, _a4_s = _signal_channel_indicator_summary(_a4_row.to_dict(), sig)
-        except Exception:
-            _a4_reg, _a4_b, _a4_s = None, 0, 0
-        if not _signal_channel_align4_ok(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s):
-            return _entry_diag_result(chat_id, symbol, 'blocked', 'هم‌جهتی کامل برقرار نیست: ' + _align4_reason(sig, _a4_reg, _a4_mkt, _a4_b, _a4_s), 'align4', sig, diagnostics=diagnostics)
-    if gate_on(s, 'gate_full_confirm_enabled'):
-        # V3.43.24: تایید کامل هم‌جهتی (BTC/ETH، ۴ ساعته، ۵/۱۵ دقیقه، ۳ اندیکاتور، سمتِ سطح)؛ وگرنه سیگنال صادر نمی‌شود.
-        try:
-            _fc_use = {k: gate_on(s, f'gate_fc_{k}_enabled') for k in ('btceth', 'h4', 'tf', 'ind', 'level')}
             _fc_ok, _fc_bad = await asyncio.to_thread(_full_confirm_check, symbol, sig, tf, reason, primary, _fc_use)
         except Exception:
             logger.exception('full confirm gate failed symbol=%s', symbol)
             _fc_ok, _fc_bad = False, ['خطا در بررسی']
         if not _fc_ok:
             return _entry_diag_result(chat_id, symbol, 'blocked', 'تایید کامل هم‌جهتی برقرار نیست: ' + '؛ '.join(_fc_bad), 'full_confirm', sig, diagnostics=diagnostics)
-    if (market_gate == 'BULLISH' and sig == 'SELL') or (market_gate == 'BEARISH' and sig == 'BUY'):
-        # حالت ۵/۶ (شکست کاذب) و حالت ۱/۲ (برخورد ساده) هر دو ذاتاً برگشتی/رنجی‌اند نه
-        # ترندی؛ طبق تصمیم کاربر هر دو جفت می‌توانند جدا از این گیت معاف شوند.
-        _scn = extract_scenario_tag(reason)
-        exempt56 = bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True)) and _scn in ('5', '6')
-        exempt12 = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True)) and _scn in ('1', '2')
-        if not (exempt56 or exempt12):
-            return _entry_diag_result(chat_id, symbol, 'blocked', _market_gate_reason(market_gate, tf), 'market_gate', sig, diagnostics=diagnostics)
     # مدل PDH/PDL+P4 (تصمیم کاربر): در حالت ۲ (کندل ۴ساعته PDH را قطع کرده؛ فقط خرید) جهت بازار
-    # باید صعودی باشد و در حالت ۳ (PDL قطع شده؛ فقط فروش) نزولی. این فیلتر مستقل از سوییچ
-    # «هم‌جهتی با بازار» همیشه برای همین دو حالت اعمال می‌شود (همان معیار ۷ از ۱۰ نماد شاخص).
+    # باید صعودی باشد و در حالت ۳ (PDL قطع شده؛ فقط فروش) نزولی. این فیلتر همیشه
+    # برای همین دو حالت اعمال می‌شود (همان معیار ۷ از ۱۰ نماد شاخص).
     _p4_case = extract_p4_case(reason)
     if _p4_case in ('2', '3'):
         _need = 'BULLISH' if _p4_case == '2' else 'BEARISH'
-        _gate_now = market_gate
-        if _gate_now is None:
-            try:
-                _gate_now = await refresh_market_gate(http, tf)
-            except Exception:
-                _gate_now = None
+        try:
+            _gate_now = await refresh_market_gate(http, tf)
+        except Exception:
+            _gate_now = None
         if _gate_now != _need:
             _have = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}.get(_gate_now, 'نامشخص')
             _want = 'صعودی' if _need == 'BULLISH' else 'نزولی'
@@ -8822,15 +8698,10 @@ async def scan_symbol(http,chat_id,symbol,market_gate=None):
     # liquidity-sweep planner here, which could make signal and SL/TP come from
     # different strategy families.
     plan_strategy_type = 'dynamic' if (strat == 'dynamic' and s.get('strategy_config', {}).get('v2_enabled', True)) else ('liquidity_sweep' if is_scalp_strategy else strat)
-    active_setup_index = None
-    if is_scalp_strategy:
-        m_active = re.search(r'ACTIVE_SETUP_INDEX=(\d+)', reason or '')
-        if m_active:
-            active_setup_index = int(m_active.group(1))
     plan, plan_reason = build_trade_plan(
         primary, sig, cfg_entry, plan_strategy_type,
         strategy_timeframe=primary_tf, grid_levels=grid_levels,
-        setup_index=active_setup_index, live_price=live_entry_price
+        live_price=live_entry_price
     )
     if not plan:
         return _entry_diag_result(chat_id, symbol, 'trade_plan_blocked', plan_reason or 'طرح معامله معتبر نشد', 'trade_plan', sig)
@@ -8901,12 +8772,8 @@ def _setup_family(reason):
     """خانواده‌ی ستاپ را از متن reason استخراج می‌کند (برای گزارش تفکیکی کیفیت).
     فقط برای گزارش‌گیری استفاده می‌شود؛ در هیچ تصمیم ورود/خروجی دخالت ندارد."""
     r = str(reason or '')
-    if 'ACTIVE_SETUP' in r:
-        return 'بازیابی ستاپ (Active Setup)'
     if 'ADAPTIVE' in r:
         return 'سطح تطبیقی (Adaptive)'
-    if 'Cluster' in r or 'کلاستر' in r:
-        return 'خوشه‌ی سطوح (Cluster)'
     if 'liquidity_sweep' in r:
         return 'جاروب نقدینگی مستقیم'
     if 'breakout' in r:
@@ -9117,25 +8984,17 @@ def _scenario_label(scn, reason=''):
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'htf_trend_filter_enabled':   ('همسو بودن با روند بزرگ‌تر (چارت ۴ ساعته)', False, 'entry_filter', 'اگر روند چارت ۴ ساعته نزولی است، ربات خرید نمی‌کند؛ اگر صعودی است، فروش نمی‌کند. وقتی روند مشخص نیست، هر دو مجازند.'),
-    'momentum_fade_filter_enabled': ('ورود بعد از کند شدن حرکت قبلی', False, 'entry_filter', 'ربات فقط وقتی وارد می‌شود که حرکت قبلی قیمت کمی کند شده باشد (قدرت حرکت از اوجش برگشته)، تا وسط یک حرکت تند وارد نشود.'),
     'session_filter_enabled':     ('فقط در ساعت‌های تعیین‌شده', False, 'entry_filter', 'سیگنال فقط در بازه‌ی ساعتی مشخص صادر می‌شود (پیش‌فرض ۰۷:۰۰ تا ۲۱:۰۰ به وقت جهانی UTC، یعنی حدود ۱۰:۳۰ تا ۰۰:۳۰ به وقت ایران). بیرون از آن ساعت‌ها ورودی انجام نمی‌شود.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_filter', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_full_confirm_enabled':  ('سیگنال فقط با تایید کامل هم‌جهتی', True, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که همه‌ی این‌ها هم‌جهت با معامله باشند: رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد روی ۵ و ۱۵ دقیقه، هر سه اندیکاتور RSI/MACD/ADX، و آخرین کندل بسته‌شده سمتِ درستِ سطح ستاپ. اگر حتی یکی هم‌جهت نباشد (یا خنثی/رنج باشد یا داده‌اش نرسد) سیگنال داده نمی‌شود. حجم معامله فقط نمایشی است و شرط نیست. با پنج کلید «↳ تایید کامل» زیرش می‌توانی تعیین کنی کدام شرط‌ها لازم باشند. پیش‌فرض: روشن، با هر پنج شرط.'),
-    'gate_fc_btceth_enabled':     ('↳ تایید کامل: رژیم BTC و ETH', True, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
-    'gate_fc_h4_enabled':         ('↳ تایید کامل: رژیم ۴ ساعته‌ی نماد', True, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
-    'gate_fc_tf_enabled':         ('↳ تایید کامل: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'entry_filter', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
-    'gate_fc_ind_enabled':        ('↳ تایید کامل: RSI و MACD و ADX', True, 'entry_filter', 'هر سه اندیکاتور باید هم‌جهت با معامله باشند.'),
-    'gate_fc_level_enabled':      ('↳ تایید کامل: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
-    'gate_btc_level_position_enabled': ('فیلتر جایگاه بیتکوین نسبت به سطوح نصف‌کردن', False, 'entry_filter', 'لحظه‌ی صدور سیگنال خودکار، جایگاه بیتکوین را روی سطوح نصف‌کردن خودش (تایم‌فریم ۵ دقیقه) می‌سنجد: اگر بیتکوین در ۳ کندل ۵ دقیقه‌ی اخیر از یک سطح به پایین شکسته باشد، سیگنال «خرید» رد می‌شود؛ اگر از یک سطح به بالا شکسته باشد، سیگنال «فروش» رد می‌شود. ورود دستی و سریع بررسی نمی‌شود. اگر داده‌ی بیتکوین در دسترس نباشد، معامله بسته نمی‌شود. پیش‌فرض: خاموش.'),
-    'htf_close_guard_enabled':    ('صبر در دقایق آخر کندل بزرگ‌تر', False, 'entry_filter', 'در دقیقه‌های پایانی هر کندل بزرگ‌تر (مثلاً ۱ ساعته یا ۴ ساعته) سیگنال صادر نمی‌شود، چون شکل نهایی آن کندل هنوز معلوم نیست.'),
+    'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
+    'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
+    'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'entry_filter', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
+    'gate_fc_ind_enabled':        ('هم‌جهتی: RSI و MACD و ADX', True, 'entry_filter', 'هر سه اندیکاتور باید هم‌جهت با معامله باشند.'),
+    'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
     'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', True, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
-    'active_setup_enabled':       ('فرصتِ چند کندل قبل هنوز معتبر بماند', False, 'structure', 'اگر فرصت معتبری همین چند کندل پیش پیدا شده و زمانش کامل از دست نرفته، تا چند کندل دیگر هم می‌شود واردش شد.'),
-    'active_setup_require_daily_breakout': ('شکست قطعی سقف یا کف دیروز لازم است', False, 'structure', 'فرصتِ چند کندل قبل فقط وقتی قابل استفاده است که قیمت سقف یا کف دیروز را قطعی شکسته باشد.'),
-    'active_structure_confirmation': ('تایید با حرکت‌های ریز قیمت', False, 'structure', 'فرصتِ چند کندل قبل باید با حرکت‌های ریز قیمت (در چارت کوچک‌تر) هم تایید شود.'),
-    'level_cluster_enabled':      ('یکی حساب کردن سطوح نزدیک به هم', False, 'structure', 'اگر چند سطح مهم خیلی به هم نزدیک باشند، به‌جای چند سطح جدا یک سطح حساب می‌شوند.'),
     # --- کیفیت و کنترل ریسک ---
     'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', True, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
     'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
@@ -9161,13 +9020,9 @@ def _filter_info(key):
         'swing_break': ('تایید با عبور از آخرین سقف/کف کوچک',
             'بعد از برگشت قیمت، ربات فقط وقتی وارد می‌شود که قیمت آخرین سقفِ کوچک (برای خرید) یا کفِ کوچک (برای فروش) را هم رد کند. از «صبر برای یک کندل تایید اضافه» سخت‌گیرانه‌تر است و اگر هر دو روشن باشند همین ملاک است.'),
         'btc_eth_same_dir': ('ورود فقط وقتی BTC و ETH هم‌جهت‌اند',
-            'ربات رژیم بیت‌کوین و اتریوم را روی تایم‌فریم فعال می‌سنجد (همان عددی که در «🧭 رژیم BTC/ETH» می‌بینی). فقط وقتی هر دو صعودی یا هر دو نزولی باشند ورود و سیگنال صادر می‌شود. اگر جهت‌شان فرق کند، هر دو رنج باشند، یا داده‌ی یکی‌شان در دسترس نباشد، هیچ معامله یا سیگنالی صادر نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند. پیش‌فرض: روشن.'),
-        'market_alignment': ('همسو بودن با اکثر بازار',
-            'ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+            'ربات رژیم بیت‌کوین و اتریوم را روی تایم‌فریم فعال می‌سنجد (همان عددی که در «🧭 رژیم BTC/ETH» می‌بینی). فقط وقتی هر دو صعودی یا هر دو نزولی باشند ورود و سیگنال صادر می‌شود. اگر جهت‌شان فرق کند، هر دو رنج باشند، یا داده‌ی یکی‌شان در دسترس نباشد، هیچ معامله یا سیگنالی صادر نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند. پیش‌فرض: خاموش.'),
         'trend_warn': ('هشدار روند بیت‌کوین و اتریوم (کلید اصلی)',
             'قبل از ورود، اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، ورود نگه داشته می‌شود و از تو می‌پرسد «وارد شوم؟». روند خنثی یا نبود داده مانع نمی‌شود. دو کلید بعدی مشخص می‌کنند کدام ارز بررسی شود.'),
-        'align4': ('هم‌جهتی کامل سیگنال‌های ربات',
-            'اگر روشن باشد، سیگنال ربات فقط وقتی صادر می‌شود که این چهار مورد با هم یکی باشند: رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت خود سیگنال (همه صعودی => خرید، همه نزولی => فروش). رنج یا اندیکاتور خنثی = سیگنال صادر نمی‌شود. پیش‌فرض خاموش.'),
         'symbol_tf_regime_warn': ('هشدار ناهم‌جهتی رژیم ۵ و ۱۵ دقیقه',
             'قبل از ورود، رژیم خودِ نماد روی تایم‌فریم ۵ دقیقه و ۱۵ دقیقه (همان معیار «رژیم نماد»: قیمت نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده) سنجیده می‌شود. اگر این دو هم‌جهت نباشند، یا هرکدام خلاف جهت معامله باشد (مثلاً خرید در رژیم نزولی)، ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد؛ در همان کارت هشدار روند و اندیکاتورها می‌آید. نبود داده مانع نمی‌شود. پیش‌فرض: روشن.'),
         'symbol_h4_regime_warn': ('هشدار خلاف رژیم ۴ ساعته',
@@ -9217,7 +9072,7 @@ def _filter_info(key):
 _FILTER_SECTION_KEYS = {
     'entry': ['regime_adv'],
     'entry_warn': ['trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn'],
-    'entry_filter': ['sweep_confirm', 'swing_break', 'btc_eth_same_dir', 'market_alignment', 'align4'],
+    'entry_filter': ['sweep_confirm', 'swing_break', 'btc_eth_same_dir'],
     'exit': ['profit_lock', 'halving_ladder', 'swing_trailing', 'weakness_exit', 'day_end_close', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
@@ -9338,14 +9193,11 @@ def trade_filter_management_keyboard(chat_id, section=None):
 
     if section == 'entry_filter':
         sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
-        swing_break = bool(scfg.get('sweep_require_swing_break', True))
-        align_on = bool(s.get('market_alignment_filters_enabled', False))
+        swing_break = bool(scfg.get('sweep_require_swing_break', False))
         return {'inline_keyboard': [
             [fcell(sweep_confirm, 'sweep_confirm', '/toggle_sweep_confirm')],
             [fcell(swing_break, 'swing_break', '/toggle_swing_break')],
-            [fcell(bool(s.get('btc_eth_same_dir_gate_enabled', True)), 'btc_eth_same_dir', '/toggle_btc_eth_same_dir')],
-            [fcell(align_on, 'market_alignment', '/toggle_market_alignment')],
-            [fcell(bool(s.get('align4_enabled', False)), 'align4', '/toggle_align4')],
+            [fcell(bool(s.get('btc_eth_same_dir_gate_enabled', False)), 'btc_eth_same_dir', '/toggle_btc_eth_same_dir')],
         ] + gate_rows('entry_filter') + [back_entry]}
 
     if section == 'structure':
@@ -9712,7 +9564,7 @@ def _market_snapshot(symbol, tf):
 
 
 MARKET_REPORT_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','DOGE','ADA','AVAX','LINK','DOT']
-# --- گیت جهت بازار (تنها منطقِ سوییچ «هم‌جهتی با بازار») ---------------------------------
+# --- گیت جهت بازار (کش رژیم تایم‌فریم؛ برای داشبورد، کانال سیگنال، هم‌جهتی کامل و فیلتر P4) ---------------------------------
 # روی تایم‌فریم فعال، ۱۰ نماد شاخص (MARKET_REPORT_SYMBOLS) با همان معیار «داشبورد بازار»
 # (close نسبت به EMA50 و EMA20>=EMA50 روی آخرین کندل بسته‌شده) امتیاز می‌گیرند:
 #   ≥ MARKET_GATE_MIN_SYMBOLS نماد صعودی  => BULLISH => ورود فروش مسدود
@@ -9768,16 +9620,6 @@ async def refresh_market_gate(http, timeframe):
         entry['ts'] = 0.0  # داده‌ی ناکافی: ورود ممنوع، ولی نتیجه کش نمی‌شود و چرخه‌ی بعد دوباره تلاش می‌کند
     TIMEFRAME_REGIME_CACHE[tf] = entry
     return gate
-
-
-def _market_gate_reason(gate, tf):
-    c = TIMEFRAME_REGIME_CACHE.get(tf) or {}
-    counts = f"{c.get('bull_n', 0)} صعودی / {c.get('bear_n', 0)} نزولی از {c.get('total', 0)} نماد شاخص"
-    if gate == 'BULLISH':
-        return f'گیت جهت بازار: {counts} - بازار صعودی است و ورود فروش مسدود است'
-    if gate == 'BEARISH':
-        return f'گیت جهت بازار: {counts} - بازار نزولی است و ورود خرید مسدود است'
-    return f'گیت جهت بازار: {counts} - بازار رنج است و هیچ ورودی مجاز نیست'
 
 
 def market_report(chat_id):
@@ -9907,7 +9749,7 @@ def apply_user_profile(s, profile):
 # --- «پروفایل من»: برخلاف presetهای بالا (که مقادیرشان توی کد ثابته)، این یکی کاملاً
 # از طریق خود ربات قابل تنظیمه - یک عکس‌فوری (snapshot/restore) از هر چیزی که کاربر
 # همین الان با دکمه‌های موجود چیده، بدون هیچ مقدار hardcode شده‌ای اینجا. ---
-_MY_PROFILE_TOP_LEVEL_KEYS = ('timeframe', 'market_alignment_filters_enabled', 'max_same_direction_positions', 'enabled_setup_tags')
+_MY_PROFILE_TOP_LEVEL_KEYS = ('timeframe', 'max_same_direction_positions', 'enabled_setup_tags')
 
 
 def save_my_profile(chat_id):
@@ -9953,11 +9795,6 @@ def my_profile_summary_text(snapshot):
         confirms.append('۳/۴')
     if cfg.get('confirm_fakeout_enabled'):
         confirms.append('۵/۶')
-    exempts = []
-    if cfg.get('scenario_12_market_gate_exempt', True):
-        exempts.append('۱/۲')
-    if cfg.get('scenario_56_market_gate_exempt', True):
-        exempts.append('۵/۶')
     saved_at = snapshot.get('saved_at')
     when = time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime(saved_at)) if saved_at else '-'
     lines = [
@@ -9965,11 +9802,10 @@ def my_profile_summary_text(snapshot):
         f"⏱ تایم‌فریم: {TF_DISPLAY.get(top.get('timeframe'), top.get('timeframe'))}",
         f"🧭 حالت‌های روشن: {', '.join(on_scenarios) or 'هیچ‌کدام'}",
         f"✅ تاییدیه‌های روشن: {', '.join(confirms) or 'هیچ‌کدام'}",
-        f"🚦 هم‌جهتی بازار: {'روشن' if top.get('market_alignment_filters_enabled') else 'خاموش'}" + (f" (معافیت: {', '.join(exempts)})" if top.get('market_alignment_filters_enabled') and exempts else ""),
         f"👥 سقف معاملات هم‌جهت: {top.get('max_same_direction_positions')}",
         f"🎯 تشخیص دقیق‌تر ۶ حالت: {'روشن' if cfg.get('scenario_precision_v2', True) else 'خاموش'} | برخورد بدون نفوذ: {'روشن' if cfg.get('scenario_touch_enabled', True) else 'خاموش'}",
         f"📐 تاییدیه کندل Sweep: {'روشن' if cfg.get('sweep_require_confirmation_candle') else 'خاموش'}",
-        f"📐 شکست سوینگ محلی (حالت ۳/۴): {'روشن' if cfg.get('sweep_require_swing_break', True) else 'خاموش'}",
+        f"📐 شکست سوینگ محلی (حالت ۳/۴): {'روشن' if cfg.get('sweep_require_swing_break', False) else 'خاموش'}",
     ]
     return "\n".join(lines)
 
@@ -10055,8 +9891,7 @@ async def _check_entry_coro(chat_id, symbol):
     timeout = aiohttp.ClientTimeout(total=15)
     conn = aiohttp.TCPConnector(limit=MAX_ASYNC_REQUESTS, ttl_dns_cache=300)
     async with aiohttp.ClientSession(timeout=timeout, connector=conn) as http:
-        gate = await refresh_market_gate(http, tf) if bool(s.get('market_alignment_filters_enabled', False)) else None
-        return await scan_symbol(http, chat_id, symbol, gate)
+        return await scan_symbol(http, chat_id, symbol)
 
 
 def check_entry_now(chat_id, symbol):
@@ -10753,7 +10588,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/toggle_swing_break':
         s.setdefault('strategy_config', {})
-        current = bool(s['strategy_config'].get('sweep_require_swing_break', True))
+        current = bool(s['strategy_config'].get('sweep_require_swing_break', False))
         s['strategy_config']['sweep_require_swing_break'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -10764,7 +10599,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"📐 {_filter_info('swing_break')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     if cl=='/toggle_btc_eth_same_dir':
-        current = bool(s.get('btc_eth_same_dir_gate_enabled', True))
+        current = bool(s.get('btc_eth_same_dir_gate_enabled', False))
         s['btc_eth_same_dir_gate_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -10774,17 +10609,6 @@ def process_command(cmd,chat_id,message_id=None):
             'این قانون خاموش شد: ورود و سیگنال به هم‌جهت بودن BTC و ETH وابسته نیست.'
         )
         send_message(chat_id, f"🧭 {_filter_info('btc_eth_same_dir')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_filter'))
-        return
-    if cl=='/toggle_market_alignment':
-        current = bool(s.get('market_alignment_filters_enabled', False))
-        s['market_alignment_filters_enabled'] = not current
-        save_session(chat_id)
-        new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        note = (
-            'از این پس ربات ۱۰ ارز شاخص را بررسی می‌کند: اگر ۷ تا یا بیشتر صعودی باشند فروش انجام نمی‌شود؛ اگر ۷ تا یا بیشتر نزولی باشند خرید انجام نمی‌شود؛ و اگر بازار بی‌جهت (رنج) باشد هیچ ورودی انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'
-            if not current else 'این قانون خاموش شد: ورودها فقط بر اساس سیگنال انجام می‌شوند و جهتِ اکثر بازار محدودیتی ایجاد نمی‌کند.'
-        )
-        send_message(chat_id, f"🌐 {_filter_info('market_alignment')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     if cl=='/toggle_profit_fade_alert':
         current = bool(s.get('profit_fade_alert_enabled', True))
@@ -10825,16 +10649,6 @@ def process_command(cmd,chat_id,message_id=None):
                if _new_on else
                "رژیم دوباره مثل قبل فقط از EMA20 و EMA50 ساخته می‌شود (برای کل ربات)."),
             trade_filter_management_keyboard(chat_id, 'entry'))
-        return
-    if cl=='/toggle_align4':
-        s['align4_enabled'] = not bool(s.get('align4_enabled', False))
-        save_session(chat_id)
-        st = '🟢 روشن' if s['align4_enabled'] else '🔴 خاموش'
-        send_message(chat_id,
-            f"🧭 {_filter_info('align4')[0]}: {st}\n\n"
-            "وقتی روشن باشد، سیگنال‌های خودِ ربات (ورود خودکار و حالت دستیار) فقط وقتی صادر می‌شوند که رژیم بازار، رژیم نماد، هر ۳ اندیکاتور (RSI/MACD/ADX) و جهت سیگنال هم‌جهت باشند "
-            "(همه صعودی => خرید، همه نزولی => فروش). اگر رژیم رنج باشد یا یک اندیکاتور خنثی، سیگنال صادر نمی‌شود. دلیل رد در «🔍 لاگ تشخیصی ورود» دیده می‌شود.",
-            trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     if cl=='/toggle_symbol_h4_regime_warn':
         current = bool(s.get('symbol_h4_regime_warn_enabled', True))
@@ -11004,9 +10818,7 @@ def process_command(cmd,chat_id,message_id=None):
             "سه گزینه‌ی «سخت‌گیری بیشتر» (پیش‌فرض خاموش) برای هر جفت حالت شرط اضافه می‌گذارند:\n"
             "• حالت ۱ و ۲: کندل برگشت باید سایه‌ی بلند داشته باشد و حجم معاملاتش از میانگین بیشتر باشد.\n"
             "• حالت ۳ و ۴: برگشت قیمت باید «سالم» باشد (حجم حرکت شکست از حجم کندل برگشت بیشتر و بدنه‌ی کندل برگشت کافی).\n"
-            "• حالت ۵ و ۶: ضعفِ شکست باید در حجم دیده شود و کندل برگشت بدنه‌ی قوی داشته باشد.\n\n"
-            "گزینه‌های «بدون نیاز به همسویی با بازار»: حالت‌های برگشتی (۱ و ۲، ۵ و ۶) ذاتاً خلاف جهت حرکت اخیر وارد می‌شوند؛ "
-            "وقتی این گزینه روشن باشد، حتی اگر «همسو بودن با اکثر بازار» روشن باشد و حالت خلاف آن باشد، باز هم صادر می‌شود.",
+            "• حالت ۵ و ۶: ضعفِ شکست باید در حجم دیده شود و کندل برگشت بدنه‌ی قوی داشته باشد.",
             get_scenario_management_keyboard(s),
         )
         return
@@ -11056,18 +10868,6 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"📉 سخت‌گیری بیشتر در حالت ۵ و ۶: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
-    if cl=='/toggle_scenario56_exempt':
-        s.setdefault('strategy_config', {})
-        current = bool(s['strategy_config'].get('scenario_56_market_gate_exempt', True))
-        s['strategy_config']['scenario_56_market_gate_exempt'] = not current
-        save_session(chat_id)
-        new_state = '🟢 روشن (بدون نیاز به همسویی)' if not current else '🔴 خاموش (مثل بقیه)'
-        note = (
-            'حالت ۵ و ۶ حتی اگر خلاف جهت اکثر بازار باشند صادر می‌شوند، چون هدفشان دقیقاً گرفتن برگشت از یک حرکت ناموفق است.'
-            if not current else 'حالت ۵ و ۶ هم مثل بقیه‌ی حالت‌ها باید با اکثر بازار همسو باشند (اگر «همسو بودن با اکثر بازار» روشن باشد).'
-        )
-        send_message(chat_id, f"🚦 حالت ۵ و ۶ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
-        return
     if cl=='/toggle_scenario_precision':
         s.setdefault('strategy_config', {})
         current = bool(s['strategy_config'].get('scenario_precision_v2', True))
@@ -11091,18 +10891,6 @@ def process_command(cmd,chat_id,message_id=None):
             if not current else 'حالت ۱/۲ فقط وقتی صادر می‌شود که فتیله حداقل ۰.۱ ATR از سطح رد شده باشد.'
         )
         send_message(chat_id, f"🎯 برخورد بدون نفوذ در حالت ۱/۲: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
-        return
-    if cl=='/toggle_scenario12_exempt':
-        s.setdefault('strategy_config', {})
-        current = bool(s['strategy_config'].get('scenario_12_market_gate_exempt', True))
-        s['strategy_config']['scenario_12_market_gate_exempt'] = not current
-        save_session(chat_id)
-        new_state = '🟢 روشن (بدون نیاز به همسویی)' if not current else '🔴 خاموش (مثل بقیه)'
-        note = (
-            'حالت ۱ و ۲ (برخورد ساده) هم مثل ۵ و ۶ ذاتاً معامله‌ی برگشتی است، نه دنباله‌روی روند؛ حتی اگر خلاف جهت اکثر بازار باشند صادر می‌شوند.'
-            if not current else 'حالت ۱ و ۲ هم مثل حالت‌های دنباله‌روی روند باید با اکثر بازار همسو باشند (اگر «همسو بودن با اکثر بازار» روشن باشد).'
-        )
-        send_message(chat_id, f"🚦 حالت ۱ و ۲ بدون نیاز به همسویی با بازار: {new_state}\n\n{note}", get_scenario_management_keyboard(s))
         return
     if cl=='/daily_pnl':
         send_message(chat_id, daily_pnl_text(chat_id)); return
@@ -11211,7 +10999,7 @@ def process_command(cmd,chat_id,message_id=None):
             chat_id,
             "👤 *تنظیمات ذخیره‌شده‌ی من*\n\n"
             "این یک تنظیم از پیش آماده نیست. هر وقت دکمه‌ها را دقیقاً همان‌طور که دوست داری چیدی "
-            "(حالت‌های معامله، سخت‌گیری‌ها، همسویی با بازار، سقف معامله‌ی هم‌جهت، چارت فعال و سطوح فعال)، "
+            "(حالت‌های معامله، سخت‌گیری‌ها، سقف معامله‌ی هم‌جهت، چارت فعال و سطوح فعال)، "
             "دکمه‌ی «ذخیره» را بزن. بعداً هر وقت خواستی به همان حالت برگردی (مثلاً بعد از امتحان کردن چیزهای دیگر)، "
             "«بازگشت به تنظیمات ذخیره‌شده» را بزن.\n\n"
             f"وضعیت فعلی تنظیمات ذخیره‌شده:\n{my_profile_summary_text(s.get('my_profile'))}",
@@ -11802,16 +11590,15 @@ async def scan_loop():
                     for s in USER_SESSIONS.values()
                     if s.get('is_bot_active') and not s.get('daily_stopped')
                 }
-                gate_by_tf = {}
                 base_watchlist_by_tf = {}
                 for tf in active_timeframes:
-                    gate_by_tf[tf] = await refresh_market_gate(http, tf)
+                    await refresh_market_gate(http, tf)   # فقط تازه‌سازی کش رژیم تایم‌فریم (برای داشبورد/کانال/هم‌جهتی کامل)
                     base_watchlist_by_tf[tf] = scan_watchlist_for_timeframe(tf, loose_regime)
                 # V3.43.28: رژیم BTC/ETH فقط برای تایم‌فریم‌هایی که کاربرِ فعالِ دارای کلید روشن دارند، یک‌بار در هر چرخه
                 be_rows_by_tf = {}
                 for tf in active_timeframes:
                     if any(sess.get('is_bot_active') and not sess.get('daily_stopped') and sess.get('timeframe', '5min') == tf
-                           and sess.get('btc_eth_same_dir_gate_enabled', True) for sess in USER_SESSIONS.values()):
+                           and sess.get('btc_eth_same_dir_gate_enabled', False) for sess in USER_SESSIONS.values()):
                         try:
                             be_rows_by_tf[tf] = await asyncio.get_running_loop().run_in_executor(None, btc_eth_regime_rows, tf)
                         except Exception:
@@ -11825,21 +11612,15 @@ async def scan_loop():
                             _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
                             continue
                         user_tf = s.get('timeframe', '5min')
-                        if bool(s.get('btc_eth_same_dir_gate_enabled', True)):
+                        if bool(s.get('btc_eth_same_dir_gate_enabled', False)):
                             _be_reason = _btc_eth_same_dir_block_reason(be_rows_by_tf.get(user_tf), user_tf)
                             if _be_reason:
                                 # BTC/ETH هم‌جهت نیستند یا رنج‌اند => هیچ ورودی/سیگنالی (شامل صف اولویت‌دار) صادر نمی‌شود
                                 _entry_diag_batch_update(cid, [{'status':'blocked','reason':_be_reason}])
                                 continue
-                        align_on = bool(s.get('market_alignment_filters_enabled', False))
-                        gate = gate_by_tf.get(user_tf) if align_on else None
-                        if gate == 'RANGE':
-                            # بازار رنج => هیچ ورودی (شامل صف اولویت‌دار) انجام نمی‌شود
-                            _entry_diag_batch_update(cid, [{'status':'blocked','reason':_market_gate_reason('RANGE', user_tf)}])
-                            continue
                         watchlist = base_watchlist_by_tf.get(user_tf) or []
                         for sym in watchlist:
-                            tasks.append(scan_symbol(http,cid,sym,gate))
+                            tasks.append(scan_symbol(http,cid,sym))
                         # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
                         # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
                         # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
@@ -11851,7 +11632,7 @@ async def scan_loop():
                                 if float((meta or {}).get('added_at', 0)) < stale_cutoff:
                                     pw.pop(sym, None); continue
                                 if sym in watchlist: continue
-                                tasks.append(scan_symbol(http,cid,sym,gate))
+                                tasks.append(scan_symbol(http,cid,sym))
                     except Exception:
                         logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'scan_loop', cid)  # خطای یک کاربر بقیه را متوقف نکند
                 if tasks:
