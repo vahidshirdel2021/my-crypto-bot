@@ -7438,7 +7438,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('timeout' if 'مهلت' in text else 'overrun') if status == 'expired' else status
+    rec['why'] = ('overrun' if rec.get('overran') else 'timeout') if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     save_session(chat_id)
     logger.info('fav confirm: %s %s -> %s | %s', rec.get('symbol'), rec.get('sig'), status, text)      # بی‌صدا: فقط لاگ
@@ -7477,21 +7477,21 @@ def _fav_process_one(chat_id, s, rec):
                 rec['last_eval_ts'] = ts
                 close_px = float(row['close'])
                 decision = _fav_decide(sig, rec['entry'], rec['sl'], rec['tp'], close_px, rec['min_r'], rec['max_r'])
+                if decision == 'overrun':
+                    rec['overran'] = True       # از سقف گذشت؛ سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند
+                    continue
                 if decision != 'wait':
                     break
     except Exception:
         logger.exception('fav confirm: candle eval failed symbol=%s', symbol)
     if decision == 'cancel':
         return _fav_finish(chat_id, s, rec, 'cancelled', f"🚫 سیگنال `{symbol}` ({side_txt}) لغو شد: کلوز کندل خلاف جهت یا به SL/TP رسید؛ بدون ورود.")
-    if decision == 'overrun':
-        x = _fav_move_r(sig, rec['entry'], rec['sl'], close_px)
-        return _fav_finish(chat_id, s, rec, 'expired', f"⌛ سیگنال `{symbol}` ({side_txt}) منقضی شد: قیمت `{x:+.2f}R` رفته و ورود دیگر ارزش R:R لازم را ندارد؛ بدون ورود.")
     if decision == 'confirm':
         # قیمت لحظه‌ای هم باید هنوز در محدوده‌ی مجاز باشد
         x_live = _fav_move_r(sig, rec['entry'], rec['sl'], live) if live else None
         if x_live is None or x_live < 0 or x_live > rec['max_r']:
             if x_live is not None and x_live > rec['max_r']:
-                return _fav_finish(chat_id, s, rec, 'expired', f"⌛ سیگنال `{symbol}` ({side_txt}) منقضی شد: بعد از تایید قیمت از `+{rec['max_r']:g}R` گذشت؛ بدون ورود.")
+                rec['overran'] = True           # بعد از تایید قیمت لحظه‌ای از سقف رد شد؛ منتظر برگشت می‌مانیم
             if now >= float(rec.get('expires_at', 0)):
                 return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید برقرار بود ولی قیمت لحظه‌ای دیگر در محدوده نبود؛ بدون ورود.")
             rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره با قیمت لحظه‌ای سنجیده می‌شود
@@ -7527,7 +7527,8 @@ def _fav_process_one(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و تایید نگرفت؛ بدون ورود.")
+        why_txt = 'قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'
+        return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
 
 
@@ -7558,12 +7559,12 @@ def fav_queue_list(chat_id, message_id=None):
             r_txt, hint = 'قیمت نامشخص', ''
         else:
             r_txt = f"`{x:+.2f}R`"
-            hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ از سقف گذشته' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
+            hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ فعلاً از سقف گذشته؛ منتظر برگشت' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
         lines.append(f"{n}) `{r['symbol']}` {'🟢 خرید' if is_long else '🔴 فروش'} · ⏳ {rem} دقیقه")
         lines.append(f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}")
     if len(waiting) > 20:
         lines.append(f"\n… و {len(waiting) - 20} سیگنال دیگر")
-    lines.append("\nتایید فقط روی کلوز کندل بسته‌شده انجام می‌شود؛ ✅ یعنی قیمت لحظه‌ای الان در محدوده است.")
+    lines.append("\nتایید فقط روی کلوز کندل بسته‌شده انجام می‌شود؛ ✅ یعنی قیمت لحظه‌ای الان در محدوده است. اگر قیمت از سقف گذشت، سیگنال تا پایان مهلت منتظر برگشت به محدوده می‌ماند.")
     # دکمه‌ی چارت برای هر نماد: TradingView (و MiniApp اگر در دسترس باشد)
     chart_rows = []
     for r in waiting[:20]:
@@ -7703,7 +7704,7 @@ def fav_stats_text(s):
     if o_imm:
         w = sum(1 for r in o_imm if r['imm']['outcome'] == 'tp')
         lines.append(f"• تعیین‌تکلیف: `{len(o_imm)}` | می‌برد: `{w / len(o_imm) * 100:.0f}%` | میانگین R فرضی: `{avg([r['imm']['r'] for r in o_imm]):+.2f}`")
-        names = {'overrun': 'قیمت از سقف گذشت (دیر شد)', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
+        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
         for why, nm in names.items():
             g = [r for r in o_imm if r.get('why') == why]
             if g:
@@ -9015,7 +9016,7 @@ def _filter_info(key):
         'regime_adv': ('تشخیص رژیم دقیق‌تر',
             f'خاموش (پیش‌فرض): رژیم مثل قبل فقط از EMA20 و EMA50 ساخته می‌شود. روشن: برای «صعودی/نزولی» علاوه بر EMA، ADX ≥ {REGIME_ADX_MIN:g}، هم‌جهت بودن DI و هم‌جهت بودن شیب EMA50 هم لازم است و فاصله‌ی قیمت از EMA50 نباید خیلی کم باشد؛ وگرنه «رنج». روی همه‌ی بخش‌هایی که رژیم می‌سنجند اثر دارد (رژیم BTC/ETH، رژیم نماد، گیت جهت بازار) و برای کل ربات است. روشن کردنش معمولاً سیگنال کمتری می‌دهد.'),
         'fav_confirm': ('صبر برای تایید حرکت به نفع معامله',
-            'سیگنال صادر می‌شود ولی بی‌صدا در پس‌زمینه می‌ماند (تا مهلت تنظیم‌شده). فقط وقتی کلوز یک کندل بسته‌شده بعد از سیگنال، بین «حداقل تایید» و «سقف ورود» (بر حسب R) به نفع معامله رفته باشد، کارت سیگنال مثل قبل نمایش داده می‌شود (حالت دستیار: کارت ورود/رد؛ حالت خودکار: ورود). SL و TP همان سطوح سیگنال می‌مانند. اگر قیمت از سقف گذشت یا خلاف جهت رفت یا تایید نگرفت، چیزی نمایش داده نمی‌شود. پیش‌فرض: خاموش.'),
+            'سیگنال صادر می‌شود ولی بی‌صدا در پس‌زمینه می‌ماند (تا مهلت تنظیم‌شده). فقط وقتی کلوز یک کندل بسته‌شده بعد از سیگنال، بین «حداقل تایید» و «سقف ورود» (بر حسب R) به نفع معامله رفته باشد، کارت سیگنال مثل قبل نمایش داده می‌شود (حالت دستیار: کارت ورود/رد؛ حالت خودکار: ورود). SL و TP همان سطوح سیگنال می‌مانند. اگر قیمت از سقف گذشت، سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند و فقط در صورت برگشت وارد می‌شود (تعقیب قیمت نداریم). اگر خلاف جهت رفت، به SL رسید یا تایید نگرفت، چیزی نمایش داده نمی‌شود. پیش‌فرض: خاموش.'),
         'fav_min_r': ('حداقل تایید', 'قیمت باید حداقل این‌قدر (بر حسب R) به نفع معامله رفته باشد.'),
         'fav_max_r': ('سقف ورود', 'اگر قیمت بیشتر از این (بر حسب R) رفته باشد، ورود دیرهنگام است و سیگنال منقضی می‌شود.'),
         'fav_wait': ('مهلت صبر', 'حداکثر مدت صبر برای گرفتن تایید.'),

@@ -46,7 +46,17 @@ g['fav_confirm_tick'](1); print(rec['status'], calls[-1].get('keep_levels')); as
 S['fav_wait']={}; S['fav_wait_seen']={}
 g['_fav_confirm_hold'](1,'XYZ','BUY',plan,100,99,102,'r'); rec=list(S['fav_wait'].values())[0]
 state['df']=mkdf([100.0,100.5,100.5]); state['live']=100.5
-g['fav_confirm_tick'](1); print(rec['status']); assert rec['status']=='expired'
+g['fav_confirm_tick'](1); print(rec['status'],rec.get('overran')); assert rec['status']=='waiting' and rec.get('overran') is True
+# pullback into band -> confirm (after having overrun)
+state['df']=mkdf([100.0,100.5,100.2,100.2]); state['live']=100.2
+g['fav_confirm_tick'](1); print(rec['status']); assert rec['status']=='opened'
+# overrun and never returns -> timeout with why=overrun
+S['fav_wait']={}; S['fav_wait_seen']={}
+g['_fav_confirm_hold'](1,'OVR','BUY',plan,100,99,102,'r'); rec=list(S['fav_wait'].values())[0]
+state['df']=mkdf([100.0,100.6,100.6]); state['live']=100.7
+g['fav_confirm_tick'](1); assert rec['status']=='waiting'
+rec['expires_at']=now-1
+g['fav_confirm_tick'](1); print(rec['status'],rec.get('why')); assert rec['status']=='expired' and rec['why']=='overrun'
 # cancel by live SL
 S['fav_wait']={}; S['fav_wait_seen']={}
 g['_fav_confirm_hold'](1,'XYZ','SELL',plan,100,101,98,'r'); rec=list(S['fav_wait'].values())[0]
