@@ -10238,6 +10238,28 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/trade_filter_management':
         send_message(chat_id, FILTER_MAIN_TEXT, trade_filter_management_keyboard(chat_id))
         return
+    # V3.43.31: هندلر صفحه‌های زیرمنوی «قوانین معامله» (قبلاً وجود نداشت و دکمه‌ها جواب نمی‌دادند)
+    if cl in ('/trade_filter_entry', '/trade_filter_entry_warn', '/trade_filter_entry_filter',
+              '/trade_filter_structure', '/trade_filter_quality', '/trade_filter_exit',
+              '/trade_filter_limits', '/trade_filter_tools'):
+        _sec = cl[len('/trade_filter_'):]
+        _kb_sec = _sec
+        send_message(chat_id, filter_section_text(_sec), trade_filter_management_keyboard(chat_id, _kb_sec))
+        return
+    # V3.43.31: روشن/خاموش کردن کلیدهای رجیستری گیت‌ها (GATE_REGISTRY)
+    if cl.startswith('/toggle_gate_'):
+        _gk = cl[len('/toggle_gate_'):]
+        if _gk not in GATE_REGISTRY:
+            send_message(chat_id, '⚠️ این کلید شناخته نشد.', trade_filter_management_keyboard(chat_id))
+            return
+        s.setdefault('strategy_config', {})
+        _cur = gate_on(s, _gk)
+        s['strategy_config'][_gk] = not _cur
+        save_session(chat_id)
+        _row = GATE_REGISTRY[_gk]
+        _new_state = '🟢 روشن' if not _cur else '🔴 خاموش'
+        send_message(chat_id, f"{_row[0]}: {_new_state}\n\n{_row[3]}", trade_filter_management_keyboard(chat_id, _row[2]))
+        return
     if cl=='/scenario_management':
         send_message(
             chat_id,
