@@ -6,7 +6,7 @@ V3 Professional Backtester for Trading Bot Strategy V2
 Features
 --------
 - Reuses strategy.py V2 regime/setup engine (no duplicate signal logic).
-- Historical CSV or CoinEx/ccxt OHLCV source.
+- Historical CSV or Binance/ccxt OHLCV source.
 - Long / short / both.
 - Position sizing from risk-per-trade and structural SL.
 - Fees, configurable slippage and optional funding cost.
@@ -104,9 +104,9 @@ class Position:
 
 # ---------------------------- data -----------------------------------------
 
-def fetch_ohlcv_coinex(symbol, timeframe, start, end, market_type='swap') -> pd.DataFrame:
+def fetch_ohlcv_binance(symbol, timeframe, start, end, market_type='future') -> pd.DataFrame:
     import ccxt
-    ex = ccxt.coinex({'enableRateLimit': True, 'timeout': 30000, 'options': {'defaultType': market_type}})
+    ex = ccxt.binanceusdm({'enableRateLimit': True, 'timeout': 30000})
     ex.has['fetchCurrencies'] = False
     for attempt in range(5):
         try:
@@ -169,7 +169,7 @@ def normalize_ohlcv(df: pd.DataFrame, start=None, end=None) -> pd.DataFrame:
 def load_source(symbol: str, timeframe: str, start: str, end: str, csv: Optional[str]) -> pd.DataFrame:
     if csv:
         return normalize_ohlcv(pd.read_csv(csv), start, end)
-    return fetch_ohlcv_coinex(symbol, timeframe, start, end)
+    return fetch_ohlcv_binance(symbol, timeframe, start, end)
 
 
 # ---------------------------- mechanics ------------------------------------

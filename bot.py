@@ -30,7 +30,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
-from backtest import run_backtest, fetch_ohlcv_coinex
+from backtest import run_backtest, fetch_ohlcv_binance
 
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
@@ -438,11 +438,13 @@ _SIGNAL_CHANNEL_TOUCH_LAST = {}   # {"symbol|tf|tag|side|level": آخرین زم
 _SIGNAL_CHANNEL_TOUCH_DIRTY = False
 _SIGNAL_CHANNEL_SEEN = {}  # {(symbol, timeframe, tag, hi/lo, pattern, candle_ts): True} - یک پیام به‌ازای هر کندل/سطح؛ به ترتیب درج نگه‌داری می‌شود
 
-COINEX_ACCOUNTS_JSON = os.environ.get('COINEX_ACCOUNTS_JSON', '{}').strip()
+# V3.44.0: معاملات REAL روی فیوچرز USDⓈ-M باینانس (جایگزین CoinEx که بسته شد).
+# قالب: {"<chat_id>": {"apiKey": "...", "secret": "..."}}
+BINANCE_ACCOUNTS_JSON = os.environ.get('BINANCE_ACCOUNTS_JSON', '{}').strip()
 try:
-    COINEX_ACCOUNTS = json.loads(COINEX_ACCOUNTS_JSON) if COINEX_ACCOUNTS_JSON else {}
+    BINANCE_ACCOUNTS = json.loads(BINANCE_ACCOUNTS_JSON) if BINANCE_ACCOUNTS_JSON else {}
 except Exception:
-    COINEX_ACCOUNTS = {}
+    BINANCE_ACCOUNTS = {}
 
 ALLOWED_CHAT_IDS_RAW = os.environ.get('ALLOWED_CHAT_IDS', '').strip()
 ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
@@ -466,7 +468,7 @@ LONG_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAV
 # شد» مواجه می‌شدند (به‌احتمال زیاد delist شده یا rebrand شده‌اند، مثل MATIC->POL).
 # نمادهای جایگزین (TON تا ZK) از دانش عمومی من انتخاب شده‌اند، نه از داده‌ی زنده‌ی
 # صرافی - چون این محیط اینترنت ندارد نمی‌توانم قبل از افزودن، وجودشان را روی
-# فیوچرز CoinEx تایید کنم. حتماً بعد از دیپلوی، یک گزارش تازه‌ی «ردیابی معاملات»
+# فیوچرز Binance تایید کنم. حتماً بعد از دیپلوی، یک گزارش تازه‌ی «ردیابی معاملات»
 # بگیرید و اگر یکی از این‌ها هم الگوی مشابه (نیمی خطا) نشان داد، همان‌طور حذفش کنید.
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
@@ -480,9 +482,8 @@ WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1ho
 SHARED_LONG_WATCHLIST = LONG_WATCHLIST
 SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
-COINEX_PUBLIC = 'https://api.coinex.com/v2'
 KUCOIN_PUBLIC = os.environ.get('KUCOIN_SPOT_URL', 'https://api.kucoin.com/api/v1').rstrip('/')  # اسپات (V20)
-# منابع داده‌ی بازار (V20): *اسپات* - CoinEx بسته شد و فیوچرز هم دیگر استفاده نمی‌شود.
+# منابع داده‌ی بازار (V20): *اسپات* عمومی. (CoinEx بسته شد؛ معاملات REAL از V3.44.0 روی فیوچرز USDⓈ-M باینانس است.)
 BINANCE_SPOT = os.environ.get('BINANCE_SPOT_URL', 'https://api.binance.com').rstrip('/')
 BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')   # آینه‌ی فقط-داده‌ی عمومی باینانس
 BYBIT_PUBLIC = os.environ.get('BYBIT_PUBLIC_URL', 'https://api.bybit.com').rstrip('/')
@@ -1101,7 +1102,7 @@ def get_session(chat_id):
 
 
 def account_credentials(chat_id):
-    raw = COINEX_ACCOUNTS.get(str(chat_id)) or COINEX_ACCOUNTS.get(chat_id)
+    raw = BINANCE_ACCOUNTS.get(str(chat_id)) or BINANCE_ACCOUNTS.get(chat_id)
     if not isinstance(raw, dict): return None
     key = (raw.get('apiKey') or raw.get('api_key') or '').strip()
     secret = (raw.get('secret') or raw.get('apiSecret') or raw.get('api_secret') or '').strip()
@@ -1117,14 +1118,19 @@ def get_exchange(chat_id):
     if cached and cached.get('fingerprint') == fingerprint:
         return cached.get('exchange')
     try:
-        ex = ccxt.coinex({'apiKey':creds[0],'secret':creds[1],'enableRateLimit':True,'options':{'defaultType':'swap','defaultMarginMode':MARGIN_MODE}})
+        # فیوچرز USDⓈ-M باینانس (USDT-margined perpetual)
+        ex = ccxt.binanceusdm({'apiKey':creds[0],'secret':creds[1],'enableRateLimit':True,
+                               'options':{'adjustForTimeDifference':True,'recvWindow':15000}})
+        # گرفتن لیست ارزها (SAPI) برای فیوچرز لازم نیست و به مجوز/دسترسی اسپات نیاز دارد
+        try: ex.has['fetchCurrencies'] = False
+        except Exception: pass
         ex.load_markets()
         EXCHANGE_CACHE[chat_id] = {'fingerprint': fingerprint, 'exchange': ex}
-        logger.info('CoinEx connected/refreshed for chat_id=%s', chat_id)
+        logger.info('Binance USDM connected/refreshed for chat_id=%s', chat_id)
         return ex
     except Exception as exc:
         EXCHANGE_CACHE.pop(chat_id, None)
-        logger.exception('CoinEx init failed for %s: %s', chat_id, exc)
+        logger.exception('Binance init failed for %s: %s', chat_id, exc)
         return None
 
 
@@ -2171,8 +2177,62 @@ def latest_price(symbol):
     return None
 
 
+# ===================== Binance USDⓈ-M Futures (V3.44.0) =====================
+# نمادهای ربات «اسپات‌گونه»‌اند (SHIB, PEPE, ...). روی فیوچرز باینانس بعضی نمادها با پیشوند ۱۰۰۰ (یا بیشتر)
+# لیست می‌شوند (1000SHIB, 1000PEPE, 1000BONK, ...). قیمت و حجم آن‌ها در «واحد ۱۰۰۰تایی» است؛
+# برای همین scale محاسبه می‌شود: قیمت ربات = قیمت فیوچرز / scale ، حجم ربات (کوین) = قرارداد × scale.
+_BINANCE_SYMBOL_ALIASES = {'LUNA': 'LUNA2'}
+_BINANCE_REVERSE_ALIASES = {v: k for k, v in _BINANCE_SYMBOL_ALIASES.items()}
+_FUT_PREFIX_RE = re.compile(r'^(1000000|100000|10000|1000)([A-Z0-9]+)$')
+_BINANCE_WORKING_TYPE = 'MARK_PRICE' if PROTECTION_TRIGGER.startswith('mark') else 'CONTRACT_PRICE'
+_ALGO_SL = 'STOP_MARKET'
+_ALGO_TP = 'TAKE_PROFIT_MARKET'
+
+
+def _bot_base(symbol):
+    return str(symbol).upper().replace('USDT','').replace('/','').replace(':','')
+
+
+def futures_market(ex, symbol):
+    """(market, scale) برای نماد ربات روی فیوچرز باینانس؛ (None, 1) اگر پیدا نشد."""
+    base=_bot_base(symbol)
+    markets=getattr(ex,'markets',None) or {}
+    cands=[(base,1)]
+    if base in _BINANCE_SYMBOL_ALIASES: cands.append((_BINANCE_SYMBOL_ALIASES[base],1))
+    for pref in (1000,10000,100000,1000000): cands.append((f'{pref}{base}',pref))
+    for cand,scale in cands:
+        m=markets.get(f'{cand}/USDT:USDT')
+        if m and m.get('active') is not False:
+            return m,scale
+    return None,1
+
+
+def _fsym(ex, symbol):
+    m,scale=futures_market(ex,symbol)
+    if not m: raise ExchangeStateError(f'نماد {symbol} روی فیوچرز USDⓈ-M باینانس وجود ندارد')
+    return m['symbol'],scale,m
+
+
+def _split_futures_base(raw_base):
+    """'1000SHIB' -> (1000,'SHIB') ; 'LUNA2' -> (1,'LUNA') ; 'BTC' -> (1,'BTC')"""
+    raw_base=str(raw_base).upper()
+    if raw_base in _BINANCE_REVERSE_ALIASES: return 1,_BINANCE_REVERSE_ALIASES[raw_base]
+    m=_FUT_PREFIX_RE.match(raw_base)
+    if m: return int(m.group(1)),m.group(2)
+    return 1,raw_base
+
+
+def _binance_call(ex, method, path, params=None):
+    """فراخوانی مستقیم و امضاشده‌ی endpoint های /fapi/v1 (مستقل از نسخه‌ی ccxt)."""
+    return ex.request(path,'fapiPrivate',method,params or {})
+
+
+def _is_usd_like(cur):
+    return cur is None or str(cur).upper() in ('USDT','USDC','BUSD','FDUSD','USD')
+
+
 def exchange_latest_price(chat_id, symbol):
-    """REAL price must come from the same CoinEx account/exchange used by the position."""
+    """REAL price must come from the same Binance futures account/exchange used by the position."""
     key=f'{chat_id}:{symbol.upper()}'; now=time.time()
     with DATA_LOCK:
         c=REAL_PRICE_CACHE.get(key)
@@ -2180,8 +2240,9 @@ def exchange_latest_price(chat_id, symbol):
     ex=get_exchange(chat_id)
     if not ex: return None
     try:
-        ticker=ex.fetch_ticker(ccxt_symbol(symbol))
-        price=float(ticker.get('last') or ticker.get('mark') or ticker.get('close') or 0)
+        fsym,scale,_m=_fsym(ex,symbol)
+        ticker=ex.fetch_ticker(fsym)
+        price=float(ticker.get('last') or ticker.get('mark') or ticker.get('close') or 0)/scale
         if price>0:
             with DATA_LOCK: REAL_PRICE_CACHE[key]={'ts':now,'price':price}
             return price
@@ -2194,7 +2255,7 @@ def exchange_balance(chat_id):
     ex=get_exchange(chat_id)
     if not ex: raise ExchangeStateError('exchange unavailable')
     try:
-        b=ex.fetch_balance({'type':'swap'})
+        b=ex.fetch_balance()
         total=(b.get('total') or {}).get('USDT')
         if total is None: raise ExchangeStateError('USDT balance missing')
         value=float(total)
@@ -2220,9 +2281,12 @@ def get_open_positions(chat_id):
 
 def normalize_real_position(pos):
     sym=pos.get('symbol','')
-    base=sym.split('/')[0].upper() if '/' in sym else sym.replace(':USDT','').replace('USDT','').upper()
+    raw_base=sym.split('/')[0].upper() if '/' in sym else sym.replace(':USDT','').replace('USDT','').upper()
+    scale,base=_split_futures_base(raw_base)
     side='BUY (Long)' if str(pos.get('side','')).lower()=='long' else 'SELL (Short)'
-    return {'symbol':base,'side':side,'entry_price':float(pos.get('entryPrice') or pos.get('average') or 0),'amount':abs(float(pos.get('contracts') or pos.get('amount') or 0)),'leverage':int(float(pos.get('leverage') or 1)),'unrealized_pnl':float(pos.get('unrealizedPnl') or 0),'position_id':pos.get('id')}
+    entry=float(pos.get('entryPrice') or pos.get('average') or 0)/scale
+    amount=abs(float(pos.get('contracts') or pos.get('amount') or 0))*scale
+    return {'symbol':base,'side':side,'entry_price':entry,'amount':amount,'leverage':int(float(pos.get('leverage') or 1)),'unrealized_pnl':float(pos.get('unrealizedPnl') or 0),'position_id':pos.get('id')}
 
 
 def find_position(chat_id, symbol):
@@ -2230,13 +2294,6 @@ def find_position(chat_id, symbol):
         n=normalize_real_position(p)
         if n['symbol']==symbol.upper(): return n
     return None
-
-
-def call_implicit_any(ex, candidates, params):
-    for name in candidates:
-        fn=getattr(ex,name,None)
-        if callable(fn): return fn(params)
-    raise AttributeError('CoinEx implicit SL/TP method unavailable in this CCXT version')
 
 
 def _extract_numbers(obj, names):
@@ -2264,12 +2321,13 @@ def _price_matches(a,b):
 def _live_position_raw(chat_id, symbol):
     ex=get_exchange(chat_id)
     try:
-        rows=ex.fetch_positions([ccxt_symbol(symbol)]) if callable(getattr(ex,'fetch_positions',None)) else ex.fetch_positions()
+        fsym,_scale,_m=_fsym(ex,symbol)
+        rows=ex.fetch_positions([fsym])
     except Exception:
         rows=ex.fetch_positions()
     for p in rows:
         n=normalize_real_position(p)
-        if n['symbol']==symbol.upper(): return p
+        if n['symbol']==symbol.upper() and abs(float(p.get('contracts') or p.get('amount') or 0))>0: return p
     return None
 
 
@@ -2280,48 +2338,196 @@ def _halt_real_trading(chat_id, reason):
     s['trading_halted_reason']=str(reason)[:500]
     s['scan_generation']=int(s.get('scan_generation',0))+1
     save_session(chat_id)
-    send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت CoinEx، معامله جدید مجاز نیست.")
+    send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت حساب Binance، معامله جدید مجاز نیست.")
+
+
+# ---- Binance: حالت پوزیشن / مارجین / اهرم --------------------------------
+def _ensure_one_way_mode(ex):
+    """ربات با حالت One-way کار می‌کند (نه Hedge)."""
+    if getattr(ex,'_one_way_ok',False): return
+    try:
+        r=_binance_call(ex,'GET','positionSide/dual')
+        dual=str((r or {}).get('dualSidePosition')).lower()=='true'
+    except Exception as exc:
+        logger.warning('position mode check failed: %s',exc); return
+    if dual:
+        # اگر پوزیشن باز داشته باشید باینانس اجازه‌ی تغییر نمی‌دهد و خطا می‌دهد (معامله رد می‌شود)
+        _binance_call(ex,'POST','positionSide/dual',{'dualSidePosition':'false'})
+    try: ex._one_way_ok=True
+    except Exception: pass
+
+
+def _binance_prepare_symbol(ex, sym, leverage):
+    """مارجین Isolated/Cross + اهرم را روی نماد تنظیم می‌کند و اهرم نهایی مجاز را برمی‌گرداند."""
+    _ensure_one_way_mode(ex)
+    mode=MARGIN_MODE if MARGIN_MODE in ('isolated','cross') else 'isolated'
+    try:
+        ex.set_margin_mode(mode,sym)
+    except Exception as exc:
+        msg=str(exc)
+        if '-4046' not in msg and 'No need to change' not in msg: raise
+    lev=max(1,int(leverage))
+    try:
+        tiers=ex.fetch_market_leverage_tiers(sym)
+        mx=max([float(t.get('maxLeverage') or 0) for t in (tiers or [])] or [0])
+        if mx>0: lev=min(lev,int(mx))
+    except Exception:
+        pass
+    last=None
+    for L in sorted({lev,*[x for x in (20,10,5,3,2,1) if x<lev]},reverse=True):
+        try:
+            ex.set_leverage(L,sym); return L
+        except Exception as exc:
+            last=exc
+    raise last if last else RuntimeError('set_leverage failed')
+
+
+# ---- Binance: سفارش‌های شرطی (SL/TP) از طریق Algo Order Service ----------
+# از 2025-12-09 باینانس STOP_MARKET/TAKE_PROFIT_MARKET را روی /fapi/v1/order رد می‌کند (خطای -4120)
+# و باید از POST /fapi/v1/algoOrder استفاده شود. ویرایش سفارش شرطی ممکن نیست؛ باید لغو و دوباره ثبت شود.
+def _algo_open_orders(ex, market_id):
+    r=_binance_call(ex,'GET','openAlgoOrders',{'symbol':market_id})
+    if isinstance(r,dict): r=r.get('orders') or r.get('data') or []
+    return r if isinstance(r,list) else []
+
+
+def _algo_type(o):
+    return str(o.get('orderType') or o.get('type') or '').upper()
+
+
+def _cancel_algo(ex, market_id, kinds=(_ALGO_SL,_ALGO_TP)):
+    done=[]
+    for o in _algo_open_orders(ex,market_id):
+        if _algo_type(o) in kinds and o.get('algoId') is not None:
+            _binance_call(ex,'DELETE','algoOrder',{'algoId':o['algoId']})
+            done.append(o)
+    return done
+
+
+def _place_algo(ex, market_id, close_side, kind, trigger_price):
+    return _binance_call(ex,'POST','algoOrder',{
+        'algoType':'CONDITIONAL','symbol':market_id,'side':close_side.upper(),'type':kind,
+        'triggerPrice':str(trigger_price),'closePosition':'true','workingType':_BINANCE_WORKING_TYPE,
+        'priceProtect':'FALSE'})
+
+
+def cancel_all_protection(chat_id, symbol):
+    """پاک‌سازی SL/TP باقی‌مانده‌ی یک نماد (بعد از بسته‌شدن پوزیشن). بدون خطا."""
+    try:
+        ex=get_exchange(chat_id)
+        if not ex: return
+        _fsym_,_scale,m=_fsym(ex,symbol)
+        _cancel_algo(ex,m['id'])
+    except Exception as exc:
+        logger.debug('cancel protection %s: %s',symbol,exc)
 
 
 def set_protection(chat_id, symbol, sl, tp):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
-    m=market_name(symbol); errors=[]; responses=[]
-    params={'market':m,'market_type':'FUTURES','stop_loss_type':PROTECTION_TRIGGER,'stop_loss_price':str(sl)}
-    try: responses.append(call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],params))
-    except Exception as e: errors.append(f'SL:{e}')
-    params={'market':m,'market_type':'FUTURES','take_profit_type':PROTECTION_TRIGGER,'take_profit_price':str(tp)}
-    try: responses.append(call_implicit_any(ex,['v2PrivatePostFuturesSetPositionTakeProfit','v2_private_post_futures_set_position_take_profit'],params))
-    except Exception as e: errors.append(f'TP:{e}')
-    if errors: return False,' | '.join(errors)
     try:
-        raw=_live_position_raw(chat_id,symbol)
-        if not raw: return False,'position disappeared after protection setup'
-        sls=_extract_numbers(responses,{'stop_loss_price','stoploss_price','stop_loss','stoplossprice'})
-        tps=_extract_numbers(responses,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
-        sls += _extract_numbers(raw,{'stop_loss_price','stoploss_price','stop_loss','stoplossprice'})
-        tps += _extract_numbers(raw,{'take_profit_price','takeprofit_price','take_profit','takeprofitprice'})
-        if sls and not any(_price_matches(x,sl) for x in sls): return False,f'SL verification mismatch: expected {sl}'
-        if tps and not any(_price_matches(x,tp) for x in tps): return False,f'TP verification mismatch: expected {tp}'
+        fsym,scale,m=_fsym(ex,symbol)
+        n=find_position(chat_id,symbol)
+        if not n: return False,'position not found'
+        close_side='sell' if side_long(n['side']) else 'buy'
+        mid=m['id']
+        _cancel_algo(ex,mid)   # باینانس ویرایش ندارد و دو closePosition هم‌جهت را هم‌زمان قبول نمی‌کند
+        errors=[]; placed={}
+        for kind,label,price in ((_ALGO_SL,'SL',sl),(_ALGO_TP,'TP',tp)):
+            if not price: continue
+            try:
+                trig=ex.price_to_precision(fsym,float(price)*scale)
+                _place_algo(ex,mid,close_side,kind,trig)
+                placed[kind]=float(trig)
+            except Exception as e:
+                errors.append(f'{label}:{e}')
+        if errors: return False,' | '.join(errors)
+        try:
+            rows=_algo_open_orders(ex,mid)
+            for kind,trig in placed.items():
+                ok=any(_algo_type(o)==kind and _price_matches(o.get('triggerPrice'),trig) for o in rows)
+                if not ok: return False,f'{kind} verification mismatch: expected {trig}'
+        except Exception as exc:
+            logger.warning('protection verification query failed for %s: %s',symbol,exc)
         return True,'OK'
     except Exception as exc:
-        return False,f'protection verification failed: {exc}'
+        return False,f'protection setup failed: {exc}'
 
 
 def move_stop_loss(chat_id, symbol, sl):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
+    old=[]; mid=None; close_side=None
     try:
-        call_implicit_any(ex,['v2PrivatePostFuturesSetPositionStopLoss','v2_private_post_futures_set_position_stop_loss'],{'market':market_name(symbol),'market_type':'FUTURES','stop_loss_type':PROTECTION_TRIGGER,'stop_loss_price':str(sl)})
+        fsym,scale,m=_fsym(ex,symbol)
+        n=find_position(chat_id,symbol)
+        if not n: return False,'position not found'
+        close_side='sell' if side_long(n['side']) else 'buy'
+        mid=m['id']
+        old=[o for o in _algo_open_orders(ex,mid) if _algo_type(o)==_ALGO_SL]
+        for o in old: _binance_call(ex,'DELETE','algoOrder',{'algoId':o['algoId']})
+        trig=ex.price_to_precision(fsym,float(sl)*scale)
+        _place_algo(ex,mid,close_side,_ALGO_SL,trig)
         return True,'OK'
-    except Exception as e: return False,str(e)
+    except Exception as e:
+        # ثبت SL جدید شکست خورد: SL قبلی را برمی‌گردانیم تا پوزیشن بدون حد ضرر نماند
+        restored=False
+        for o in old:
+            try:
+                _place_algo(ex,mid,close_side,_ALGO_SL,o.get('triggerPrice')); restored=True
+            except Exception as e2:
+                logger.error('SL restore failed %s: %s',symbol,e2)
+        if old and not restored:
+            try: send_message(chat_id,f'🚨 حد ضرر `{symbol}` روی صرافی لغو شد ولی ثبت دوباره شکست خورد! فوراً حد ضرر را در Binance چک کنید.',parse_mode=None)
+            except Exception: pass
+        return False,str(e)
 
 
 def position_history_for(chat_id, symbol, since_ms):
+    """PnL خالص (بعد از کارمزد) معاملات یک نماد از زمان since_ms؛ یک ردیف خلاصه یا []."""
     ex=get_exchange(chat_id)
     if not ex: return []
-    try: return ex.fetch_position_history(ccxt_symbol(symbol), since_ms, 20)
-    except Exception as exc: logger.debug('position history %s: %s',symbol,exc); return []
+    try:
+        fsym,scale,_m=_fsym(ex,symbol)
+        trades=ex.fetch_my_trades(fsym,int(since_ms),200)
+        if not trades: return []
+        gross=0.0; fees=0.0; last_ts=0; last_px=0.0
+        for t in trades:
+            info=t.get('info') or {}
+            gross+=float(info.get('realizedPnl') or 0)
+            fee=t.get('fee') or {}
+            cost=fee.get('cost'); cur=fee.get('currency')
+            if cost is None: cost=info.get('commission'); cur=info.get('commissionAsset')
+            if _is_usd_like(cur): fees+=float(cost or 0)
+            else: fees+=float(t.get('cost') or 0)*TAKER_FEE_PCT/100.0   # کارمزد با BNB و ... → برآورد با نرخ Taker
+            ts=float(t.get('timestamp') or 0)
+            if ts>=last_ts: last_ts=ts; last_px=float(t.get('price') or 0)
+        return [{'realizedPnl':gross-fees,'timestamp':last_ts,'close_price':(last_px/scale if last_px else None),
+                 'info':{'gross_realized':gross,'fees':fees}}]
+    except Exception as exc:
+        logger.debug('position history %s: %s',symbol,exc); return []
+
+
+def _close_market(ex, sym, is_long, contracts):
+    """بستن (reduce-only) با سفارش مارکت؛ contracts بر حسب واحد قرارداد فیوچرز."""
+    amt=float(ex.amount_to_precision(sym,contracts))
+    return ex.create_order(sym,'market','sell' if is_long else 'buy',amt,None,{'reduceOnly':True,'newOrderRespType':'RESULT'})
+
+
+def _order_avg_price(ex, sym, order):
+    try:
+        avg=float((order or {}).get('average') or 0)
+        if avg>0: return avg
+    except Exception: pass
+    oid=(order or {}).get('id')
+    for _ in range(4):
+        try:
+            o=ex.fetch_order(oid,sym)
+            avg=float(o.get('average') or 0)
+            if avg>0: return avg
+        except Exception: pass
+        time.sleep(0.4)
+    return 0.0
 
 
 def side_long(side): return 'BUY' in str(side).upper() or 'LONG' in str(side).upper()
@@ -2466,7 +2672,7 @@ def risk_guard(chat_id):
         equity=exchange_balance(chat_id) if s['trading_mode']=='REAL' else current_paper_equity(s)
     except ExchangeStateError as exc:
         if s['trading_mode']=='REAL':
-            _halt_real_trading(chat_id,f'اطلاعات حساب CoinEx قابل اعتماد نیست: {exc}')
+            _halt_real_trading(chat_id,f'اطلاعات حساب Binance قابل اعتماد نیست: {exc}')
         return False
     reset_daily_if_needed(chat_id,equity)
     start=float(s['daily_start_equity'])
@@ -2486,16 +2692,21 @@ def risk_guard(chat_id):
 def market_meta(chat_id,symbol):
     ex=get_exchange(chat_id)
     if not ex: return None
-    try: return ex.market(ccxt_symbol(symbol))
+    try:
+        m,_scale=futures_market(ex,symbol)
+        return m
     except Exception as exc:
         logger.debug('market_meta fallback symbol=%s: %s', symbol, exc)
         return None
 
 
 def normalize_amount(chat_id,symbol,amount):
+    """حجم (بر حسب کوین، واحد ربات) را مطابق دقت قرارداد فیوچرز گرد می‌کند."""
     ex=get_exchange(chat_id)
     if not ex: return 0.0
-    try: return float(ex.amount_to_precision(ccxt_symbol(symbol),amount))
+    try:
+        fsym,scale,_m=_fsym(ex,symbol)
+        return float(ex.amount_to_precision(fsym,float(amount)/scale))*scale
     except Exception as exc:
         logger.debug('normalize_amount fallback symbol=%s amount=%s: %s', symbol, amount, exc)
         return float(amount)
@@ -2504,7 +2715,9 @@ def normalize_amount(chat_id,symbol,amount):
 def normalize_price(chat_id,symbol,price):
     ex=get_exchange(chat_id)
     if not ex: return float(price)
-    try: return float(ex.price_to_precision(ccxt_symbol(symbol),price))
+    try:
+        fsym,scale,_m=_fsym(ex,symbol)
+        return float(ex.price_to_precision(fsym,float(price)*scale))/scale
     except Exception as exc:
         logger.debug('normalize_price fallback symbol=%s price=%s: %s', symbol, price, exc)
         return float(price)
@@ -2965,6 +3178,21 @@ def btc_eth_regime_rows(tf):
         sc = snap.get('score', 0)
         rows.append((sym, 'BULLISH' if sc > 0 else ('BEARISH' if sc < 0 else 'RANGE'), snap.get('adx'), snap.get('rsi')))
     return rows
+
+
+def btc_eth_aligned(tf):
+    """(ok, توضیح): True فقط وقتی رژیم BTC و ETH روی تایم‌فریم tf هر دو صعودی یا هر دو نزولی باشند.
+    رنج، ناهم‌جهت یا نبود داده = False. (کلید gate_btceth_aligned_enabled)"""
+    rows = btc_eth_regime_rows(tf)
+    regs = [r[1] for r in rows]
+    fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
+    if not all(regs):
+        return False, 'رژیم BTC/ETH در دسترس نیست'
+    if regs[0] == regs[1] and regs[0] in ('BULLISH', 'BEARISH'):
+        return True, f'هر دو {fa[regs[0]]}'
+    if regs[0] == regs[1]:
+        return False, 'هر دو رنج'
+    return False, f'BTC {fa[regs[0]]} و ETH {fa[regs[1]]} (ناهم‌جهت)'
 
 
 def btc_eth_regime_text(tf, popup=False):
@@ -3678,6 +3906,14 @@ def _signal_channel_scan_once():
     if _SIGNAL_CHANNEL_FLAGS.get('paused'):
         return          # V3.43.12: ارسال سیگنال کانال متوقف است
     timeframe = _signal_channel_timeframe()
+    # کلید «فقط وقتی BTC و ETH هم‌جهت‌اند» (تنظیمات ادمینِ تعیین‌کننده‌ی تایم‌فریم کانال): رنج/ناهم‌جهت = هیچ پیامی ارسال نمی‌شود
+    if gate_on(USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}, 'gate_btceth_aligned_enabled'):
+        try:
+            if not btc_eth_aligned(timeframe)[0]:
+                return
+        except Exception:
+            logger.exception('channel btc/eth aligned gate failed')
+            return
     _ensure_tf_gate_sync(timeframe)
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
     for symbol in watchlist:
@@ -4563,30 +4799,31 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
         if not ex:
-            send_message(chat_id,'❌ حساب CoinEx این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
-        sym=ccxt_symbol(symbol)
+            send_message(chat_id,'❌ حساب Binance این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
+        market,scale=futures_market(ex,symbol)
+        if not market:
+            send_message(chat_id,f'❌ نماد `{symbol}` روی فیوچرز USDⓈ-M باینانس وجود ندارد (یا غیرفعال است).'); return False
+        sym=market['symbol']
         try:
-            market=ex.market(sym)
-            lev_info=market.get('info') or {}
-            max_lev=float(lev_info.get('max_leverage') or market.get('maxLeverage') or leverage)
-            if leverage>max_lev: leverage=int(max_lev); trade['leverage']=leverage
-            ex.set_margin_mode(MARGIN_MODE,sym,{'leverage':leverage})
-        except Exception:
-            try:
-                ex.set_leverage(leverage,sym,{'marginMode':MARGIN_MODE})
-            except Exception as exc:
-                send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`'); return False
+            leverage=_binance_prepare_symbol(ex,sym,int(leverage)); trade['leverage']=leverage
+        except Exception as exc:
+            send_message(chat_id,f'❌ تنظیم اهرم/مارجین `{symbol}` شکست خورد: `{exc}`',parse_mode=None); return False
         amount=(margin*leverage)/price
-        amount=normalize_amount(chat_id,symbol,amount)
-        min_amt=float(((market.get('limits') or {}).get('amount') or {}).get('min') or 0)
-        if amount<=0 or (min_amt and amount<min_amt):
-            send_message(chat_id,f'❌ حجم معامله `{symbol}` از حداقل مجاز بازار کمتر است.'); return False
+        amount=normalize_amount(chat_id,symbol,amount)      # بر حسب کوین (واحد ربات)
+        contracts=amount/scale                              # بر حسب قرارداد فیوچرز
+        _lim=market.get('limits') or {}
+        min_amt=float((_lim.get('amount') or {}).get('min') or 0)
+        min_cost=float((_lim.get('cost') or {}).get('min') or 0)
+        if amount<=0 or (min_amt and contracts<min_amt) or (min_cost and amount*price<min_cost):
+            send_message(chat_id,f'❌ حجم/ارزش معامله `{symbol}` از حداقل مجاز باینانس کمتر است (حداقل ارزش سفارش: `{min_cost or "-"}` USDT).'); return False
         try:
             norm_price = normalize_price(chat_id, symbol, price)
+            _side_ex='buy' if side_long(side) else 'sell'
             if (order_type or ENTRY_ORDER_TYPE) == 'limit':
-                order = ex.create_order(sym, 'limit', 'buy' if side_long(side) else 'sell', amount, norm_price)
+                f_price=float(ex.price_to_precision(sym,norm_price*scale))
+                order = ex.create_order(sym, 'limit', _side_ex, contracts, f_price, {'newOrderRespType':'RESULT'})
             else:
-                order = ex.create_order(sym, 'market', 'buy' if side_long(side) else 'sell', amount)
+                order = ex.create_order(sym, 'market', _side_ex, contracts, None, {'newOrderRespType':'RESULT'})
 
             order_id = order.get('id')
             confirmed = None
@@ -4595,29 +4832,32 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                     confirmed = ex.fetch_order(order_id, sym) if order_id else order
                 except Exception:
                     confirmed = order
-                filled = float((confirmed or {}).get('filled') or 0)
+                filled_c = float((confirmed or {}).get('filled') or 0)
                 status = str((confirmed or {}).get('status') or '').lower()
-                if filled > 0 and (status in ('closed', 'filled') or not status): break
+                if filled_c > 0 and (status in ('closed', 'filled') or not status): break
                 time.sleep(ORDER_CONFIRM_DELAY)
 
             if confirmed is None: confirmed = order
-            filled = float(confirmed.get('filled') or 0)
+            filled_c = float(confirmed.get('filled') or 0)
+            _st = str(confirmed.get('status') or '').lower()
+            if order_id and _st in ('open','new','partially_filled'):
+                # سفارش هنوز باز است (Limit پر نشده یا نیمه‌پر): باقی‌مانده را لغو و مقدار نهایی را دوباره می‌خوانیم
+                try: ex.cancel_order(order_id, sym)
+                except Exception: pass
+                try: filled_c = float((ex.fetch_order(order_id, sym) or {}).get('filled') or filled_c)
+                except Exception: pass
 
-            if filled <= 0:
-                if order_id:
-                    try:
-                        ex.cancel_order(order_id, sym)
-                    except Exception:
-                        pass
+            if filled_c <= 0:
                 live = find_position(chat_id, symbol)
                 if live and float(live.get('amount') or 0) > 0:
-                    filled = float(live['amount'])
+                    filled_c = float(live['amount']) / scale
                     exec_price = float(live.get('entry_price') or norm_price)
                 else:
                     send_message(chat_id, f'⏱ سفارش Limit نماد `{symbol}` در قیمت `{fmt(norm_price)}` پر نشد و لغو شد.')
                     return False
             else:
-                exec_price = float(confirmed.get('average') or confirmed.get('price') or norm_price)
+                exec_price = float(confirmed.get('average') or confirmed.get('price') or (norm_price*scale)) / scale
+            filled = filled_c * scale   # بر حسب کوین (واحد ربات)
 
             trade['entry_price'] = exec_price
             trade['amount'] = filled
@@ -4643,14 +4883,17 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             audit_event(chat_id, trade_id, 'protection_set', {'ok': ok, 'detail': err, 'sl': trade.get('sl'), 'tp': trade.get('tp')})
             if not ok:
                 _halt_real_trading(chat_id, f'ثبت SL/TP برای {symbol} ناموفق بود: {err}')
-                try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
+                try: _close_market(ex, sym, side_long(side), filled_c)
                 except Exception as close_exc: send_message(chat_id, f'🚨 *حفاظت شکست و بستن خودکار هم شکست.* `{symbol}`\nSL/TP: `{err}`\nخطای بستن: `{close_exc}`')
                 else: send_message(chat_id, f'⚠️ معامله `{symbol}` به‌دلیل عدم ثبت SL/TP فوراً بسته شد.')
+                cancel_all_protection(chat_id, symbol)
                 return False
 
             current = get_session(chat_id)
             if (require_active and not current['is_bot_active']) or int(current.get('scan_generation', 0)) != generation:
-                try: ex.close_position(sym, None, {'type': 'market', 'amount': filled})
+                try:
+                    _close_market(ex, sym, side_long(side), filled_c)
+                    cancel_all_protection(chat_id, symbol)
                 except Exception as close_exc:
                     _halt_real_trading(chat_id, f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
                 return False
@@ -5010,7 +5253,7 @@ def realized_history_value(chat_id,symbol,opened_at):
     if not rows: return None
     best=None; best_ts=0
     for r in rows:
-        rp=r.get('realizedPnl') or r.get('info',{}).get('realized_pnl') if isinstance(r,dict) else None
+        rp=(r.get('realizedPnl') if r.get('realizedPnl') is not None else (r.get('info') or {}).get('realized_pnl')) if isinstance(r,dict) else None
         try: rp=float(rp)
         except: continue
         ts=float(r.get('timestamp') or r.get('datetime') and time.mktime(time.strptime(r['datetime'],'%Y-%m-%dT%H:%M:%S.%fZ'))*1000 or 0)
@@ -5329,13 +5572,14 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         fee_note=''
         if pos.get('is_real'):
             ex=get_exchange(chat_id)
-            if not ex: send_message(chat_id,'❌ اتصال CoinEx در دسترس نیست.'); return False
+            if not ex: send_message(chat_id,'❌ اتصال Binance در دسترس نیست.'); return False
             try:
-                sym=ccxt_symbol(pos['symbol']); amount=float(pos.get('amount') or 0)
+                fsym,scale,_m=_fsym(ex,pos['symbol']); amount=float(pos.get('amount') or 0)
                 live=find_position(chat_id,pos['symbol']); amount=float(live['amount']) if live else amount
                 if amount<=0: return False
-                order=ex.close_position(sym,None,{'type':'market','amount':amount})
-                price=float(order.get('average') or order.get('price') or latest_price(pos['symbol']) or pos['entry_price'])
+                order=_close_market(ex,fsym,side_long(pos['side']),amount/scale)
+                _avg=_order_avg_price(ex,fsym,order)
+                price=(_avg/scale) if _avg>0 else float(latest_price(pos['symbol']) or pos['entry_price'])
                 await_until=time.time()+12
                 while time.time()<await_until:
                     try:
@@ -5343,6 +5587,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
                     except ExchangeStateError:
                         time.sleep(.5); continue
                     time.sleep(.5)
+                cancel_all_protection(chat_id,pos['symbol'])   # SL/TP باقی‌مانده را پاک کن
                 realized=realized_history_value(chat_id,pos['symbol'],float(pos.get('opened_at',time.time()-60)))
                 if realized is None:
                     entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
@@ -5431,9 +5676,11 @@ def reconcile_real(chat_id):
             hist=position_history_for(chat_id,sym,max(0,int((p.get('opened_at',time.time()-3600)-120)*1000)))
             rp=None
             for h in hist:
-                try: rp=float(h.get('realizedPnl') or h.get('info',{}).get('realized_pnl'))
+                try: rp=float(h.get('realizedPnl') if h.get('realizedPnl') is not None else h.get('info',{}).get('realized_pnl'))
                 except: continue
+                if h.get('close_price'): p['close_price']=float(h['close_price'])
                 if rp is not None: break
+            cancel_all_protection(chat_id,sym)   # TP/SL باقی‌مانده بعد از بسته‌شدن پوزیشن
             if rp is None:
                 p['pnl_usdt']=0.0
                 p['pnl_is_estimate']=True
@@ -8654,6 +8901,14 @@ async def scan_symbol(http,chat_id,symbol):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    if gate_on(s, 'gate_btceth_aligned_enabled'):
+        try:
+            _ba_ok, _ba_txt = await asyncio.to_thread(btc_eth_aligned, tf)
+        except Exception:
+            logger.exception('btc/eth aligned gate failed symbol=%s', symbol)
+            _ba_ok, _ba_txt = False, 'خطا در بررسی رژیم BTC/ETH'
+        if not _ba_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «فقط وقتی BTC و ETH هم‌جهت‌اند»: {_ba_txt}', 'btceth_aligned', sig, diagnostics=diagnostics)
     _fc_use = {k: gate_on(s, f'gate_fc_{k}_enabled') for k in ('btceth', 'h4', 'tf', 'rsi', 'macd', 'vol', 'adx', 'level')}
     if any(_fc_use.values()):      # هر کلید روشن مستقل کار می‌کند؛ کلید اصلی حذف شد
         try:
@@ -8983,6 +9238,7 @@ def _scenario_label(scn, reason=''):
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_filter', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
     'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'entry_filter', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
@@ -9492,7 +9748,7 @@ def start_scan(chat_id,message_id=None):
         s['daily_start_equity']=equity
     if s['trading_mode']=='REAL':
         if not get_exchange(chat_id):
-            send_message(chat_id,'❌ حساب CoinEx برای این کاربر تنظیم نشده است.')
+            send_message(chat_id,'❌ حساب Binance برای این کاربر تنظیم نشده است.')
             return
         if not reconcile_real(chat_id):
             return
@@ -9637,8 +9893,8 @@ def market_report(chat_id):
 
 
 # --- داشبورد بازار روی همه‌ی تایم‌فریم‌ها (دکمه‌ی «وضعیت بازار») -------------------------
-# ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به CoinEx/KuCoin پاس داده می‌شود
-# (چون در TIMEFRAME_MAP نیستند، get_klines آن‌ها را دست‌نخورده رد می‌کند؛ اگر CoinEx این
+# ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به منابع داده (Binance/Bybit/KuCoin) پاس داده می‌شود
+# (چون در TIMEFRAME_MAP نیستند، get_klines آن‌ها را دست‌نخورده رد می‌کند؛ اگر منبع داده این
 # پریودها را پشتیبانی نکند، همان fallback موجود به KuCoin کار را انجام می‌دهد).
 # عمداً sync (ThreadPoolExecutor + get_klines/_market_snapshot) است، نه async: نسخه‌ی اولیه
 # از get_klines_async استفاده می‌کرد که به ASYNC_SEMAPHORE سراسری نیاز دارد؛ آن سمافور توسط
@@ -10193,7 +10449,7 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.')
             return
         if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
-        if not get_exchange(chat_id): send_message(chat_id,'❌ حساب CoinEx این کاربر در `COINEX_ACCOUNTS_JSON` تنظیم نشده است.'); return
+        if not get_exchange(chat_id): send_message(chat_id,'❌ حساب Binance این کاربر در `BINANCE_ACCOUNTS_JSON` تنظیم نشده است.'); return
         bal=exchange_balance(chat_id)
         s['trading_mode']='REAL'; s['is_bot_active']=False; s['daily_start_equity']=bal; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,f'🔴 موجودی REAL: `{bal:.2f} USDT`\n\n⚙️ مارجین هر معامله:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_bal_'):
@@ -11027,7 +11283,7 @@ def run_user_backtest(chat_id):
     s=get_session(chat_id)
     try:
         send_message(chat_id,'⏳ لطفاً منتظر بمانید...\nدر حال دریافت داده‌های تاریخی از سرور و آماده‌سازی تست.')
-        df=fetch_ohlcv_coinex(s['backtest_symbol'], s['backtest_tf'], s['backtest_start'], s['backtest_end'])
+        df=fetch_ohlcv_binance(s['backtest_symbol'], s['backtest_tf'], s['backtest_start'], s['backtest_end'])
         send_message(chat_id,'✅ داده‌ها دریافت شد.\nدر حال اجرای تست استراتژی...')
         result=run_backtest(df, strategy_type=s.get('active_strategy','dynamic'), side='both', strategy_timeframe=s.get('timeframe','1hour'))
         send_message(chat_id, f'🧪 نتیجه تست\n\nنماد: {s["backtest_symbol"]}\nتعداد معاملات: {len(result.get("trades",[])) if isinstance(result,dict) else "انجام شد"}')
@@ -11577,7 +11833,7 @@ def health(): return 'OK',200
 def status():
     key=os.environ.get('STATUS_KEY','').strip()
     if key and request.headers.get('X-Status-Key')!=key: return {'status':'unauthorized'},401
-    return {'status':'ok','sessions':len(USER_SESSIONS),'active_bots':sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active')),'multi_user_real':bool(COINEX_ACCOUNTS)},200
+    return {'status':'ok','sessions':len(USER_SESSIONS),'active_bots':sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active')),'multi_user_real':bool(BINANCE_ACCOUNTS)},200
 
 
 def _validate_telegram_webapp_initdata(init_data: str, max_age_seconds: int = 3600):

@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-بک‌تست استراتژی‌های ربات روی داده تاریخی CoinEx
+بک‌تست استراتژی‌های ربات روی داده تاریخی Binance
 =================================================
 
 این اسکریپت دقیقاً همان منطق فایل strategy.py (تولید سیگنال، محاسبه SL/TP و
 امتیاز کیفیت) را روی داده کندل تاریخی اجرا می‌کند تا نتیجه واقعی هر
 استراتژی/جهت را روی یک بازه زمانی مشخص (مثلاً یک ماه صعودی یا نزولی) بسنجد.
 
-⚠️ این اسکریپت باید جایی اجرا شود که به اینترنت و API عمومی CoinEx دسترسی
+⚠️ این اسکریپت باید جایی اجرا شود که به اینترنت و API عمومی Binance دسترسی
 دارد (مثلاً همان سروری که ربات روی آن دیپلوی شده). محیط چتی که این فایل در
 آن ساخته شده، دسترسی شبکه ندارد و نمی‌تواند مستقیماً داده را دانلود کند.
 
@@ -52,18 +52,15 @@ PAPER_CONSERVATIVE_OHLC = True  # اگر در یک کندل هم SL و هم TP �
 
 
 # ---------------------------------------------------------------------------
-# دانلود داده تاریخی از CoinEx با ccxt (صفحه‌بندی خودکار)
+# دانلود داده تاریخی از Binance با ccxt (صفحه‌بندی خودکار)
 # ---------------------------------------------------------------------------
-def fetch_ohlcv_coinex(symbol, timeframe, start_iso, end_iso, market_type='swap'):
+def fetch_ohlcv_binance(symbol, timeframe, start_iso, end_iso, market_type='future'):
     import time as _time
     import ccxt  # وارد کردن دیرهنگام تا بدون نصب ccxt هم بقیه اسکریپت قابل استفاده/تست باشد
 
-    exchange = ccxt.coinex({
+    exchange = ccxt.binanceusdm({
         'enableRateLimit': True,
         'timeout': 30000,
-        'options': {
-            'defaultType': market_type,
-        },
     })
     # این مرحله (گرفتن لیست ارزها/تنظیمات واریز-برداشت) برای دریافت کندل لازم نیست و
     # روی برخی VPN/ISPها این endpoint خاص Fail می‌شود؛ با غیرفعال‌کردن قابلیت آن در ccxt کاملاً دورش می‌زنیم.
@@ -97,7 +94,7 @@ def fetch_ohlcv_coinex(symbol, timeframe, start_iso, end_iso, market_type='swap'
         cursor = last_ts + 1
         print(f'  ... {len(rows)} کندل تا الان دریافت شد', end='\r')
     if not rows:
-        raise RuntimeError('داده‌ای از CoinEx دریافت نشد؛ نماد/تایم‌فریم/بازه را بررسی کنید.')
+        raise RuntimeError('داده‌ای از Binance دریافت نشد؛ نماد/تایم‌فریم/بازه را بررسی کنید.')
     df = pd.DataFrame(rows, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
     df = df[(df['ts'] >= since) & (df['ts'] <= until)].drop_duplicates('ts').reset_index(drop=True)
     df['timestamp'] = df['ts']  # strategy.py برای محاسبه PDH/PDL روزانه ستون 'timestamp' را انتظار دارد
@@ -249,7 +246,7 @@ def summarize(trades, initial_balance=1000.0):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='بک‌تست استراتژی ربات روی داده تاریخی CoinEx')
+    ap = argparse.ArgumentParser(description='بک‌تست استراتژی ربات روی داده تاریخی Binance')
     ap.add_argument('--symbol', default='BTC/USDT:USDT', help='نماد ccxt، مثال BTC/USDT:USDT')
     ap.add_argument('--timeframe', default='15m', help='5m, 15m, 1h, 4h ...')
     ap.add_argument('--start', required=True, help='YYYY-MM-DD')
@@ -273,8 +270,8 @@ def main():
         print(f'🔕 حالت‌های خاموش‌شده در این بک‌تست: {", ".join(k.split("_")[1] for k in strategy_config_overrides)}')
 
     strategy_tf = args.strategy_timeframe or CCXT_TO_STRATEGY_TF.get(args.timeframe, '1hour')
-    print(f'⏳ دریافت داده {args.symbol} | {args.timeframe} | {args.start} تا {args.end} از CoinEx ...')
-    df = fetch_ohlcv_coinex(args.symbol, args.timeframe, args.start, args.end)
+    print(f'⏳ دریافت داده {args.symbol} | {args.timeframe} | {args.start} تا {args.end} از Binance ...')
+    df = fetch_ohlcv_binance(args.symbol, args.timeframe, args.start, args.end)
     print(f'✅ {len(df)} کندل دریافت شد. | آستانه‌های استراتژی بر اساس تایم‌فریم: {strategy_tf}')
 
     trades = run_backtest(
