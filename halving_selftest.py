@@ -69,4 +69,16 @@ check("با مدل خاموش، تگ Halving ظاهر نمی‌شود", "Halving
 cfg_nr = {**STRATEGY_DEFAULTS, "halving_model_enabled": True}
 s3, r3 = get_signal_with_reason(d, None, "single", "5min", "dynamic", FILTER_DEFAULTS, cfg_nr, None)
 check("بدون سقف/کف: سیگنال نمی‌دهد", s3 is None, r3)
+
+# --- V3.44.3: ستاپِ «باطل‌شده» (قیمت چند ATR بالای سطح بالایی) نباید فروش بدهد، حتی با خاموش‌بودن سخت‌گیری‌ها ---
+atr_ = float(d["atr"].iloc[-2]); up_ = level + 3 * atr_
+df_w = df.copy()
+for i in range(n - 8, n):
+    o_ = up_ + (n - i) * 3; c_ = o_ - 5
+    df_w.loc[i, ["open", "high", "low", "close"]] = [o_, o_ + atr_ * 0.4, c_ - atr_ * 0.2, c_]
+df_w.loc[n - 2, ["open", "high", "low", "close"]] = [up_ + atr_ * 0.3, up_ + atr_ * 0.8, up_ - atr_ * 0.3, up_ - atr_ * 0.1]
+d_w = calculate_indicators(df_w)
+cfg_loose = {**cfg, "sweep_require_reclaim": False, "sweep_require_reversal_candle": False, "scenario_precision_v2": False}
+s4, r4 = get_signal_with_reason(d_w, None, "single", "5min", "dynamic", FILTER_DEFAULTS, cfg_loose, None, live_price=up_ - atr_ * 0.1)
+check("فروش با سطحِ بالایی «زیر» قیمت (ستاپ باطل‌شده) صادر نمی‌شود", s4 is None, str(r4)[:90])
 print("\nALL PASS" if ok else "\nSOME FAILED")

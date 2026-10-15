@@ -811,6 +811,7 @@ def audit_trade_record(p):
         'timeframe_bear_pct_at_entry': p.get('timeframe_bear_pct_at_entry'),
         'symbol_adx_at_entry': p.get('symbol_adx_at_entry'),
         'regime_filter_exempt': p.get('regime_filter_exempt'),
+        'entry_warnings': p.get('entry_warnings'),
         'sl_slippage_r': p.get('sl_slippage_r'),
         'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
         'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
@@ -892,6 +893,9 @@ def default_session():
         'fav_confirm_enabled': False,
         'fav_confirm_min_r': 0.15,
         'fav_confirm_max_r': 0.30,
+        # V3.44.2: سقف ورود به‌جای عدد ثابت R، درصدی از مسیر ورود تا هدف (TP) همان سیگنال است ('tp') یا عدد ثابت R ('r')
+        'fav_confirm_max_mode': 'tp',
+        'fav_confirm_max_tp_pct': 0.20,
         'fav_confirm_wait_sec': 900,
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
@@ -4439,7 +4443,8 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
             + tp_lvl_line +
             f"• حد ضرر: `{fmt(sl)}` → `{-(metrics['risk'] + fee_c):+.2f} USDT` (شامل کارمزد)\n"
             f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n"
-            + alignment_line,
+            + alignment_line
+            + _entry_warn_line(trade),
             trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf),
             keep=bool(getattr(_SIGNAL_ORIGIN, 'on', False))
         )
@@ -4791,8 +4796,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
+    try:
+        _entry_warns = _entry_warning_tags(chat_id, symbol, side, s['timeframe'])
+    except Exception:
+        logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
 
@@ -5651,6 +5660,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         entry_time_line = f"\n• زمان ورود: `{fmt_scan_time(pos.get('opened_at'))}`"
         close_time_line = f"\n• زمان خروج: `{fmt_scan_time(pos.get('close_timestamp'))}`"
         snapshot_lines = _close_snapshot_lines(pos)
+        _w_close = _entry_warn_line(pos).rstrip('\n')
+        if _w_close: snapshot_lines = f"{snapshot_lines}\n{_w_close}" if snapshot_lines else f"\n{_w_close}"
         journal_append_closed(chat_id, pos)
         send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
         return True
@@ -7231,6 +7242,53 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
             "*ورود را تایید می‌کنید؟*")
 
 
+def _entry_warning_tags(chat_id, symbol, side, tf):
+    """V3.44.4: هشدارهای لحظه‌ی ورود به‌صورت برچسب‌های کوتاه (همان بررسی‌های کارت هشدار: روند BTC/ETH، اندیکاتورها،
+    رژیم ۴ ساعته، رژیم ۵/۱۵ دقیقه). فقط بررسی‌هایی که کلیدشان روشن است سنجیده می‌شوند.
+    خروجی: None = هیچ کلید هشداری روشن نیست (چیزی ثبت نمی‌شود) | [] = هشدار نداشت | ['روند BTC', 'اندیکاتورها', ...]"""
+    syms = _trend_active_symbols(chat_id, symbol)
+    ind_on = _ind_warn_active(chat_id); tfr_on = _tfr_warn_active(chat_id); h4_on = _h4_warn_active(chat_id)
+    if not syms and not ind_on and not tfr_on and not h4_on:
+        return None
+    is_long = (side == 'BUY' or side_long(side))
+    sig = 'BUY' if is_long else 'SELL'
+    tags = []
+    for sym in syms:
+        try:
+            snap = _trend_snapshot_cached(sym, tf)
+        except Exception:
+            snap = None
+        if not snap:
+            continue
+        sc = int(snap.get('score', 0))
+        if (sc > 0 and not is_long) or (sc < 0 and is_long):
+            tags.append(f'روند {sym}')
+    try:
+        if ind_on and _indicator_conflict(symbol, sig, tf)[0]:
+            tags.append('اندیکاتورها')
+    except Exception:
+        logger.debug('entry warn: indicator check failed %s', symbol)
+    try:
+        if h4_on and _h4_conflict(symbol, sig)[0]:
+            tags.append('رژیم ۴ساعته')
+    except Exception:
+        logger.debug('entry warn: h4 check failed %s', symbol)
+    try:
+        if tfr_on and _tfr_conflict(symbol, sig)[0]:
+            tags.append('رژیم ۵/۱۵م')
+    except Exception:
+        logger.debug('entry warn: tf regime check failed %s', symbol)
+    return tags
+
+
+def _entry_warn_line(trade):
+    """یک خط کوتاه برای پیام‌ها؛ '' اگر برای این معامله چیزی ثبت نشده (قدیمی یا کلید هشدار خاموش بوده)."""
+    w = trade.get('entry_warnings') if isinstance(trade, dict) else None
+    if w is None:
+        return ''
+    return ('• ⚠️ هشدار لحظه‌ی ورود: ' + '، '.join(w) + '\n') if w else '• ✅ هشدار لحظه‌ی ورود: ندارد\n'
+
+
 # ===================== V3.43.24: «تایید کامل هم‌جهتی» (کلیدهای gate_fc_*_enabled، هرکدام مستقل) =====================
 # همه‌ی مواردی که در پیام بسته‌شدن پوزیشن با «هم‌جهت ✅» نشان داده می‌شوند، قبل از صدور سیگنال باید برقرار باشند:
 # رژیم BTC و ETH، رژیم ۴ ساعته‌ی نماد، رژیم نماد در ۵ و ۱۵ دقیقه، RSI، MACD، حجم، روند ADX، و آخرین کندل بسته‌شده سمتِ درستِ سطح.
@@ -7597,6 +7655,8 @@ FAV_CONFIRM_CANCEL_R = float(os.environ.get('FAV_CONFIRM_CANCEL_R', '0.5'))
 FAV_MIN_R_CHOICES = (0.10, 0.15, 0.20, 0.25)
 FAV_MAX_R_CHOICES = (0.30, 0.35, 0.50)
 FAV_WAIT_CHOICES = (600, 900, 1200, 1800)
+FAV_MAX_PCT_CHOICES = (0.10, 0.15, 0.20, 0.25, 0.30, 0.40)
+FAV_HARD_MAX_R = float(os.environ.get('FAV_HARD_MAX_R', '1.5'))      # در حالت «درصد مسیر تا هدف» هم سقف از این R بالاتر نمی‌رود
 
 
 def _fav_cfg(s):
@@ -7608,6 +7668,40 @@ def _fav_cfg(s):
     if mx <= mn:
         mx = mn + 0.05
     return mn, mx, max(60, wt)
+
+
+def _fav_max_mode(s):
+    return 'r' if str(s.get('fav_confirm_max_mode', 'tp')).lower() == 'r' else 'tp'
+
+
+def _fav_max_pct(s):
+    try:
+        v = float(s.get('fav_confirm_max_tp_pct', 0.20))
+    except Exception:
+        v = 0.20
+    return min(max(v, 0.05), 0.90)
+
+
+def _fav_max_label(s):
+    if _fav_max_mode(s) == 'tp':
+        return f"٪{_fav_max_pct(s) * 100:g} مسیر تا هدف"
+    return f"+{_fav_cfg(s)[1]:g}R"
+
+
+def _fav_effective_max_r(s, entry, sl, tp):
+    """سقف ورود (بر حسب R) برای همین سیگنال. حالت 'tp': درصدی از فاصله‌ی ورود تا هدف؛ یعنی هر نماد سقف خودش را دارد
+    (هدف دور = سقف بالاتر، هدف نزدیک = سقف کمتر). حالت 'r': همان عدد ثابت قبلی."""
+    mn, mx_fixed, _wt = _fav_cfg(s)
+    if _fav_max_mode(s) != 'tp':
+        return mx_fixed
+    try:
+        risk = abs(float(entry) - float(sl)); reward = abs(float(tp) - float(entry))
+    except Exception:
+        return mx_fixed
+    if risk <= 0 or reward <= 0:
+        return mx_fixed
+    mx = min(_fav_max_pct(s) * reward / risk, FAV_HARD_MAX_R)
+    return max(mx, mn + 0.05)
 
 
 def _fav_move_r(sig, entry, sl, px):
@@ -7662,14 +7756,15 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     seen = s.setdefault('fav_wait_seen', {})
     if now - float(seen.get(seen_key, 0) or 0) < ASSIST_SEEN_TTL_SECONDS:
         return True
-    mn, mx, wt = _fav_cfg(s)
+    mn, _mx_fixed, wt = _fav_cfg(s)
+    mx = _fav_effective_max_r(s, entry, sl, tp)        # سقف مخصوص همین نماد/سیگنال
     tf = s.get('timeframe', '5min')
     rid = hashlib.sha1(f"fav{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
     waits[rid] = {'id': rid, 'symbol': symbol, 'sig': sig, 'side_label': 'BUY (Long)' if sig == 'BUY' else 'SELL (Short)',
                   'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'reason': full_reason, 'tf': tf,
                   'structural_tp': bool(plan.get('structural_target', False)), 'score': plan.get('score'), 'rr': plan.get('rr'),
                   'quality_label': plan.get('quality_label'), 'tp_level_name': plan.get('tp_level_name'),
-                  'tp_stages': plan.get('tp_stages'), 'min_r': mn, 'max_r': mx,
+                  'tp_stages': plan.get('tp_stages'), 'min_r': mn, 'max_r': mx, 'max_mode': _fav_max_mode(s),
                   'created_at': now, 'expires_at': now + wt, 'last_eval_ts': 0.0, 'status': 'waiting'}
     seen[seen_key] = now
     for k in sorted(waits.keys(), key=lambda kk: float(waits[kk].get('created_at', 0) or 0)):   # سقف ۳۰۰ رکورد؛ قدیمی‌های تعیین‌تکلیف‌شده اول حذف می‌شوند
@@ -7678,7 +7773,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
         if waits[k].get('status') != 'waiting' and waits[k].get('shadow_done'):
             waits.pop(k, None)
     save_session(chat_id)
-    logger.info('fav confirm: queued %s %s entry=%s wait=%ss min=%sR max=%sR', symbol, sig, entry, wt, mn, mx)
+    logger.info('fav confirm: queued %s %s entry=%s wait=%ss min=%sR max=%.2fR (%s)', symbol, sig, entry, wt, mn, mx, _fav_max_mode(s))
     return True
 
 
@@ -7789,7 +7884,7 @@ def fav_queue_list(chat_id, message_id=None):
     refresh = {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
                                    [{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'},
                                     {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}
-    head = f"⏳ *صف تایید حرکت* ({state_txt})\nمحدوده‌ی ورود: `+{mn:g}R` تا `+{mx:g}R` | مهلت: `{wt // 60}` دقیقه"
+    head = f"⏳ *صف تایید حرکت* ({state_txt})\nحداقل تایید: `+{mn:g}R` | سقف ورود: `{_fav_max_label(s)}` | مهلت: `{wt // 60}` دقیقه"
     if not waiting:
         send_message(chat_id, head + "\n\n✅ الان سیگنالی در صف نیست.", refresh, message_id=message_id)
         return
@@ -7809,6 +7904,8 @@ def fav_queue_list(chat_id, message_id=None):
             hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ فعلاً از سقف گذشته؛ منتظر برگشت' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
         lines.append(f"{n}) `{r['symbol']}` {'🟢 خرید' if is_long else '🔴 فروش'} · ⏳ {rem} دقیقه")
         lines.append(f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}")
+        if r.get('max_mode') == 'tp':
+            lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
     if len(waiting) > 20:
         lines.append(f"\n… و {len(waiting) - 20} سیگنال دیگر")
     lines.append("\nتایید فقط روی کلوز کندل بسته‌شده انجام می‌شود؛ ✅ یعنی قیمت لحظه‌ای الان در محدوده است. اگر قیمت از سقف گذشت، سیگنال تا پایان مهلت منتظر برگشت به محدوده می‌ماند.")
@@ -9274,7 +9371,7 @@ def _filter_info(key):
         'fav_confirm': ('صبر برای تایید حرکت به نفع معامله',
             'سیگنال صادر می‌شود ولی بی‌صدا در پس‌زمینه می‌ماند (تا مهلت تنظیم‌شده). فقط وقتی کلوز یک کندل بسته‌شده بعد از سیگنال، بین «حداقل تایید» و «سقف ورود» (بر حسب R) به نفع معامله رفته باشد، کارت سیگنال مثل قبل نمایش داده می‌شود (حالت دستیار: کارت ورود/رد؛ حالت خودکار: ورود). SL و TP همان سطوح سیگنال می‌مانند. اگر قیمت از سقف گذشت، سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند و فقط در صورت برگشت وارد می‌شود (تعقیب قیمت نداریم). اگر خلاف جهت رفت، به SL رسید یا تایید نگرفت، چیزی نمایش داده نمی‌شود. پیش‌فرض: خاموش.'),
         'fav_min_r': ('حداقل تایید', 'قیمت باید حداقل این‌قدر (بر حسب R) به نفع معامله رفته باشد.'),
-        'fav_max_r': ('سقف ورود', 'اگر قیمت بیشتر از این (بر حسب R) رفته باشد، ورود دیرهنگام است و سیگنال منقضی می‌شود.'),
+        'fav_max_r': ('سقف ورود', 'اگر قیمت بیشتر از این رفته باشد، ورود دیرهنگام است و سیگنال تا برگشت منتظر می‌ماند. پیش‌فرض: درصدی از فاصله‌ی ورود تا هدفِ همان سیگنال (برای هر نماد جدا)؛ با دکمه‌ی «نوع سقف» می‌شود آن را عدد ثابت R کرد.'),
         'fav_wait': ('مهلت صبر', 'حداکثر مدت صبر برای گرفتن تایید.'),
         'sweep_confirm': ('صبر برای یک کندل تایید اضافه',
             'بعد از اینکه قیمت یک سطح مهم را لحظه‌ای می‌شکند و برمی‌گردد (دام قیمتی)، ربات یک کندل دیگر صبر می‌کند تا برگشت واقعاً تایید شود. ورود کمی دیرتر و با قیمت بدتر می‌شود، ولی برگشت‌های دروغین کمتر می‌شوند.'),
@@ -9445,8 +9542,9 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(sweep_confirm, 'sweep_confirm', '/toggle_sweep_confirm')],
             [fcell(bool(s.get('fav_confirm_enabled', False)), 'fav_confirm', '/toggle_fav_confirm')],
             [{'text': f"🎯 حداقل تایید: +{_fmn:g}R", 'callback_data': '/fav_min_r_next'},
-             {'text': f"🚧 سقف ورود: +{_fmx:g}R", 'callback_data': '/fav_max_r_next'},
+             {'text': f"🚧 سقف ورود: {_fav_max_label(s)}", 'callback_data': '/fav_max_r_next'},
              {'text': f"⏱ مهلت: {_fwt // 60} دقیقه", 'callback_data': '/fav_wait_next'}],
+            [{'text': ('📏 سقف: بر اساس فاصله تا هدف ✅' if _fav_max_mode(s) == 'tp' else '📏 سقف: عدد ثابت R'), 'callback_data': '/fav_max_mode_toggle'}],
             [{'text': '⏳ مشاهده‌ی صف تایید', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
         ] + gate_rows('entry_filter') + [back_entry]}
 
@@ -10816,14 +10914,23 @@ def process_command(cmd,chat_id,message_id=None):
         s['fav_confirm_enabled'] = not current
         save_session(chat_id)
         _mn, _mx, _wt = _fav_cfg(s)
-        note = (f'از این پس سیگنال صادر می‌شود ولی تا {_wt // 60} دقیقه بی‌صدا در پس‌زمینه می‌ماند؛ فقط وقتی +{_mn:g}R تا +{_mx:g}R به نفع معامله رفت، کارت سیگنال مثل قبل نمایش داده می‌شود (SL/TP همان سیگنال). اگر تایید نگرفت، چیزی نمایش داده نمی‌شود.'
+        note = (f'از این پس سیگنال صادر می‌شود ولی تا {_wt // 60} دقیقه بی‌صدا در پس‌زمینه می‌ماند؛ فقط وقتی حداقل +{_mn:g}R و حداکثر {_fav_max_label(s)} به نفع معامله رفت، کارت سیگنال مثل قبل نمایش داده می‌شود (SL/TP همان سیگنال). اگر تایید نگرفت، چیزی نمایش داده نمی‌شود.'
                 if not current else 'برگشت به حالت قبلی: سیگنال‌ها بدون صبر وارد می‌شوند. سیگنال‌هایی که الان در صف‌اند تا پایان مهلت بررسی می‌شوند.')
         send_message(chat_id, f"⏳ {_filter_info('fav_confirm')[0]}: {'🟢 روشن' if not current else '🔴 خاموش'}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_filter'))
+        return
+    if cl == '/fav_max_mode_toggle':
+        s['fav_confirm_max_mode'] = 'r' if _fav_max_mode(s) == 'tp' else 'tp'
+        save_session(chat_id)
+        _txt = (f"سقف ورود حالا برای هر نماد جدا حساب می‌شود: {_fav_max_pct(s) * 100:g}٪ از مسیر ورود تا هدفِ همان سیگنال (حداکثر +{FAV_HARD_MAX_R:g}R). هدف دورتر = سقف بالاتر؛ هدف نزدیک‌تر = سقف کمتر."
+                if _fav_max_mode(s) == 'tp' else f"سقف ورود حالا یک عدد ثابت برای همه‌ی نمادهاست: +{_fav_cfg(s)[1]:g}R.")
+        send_message(chat_id, f"⏳ نوع سقف ورود: {'بر اساس فاصله تا هدف' if _fav_max_mode(s) == 'tp' else 'عدد ثابت R'}\n\n{_txt}\n\nروی سیگنال‌های بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     if cl in ('/fav_min_r_next', '/fav_max_r_next', '/fav_wait_next'):
         _key, _choices = {'/fav_min_r_next': ('fav_confirm_min_r', FAV_MIN_R_CHOICES),
                           '/fav_max_r_next': ('fav_confirm_max_r', FAV_MAX_R_CHOICES),
                           '/fav_wait_next': ('fav_confirm_wait_sec', FAV_WAIT_CHOICES)}[cl]
+        if cl == '/fav_max_r_next' and _fav_max_mode(s) == 'tp':
+            _key, _choices = 'fav_confirm_max_tp_pct', FAV_MAX_PCT_CHOICES
         _cur = s.get(_key, _choices[0])
         try:
             _i = min(range(len(_choices)), key=lambda k: abs(float(_choices[k]) - float(_cur)))
@@ -10835,7 +10942,7 @@ def process_command(cmd,chat_id,message_id=None):
             s['fav_confirm_max_r'] = FAV_MAX_R_CHOICES[0]
         save_session(chat_id)
         _mn, _mx, _wt = _fav_cfg(s)
-        send_message(chat_id, f"⏳ تنظیم صبر برای تایید: حداقل تایید +{_mn:g}R | سقف ورود +{_mx:g}R | مهلت {_wt // 60} دقیقه\n\nاین تنظیم روی سیگنال‌های بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'entry_filter'))
+        send_message(chat_id, f"⏳ تنظیم صبر برای تایید: حداقل تایید +{_mn:g}R | سقف ورود {_fav_max_label(s)} | مهلت {_wt // 60} دقیقه\n\nاین تنظیم روی سیگنال‌های بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     if cl=='/toggle_sweep_confirm':
         s.setdefault('strategy_config', {})

@@ -2264,6 +2264,12 @@ def strategy_halving(df, strategy_config=None, live_price=None):
             max_dist = atr * max(0.20, float(cfg.get("active_setup_max_distance_atr", 0.80)))
             if (sig == "BUY" and lp > anchor + max_dist) or (sig == "SELL" and lp < anchor - max_dist):
                 continue
+            # V3.44.3: گارد «باطل‌شدن ستاپ» (مثل مدل سطوح روزانه): اگر قیمت زنده خلاف جهت ستاپ از سطح عبور کرده باشد
+            # (فروش با قیمتی بالاتر از سطح بالایی، یا خرید با قیمتی پایین‌تر از سطح پایینی) ستاپ دیگر معتبر نیست.
+            # قبلاً این گارد برای نصف‌کردن نبود و فروش با سطحِ هدف/ستاپ «زیر» قیمت ورود صادر می‌شد.
+            _inv = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)), float(cfg.get("halving_zone_atr", 0.30)))
+            if (sig == "BUY" and lp < anchor - _inv) or (sig == "SELL" and lp > anchor + _inv):
+                continue
         extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}"
         return sig, tag_setup_reason("Halving", f"{reason}{extra}")
 
