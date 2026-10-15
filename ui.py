@@ -203,14 +203,14 @@ def get_setup_management_keyboard(session=None):
 
 
 _SCENARIO_LABELS = {
-    "1": "۱ برخورد به سقف دیروز و برگشت (فروش)", "2": "۲ برخورد به کف دیروز و برگشت (خرید)",
-    "3": "۳ شکست سقف دیروز و ادامه صعود (خرید)", "4": "۴ شکست کف دیروز و ادامه نزول (فروش)",
-    "5": "۵ شکست کاذب سقف دیروز (فروش)", "6": "۶ شکست کاذب کف دیروز (خرید)",
+    "1": "۱ برخورد به سطح بالایی و برگشت (فروش)", "2": "۲ برخورد به سطح پایینی و برگشت (خرید)",
+    "3": "۳ شکست سطح بالایی و ادامه صعود (خرید)", "4": "۴ شکست سطح پایینی و ادامه نزول (فروش)",
+    "5": "۵ شکست کاذب سطح بالایی (فروش)", "6": "۶ شکست کاذب سطح پایینی (خرید)",
 }
 
 
 def get_scenario_management_keyboard(session=None):
-    """۶ حالت معاملاتی روی سقف/کف دیروز (PDH/PDL) + سه «سخت‌گیری بیشتر»ِ اختیاری برای هر جفت حالت
+    """۶ حالت معاملاتی روی سطح بالایی/پایینی (PDH/PDL، نصف‌کردن و ...) + سه «سخت‌گیری بیشتر»ِ اختیاری برای هر جفت حالت
     + معافیت‌های همسویی با بازار. نام دکمه‌ها برای کاربر مبتدی ساده نوشته شده؛ callback_data ها ثابت‌اند."""
     s = session or {}
     cfg = s.get("strategy_config") or {}
@@ -225,10 +225,6 @@ def get_scenario_management_keyboard(session=None):
     rows.append([{"text": f"{'🟢' if conf_simple else '🔴'} سخت‌گیری بیشتر در حالت ۱ و ۲", "callback_data": "/toggle_confirm_simple"}])
     rows.append([{"text": f"{'🟢' if conf_cont else '🔴'} سخت‌گیری بیشتر در حالت ۳ و ۴", "callback_data": "/toggle_confirm_continuation"}])
     rows.append([{"text": f"{'🟢' if conf_fake else '🔴'} سخت‌گیری بیشتر در حالت ۵ و ۶", "callback_data": "/toggle_confirm_fakeout"}])
-    prec = bool(cfg.get("scenario_precision_v2", True))
-    touch = bool(cfg.get("scenario_touch_enabled", True))
-    rows.append([{"text": f"{'🟢' if prec else '🔴'} تشخیص دقیق‌تر ۶ حالت (ماشین‌حالت شکست)", "callback_data": "/toggle_scenario_precision"}])
-    rows.append([{"text": f"{'🟢' if touch else '🔴'} حالت ۱ و ۲: برخورد بدون نفوذ هم حساب شود", "callback_data": "/toggle_scenario_touch"}])
     rows.append([{"text": "🧰 بازگشت به قوانین معامله", "callback_data": "/trade_filter_management"}])
     return {"inline_keyboard": rows}
 

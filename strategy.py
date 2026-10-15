@@ -269,7 +269,6 @@ STRATEGY_DEFAULTS = {
     # روشن: حالت ۵/۶ فقط روی «اولین کندل بازگشت به داخل» بعد از شکستِ تازه صادر می‌شود (نه هر کندل
     # نزولی/صعودیِ دور از سطح)، حالت ۳/۴ فقط وقتی سطح بین شکست و پولبک از دست نرفته، و حالت ۱/۲
     # دیگر نمی‌تواند یک شکست‌کاذبِ ردشده‌ی ۵/۶ را با برچسب ۱/۲ دوباره صادر کند.
-    "scenario_precision_v2": True,
     "scenario_penetration_min_atr": 0.10,       # close باید حداقل این‌قدر (×ATR) فراتر از سطح باشد تا «نفوذ» حساب شود
     "scenario_fakeout_max_gap_candles": 0,      # ۵/۶: حداکثر کندلِ بسته‌شده‌ی داخل رنج بین آخرین close فراتر از سطح و کندل فعلی (۰ = اولین کندلِ بازگشت)
     # V3.43.28: تعریف دقیق «شکست کاذب» ۵/۶ - قیمت باید از داخل محدوده به بیرون سطح رفته، فقط کوتاه آن‌طرف مانده و برگشته باشد.
@@ -278,7 +277,6 @@ STRATEGY_DEFAULTS = {
     "fakeout_max_leg_candles": 6,               # حداکثر تعداد کندلِ پیاپی که close بیرون سطح مانده (بیشتر = شکست پذیرفته‌شده، نه کاذب). 0 = بدون محدودیت
     "fakeout_min_inside_candles": 2,            # قبل از شکست، حداقل این‌قدر کندل پیاپی داخل محدوده بسته شده باشد. 0 = بررسی نشود
     # ۱/۲ دقیقاً طبق تعریف: «برخورد بدون نفوذ + برگشت»، یعنی فتیله به سطح برسد (نه لزوماً ازش رد شود)
-    "scenario_touch_enabled": True,
     "scenario_touch_tolerance_atr": 0.10,       # فاصله‌ی مجاز تا سطح (×ATR) برای «برخورد»
     "scenario_touch_min_wick_frac": 0.35,       # حداقل نسبتِ فتیله‌ی ردکننده به کل رنج کندل در حالت برخورد-بدون-نفوذ
     # --- مدل «PDH/PDL + P4» (تصمیم کاربر) ---------------------------------------------
@@ -978,6 +976,12 @@ def _breakout_context(d, before_idx, hi, lo, lookback, pen=0.0, max_back=400):
     return direction, level, leg, last, (end - 1) - last
 
 
+def _precise_scenarios(cfg=None):
+    """V3.44.5: «تشخیص دقیق ۶ حالت» (ماشین‌حالت شکست) و «برخورد بدون نفوذ» در حالت ۱/۲ دیگر کلید جدا ندارند؛
+    جزو خودِ حالت‌ها و همیشه فعال‌اند. مقدار قدیمیِ ذخیره‌شده در تنظیمات کاربر عمداً نادیده گرفته می‌شود."""
+    return True
+
+
 def _recent_close_beyond(d, idx, level, side, pen, n_candles):
     """آیا در n_candles کندلِ بسته‌شده‌ی قبل از idx، close فراتر از سطح بوده؟ (side: UP/DOWN)"""
     if d is None or idx <= 0:
@@ -1007,7 +1011,7 @@ def _detect_named_level_sweep(d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
     # V3.43: «برخورد بدون نفوذ» (حالت ۱/۲ طبق تعریف کاربر): فتیله به سطح می‌رسد (در tolerance) ولی
     # لزوماً ازش رد نمی‌شود؛ چون نفوذِ واقعی نیست، رد قیمت باید قوی‌تر (فتیله‌ی بلند) ثابت شود.
-    touch_on = bool(cfg.get("scenario_precision_v2", True)) and bool(cfg.get("scenario_touch_enabled", True))
+    touch_on = _precise_scenarios(cfg)
     touch_tol = atr * max(0.0, float(cfg.get("scenario_touch_tolerance_atr", 0.10)))
     touch_wick = float(cfg.get("scenario_touch_min_wick_frac", 0.35))
     sell_pierced = h >= hi + min_sweep
@@ -1159,7 +1163,7 @@ def _find_recent_breakout(d, before_idx, hi, lo, lookback):
 
 def _detect_retest_continuation(d, before_idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg):
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    if bool(cfg.get("scenario_precision_v2", True)):
+    if _precise_scenarios(cfg):
         pen = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10)))
         direction, level, breakout_idx, _last_beyond, _gap = _breakout_context(d, before_idx, hi, lo, lookback, pen)
         # گپ>0 یعنی بعد از شکست، قیمت دوباره داخل رنج بسته شده: سطح از دست رفته، این پولبکِ «موفق» نیست
@@ -1251,7 +1255,7 @@ def _detect_failed_retest_reversal(d, before_idx, hi, lo, hi_key, lo_key, hi_lab
     بین hi/lo برمی‌گردد - یعنی شکست کاذب (fakeout) بوده، پس معامله برعکسِ شکست اولیه
     گرفته می‌شود."""
     lookback = int(cfg.get("retest_lookback_candles", 48))
-    precise = bool(cfg.get("scenario_precision_v2", True))
+    precise = _precise_scenarios(cfg)
     if precise:
         pen = atr * max(0.0, float(cfg.get("scenario_penetration_min_atr", 0.10)))
         direction, level, breakout_idx, _last_beyond, _gap = _breakout_context(d, before_idx, hi, lo, lookback, pen)
@@ -1593,7 +1597,7 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
             )
-            if sig and bool(cfg.get("scenario_precision_v2", True)):
+            if sig and _precise_scenarios(cfg):
                 # ۱/۲ یعنی «برخورد بدون نفوذِ قبلی». اگر کندل(های) قبلی همین سطح را با close شکسته بودند، این کندل
                 # در قلمرو ۵/۶ است - حتی اگر ۵/۶ خاموش باشد یا تاییدیه‌ی سخت‌گیرانه‌اش را رد کرده باشد - و نباید
                 # با برچسب ۱/۲ از در پشتی صادر شود.
@@ -2239,7 +2243,7 @@ def strategy_halving(df, strategy_config=None, live_price=None):
         if not sig:
             ssig, sreason, _ = _detect_named_level_sweep(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label,
                                                           cfg_run, require_reclaim, require_reversal)
-            if ssig and bool(cfg_run.get("scenario_precision_v2", True)):
+            if ssig and _precise_scenarios(cfg_run):
                 _pen = atr * max(0.0, float(cfg_run.get("scenario_penetration_min_atr", 0.10)))
                 _n = max(0, int(cfg_run.get("scenario_fakeout_max_gap_candles", 0))) + 1
                 if ssig == "SELL" and _recent_close_beyond(d, idx, hi, "UP", _pen, _n):

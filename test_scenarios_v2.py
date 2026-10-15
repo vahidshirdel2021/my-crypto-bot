@@ -42,7 +42,7 @@ res.append(ok('2: آینه => BUY', s[0]=='BUY'))
 # --- «برخورد بدون نفوذ» (۱/۲ طبق تعریف) ---
 d = mk(inside + [(99.4,99.95,98.8,99.0)]); s = W(d, cfg)
 res.append(ok('1-touch: فتیله به ۰.۰۵ATR زیر PDH رسید + فتیله‌ی بلند => SELL', s[0]=='SELL' and 'بدون نفوذ' in s[1]))
-res.append(ok('1-touch: با خاموش‌کردن scenario_touch_enabled => None', W(d, cfgx(scenario_touch_enabled=False))[0] is None))
+res.append(ok('1-touch: کلید قدیمی scenario_touch_enabled=False نادیده گرفته می‌شود (همیشه فعال) => SELL', W(d, cfgx(scenario_touch_enabled=False))[0]=='SELL'))
 d = mk(inside + [(99.8,99.95,98.5,98.6)]); res.append(ok('1-touch: فتیله‌ی کوتاه (ضعیف) => None', W(d, cfg)[0] is None))
 d = mk(inside + [(90.6,91.2,90.05,91.0)]); s = W(d, cfg)
 res.append(ok('2-touch: آینه => BUY', s[0]=='BUY' and 'بدون نفوذ' in s[1]))
@@ -52,12 +52,12 @@ d = mk(inside + [(97,97.5,96.5,97.2)]); res.append(ok('وسط رنج هیچ‌چ
 rows = inside + up_break + [(101,101.2,98,98.5)] + [(98.5-0.1*k,98.7-0.1*k,98.0-0.1*k,98.2-0.1*k) for k in range(25)] + [(95.0,95.2,94.0,94.2)]
 d = mk(rows)
 res.append(ok('باگ: کندل نزولیِ ۵ATR دور از PDH دیگر «شکست کاذب» نیست', F(d, cfg)[0] is None))
-res.append(ok('   (حالت قدیمی همان باگ را نشان می‌داد)', F(d, cfgx(scenario_precision_v2=False))[0]=='SELL'))
+res.append(ok('   (کلید قدیمی scenario_precision_v2=False دیگر اثری ندارد)', F(d, cfgx(scenario_precision_v2=False))[0] is None))
 d = mk(inside + up_break + [(101,101.2,98,98.5)] + [(98.5,98.8,98.0,98.3)]*2 + [(98.3,98.4,97.3,97.5)])
 res.append(ok('۵ فقط روی اولین کندل بازگشت (نه چند کندل بعد)', F(d, cfg)[0] is None))
 d = mk(inside + up_break + [(101,101.2,98,98.5)] + [(99.8,101.0,99.5,100.8)])
 res.append(ok('۳: اگر بین شکست و پولبک close داخل رنج بوده => ادامه نیست', C(d, cfg)[0] is None))
-res.append(ok('   (حالت قدیمی اینجا BUY می‌داد)', C(d, cfgx(scenario_precision_v2=False))[0]=='BUY'))
+res.append(ok('   (کلید قدیمی scenario_precision_v2=False دیگر اثری ندارد)', C(d, cfgx(scenario_precision_v2=False))[0] is None))
 d = mk(inside + [(100.0,100.15,99.0,100.05)] + [(100.05,100.3,98.6,99.0)])
 res.append(ok('close فقط ۰.۰۵ATR بالای سطح، «نفوذ» حساب نمی‌شود => ۵ نیست', F(d, cfg)[0] is None))
 
@@ -101,7 +101,7 @@ vols = {5: 900.0, 9: 90.0}
 sig, scn, r = run(ev5w, vols, confirm_fakeout_enabled=True)
 res.append(ok(f'پایپ‌لاین: ۵ ردشده با تاییدیه، از در پشتی ۱ نمی‌شود (got {sig}/{scn})', sig is None or scn != '1'))
 sig_l, scn_l, _ = run(ev5w, vols, confirm_fakeout_enabled=True, scenario_precision_v2=False)
-res.append(ok(f'   (قدیمی: همان کندل SELL/SCN=1 صادر می‌کرد — got {sig_l}/{scn_l})', sig_l=='SELL' and scn_l=='1'))
+res.append(ok(f'   (کلید قدیمی scenario_precision_v2=False اثری ندارد — got {sig_l}/{scn_l})', sig_l is None or scn_l != '1'))
 ev1 = pre + [(95.0,95.4,94.6,95.1)]*3 + [(99.2,100.6,98.9,99.1)]
 sig, scn, _ = run(ev1);                        res.append(ok(f'پایپ‌لاین: ۱ => SELL/SCN=1 (got {sig}/{scn})', sig=='SELL' and scn=='1'))
 ev1t = pre + [(95.0,95.4,94.6,95.1)]*3 + [(99.5,99.96,99.3,99.4)]
