@@ -4652,13 +4652,24 @@ def _blk(chat_id, reason):
     return False
 
 
-def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None,keep_levels=False):
+def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None,keep_levels=False,allow_inverse=True):
     _LAST_BLOCK_REASON.pop(chat_id, None)
     s=get_session(chat_id)
     # V3.43.15: ۳۰ دقیقه‌ی آخر کندل ۴ ساعته - هیچ معامله‌ای باز نمی‌شود (حتی force/دستی/دستیار)
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
         return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
+    # V3.44.8: معاملات معکوس (آزمایشی، پیش‌فرض خاموش) - جهت و سطوح سیگنال نسبت به قیمت سیگنال آینه می‌شوند.
+    inverse_applied = False
+    if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
+        _orig_side = side
+        side = 'SELL (Short)' if side_long(side) else 'BUY (Long)'
+        # معکوس دقیق: حد ضرر و هدف سود با هم جابه‌جا می‌شوند (هر جا سیگنال اصلی سود می‌کرد، این معامله ضرر می‌کند و برعکس)
+        sl, tp = float(tp), float(sl)
+        tp_stages = None        # خروج پله‌ای سیگنال اصلی در حالت معکوس معنی ندارد
+        structural_tp = False
+        reason = f'🔁 معکوس (سیگنال اصلی: {_orig_side}) | ' + (reason or '')
+        inverse_applied = True
     trade_id = new_trade_id(chat_id, symbol)
     quality_score = None; quality_label = None; planned_rr = None
     # لایه V1.5 Enhanced Selection رشته دلیل را با فرمت انگلیسی «Quality XX/100»
@@ -4806,7 +4817,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,**presets_mod.trade_tag(s)}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
 
@@ -5069,7 +5080,7 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
         s=get_session(chat_id)
         if s['daily_stopped'] and not force:
             return False, 'محدودیت ضرر روزانه فعال است؛ ورود دستی هم مسدود است.'
-        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type,force=force,tp_level_name=tp_level_name)
+        ok=_execute_trade_unlocked(chat_id,symbol,side,price,sl,tp,reason,generation,require_active=False,order_type=order_type,force=force,tp_level_name=tp_level_name,allow_inverse=bool(force))
     if ok:
         return True, ''
     # دلیل دقیق رد شدن (اگر ثبت شده باشد) به‌جای پیام کلی
@@ -9350,6 +9361,7 @@ GATE_REGISTRY = {
     'gate_fc_vol_enabled':        ('تایید حجم', False, 'entry_filter', f'حجم آخرین کندل بسته‌شده باید حداقل {FULL_CONFIRM_MIN_VOLUME_RATIO:g} برابر میانگین ۲۰ کندل قبل باشد (همان معیار «حجم بالا» در پیام اندیکاتورها). حجم پایین‌تر یا نبود داده = سیگنال صادر نمی‌شود. پیش‌فرض: خاموش.'),
     'gate_fc_adx_enabled':        ('تایید روند ADX', True, 'entry_filter', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
+    'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_filter', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی معامله دقیقاً برعکس باز می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. حد ضرر و هدف سود هم جابه‌جا می‌شوند (هدفِ سیگنال اصلی می‌شود حد ضرر و حد ضررِ آن می‌شود هدف). روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
