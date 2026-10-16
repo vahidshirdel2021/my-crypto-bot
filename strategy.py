@@ -2115,6 +2115,11 @@ HALVING_DEFAULTS = {
     "halving_max_trade_depth": 0,      # 0 = همه‌ی عمق‌ها؛ n = فقط سطوحی با عمق ≤ n معامله می‌شوند
     "halving_only_targets": True,      # هدف فقط از سطوح نصف‌کردن
     "halving_atr_smooth_candles": 200, # ATR هموار (میانه‌ی N کندل اخیر) تا عمق هر کندل جابه‌جا نشود
+    # k پویا: ATR مؤثر = ATR کند × clamp(ATR سریع / ATR کند). نوسان بالا → سطوح درشت‌تر، بازار آرام → سطوح ریزتر.
+    "halving_dynamic_k": False,
+    "halving_dyn_fast_candles": 30,    # پنجره‌ی ATR سریع (میانه‌ی N کندل اخیر)
+    "halving_dyn_min": 0.7,            # حداقل ضریب (جلوی ریزشدن بیش‌ازحد سطوح در بازار خواب)
+    "halving_dyn_max": 1.6,            # حداکثر ضریب (جلوی درشت‌شدن بیش‌ازحد در هیجان)
 }
 
 
@@ -2153,6 +2158,24 @@ def _halving_atr(d, idx, cfg):
         return 0.0
 
 
+def _halving_dyn_ratio(d, idx, cfg, atr_slow):
+    """ضریب نوسان = ATR سریع / ATR کند، بین min و max. فقط با داده‌ی تا idx (بدون نگاه به آینده).
+    اگر خاموش یا داده ناکافی باشد ۱٫۰ (بدون تغییر)."""
+    if not cfg.get("halving_dynamic_k", False) or not atr_slow or atr_slow <= 0:
+        return 1.0
+    n = max(10, int(cfg.get("halving_dyn_fast_candles", 30)))
+    try:
+        seg = pd.to_numeric(d["atr"].iloc[max(0, idx - n + 1):idx + 1], errors="coerce").dropna()
+        seg = seg[seg > 0]
+        if len(seg) < max(5, n // 3):
+            return 1.0
+        r = float(seg.median()) / float(atr_slow)
+        lo = float(cfg.get("halving_dyn_min", 0.7)); hi = float(cfg.get("halving_dyn_max", 1.6))
+        return float(min(max(r, lo), hi)) if np.isfinite(r) else 1.0
+    except Exception:
+        return 1.0
+
+
 def _halving_context(d, idx, cfg, span_cells=4):
     """درخت نصف‌کردن را در لحظه‌ی idx می‌سازد (فقط با داده‌ی تا idx): عمق انتخاب‌شده، فاصله،
     سطوح نزدیک قیمت و سلول‌های اطراف قیمت مرجع (close کندل قبلِ idx). None اگر داده نبود."""
@@ -2160,12 +2183,13 @@ def _halving_context(d, idx, cfg, span_cells=4):
     if hi is None:
         return None
     atr_s = _halving_atr(d, idx, cfg)
-    depth = _hv_choose_depth(hi, lo, atr_s, float(cfg.get("halving_k_atr", 4.0)),
+    dyn_ratio = _halving_dyn_ratio(d, idx, cfg, atr_s)
+    depth = _hv_choose_depth(hi, lo, atr_s * dyn_ratio, float(cfg.get("halving_k_atr", 4.0)),
                              int(cfg.get("halving_min_depth", 3)), int(cfg.get("halving_max_depth", 10)))
     step = _hv_spacing_at(hi, lo, depth)
     ref = float(d["close"].iloc[idx - 1]) if idx >= 1 else float(d["close"].iloc[idx])
     levels = _hv_levels_near(hi, lo, depth, ref - span_cells * step, ref + span_cells * step)
-    return {"high": hi, "low": lo, "depth": depth, "step": step, "atr": atr_s, "ref": ref,
+    return {"high": hi, "low": lo, "depth": depth, "step": step, "atr": atr_s, "dyn_ratio": dyn_ratio, "ref": ref,
             "levels": levels, "cells": _hv_cells_around(levels, ref)}
 
 

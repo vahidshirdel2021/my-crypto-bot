@@ -825,6 +825,7 @@ def audit_trade_record(p):
         'peak_favorable_price': p.get('peak_favorable_price'),
         'peak_adverse_price': p.get('peak_adverse_price'),
         'entry_snapshot': p.get('entry_snapshot'),
+        'preset': p.get('preset'), 'preset_modified': p.get('preset_modified'), 'preset_diff': p.get('preset_diff'),
     }
 
 
@@ -861,6 +862,9 @@ def save_telegram_offset(offset):
             conn.close()
 
 
+import presets as presets_mod
+
+
 def default_session():
     return {
         'is_bot_active': False,
@@ -890,6 +894,7 @@ def default_session():
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
         # V3.43.32: صبر برای تایید (ورود فقط وقتی قیمت بعد از سیگنال کمی به نفع معامله رفته باشد). پیش‌فرض خاموش.
+        'active_preset': None,   # V3.44.7: کلید پریست فعال (۱..۵) برای برچسب‌زدن معاملات
         'fav_confirm_enabled': False,
         'fav_confirm_min_r': 0.15,
         'fav_confirm_max_r': 0.30,
@@ -955,7 +960,7 @@ def default_session():
 
 
 _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
-                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth')
+                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k')
 
 
 def _p4_keep_flags(old_cfg, new_cfg):
@@ -1036,7 +1041,7 @@ def normalize_session(data):
         'sweep_require_confirmation_candle',
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
-        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth',
+        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -3379,7 +3384,7 @@ def _signal_channel_halving_cfg_for(symbol, timeframe):
     scfg = ((USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}).get('strategy_config') or {})
     cfg = {**get_timeframe_preset(timeframe), 'halving_model_enabled': True,
            'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
-    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth'):
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k'):
         if k in scfg:
             cfg[k] = scfg[k]
     return cfg
@@ -4801,7 +4806,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
 
@@ -5515,6 +5520,7 @@ def journal_append_closed(chat_id, pos):
             'pnl_usdt': pos.get('pnl_usdt'), 'close_reason': pos.get('close_reason'), 'realized_r': pos.get('realized_r'),
             'mfe_r': pos.get('mfe_r'), 'mae_r': pos.get('mae_r'), 'duration_seconds': pos.get('duration_seconds'),
             'entry_snapshot': pos.get('entry_snapshot'),
+            'preset': pos.get('preset'), 'preset_modified': pos.get('preset_modified'), 'preset_diff': pos.get('preset_diff'),
         }
         path = _journal_path()
         with _JOURNAL_LOCK:
@@ -9587,6 +9593,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         ]}
 
     return {'inline_keyboard': [
+        [{'text': '🎚 پریست‌های آماده (کلید ۱، ۲، ...)', 'callback_data': '/preset_menu'}],
         [{'text': '📥 شرایط ورود به معامله', 'callback_data': '/trade_filter_entry'}],
         [{'text': '🧩 شناسایی فرصت (الگوی قیمت)', 'callback_data': '/trade_filter_structure'}],
         [{'text': '🧱 کیفیت و کنترل ریسک', 'callback_data': '/trade_filter_quality'}],
@@ -9724,6 +9731,46 @@ def trade_audit_report(chat_id):
     if p in closed:
         lines += [f'🚪 خروج: `{fmt(p.get("close_price",0))}`',f'💰 PnL: `{float(p.get("pnl_usdt",0) or 0):+.2f} USDT`',f'📝 علت خروج: `{p.get("close_reason","—")}`']
     return '\n'.join(lines)
+
+
+def _journal_trades_for(chat_id):
+    try:
+        path = _journal_path()
+        if not os.path.exists(path):
+            return []
+        with _JOURNAL_LOCK:
+            with open(path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+        return [t for t in (data.get('trades') or []) if str(t.get('chat_id')) == str(chat_id)]
+    except Exception:
+        logger.exception('journal read failed')
+        return []
+
+
+def preset_stats_text(chat_id):
+    return presets_mod.format_stats(presets_mod.summarize(_journal_trades_for(chat_id)))
+
+
+def export_trade_journal(chat_id):
+    """فایل ژورنال معاملات (با برچسب پریست) را به تلگرام می‌فرستد؛ بدون حذف خودکار تا بتوانی فوروارد کنی."""
+    if not is_allowed(chat_id) or not TELEGRAM_TOKEN:
+        return False
+    trades = _journal_trades_for(chat_id)
+    raw = json.dumps({'version': 1, 'chat_id': chat_id, 'generated_at': time.time(), 'trades': trades},
+                     ensure_ascii=False, indent=1, default=str).encode('utf-8')
+    try:
+        resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
+                             data={'chat_id': chat_id, 'caption': f'📤 ژورنال معاملات ({len(trades)} معامله)'},
+                             files={'document': ('trade_journal.json', io.BytesIO(raw), 'application/json')}, timeout=30)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('journal export send failed: %s', resp.text[:500])
+            send_message(chat_id, '❌ فایل ژورنال ساخته شد اما ارسال آن به تلگرام ناموفق بود.')
+            return False
+        return True
+    except Exception as exc:
+        logger.warning('journal export failed: %s', exc)
+        send_message(chat_id, f'❌ خطا در ارسال ژورنال: {exc}')
+        return False
 
 
 def export_trade_data(chat_id):
@@ -10615,11 +10662,13 @@ def process_command(cmd,chat_id,message_id=None):
             _p4_sync_tags(s)
         save_session(chat_id)
         edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
-    if cl in ('/toggle_halving_model', '/halving_k_cycle', '/halving_depth_cycle', '/halving_major_cycle'):
+    if cl in ('/toggle_halving_model', '/halving_k_cycle', '/halving_depth_cycle', '/halving_major_cycle', '/halving_dyn_toggle'):
         _cfg_hv = s.setdefault('strategy_config', {})
         if cl == '/toggle_halving_model':
             _cfg_hv['halving_model_enabled'] = not bool(_cfg_hv.get('halving_model_enabled', False))
             s['setup_legacy_view'] = False
+        elif cl == '/halving_dyn_toggle':
+            _cfg_hv['halving_dynamic_k'] = not bool(_cfg_hv.get('halving_dynamic_k', False))
         elif cl == '/halving_k_cycle':
             _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
@@ -11068,6 +11117,25 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/trade_filter_management':
         send_message(chat_id, FILTER_MAIN_TEXT, trade_filter_management_keyboard(chat_id))
+        return
+    # V3.44.7: پریست‌های آماده (کلید ۱، ۲، ...)
+    if cl == '/preset_menu':
+        send_message(chat_id, presets_mod.menu_text(s), presets_mod.keyboard(s))
+        return
+    if cl.startswith('/preset_apply_'):
+        _pn = cl[len('/preset_apply_'):]
+        if not presets_mod.apply_preset(s, _pn):
+            send_message(chat_id, '⚠️ این کلید شناخته نشد.', presets_mod.keyboard(s))
+            return
+        save_session(chat_id)
+        _pp = presets_mod.PRESETS[_pn]
+        send_message(chat_id, f"✅ کلید {presets_mod._fa(_pn)} اعمال شد: {_pp['label']}\n\n{_pp['desc']}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.", presets_mod.keyboard(s))
+        return
+    if cl == '/preset_stats':
+        send_message(chat_id, preset_stats_text(chat_id), presets_mod.keyboard(s))
+        return
+    if cl == '/preset_export':
+        export_trade_journal(chat_id)
         return
     # V3.43.31: هندلر صفحه‌های زیرمنوی «قوانین معامله» (قبلاً وجود نداشت و دکمه‌ها جواب نمی‌دادند)
     if cl in ('/trade_filter_entry', '/trade_filter_entry_warn', '/trade_filter_entry_filter',

@@ -82,3 +82,32 @@ cfg_loose = {**cfg, "sweep_require_reclaim": False, "sweep_require_reversal_cand
 s4, r4 = get_signal_with_reason(d_w, None, "single", "5min", "dynamic", FILTER_DEFAULTS, cfg_loose, None, live_price=up_ - atr_ * 0.1)
 check("فروش با سطحِ بالایی «زیر» قیمت (ستاپ باطل‌شده) صادر نمی‌شود", s4 is None, str(r4)[:90])
 print("\nALL PASS" if ok else "\nSOME FAILED")
+
+
+# --- k پویا (halving_dynamic_k) ---
+from strategy import _halving_context, _halving_cfg
+def _mk(n, atr_old, atr_new, fast_n=30):
+    px = 80000 + np.cumsum(np.random.default_rng(3).normal(0, 20, n))
+    df = pd.DataFrame({"high": px + 10, "low": px - 10, "close": px, "open": px,
+                       "volume": 1.0, "atr": [atr_old] * (n - fast_n) + [atr_new] * fast_n})
+    return df
+_base = {"halving_high": H, "halving_low": L, "halving_k_atr": 3.0, "halving_max_depth": 12}
+_df_hot = _mk(400, 100.0, 200.0)     # نوسان اخیر دو برابر
+_df_calm = _mk(400, 100.0, 50.0)     # نوسان اخیر نصف
+_idx = len(_df_hot) - 1
+c_off = _halving_context(_df_hot, _idx, _halving_cfg({**_base, "halving_dynamic_k": False}))
+c_hot = _halving_context(_df_hot, _idx, _halving_cfg({**_base, "halving_dynamic_k": True}))
+c_calm = _halving_context(_df_calm, _idx, _halving_cfg({**_base, "halving_dynamic_k": True}))
+check("k پویا خاموش: ضریب ۱ و عمق بدون تغییر", c_off["dyn_ratio"] == 1.0)
+check("نوسان بالا → سطوح درشت‌تر (عمق کمتر)", c_hot["depth"] < c_off["depth"], f"{c_hot['depth']} < {c_off['depth']}")
+check("ضریب به سقف clamp می‌شود (۱٫۶)", abs(c_hot["dyn_ratio"] - 1.6) < 1e-9, c_hot["dyn_ratio"])
+check("بازار آرام → سطوح ریزتر (عمق بیشتر)", c_calm["depth"] > c_off["depth"], f"{c_calm['depth']} > {c_off['depth']}")
+check("ضریب به کف clamp می‌شود (۰٫۷)", abs(c_calm["dyn_ratio"] - 0.7) < 1e-9, c_calm["dyn_ratio"])
+# سطوح عمیق‌تر شامل همان سطوح کم‌عمق‌ترند (برچسب عمقِ هر قیمت ثابت می‌ماند)
+_p_hot = {round(x["price"], 4): x["depth"] for x in c_hot["levels"]}
+_p_calm = {round(x["price"], 4): x["depth"] for x in c_calm["levels"]}
+check("برچسب عمق هر سطح مشترک ثابت است", all(_p_calm[p] == dd for p, dd in _p_hot.items() if p in _p_calm))
+# علّی بودن: تغییر کندل‌های بعد از idx روی نتیجه اثر ندارد
+_df_fut = _df_hot.copy(); _df_fut.loc[_idx + 1:, "atr"] = 9999
+check("بدون نگاه به آینده", _halving_context(_df_fut, _idx, _halving_cfg({**_base, "halving_dynamic_k": True}))["depth"] == c_hot["depth"])
+print("ALL OK" if ok else "SOME FAILED")

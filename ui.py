@@ -192,6 +192,8 @@ def get_setup_management_keyboard(session=None):
     if hv_on:
         _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
         rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
+        _dyn = bool(_cfg_ui.get("halving_dynamic_k", False))
+        rows.append([{"text": f"{'🟢' if _dyn else '🔴'} k پویا (تطبیق با نوسان)", "callback_data": "/halving_dyn_toggle"}])
         rows.append([{"text": f"سقف عمق درخت: {_md}", "callback_data": "/halving_depth_cycle"}])
         rows.append([{"text": f"فقط سطوح اصلی: {'همه‌ی عمق‌ها' if _mt == 0 else 'تا عمق ' + str(_mt)}", "callback_data": "/halving_major_cycle"}])
         rows.append([{"text": "📦 سطوح قدیمی (PDH/PDL، P4 و ...)", "callback_data": "/setup_legacy"}])
