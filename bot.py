@@ -4432,6 +4432,8 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
             alignment_line = ""
         scenario_tag = extract_scenario_tag(trade.get('entry_reason') or trade.get('signal_reason') or '')
         scenario_line = f"• سناریو: `{scenario_tag} - {_scenario_label(scenario_tag, trade.get('entry_reason') or trade.get('signal_reason') or '')}`\n" if scenario_tag else ""
+        if trade.get('inverse_trade'):
+            scenario_line = "• 🔁 *معامله‌ی معکوس:* جهت برعکسِ سیگنال (متن سناریو مربوط به سیگنال اصلی است)\n" + scenario_line
         level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
         tp_lvl_line = f"• سطح هدف (TP): `{trade['tp_level_name']}`\n" if trade.get('tp_level_name') else ''
         fee_c = round_trip_fee_usdt(trade.get('margin'), trade.get('leverage'))
@@ -4659,15 +4661,25 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
         return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
-    # V3.44.8: معاملات معکوس (آزمایشی، پیش‌فرض خاموش) - جهت و سطوح سیگنال نسبت به قیمت سیگنال آینه می‌شوند.
+    # V3.44.9: معاملات معکوس (آزمایشی، پیش‌فرض خاموش) - فقط «جهت» برعکس می‌شود و معامله آینه‌ی قیمتیِ سیگنال است:
+    # فاصله‌ی حد ضرر و فاصله‌ی حد سود دقیقاً همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)،
+    # پس نسبت پاداش به ریسک هم همان سیگنال اصلی (حداقل مقدار تنظیم‌شده) می‌ماند و ضرر از سود کمتر است.
     inverse_applied = False
     if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
         _orig_side = side
-        side = 'SELL (Short)' if side_long(side) else 'BUY (Long)'
-        # معکوس دقیق: حد ضرر و هدف سود با هم جابه‌جا می‌شوند (هر جا سیگنال اصلی سود می‌کرد، این معامله ضرر می‌کند و برعکس)
-        sl, tp = float(tp), float(sl)
-        tp_stages = None        # خروج پله‌ای سیگنال اصلی در حالت معکوس معنی ندارد
-        structural_tp = False
+        _gap_sl_orig = abs(float(signal_price) - float(sl))
+        _gap_tp_orig = abs(float(tp) - float(signal_price))
+        if side_long(side):      # سیگنال خرید -> معامله‌ی فروش (آینه حول قیمت سیگنال)
+            side = 'SELL (Short)'
+            sl = float(signal_price) + _gap_sl_orig
+            tp = float(signal_price) - _gap_tp_orig
+        else:                    # سیگنال فروش -> معامله‌ی خرید
+            side = 'BUY (Long)'
+            sl = float(signal_price) - _gap_sl_orig
+            tp = float(signal_price) + _gap_tp_orig
+        tp_stages = None         # خروج پله‌ای سیگنال اصلی در حالت معکوس معنی ندارد
+        structural_tp = False    # هدف دیگر روی سطح ساختاری نیست؛ فاصله‌ی آینه‌ای است
+        tp_level_name = None     # برچسب سطح هدف سیگنال اصلی برای معامله‌ی معکوس درست نیست
         reason = f'🔁 معکوس (سیگنال اصلی: {_orig_side}) | ' + (reason or '')
         inverse_applied = True
     trade_id = new_trade_id(chat_id, symbol)
@@ -9361,7 +9373,7 @@ GATE_REGISTRY = {
     'gate_fc_vol_enabled':        ('تایید حجم', False, 'entry_filter', f'حجم آخرین کندل بسته‌شده باید حداقل {FULL_CONFIRM_MIN_VOLUME_RATIO:g} برابر میانگین ۲۰ کندل قبل باشد (همان معیار «حجم بالا» در پیام اندیکاتورها). حجم پایین‌تر یا نبود داده = سیگنال صادر نمی‌شود. پیش‌فرض: خاموش.'),
     'gate_fc_adx_enabled':        ('تایید روند ADX', True, 'entry_filter', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
-    'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_filter', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی معامله دقیقاً برعکس باز می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. حد ضرر و هدف سود هم جابه‌جا می‌شوند (هدفِ سیگنال اصلی می‌شود حد ضرر و حد ضررِ آن می‌شود هدف). روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
+    'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_filter', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی جهت معامله برعکس می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. فاصله‌ی حد ضرر و فاصله‌ی حد سود همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)، پس نسبت پاداش به ریسک هم همان سیگنال اصلی است و ضرر از سود کمتر می‌ماند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
