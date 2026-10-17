@@ -4464,6 +4464,140 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
+BE_TRACK_TRIGGERS = (0.3, 0.5, 0.75)   # V3.44.11: تریگرهای ردیاب مجازی سر به سر (بر حسب R)
+
+
+def _be_track(pos, price):
+    """V3.44.11: ردیاب مجازی سر به سر. با ترتیب واقعی قیمت‌های لحظه‌ای (هر چرخه)، برای هر تریگر ثبت می‌کند که
+    آیا قیمت به T×R رسیده («armed») و بعدش به قیمت ورود برگشته («hit») یا نه. فقط گزارش است."""
+    try:
+        bt = pos.get('be_track')
+        if not isinstance(bt, dict): return
+        entry = float(bt['entry']); rd = float(bt['risk_dist']); pr = float(price)
+        if entry <= 0 or rd <= 0 or pr <= 0: return
+        is_long = bool(bt['long'])
+        now = time.time()
+        for key, st in bt['levels'].items():
+            if st.get('hit'): continue
+            target = entry + float(key) * rd if is_long else entry - float(key) * rd
+            if st.get('armed'):
+                if (pr <= entry) if is_long else (pr >= entry):
+                    st['hit'] = True; st['hit_at'] = now
+            else:
+                if (pr >= target) if is_long else (pr <= target):
+                    st['armed'] = True; st['armed_at'] = now
+    except Exception as exc:
+        logger.debug('be tracking failed trade=%s: %s', (pos or {}).get('trade_id'), exc)
+
+
+def _be_finalize(pos):
+    """V3.44.11: نتیجه‌ی شبیه‌سازی سر به سر را حساب و در pos['be_sim'] ذخیره می‌کند؛ یک خط کوتاه برای پیام برمی‌گرداند."""
+    try:
+        bt = pos.get('be_track')
+        if not isinstance(bt, dict): return ''
+        margin = float(pos.get('margin') or 0.0); lev = float(pos.get('leverage') or 1.0); risk = float(pos.get('risk_usdt') or 0.0)
+        if margin <= 0 or risk <= 0: return ''
+        slip_usdt = margin * lev * ((PAPER_SLIPPAGE_BPS / 10000.0) if (PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0) else 0.0)
+        cost_r = (float(round_trip_fee_usdt(margin, lev)) + slip_usdt) / risk
+        actual_r = pos.get('realized_r')
+        if actual_r is None: return ''
+        actual_r = float(actual_r)
+        out = {}; marks = []
+        for key, st in bt['levels'].items():
+            armed = bool(st.get('armed')); hit = bool(st.get('hit'))
+            verdict = 'none'; sim_r = actual_r
+            if hit:
+                sim_r = -cost_r
+                if sim_r > actual_r + 0.05: verdict = 'saved'
+                elif sim_r < actual_r - 0.05: verdict = 'killed'
+                else: verdict = 'neutral'
+            out[key] = {'armed': armed, 'hit': hit, 'verdict': verdict, 'sim_r': round(sim_r, 3)}
+            icon = {'saved': '✅', 'killed': '❌', 'neutral': '➖', 'none': ('·' if not armed else '⏭')}[verdict]
+            marks.append(f"{float(key):g}R {icon}")
+        pos['be_sim'] = {'cost_r': round(cost_r, 3), 'actual_r': round(actual_r, 3), 'levels': out}
+        if not any(v['armed'] for v in out.values()): return ''
+        return "\n• 🛡 سر به سر مجازی: " + " | ".join(marks) + ""
+    except Exception:
+        logger.exception('be finalize failed trade=%s', (pos or {}).get('trade_id'))
+        return ''
+
+
+def _shadow_track(pos, high, low):
+    """V3.44.9: حالت سایه برای معامله‌ی معکوس - فقط گزارش، روی معامله‌ی واقعی اثری ندارد.
+    اگر معامله با جهت عادیِ سیگنال باز شده بود، سطوح SL/TP عادی در این بازه‌ی قیمتی خورده بود یا نه؟"""
+    try:
+        sh = pos.get('shadow')
+        if not isinstance(sh, dict) or sh.get('status') != 'open':
+            return
+        hi = float(high); lo = float(low)
+        if side_long(sh['side']):
+            hit_tp = hi >= float(sh['tp']); hit_sl = lo <= float(sh['sl'])
+        else:
+            hit_tp = lo <= float(sh['tp']); hit_sl = hi >= float(sh['sl'])
+        if hit_tp and hit_sl:
+            status = 'sl' if PAPER_CONSERVATIVE_OHLC else 'tp'
+        elif hit_sl:
+            status = 'sl'
+        elif hit_tp:
+            status = 'tp'
+        else:
+            return
+        sh['status'] = status
+        sh['closed_at'] = time.time()
+        sh['exit_price'] = float(sh['sl'] if status == 'sl' else sh['tp'])
+    except Exception as exc:
+        logger.debug('shadow tracking failed trade=%s: %s', (pos or {}).get('trade_id'), exc)
+
+
+def _shadow_finalize(pos, ref_price=None, actual_pnl=None):
+    """V3.44.9: نتیجه‌ی سایه (معامله‌ی عادی) را حساب و در pos['shadow'] ذخیره می‌کند و متن گزارش را برمی‌گرداند."""
+    try:
+        sh = pos.get('shadow')
+        if not isinstance(sh, dict):
+            return ''
+        entry = float(sh['entry']); margin = float(pos.get('margin') or 0.0); lev = float(pos.get('leverage') or 1.0)
+        if entry <= 0 or margin <= 0:
+            return ''
+        is_long = side_long(sh['side'])
+        status = sh.get('status')
+        if status in ('tp', 'sl'):
+            exit_p = float(sh['exit_price'])
+            if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+                slip = PAPER_SLIPPAGE_BPS / 10000.0
+                exit_p = exit_p * (1.0 - slip) if is_long else exit_p * (1.0 + slip)
+            end_ts = float(sh.get('closed_at') or time.time())
+        else:
+            exit_p = float(ref_price or latest_price(pos.get('symbol')) or entry)
+            end_ts = time.time()
+        frac = ((exit_p - entry) / entry) if is_long else ((entry - exit_p) / entry)
+        gross = margin * frac * lev
+        fee = round_trip_fee_usdt(margin, lev)
+        hours = max(0.0, end_ts - float(pos.get('opened_at') or end_ts)) / 3600.0
+        funding = 0.0 if pos.get('is_real') else margin * lev * (PAPER_FUNDING_RATE_PCT_8H / 100.0) * (hours / 8.0)
+        pnl = gross - fee - funding
+        risk = float(pos.get('risk_usdt') or 0.0)
+        r = (pnl / risk) if risk > 0 else None
+        sh['pnl_usdt'] = round(pnl, 4); sh['r'] = (round(r, 3) if r is not None else None)
+        sh['final_price'] = exit_p; sh['reported'] = True
+        r_txt = f" (`{r:+.2f}R`)" if r is not None else ''
+        if status == 'tp':
+            res = f"✅ به حد سود می‌خورد: `{pnl:+.2f} USDT`{r_txt}"
+        elif status == 'sl':
+            res = f"❌ به حد ضرر می‌خورد: `{pnl:+.2f} USDT`{r_txt}"
+        else:
+            res = f"⏳ تا لحظه‌ی بسته‌شدن این پوزیشن نه حد سود خورده بود نه حد ضرر؛ سود/زیان شناور: `{pnl:+.2f} USDT`{r_txt}"
+        side_fa = 'خرید (Long)' if is_long else 'فروش (Short)'
+        diff_line = ''
+        if actual_pnl is not None:
+            d = pnl - float(actual_pnl)
+            diff_line = f"\n• اختلاف با معامله‌ی معکوس واقعی: `{d:+.2f} USDT` ({'عادی بهتر بود' if d > 0.005 else ('معکوس بهتر بود' if d < -0.005 else 'تقریباً برابر')})"
+        return (f"\n\n🕶 *گزارش سایه (اگر معامله‌ی عادی بود)*\n• جهت عادی: `{side_fa}` | ورود `{fmt(entry)}` | SL `{fmt(sh['sl'])}` | TP `{fmt(sh['tp'])}`\n"
+                f"• نتیجه: {res}{diff_line}\n• _تقریبی و بر پایه‌ی کندل‌ها؛ فقط گزارش است و روی معامله اثری ندارد_")
+    except Exception:
+        logger.exception('shadow finalize failed trade=%s', (pos or {}).get('trade_id'))
+        return ''
+
+
 def update_trade_excursions(pos, high, low):
     try:
         entry = float(pos.get('entry_price') or 0)
@@ -4665,8 +4799,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # فاصله‌ی حد ضرر و فاصله‌ی حد سود دقیقاً همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)،
     # پس نسبت پاداش به ریسک هم همان سیگنال اصلی (حداقل مقدار تنظیم‌شده) می‌ماند و ضرر از سود کمتر است.
     inverse_applied = False
+    _shadow_spec = None
     if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
         _orig_side = side
+        _shadow_spec = {'side': side, 'gap_sl': abs(float(signal_price) - float(sl)), 'gap_tp': abs(float(tp) - float(signal_price)),
+                        'orig_tp': float(tp), 'structural': bool(structural_tp)}
         _gap_sl_orig = abs(float(signal_price) - float(sl))
         _gap_tp_orig = abs(float(tp) - float(signal_price))
         if side_long(side):      # سیگنال خرید -> معامله‌ی فروش (آینه حول قیمت سیگنال)
@@ -4768,6 +4905,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     })
 
     price=latest_price(symbol) or float(signal_price)
+    _raw_entry_price = float(price)
     # Conservative paper execution: adverse entry slippage only.
     if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
         slip = PAPER_SLIPPAGE_BPS / 10000.0
@@ -4832,6 +4970,26 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
+    if inverse_applied and _shadow_spec:
+        try:
+            _sh_long = side_long(_shadow_spec['side'])
+            _sh_slip = (PAPER_SLIPPAGE_BPS / 10000.0) if (PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0) else 0.0
+            _sh_entry = _raw_entry_price * (1.0 + _sh_slip) if _sh_long else _raw_entry_price * (1.0 - _sh_slip)
+            if _sh_long:
+                _sh_sl = _sh_entry - _shadow_spec['gap_sl']
+                _sh_tp = _shadow_spec['orig_tp'] if (_shadow_spec['structural'] and _shadow_spec['orig_tp'] > _sh_entry) else _sh_entry + _shadow_spec['gap_tp']
+            else:
+                _sh_sl = _sh_entry + _shadow_spec['gap_sl']
+                _sh_tp = _shadow_spec['orig_tp'] if (_shadow_spec['structural'] and _shadow_spec['orig_tp'] < _sh_entry) else _sh_entry - _shadow_spec['gap_tp']
+            trade['shadow'] = {'side': _shadow_spec['side'], 'entry': _sh_entry, 'sl': _sh_sl, 'tp': _sh_tp, 'status': 'open'}
+        except Exception:
+            logger.exception('shadow setup failed symbol=%s', symbol)
+    # V3.44.11: ردیاب مجازی «انتقال SL به سر به سر» - فقط گزارش؛ روی معامله اثری ندارد
+    try:
+        trade['be_track'] = {'entry': float(price), 'risk_dist': float(risk_dist), 'long': bool(side_long(side)),
+                             'levels': {str(t): {'armed': False, 'hit': False} for t in BE_TRACK_TRIGGERS}}
+    except Exception:
+        logger.exception('be_track setup failed symbol=%s', symbol)
 
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
@@ -5543,6 +5701,7 @@ def journal_append_closed(chat_id, pos):
             'pnl_usdt': pos.get('pnl_usdt'), 'close_reason': pos.get('close_reason'), 'realized_r': pos.get('realized_r'),
             'mfe_r': pos.get('mfe_r'), 'mae_r': pos.get('mae_r'), 'duration_seconds': pos.get('duration_seconds'),
             'entry_snapshot': pos.get('entry_snapshot'),
+            'inverse_trade': bool(pos.get('inverse_trade')), 'shadow': pos.get('shadow'), 'be_sim': pos.get('be_sim'),
             'preset': pos.get('preset'), 'preset_modified': pos.get('preset_modified'), 'preset_diff': pos.get('preset_diff'),
         }
         path = _journal_path()
@@ -5608,6 +5767,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         if pos not in s['paper_positions']: return False
         fee=round_trip_fee_usdt(pos.get('margin'), pos.get('leverage'))
         fee_note=''
+        _raw_close_price=None
         if pos.get('is_real'):
             ex=get_exchange(chat_id)
             if not ex: send_message(chat_id,'❌ اتصال Binance در دسترس نیست.'); return False
@@ -5618,6 +5778,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
                 order=_close_market(ex,fsym,side_long(pos['side']),amount/scale)
                 _avg=_order_avg_price(ex,fsym,order)
                 price=(_avg/scale) if _avg>0 else float(latest_price(pos['symbol']) or pos['entry_price'])
+                _raw_close_price=float(price)
                 await_until=time.time()+12
                 while time.time()<await_until:
                     try:
@@ -5641,6 +5802,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
             except Exception as exc: send_message(chat_id,f'❌ بستن REAL `{pos["symbol"]}` شکست خورد: `{exc}`',parse_mode=None); return False
         else:
             if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
+            _raw_close_price=float(price)
             # Conservative paper exit slippage.
             if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
                 slip = PAPER_SLIPPAGE_BPS / 10000.0
@@ -5677,6 +5839,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         pos['duration_seconds']=max(0, pos['close_timestamp']-float(pos.get('opened_at', pos['close_timestamp'])))
         pos['realized_r']=(float(pos.get('pnl_usdt') or 0.0)/float(pos.get('risk_usdt') or 0.0)) if float(pos.get('risk_usdt') or 0.0)>0 else None
         update_trade_excursions(pos, float(price), float(price))
+        shadow_block = _shadow_finalize(pos, _raw_close_price if _raw_close_price else float(price), float(pnl))
+        be_line = _be_finalize(pos)
         audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
         cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
         s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
@@ -5692,7 +5856,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         _w_close = _entry_warn_line(pos).rstrip('\n')
         if _w_close: snapshot_lines = f"{snapshot_lines}\n{_w_close}" if snapshot_lines else f"\n{_w_close}"
         journal_append_closed(chat_id, pos)
-        send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`")
+        send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`{be_line}{shadow_block}")
         return True
 
 
@@ -5739,7 +5903,8 @@ def reconcile_real(chat_id):
             cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
             s['closed_positions'].append(p.copy()); s['paper_positions'].remove(p); s['cooldowns'][sym]=time.time()+cooldown_len
             audit_event(chat_id, p.get('trade_id') or new_trade_id(chat_id, sym), 'position_closed', {'close_price': p.get('close_price'), 'pnl_usdt': p.get('pnl_usdt'), 'reason': p.get('close_reason'), 'duration_seconds': p.get('duration_seconds'), 'realized_r': p.get('realized_r'), 'mfe_usdt': p.get('mfe_usdt',0.0), 'mae_usdt': p.get('mae_usdt',0.0), 'external': True})
-            send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`")
+            _sb = _be_finalize(p) + _shadow_finalize(p, p.get('close_price'), float(p.get('pnl_usdt') or 0.0))
+            send_message(chat_id,f"📌 پوزیشن REAL `{sym}` توسط صرافی بسته شد.\nPnL ثبت‌شده: `{p['pnl_usdt']:+.2f} USDT`{_sb}")
     s['last_reconcile']=time.time(); save_session(chat_id); return True
 
 
@@ -6296,6 +6461,8 @@ def update_positions(chat_id):
             # PAPER excursion remains candle-based for deterministic backtests, while
             # current PnL/management decisions use the freshest available market price.
             update_trade_excursions(p,high,low)
+            _shadow_track(p,high,low)
+            _be_track(p, price)
             p['last_unrealized_pnl'] = ((price-float(p['entry_price']))*abs(float(p.get('amount') or 0))
                                         if side_long(p['side']) else
                                         (float(p['entry_price'])-price)*abs(float(p.get('amount') or 0)))
@@ -6304,6 +6471,8 @@ def update_positions(chat_id):
             # REAL: excursion/MFE/MAE starts at the actual position lifetime.
             # Never feed historical candles from before the position opened.
             update_trade_excursions(p, float(price), float(price))
+            _shadow_track(p, float(price), float(price))
+            _be_track(p, float(price))
             p['last_unrealized_pnl']=float(p.get('margin',0))*(((price-float(p['entry_price']))/float(p['entry_price'])) if side_long(p['side']) else ((float(p['entry_price'])-price)/float(p['entry_price'])))*float(p['leverage'])
             p['last_price']=float(price)
 
