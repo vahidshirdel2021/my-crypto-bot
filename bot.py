@@ -902,6 +902,10 @@ def default_session():
         'fav_confirm_max_mode': 'tp',
         'fav_confirm_max_tp_pct': 0.20,
         'fav_confirm_wait_sec': 900,
+        # V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح
+        'touch_auto_mode': 'all',
+        'touch_wait': {},
+        'touch_wait_seen': {},
         # بلاک‌های دستی جهت معامله - مستقل از هر فیلتر خودکار دیگری. پیش‌فرض همه خاموش
         # (یعنی هیچ محدودیتی نیست).
         'manual_block_buy_entries': False,
@@ -1701,7 +1705,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 # فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
 # عمداً مسیر قبلی خودشان را نگه می‌دارند.
 _NEW_MESSAGE_PREFIXES = (
-    '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
+    '/tw_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
     '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
@@ -4467,12 +4471,12 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.13'
+BOT_VERSION = '3.44.15'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
-                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'timeframe', 'active_strategy',
+                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'touch_auto_mode', 'timeframe', 'active_strategy',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
 _SETTINGS_LOCK = RLock()
@@ -8927,6 +8931,330 @@ def assist_extend(chat_id, aid):
         send_message(chat_id, f"⏳ مهلت روی {ASSIST_EXTEND_SECONDS // 60} دقیقه تنظیم شد.")
 
 
+# ===================== V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح =====================
+# هر برخورد با سطح (همان تشخیص ستاپِ فعلی ربات) فوراً وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنال خرید/فروش
+# هنوز صادر نشده است. هر فیلتر روشنِ «تایید کامل هم‌جهتی» (کلیدهای gate_fc_*_enabled) یک رأی می‌دهد:
+#   خرید / فروش / خنثی (منتظر). جهت از اکثریتِ آرا می‌آید (مساوی = جهت نامشخص). فیلتر «حجم» جهت نمی‌دهد؛ فقط شرط است.
+# ورود خودکار وقتی انجام می‌شود که جهت مشخص باشد و تعداد فیلترهای موافق به حد انتخابی (touch_auto_mode) برسد.
+# ورود سریع (دستی) همیشه در دسترس است. SL/TP از همان طرح ورود سریع (سوینگ/ATR + سطح مقابل) ساخته می‌شود.
+TOUCH_AUTO_MODES = ('all', 'minus1', 'majority')
+TOUCH_AUTO_LABELS = {'all': 'همه‌ی فیلترها موافق', 'minus1': 'همه به‌جز یکی', 'majority': 'اکثریت ساده'}
+TOUCH_AUTO_DESC = {
+    'all': 'فقط وقتی همه‌ی فیلترهای روشن با جهت برنده موافق باشند، ربات خودش وارد می‌شود.',
+    'minus1': 'اگر فقط یک فیلتر موافق نباشد (خنثی یا مخالف)، ربات باز هم خودش وارد می‌شود.',
+    'majority': 'اگر بیش از نیمی از فیلترهای روشن با جهت برنده موافق باشند، ربات خودش وارد می‌شود.',
+}
+TOUCH_EVAL_INTERVAL_SECONDS = 25
+TOUCH_MAX_RECORDS = 300
+_TOUCH_LOCK = RLock()
+_TOUCH_KEYS = ('btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'vol')
+_TOUCH_LABELS = {'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
+                 'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'vol': 'حجم'}
+_TOUCH_ST_TXT = {'ok': '✅ تایید', 'wait': '⏳ منتظر تایید', 'against': '❌ مخالف', 'buy': '🟢 رأی خرید', 'sell': '🔴 رأی فروش'}
+
+
+def _touch_enabled_keys(s):
+    return [k for k in _TOUCH_KEYS if gate_on(s, f'gate_fc_{k}_enabled')]
+
+
+def _touch_votes(symbol, tf, reason, keys, ind_df=None):
+    """sync (از thread صدا زده شود). خروجی: [{'key','label','vote','detail'}]؛ vote: 'BUY' | 'SELL' | None (خنثی/نبود داده)،
+    و برای «حجم»: 'OK' | None."""
+    out = []
+    fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
+    r2v = {'BULLISH': 'BUY', 'BEARISH': 'SELL'}
+
+    def add(k, vote, detail=''):
+        out.append({'key': k, 'label': _TOUCH_LABELS[k], 'vote': vote, 'detail': detail})
+    sym_u = str(symbol or '').upper()
+    if 'btceth' in keys:
+        regs = {}
+        for sym in ('BTC', 'ETH'):
+            if sym == sym_u:
+                continue
+            try:
+                snap = _trend_snapshot_cached(sym, tf)
+            except Exception:
+                snap = None
+            if snap:
+                sc = int(snap.get('score', 0))
+                regs[sym] = 'BULLISH' if sc > 0 else ('BEARISH' if sc < 0 else 'RANGE')
+            else:
+                regs[sym] = None
+        vs = {r2v.get(r) for r in regs.values()}
+        vote = next(iter(vs)) if (len(vs) == 1 and None not in vs) else None
+        add('btceth', vote, '، '.join(f"{k} {fa.get(v, 'نامشخص')}" for k, v in regs.items()))
+    if 'h4' in keys:
+        reg = _symbol_h4_regime(symbol)
+        add('h4', r2v.get(reg), fa.get(reg, 'نامشخص'))
+    if 'tf' in keys:
+        regs = _symbol_tf_regimes(symbol)
+        vs = {r2v.get(regs.get(t)) for t in _TFR_TIMEFRAMES}
+        vote = next(iter(vs)) if (len(vs) == 1 and None not in vs) else None
+        add('tf', vote, '، '.join(f"{TF_DISPLAY.get(t, t)} {fa.get(regs.get(t), 'نامشخص')}" for t in _TFR_TIMEFRAMES))
+    if any(k in keys for k in ('rsi', 'macd', 'adx', 'vol', 'level')):
+        row, bias, raw = None, {}, {}
+        try:
+            ind = ind_df
+            if ind is None:
+                d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+                ind = calculate_indicators(d) if d is not None and not d.empty else None
+            if ind is None or len(ind) < 4:
+                raise ValueError('no indicator data')
+            row = ind.iloc[-2]
+            bias, raw = _single_indicator_biases(row.to_dict())
+        except Exception:
+            logger.exception('touch votes indicators failed symbol=%s', symbol)
+        if 'rsi' in keys:
+            add('rsi', bias.get('rsi'), f"{raw['rsi']:.0f}" if 'rsi' in raw else 'داده نیست')
+        if 'macd' in keys:
+            add('macd', bias.get('macd'), ('مثبت' if raw.get('macd', 0) > 0 else 'منفی') if 'macd' in raw else 'داده نیست')
+        if 'adx' in keys:
+            add('adx', bias.get('adx'), f"ADX {raw['adx']:.0f}" if 'adx' in raw else 'داده نیست')
+        if 'vol' in keys:
+            vr = row.get('volume_ratio') if row is not None else None
+            if vr is None or pd.isna(vr):
+                add('vol', None, 'داده نیست')
+            else:
+                add('vol', ('OK' if float(vr) >= FULL_CONFIRM_MIN_VOLUME_RATIO else None), f"{float(vr):.1f}x (لازم {FULL_CONFIRM_MIN_VOLUME_RATIO:g}x)")
+        if 'level' in keys:
+            m = re.search(r'HVL=([0-9.]+)', reason or '') or re.search(r'ANCHOR=([0-9.]+)', reason or '')
+            if m and row is not None:
+                lvl = float(m.group(1)); last = float(row['close'])
+                vote = 'BUY' if last > lvl else ('SELL' if last < lvl else None)
+                add('level', vote, f"آخرین کلوز {'بالای' if last > lvl else 'پایین'} سطح" if vote else 'روی سطح')
+            else:
+                add('level', None, 'سطح/داده نامشخص')
+    return out
+
+
+def _touch_summarize(votes, mode):
+    """votes را (درجا) با کلید 'status' علامت می‌زند و خلاصه برمی‌گرداند: {'dir','agree','total','auto_ok'}."""
+    buy = sum(1 for v in votes if v['key'] != 'vol' and v['vote'] == 'BUY')
+    sell = sum(1 for v in votes if v['key'] != 'vol' and v['vote'] == 'SELL')
+    direction = 'BUY' if buy > sell else ('SELL' if sell > buy else None)
+    agree = 0
+    for v in votes:
+        if v['key'] == 'vol':
+            st = 'ok' if v['vote'] == 'OK' else 'wait'
+        elif direction is None:
+            st = {'BUY': 'buy', 'SELL': 'sell'}.get(v['vote'], 'wait')
+        elif v['vote'] == direction:
+            st = 'ok'
+        elif v['vote'] in ('BUY', 'SELL'):
+            st = 'against'
+        else:
+            st = 'wait'
+        v['status'] = st
+        if st == 'ok':
+            agree += 1
+    total = len(votes)
+    need = {'all': total, 'minus1': max(1, total - 1), 'majority': total // 2 + 1}.get(mode, total)
+    return {'dir': direction, 'agree': agree, 'total': total, 'auto_ok': bool(direction and total > 0 and agree >= need)}
+
+
+def _touch_eval_one(chat_id, rec):
+    s = get_session(chat_id)
+    keys = _touch_enabled_keys(s)
+    tf = rec.get('tf') or s.get('timeframe', '5min')
+    votes = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', keys) if keys else []
+    if gate_on(s, 'gate_touch_pattern_vote_enabled') and rec.get('touch_sig') in ('BUY', 'SELL'):
+        # V3.44.15: جهتِ پیشنهادیِ خودِ الگوی برخورد (برگشت بدون نفوذ / شکست کاذب / پولبک و ادامه) هم یک رأی است
+        _lt, _st = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
+        votes.insert(0, {'key': 'pattern', 'label': 'الگوی برخورد با سطح', 'vote': rec['touch_sig'], 'detail': _st})
+    summ = _touch_summarize(votes, s.get('touch_auto_mode', 'all'))
+    with _TOUCH_LOCK:
+        rec['votes'] = votes
+        rec.update(summ)
+        rec['last_eval'] = time.time()
+
+
+def _touch_register(chat_id, symbol, touch_sig, reason, tf):
+    """برخورد با سطح را در لیست انتظار ثبت می‌کند (بدون صدور سیگنال). خروجی: (status, متن)."""
+    s = get_session(chat_id)
+    now = time.time()
+    _tag, level_token, level_value = extract_setup_level(reason)
+    scn = extract_scenario_tag(reason)
+    if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
+        return 'touch_skipped', 'روی این نماد پوزیشن باز داریم'
+    if level_token is not None and gate_on(s, 'gate_traded_level_enabled') and f"{symbol}:{level_token}:{level_value}" in s.get('traded_levels', {}):
+        return 'touch_skipped', 'روی همین سطح قبلاً معامله شده'
+    with _TOUCH_LOCK:
+        waits = s.setdefault('touch_wait', {})
+        if any(r.get('symbol') == symbol and r.get('status') == 'waiting' for r in waits.values()):
+            return 'touch_wait', 'این نماد همین حالا در لیست انتظار رأی‌گیری است'
+        seen = s.setdefault('touch_wait_seen', {})
+        for k in [k for k, v in seen.items() if now - float(v or 0) >= ASSIST_SEEN_TTL_SECONDS]:
+            seen.pop(k, None)
+        seen_key = f"{symbol}|{level_token}|{level_value}"
+        if seen_key in seen:
+            return 'touch_skipped', 'این برخورد قبلاً ثبت شده'
+        tid = hashlib.sha1(f"tw{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
+        expiry = int(s.get('assist_expiry_seconds', 900) or 900)
+        rec = {'id': tid, 'symbol': symbol, 'touch_sig': touch_sig, 'reason': str(reason or '')[:500], 'level_token': level_token,
+               'level_value': level_value, 'scn': scn, 'tf': tf, 'created_at': now, 'expires_at': now + expiry, 'status': 'waiting',
+               'last_eval': 0.0, 'votes': [], 'dir': None, 'agree': 0, 'total': 0, 'auto_ok': False}
+        waits[tid] = rec
+        seen[seen_key] = now
+        if len(waits) > TOUCH_MAX_RECORDS:
+            for k in sorted(waits, key=lambda kk: float(waits[kk].get('created_at', 0) or 0)):
+                if len(waits) <= TOUCH_MAX_RECORDS:
+                    break
+                if waits[k].get('status') != 'waiting':
+                    waits.pop(k, None)
+    _touch_eval_one(chat_id, rec)
+    opened = False
+    if rec.get('auto_ok') and gate_on(s, 'gate_touch_vote_enabled'):
+        opened = _touch_auto_enter(chat_id, rec)
+    save_session(chat_id)
+    logger.info('touch vote: %s dir=%s agree=%s/%s auto=%s opened=%s', symbol, rec.get('dir'), rec.get('agree'), rec.get('total'), rec.get('auto_ok'), opened)
+    return ('entry_opened', 'ورود خودکار پس از تایید فیلترها') if opened else ('touch_wait', 'برخورد در لیست انتظار؛ منتظر تایید فیلترها')
+
+
+@_from_signal_origin
+def _touch_auto_enter(chat_id, rec):
+    """ورود خودکار بعد از تایید فیلترها (با قیمت لحظه‌ای؛ محدودیت‌های عادی ریسک/کول‌داون/سقف پوزیشن اعمال می‌شود). True = پوزیشن باز شد."""
+    s = get_session(chat_id)
+    symbol, side = rec['symbol'], rec.get('dir')
+    if side not in ('BUY', 'SELL'):
+        return False
+    if not s.get('is_bot_active') or s.get('daily_stopped'):
+        return False
+    if s.get('manual_block_all_entries') or (side == 'BUY' and s.get('manual_block_buy_entries')) or (side == 'SELL' and s.get('manual_block_sell_entries')):
+        rec['block_note'] = 'بلاک دستی جهت/کل معاملات فعال است'
+        return False
+    tf = rec.get('tf') or s.get('timeframe', '5min')
+    try:
+        live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
+        live = float(live) if live else None
+    except Exception:
+        live = None
+    if not live:
+        return False
+    plan, _ = build_quick_plan_with_fallback(symbol, side, s.get('strategy_config'), live, tf)
+    side_fa = 'خرید' if side == 'BUY' else 'فروش'
+    full_reason = (f"{rec.get('reason') or ''} | ⚖️ رأی فیلترها: {side_fa} ({rec.get('agree')}/{rec.get('total')}) | {plan.get('reason', '')}")[:500]
+    ok = execute_trade(chat_id, symbol, 'BUY (Long)' if side == 'BUY' else 'SELL (Short)', live, plan['sl'], plan['tp'], full_reason,
+                       plan_rr=plan.get('rr'), bypass_burst_cooldown=True, tp_level_name=plan.get('tp_level_name'))
+    if ok:
+        with _TOUCH_LOCK:
+            rec['status'] = 'opened'; rec['finished_at'] = time.time(); rec.pop('block_note', None)
+        return True
+    rec['block_note'] = (_LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد')[:120]
+    return False
+
+
+def touch_quick_entry(chat_id, tid, side):
+    """دکمه‌ی ⚡ ورود سریع زیر هر مورد لیست انتظار."""
+    s = get_session(chat_id)
+    rec = (s.get('touch_wait') or {}).get(tid)
+    if not rec or rec.get('status') != 'waiting':
+        send_message(chat_id, 'ℹ️ این مورد دیگر در لیست انتظار نیست.'); return
+    symbol = rec['symbol']
+    had = any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
+    quick_channel_trade(chat_id, symbol, side, skip_trend=True)
+    s = get_session(chat_id)
+    if not had and any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
+        with _TOUCH_LOCK:
+            rec['status'] = 'entered_manual'; rec['manual_side'] = side; rec['finished_at'] = time.time()
+        save_session(chat_id)
+
+
+def _touch_block_lines(r, n, now):
+    tf = r.get('tf') or '5min'
+    rem = max(0, int((float(r.get('expires_at', 0) or 0) - now + 59) // 60))
+    level_txt, scn_txt = _assist_describe_source(r.get('reason') or '', r.get('level_token'), r.get('level_value'), r.get('scn'))
+    d = r.get('dir')
+    dir_txt = (f"{'🟢 خرید' if d == 'BUY' else '🔴 فروش'} ({r.get('agree', 0)} از {r.get('total', 0)} فیلتر موافق)") if d else '⏳ هنوز مشخص نیست'
+    lines = [f"{n}) `{r['symbol']}` · {TF_DISPLAY.get(tf, tf)} · ⏳ {rem} دقیقه",
+             f"    🎯 سطح: `{level_txt}` | سناریو: `{scn_txt}`",
+             f"    جهت: {dir_txt}"]
+    votes = r.get('votes') or []
+    if not votes:
+        lines.append('    (هیچ فیلتر روشنی نیست؛ فقط ورود سریع)')
+    for i, v in enumerate(votes, 1):
+        lines.append(f"    {i}. {v['label']}: {_TOUCH_ST_TXT.get(v.get('status'), '⏳ منتظر تایید')}" + (f" ({v['detail']})" if v.get('detail') else ''))
+    if r.get('block_note'):
+        lines.append(f"    ⛔ ورود خودکار انجام نشد: {r['block_note']}")
+    return lines
+
+
+def _touch_buttons(r):
+    sym, tid, tf = r['symbol'], r['id'], r.get('tf') or '5min'
+    try:
+        chart = {'text': '📈 چارت TradingView', 'url': tradingview_chart_url(sym, tf)}
+    except Exception:
+        chart = None
+    d = r.get('dir')
+    if d:
+        qe = [{'text': f"⚡ ورود سریع {sym} {'🟢 خرید' if d == 'BUY' else '🔴 فروش'}", 'callback_data': f"/tw_qe_{'buy' if d == 'BUY' else 'sell'}_{tid}"}]
+    else:
+        qe = [{'text': f"⚡ {sym} 🟢 خرید", 'callback_data': f'/tw_qe_buy_{tid}'}, {'text': f"⚡ {sym} 🔴 فروش", 'callback_data': f'/tw_qe_sell_{tid}'}]
+    return [qe + ([chart] if chart else [])]
+
+
+def _touch_pending_section(s, char_budget=2800):
+    """(lines, rows, تعداد) - برخوردهای در حال رأی‌گیری برای نمایش بالای «📋 سیگنال‌های در انتظار»."""
+    now = time.time()
+    with _TOUCH_LOCK:
+        recs = [r for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting' and float(r.get('expires_at', 0) or 0) > now]
+    recs.sort(key=lambda r: -float(r.get('created_at', 0) or 0))
+    if not recs:
+        return [], [], 0
+    mode = s.get('touch_auto_mode', 'all')
+    lines = [f"🎯 *برخورد با سطح — رأی‌گیری فیلترها ({len(recs)})*", f"🤖 ورود خودکار: {TOUCH_AUTO_LABELS.get(mode, mode)}", '']
+    rows, used, shown = [], 0, 0
+    for n, r in enumerate(recs, 1):
+        block = _touch_block_lines(r, n, now)
+        size = sum(len(x) + 1 for x in block) + 1
+        if shown and used + size > char_budget:
+            break
+        lines += block + ['']
+        used += size; shown += 1
+        rows.extend(_touch_buttons(r))
+    if len(recs) > shown:
+        lines.append(f"… و {len(recs) - shown} مورد دیگر (بعد از ورود یا انقضای موارد بالا نمایش داده می‌شوند)")
+        lines.append('')
+    return lines, rows, len(recs)
+
+
+def _touch_tick(chat_id):
+    s = get_session(chat_id)
+    now = time.time()
+    changed = False
+    for r in [r for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting']:
+        try:
+            if any(p.get('symbol') == r['symbol'] for p in s.get('paper_positions', [])):
+                r['status'] = 'skipped'; r['finished_at'] = now; changed = True; continue
+            if now >= float(r.get('expires_at', 0) or 0):
+                r['status'] = 'expired'; r['finished_at'] = now; changed = True; continue
+            if now - float(r.get('last_eval', 0) or 0) < TOUCH_EVAL_INTERVAL_SECONDS:
+                continue
+            _touch_eval_one(chat_id, r)
+            changed = True
+            if r.get('auto_ok') and gate_on(s, 'gate_touch_vote_enabled'):
+                _touch_auto_enter(chat_id, r)
+        except Exception:
+            logger.exception('touch tick failed chat=%s symbol=%s', chat_id, r.get('symbol'))
+    if changed:
+        save_session(chat_id)
+
+
+def _touch_wait_loop():
+    while True:
+        try:
+            for chat_id, s in list(USER_SESSIONS.items()):
+                try:
+                    if any(r.get('status') == 'waiting' for r in (s.get('touch_wait') or {}).values()):
+                        _touch_tick(chat_id)
+                except Exception:
+                    logger.exception('touch wait loop per-user failure chat=%s', chat_id)
+        except Exception:
+            logger.exception('touch wait loop failed')
+        time.sleep(10)
+# END V3.44.14
+
+
 def _assist_pending_recs(s):
     """همه‌ی سیگنال‌های در انتظار (ذخیره‌شده + منتظر تصمیم)، جدیدترین اول. V3.42: بدون فیلتر زمان."""
     now = time.time()
@@ -8941,13 +9269,21 @@ def assist_pending_list(chat_id, message_id=None):
     """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
     recs = _assist_pending_recs(s)
-    if not recs:
+    t_lines, t_rows, t_total = _touch_pending_section(s)
+    if not recs and not t_total:
         send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
         return
     shown = recs[:25]
-    lines = [f"📋 *سیگنال‌های در انتظار ({len(recs)})*", ""]
+    lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + t_total})*", ""]
     rows = []
+    if t_total:
+        lines += t_lines
+        rows += t_rows
+    _n_shown = 0
     for n, r in enumerate(shown, 1):
+        if sum(len(x) + 1 for x in lines) > 3300:
+            break
+        _n_shown = n
         is_long = r['sig'] == 'BUY'
         tf = r.get('tf') or '5min'
         side_txt = '🟢 خرید' if is_long else '🔴 فروش'
@@ -8971,9 +9307,10 @@ def assist_pending_list(chat_id, message_id=None):
         lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · {state_txt}")
         lines.append(f"    ورود `{fmt(float(r['entry']))}`{price_txt}")
         rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'}" + (' 💾' if r.get('saved') else ''), 'callback_data': f"/assist_open_{r['id']}"}])
-    if len(recs) > len(shown):
-        lines.append(f"\n… و {len(recs) - len(shown)} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
-    lines.append("\nروی هر ردیف بزنید تا کارت آن سیگنال دوباره پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
+    if len(recs) > _n_shown:
+        lines.append(f"\n… و {len(recs) - _n_shown} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
+    if recs:
+        lines.append("\nروی هر ردیف بزنید تا کارت آن سیگنال دوباره پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
     rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
     rows.append([{'text': '⏳ صف تایید حرکت', 'callback_data': '/fav_queue'}])
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
@@ -9411,6 +9748,14 @@ async def scan_symbol(http,chat_id,symbol):
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    if gate_on(s, 'gate_touch_vote_enabled'):
+        # V3.44.14: برخورد با سطح وارد لیست انتظار می‌شود؛ جهت بعد از رأی‌گیری فیلترها تعیین می‌شود (نه از خود برخورد).
+        try:
+            _tv = await asyncio.to_thread(_touch_register, chat_id, symbol, sig, reason, tf)
+        except Exception:
+            logger.exception('touch register failed symbol=%s', symbol)
+            _tv = ('touch_error', 'خطا در ثبت برخورد')
+        return _entry_diag_result(chat_id, symbol, _tv[0], _tv[1], 'touch_vote', sig, diagnostics=diagnostics)
     if gate_on(s, 'gate_btceth_aligned_enabled'):
         try:
             _ba_ok, _ba_txt = await asyncio.to_thread(btc_eth_aligned, tf)
@@ -9747,6 +10092,8 @@ def _scenario_label(scn, reason=''):
 #   key: (برچسب دکمه، پیش‌فرض، بخش منو، توضیح)
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
+    'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'entry_filter', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_filter', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_filter', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
@@ -9961,6 +10308,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
              {'text': f"⏱ مهلت: {_fwt // 60} دقیقه", 'callback_data': '/fav_wait_next'}],
             [{'text': ('📏 سقف: بر اساس فاصله تا هدف ✅' if _fav_max_mode(s) == 'tp' else '📏 سقف: عدد ثابت R'), 'callback_data': '/fav_max_mode_toggle'}],
             [{'text': '⏳ مشاهده‌ی صف تایید', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
+            [{'text': f"🤖 ورود خودکار رأی‌گیری: {TOUCH_AUTO_LABELS.get(s.get('touch_auto_mode', 'all'), 'همه‌ی فیلترها موافق')} (تغییر)", 'callback_data': '/touch_auto_next'}],
         ] + gate_rows('entry_filter') + [back_entry]}
 
     if section == 'structure':
@@ -11149,6 +11497,10 @@ def process_command(cmd,chat_id,message_id=None):
             '`جهت (خرید/فروش)`\n`نماد`\n`قیمت ورود (یا بازار)`\n`حد سود`\n`حد ضرر`\n\n'
             'مثال:\n`خرید`\n`BTC`\n`بازار`\n`67000`\n`64000`'
         ); return
+    if cl.startswith('/tw_qe_'):
+        # V3.44.14: ورود سریع زیر هر مورد لیست انتظار: /tw_qe_<buy|sell>_<id>
+        _tw_side, _tw_id = cl[len('/tw_qe_'):].split('_', 1)
+        touch_quick_entry(chat_id, _tw_id, 'BUY' if _tw_side == 'buy' else 'SELL'); return
     if cl.startswith('/qt_buy_') or cl.startswith('/qt_sell_'):
         # ورود سریع از دکمه‌های 🟢/🔴 زیر پیام کانال: /qt_<buy|sell>_<SYMBOL>
         _, qt_side, qt_sym = cl.split('_', 2)
@@ -11555,6 +11907,13 @@ def process_command(cmd,chat_id,message_id=None):
         _sec = cl[len('/trade_filter_'):]
         _kb_sec = _sec
         send_message(chat_id, filter_section_text(_sec), trade_filter_management_keyboard(chat_id, _kb_sec))
+        return
+    if cl == '/touch_auto_next':
+        _cur_m = s.get('touch_auto_mode', 'all')
+        _i_m = TOUCH_AUTO_MODES.index(_cur_m) if _cur_m in TOUCH_AUTO_MODES else 0
+        s['touch_auto_mode'] = TOUCH_AUTO_MODES[(_i_m + 1) % len(TOUCH_AUTO_MODES)]
+        save_session(chat_id)
+        send_message(chat_id, f"🤖 حد ورود خودکار رأی‌گیری: {TOUCH_AUTO_LABELS[s['touch_auto_mode']]}\n\n{TOUCH_AUTO_DESC[s['touch_auto_mode']]}\n\nروی برخوردهای بعدی (و بروزرسانی بعدی موارد داخل لیست) اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'entry_filter'))
         return
     # V3.43.31: روشن/خاموش کردن کلیدهای رجیستری گیت‌ها (GATE_REGISTRY)
     if cl.startswith('/toggle_gate_'):
@@ -12723,6 +13082,7 @@ def main():
     Thread(target=lambda: (time.sleep(11), _background_scan_loop()), daemon=True, name='background-scan').start()
     Thread(target=lambda: (time.sleep(13), _assist_loop()), daemon=True, name='assist').start()
     Thread(target=lambda: (time.sleep(12), _fav_wait_loop()), daemon=True, name='fav-confirm-wait').start()
+    Thread(target=lambda: (time.sleep(14), _touch_wait_loop()), daemon=True, name='touch-vote-wait').start()
     Thread(target=lambda: (time.sleep(15), _auto_delete_loop()), daemon=True, name='auto-delete').start()
     Thread(target=lambda: (time.sleep(17), _day_cleanup_loop()), daemon=True, name='day-cleanup').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
