@@ -2732,17 +2732,17 @@ def normalize_price(chat_id,symbol,price):
         return float(price)
 
 
-def safe_size(chat_id,s,entry,sl,force=False,dynamic=False):
+def safe_size(chat_id,s,entry,sl,force=False,dynamic=False,risk_mult=1.0):
     try:
         balance=exchange_balance(chat_id) if s['trading_mode']=='REAL' else float(s['paper_balance'])
     except ExchangeStateError as exc:
         return 0,f'account state unavailable: {exc}'
     stop_dist=abs(entry-sl)/max(abs(entry),1e-12)
     if stop_dist<=0 or not math.isfinite(stop_dist): return 0,'invalid stop distance'
-    risk_budget=balance*float(s['risk_per_trade_pct'])/100
+    risk_budget=balance*float(s['risk_per_trade_pct'])/100*float(risk_mult)
     leverage=max(1,int(s['leverage']))
     # dynamic=True: مارجین ثابتِ تنظیمات نادیده گرفته می‌شود و فقط ریسک هر معامله/فاصله‌ی SL و موجودی آزاد تعیین‌کننده‌اند.
-    requested_margin=float('inf') if dynamic else float(s['trade_amount_usdt'])
+    requested_margin=float('inf') if dynamic else float(s['trade_amount_usdt'])*float(risk_mult)
     # force (تایید دستی): سقف درصد مصرف مارجین نادیده گرفته می‌شود؛ فقط موجودی آزاد واقعی محدودکننده است.
     cap=balance if force else balance*float(s['max_margin_usage_pct'])/100
     available=max(0,cap-reserved_margin(s))
@@ -4432,6 +4432,9 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
             alignment_line = ""
         scenario_tag = extract_scenario_tag(trade.get('entry_reason') or trade.get('signal_reason') or '')
         scenario_line = f"• سناریو: `{scenario_tag} - {_scenario_label(scenario_tag, trade.get('entry_reason') or trade.get('signal_reason') or '')}`\n" if scenario_tag else ""
+        _ht = trade.get('h4_tier')
+        if isinstance(_ht, dict) and float(_ht.get('risk_mult') or 1.0) < 1.0:
+            scenario_line = f"• ⚖️ رتبه‌ی ۴ ساعته: ریسک این معامله ×{float(_ht['risk_mult']):g} شد (رژیم ۴ ساعته: {_ht.get('h4_regime')})\n" + scenario_line
         if trade.get('inverse_trade'):
             scenario_line = "• 🔁 *معامله‌ی معکوس:* جهت برعکسِ سیگنال (متن سناریو مربوط به سیگنال اصلی است)\n" + scenario_line
         level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
@@ -4462,6 +4465,96 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
                 save_session(chat_id)
     except Exception:
         logger.exception('chart error')
+
+
+BOT_VERSION = '3.44.13'
+H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
+_SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
+                  'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
+                  'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
+                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'timeframe', 'active_strategy',
+                  'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
+                  'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
+_SETTINGS_LOCK = RLock()
+_SETTINGS_REGISTRY = {}
+PATH_LOG_MAX = 300
+
+
+def _settings_registry_path():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'settings_registry.json')
+
+
+def _settings_register(s):
+    """V3.44.12: تنظیمات و کلیدهای فعال لحظه‌ی ورود را به یک هش کوتاه تبدیل می‌کند و متن کامل را یک‌بار در
+    settings_registry.json نگه می‌دارد؛ هر معامله فقط هش را دارد (settings_hash)."""
+    try:
+        cfg = {k: s.get(k) for k in _SETTINGS_KEYS}
+        cfg['strategy_config'] = dict(s.get('strategy_config') or {})
+        cfg['filters'] = dict(s.get('filters') or {})
+        raw = json.dumps(cfg, sort_keys=True, ensure_ascii=False, default=str)
+        h = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:10]
+        with _SETTINGS_LOCK:
+            if h not in _SETTINGS_REGISTRY:
+                _SETTINGS_REGISTRY[h] = True
+                path = _settings_registry_path()
+                data = {}
+                if os.path.exists(path):
+                    try:
+                        with open(path, 'r', encoding='utf-8') as fh:
+                            data = json.load(fh)
+                    except Exception:
+                        data = {}
+                if h not in data:
+                    data[h] = {'first_seen': time.time(), 'first_seen_text': fmt_scan_time(time.time()), 'bot_version': BOT_VERSION, 'config': json.loads(raw)}
+                    if len(data) > 300:
+                        for k in sorted(data, key=lambda x: data[x].get('first_seen', 0))[:len(data) - 300]:
+                            data.pop(k, None)
+                    tmp = path + '.tmp'
+                    with open(tmp, 'w', encoding='utf-8') as fh:
+                        json.dump(data, fh, ensure_ascii=False, indent=1, default=str)
+                    os.replace(tmp, path)
+        return h
+    except Exception:
+        logger.exception('settings register failed')
+        return None
+
+
+def _settings_lookup(hashes):
+    try:
+        path = _settings_registry_path()
+        if not os.path.exists(path):
+            return {}
+        with _SETTINGS_LOCK:
+            with open(path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+        return {h: data[h] for h in set(x for x in hashes if x) if h in data}
+    except Exception:
+        logger.debug('settings lookup failed', exc_info=True)
+        return {}
+
+
+def _path_log(pos, price):
+    """V3.44.12: مسیر قیمت پوزیشن بر حسب R (مثبت = به نفع معامله) با ترتیب زمانی: [ثانیه از ورود, R].
+    نقطه وقتی ثبت می‌شود که ≥۰.۱R از نقطه‌ی قبلی فاصله گرفته یا از ورود رد شده باشد؛ اکسترمم‌ها جدا نگه داشته می‌شوند."""
+    try:
+        bt = pos.get('be_track')
+        if not isinstance(bt, dict): return
+        entry = float(bt['entry']); rd = float(bt['risk_dist']); pr = float(price)
+        if entry <= 0 or rd <= 0 or pr <= 0: return
+        r = ((pr - entry) / rd) if bt['long'] else ((entry - pr) / rd)
+        t = int(max(0.0, time.time() - float(pos.get('opened_at') or time.time())))
+        if r > float(pos.get('path_max_r', -1e9)):
+            pos['path_max_r'] = round(r, 3); pos['path_max_t'] = t
+        if r < float(pos.get('path_min_r', 1e9)):
+            pos['path_min_r'] = round(r, 3); pos['path_min_t'] = t
+        path = pos.setdefault('path', [])
+        last = path[-1][1] if path else None
+        if last is None or abs(r - last) >= 0.1 or ((r > 0) != (last > 0)):
+            path.append([t, round(r, 2)])
+            if len(path) > PATH_LOG_MAX:
+                del path[1:-1:2]
+    except Exception as exc:
+        logger.debug('path log failed trade=%s: %s', (pos or {}).get('trade_id'), exc)
 
 
 BE_TRACK_TRIGGERS = (0.3, 0.5, 0.75)   # V3.44.11: تریگرهای ردیاب مجازی سر به سر (بر حسب R)
@@ -4782,14 +4875,88 @@ def _regime_alignment_snapshot(symbol, timeframe):
 _LAST_BLOCK_REASON = {}
 
 
+_BLK_CTX = {}
+_REJECT_LOCK = RLock()
+_REJECT_RECENT = {}
+_REJECT_APPENDS = [0]
+
+
+def _reject_log_path():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'rejected_signals.jsonl')
+
+
+def _reject_record(chat_id, reason):
+    """V3.44.12: هر سیگنالی که به مرحله‌ی ورود رسید ولی رد شد (دلیل + قیمت‌ها) در rejected_signals.jsonl ثبت می‌شود.
+    تکراری‌ها (همان نماد/جهت/دلیل) تا ۱۰ دقیقه ثبت نمی‌شوند."""
+    try:
+        ctx = _BLK_CTX.get(chat_id)
+        now = time.time()
+        if not ctx or now - float(ctx.get('ts') or 0) > 5.0:
+            return
+        key = (chat_id, ctx['symbol'], ctx['side'], str(reason)[:60])
+        with _REJECT_LOCK:
+            if now - _REJECT_RECENT.get(key, 0.0) < 600.0:
+                return
+            _REJECT_RECENT[key] = now
+            if len(_REJECT_RECENT) > 4000:
+                for k in [k for k, v in _REJECT_RECENT.items() if now - v > 600.0]:
+                    _REJECT_RECENT.pop(k, None)
+            rec = {'ts': now, 'time': fmt_scan_time(now), 'chat_id': chat_id, 'symbol': ctx['symbol'], 'side': ctx['side'],
+                   'scenario': ctx.get('scenario'), 'signal_price': ctx.get('signal_price'), 'sl': ctx.get('sl'), 'tp': ctx.get('tp'),
+                   'forced': bool(ctx.get('force')), 'reason': str(reason)[:300], 'bot_version': BOT_VERSION}
+            path = _reject_log_path()
+            with open(path, 'a', encoding='utf-8') as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+            _REJECT_APPENDS[0] += 1
+            if _REJECT_APPENDS[0] % 300 == 0:       # نگه‌داری فقط ۴۰۰۰ ردیف آخر
+                with open(path, 'r', encoding='utf-8') as fh:
+                    lines = fh.readlines()
+                if len(lines) > 6000:
+                    tmp = path + '.tmp'
+                    with open(tmp, 'w', encoding='utf-8') as fh:
+                        fh.writelines(lines[-4000:])
+                    os.replace(tmp, path)
+    except Exception:
+        logger.debug('reject record failed', exc_info=True)
+
+
+def _reject_tail(chat_id, n=500):
+    try:
+        path = _reject_log_path()
+        if not os.path.exists(path):
+            return []
+        with _REJECT_LOCK:
+            with open(path, 'r', encoding='utf-8') as fh:
+                lines = fh.readlines()
+        out = []
+        for ln in lines[-4000:]:
+            try:
+                r = json.loads(ln)
+            except Exception:
+                continue
+            if str(r.get('chat_id')) == str(chat_id):
+                out.append(r)
+        return out[-n:]
+    except Exception:
+        logger.debug('reject tail failed', exc_info=True)
+        return []
+
+
 def _blk(chat_id, reason):
     """دلیل رد شدن ورود را نگه می‌دارد (برای نمایش در حالت دستیار) و False برمی‌گرداند."""
     _LAST_BLOCK_REASON[chat_id] = reason
+    _reject_record(chat_id, reason)
     return False
 
 
 def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',generation=None,require_active=True,structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,order_type=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None,keep_levels=False,allow_inverse=True):
     _LAST_BLOCK_REASON.pop(chat_id, None)
+    try:
+        _m_scn = re.search(r'SCN=(\d+)', reason or '')
+        _BLK_CTX[chat_id] = {'ts': time.time(), 'symbol': symbol, 'side': side, 'signal_price': float(signal_price), 'sl': float(sl), 'tp': float(tp),
+                             'scenario': int(_m_scn.group(1)) if _m_scn else None, 'force': bool(force)}
+    except Exception:
+        pass
     s=get_session(chat_id)
     # V3.43.15: ۳۰ دقیقه‌ی آخر کندل ۴ ساعته - هیچ معامله‌ای باز نمی‌شود (حتی force/دستی/دستیار)
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
@@ -4799,6 +4966,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     # فاصله‌ی حد ضرر و فاصله‌ی حد سود دقیقاً همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)،
     # پس نسبت پاداش به ریسک هم همان سیگنال اصلی (حداقل مقدار تنظیم‌شده) می‌ماند و ضرر از سود کمتر است.
     inverse_applied = False
+    _signal_side = side
     _shadow_spec = None
     if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
         _orig_side = side
@@ -4938,8 +5106,21 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 _n=len(_valid)
                 paper_stage_rows=[{'price':float(st['price']),'name':st.get('name'),'fraction':1.0/_n,'done':False} for st in _valid[:-1]]
                 tp_level_name=' → '.join(str(st.get('name')) for st in _valid)+' (پله‌ای)'
+    # V3.44.13: رتبه‌ی نرم با رژیم ۴ ساعته - سیگنال را رد نمی‌کند، فقط ریسک/حجم را کم می‌کند
+    _tier_mult = 1.0; _tier_info = None
+    if gate_on(s, 'gate_h4_tier_enabled') and not force:
+        try:
+            _reg = _symbol_h4_regime(symbol)
+            if _reg is not None:
+                _sig_long = side_long(_signal_side)
+                _aligned = (_reg == 'BULLISH' and _sig_long) or (_reg == 'BEARISH' and not _sig_long)
+                _reduce = _aligned if inverse_applied else (not _aligned)
+                if _reduce: _tier_mult = float(H4_TIER_REDUCED_RISK_MULT)
+                _tier_info = {'h4_regime': _reg, 'signal_aligned': bool(_aligned), 'risk_mult': _tier_mult}
+        except Exception:
+            logger.exception('h4 tier failed symbol=%s', symbol)
     s['_symbol_tmp']=symbol
-    margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force)
+    margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force,risk_mult=_tier_mult)
     s.pop('_symbol_tmp',None)
     if margin<=0:
         return _blk(chat_id, f'محاسبه‌ی حجم/مارجین ناموفق: {amount_or_reason}')
@@ -4984,6 +5165,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             trade['shadow'] = {'side': _shadow_spec['side'], 'entry': _sh_entry, 'sl': _sh_sl, 'tp': _sh_tp, 'status': 'open'}
         except Exception:
             logger.exception('shadow setup failed symbol=%s', symbol)
+    # V3.44.12: فیلدهای کمکِ ارزیابی (قیمت سیگنال/ورود خام، SL و TP اولیه، نسخه و هش تنظیمات)
+    try:
+        trade.update({'signal_price': float(signal_price), 'raw_entry_price': float(_raw_entry_price), 'sl_initial': float(sl), 'tp_initial': float(tp),
+                      'bot_version': BOT_VERSION, 'settings_hash': _settings_register(s), 'h4_tier': _tier_info})
+    except Exception:
+        logger.exception('trade extra fields failed symbol=%s', symbol)
     # V3.44.11: ردیاب مجازی «انتقال SL به سر به سر» - فقط گزارش؛ روی معامله اثری ندارد
     try:
         trade['be_track'] = {'entry': float(price), 'risk_dist': float(risk_dist), 'long': bool(side_long(side)),
@@ -5686,6 +5873,31 @@ def _close_snapshot_lines(pos):
     return ''.join(out)
 
 
+_JOURNAL_EXTRA_KEYS = (
+    'margin', 'leverage', 'risk_usdt', 'risk_pct', 'risk_distance', 'planned_rr', 'quality_score', 'quality_label',
+    'signal_price', 'raw_entry_price', 'sl_initial', 'tp_initial', 'fee_usdt', 'funding_usdt', 'platform_fee_usdt',
+    'pnl_gross_usdt', 'pnl_before_platform_fee_usdt', 'pnl_is_estimate', 'sl_slippage_r', 'partial_exits', 'partial_pnl_usdt',
+    'partial_fee_usdt', 'market_adx_at_entry', 'timeframe_bull_pct_at_entry', 'timeframe_bear_pct_at_entry', 'symbol_adx_at_entry',
+    'entry_warnings', 'bot_version', 'settings_hash', 'path', 'path_max_r', 'path_max_t', 'path_min_r', 'path_min_t',
+    'mfe_usdt', 'mae_usdt', 'paper_slippage_bps', 'paper_funding_rate_pct_8h', 'setup_id', 'h4_tier')
+
+
+def _journal_extra_fields(pos):
+    """V3.44.12: فیلدهای اضافه‌ی ژورنال برای ایرادیابی (هزینه‌ها، مسیر قیمت، SL/TP اولیه، قیمت سیگنال، نسخه و هش تنظیمات)."""
+    out = {}
+    try:
+        for k in _JOURNAL_EXTRA_KEYS:
+            v = pos.get(k)
+            if v is not None:
+                out[k] = v
+        er = pos.get('entry_reason') or pos.get('signal_reason')
+        if er:
+            out['entry_reason'] = str(er)[:400]
+    except Exception:
+        logger.debug('journal extra failed', exc_info=True)
+    return out
+
+
 def journal_append_closed(chat_id, pos):
     """رکورد پوزیشن بسته‌شده را به فایل ژورنال JSON اضافه می‌کند (نوشتن اتمیک؛ خطا هیچ‌وقت جلوی بستن پوزیشن را نمی‌گیرد)."""
     try:
@@ -5702,6 +5914,7 @@ def journal_append_closed(chat_id, pos):
             'mfe_r': pos.get('mfe_r'), 'mae_r': pos.get('mae_r'), 'duration_seconds': pos.get('duration_seconds'),
             'entry_snapshot': pos.get('entry_snapshot'),
             'inverse_trade': bool(pos.get('inverse_trade')), 'shadow': pos.get('shadow'), 'be_sim': pos.get('be_sim'),
+            **_journal_extra_fields(pos),
             'preset': pos.get('preset'), 'preset_modified': pos.get('preset_modified'), 'preset_diff': pos.get('preset_diff'),
         }
         path = _journal_path()
@@ -6463,6 +6676,7 @@ def update_positions(chat_id):
             update_trade_excursions(p,high,low)
             _shadow_track(p,high,low)
             _be_track(p, price)
+            _path_log(p, price)
             p['last_unrealized_pnl'] = ((price-float(p['entry_price']))*abs(float(p.get('amount') or 0))
                                         if side_long(p['side']) else
                                         (float(p['entry_price'])-price)*abs(float(p.get('amount') or 0)))
@@ -6473,6 +6687,7 @@ def update_positions(chat_id):
             update_trade_excursions(p, float(price), float(price))
             _shadow_track(p, float(price), float(price))
             _be_track(p, float(price))
+            _path_log(p, float(price))
             p['last_unrealized_pnl']=float(p.get('margin',0))*(((price-float(p['entry_price']))/float(p['entry_price'])) if side_long(p['side']) else ((float(p['entry_price'])-price)/float(p['entry_price'])))*float(p['leverage'])
             p['last_price']=float(price)
 
@@ -9543,6 +9758,7 @@ GATE_REGISTRY = {
     'gate_fc_adx_enabled':        ('تایید روند ADX', True, 'entry_filter', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_filter', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی جهت معامله برعکس می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. فاصله‌ی حد ضرر و فاصله‌ی حد سود همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)، پس نسبت پاداش به ریسک هم همان سیگنال اصلی است و ضرر از سود کمتر می‌ماند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
+    'gate_h4_tier_enabled': ('رتبه‌ی نرم با رژیم ۴ ساعته (کاهش حجم، بدون رد سیگنال)', False, 'quality', 'پیش‌فرض خاموش. سیگنالی را رد نمی‌کند؛ فقط حجم/ریسک معامله را کم می‌کند. اگر رژیم ۴ ساعته‌ی نماد با جهتِ سیگنال هم‌جهت باشد (خرید با ۴ ساعته‌ی صعودی، فروش با نزولی) با حجم کامل وارد می‌شود؛ اگر هم‌جهت نباشد (خلاف یا رنج) ریسک معامله به نصف (قابل‌تنظیم با H4_TIER_REDUCED_RISK_MULT) کم می‌شود. در حالت معکوس منطق برعکس است: سیگنال‌های هم‌جهت با ۴ ساعته (که بیشتر برنده‌اند) با حجم کم‌تر معکوس می‌شوند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
@@ -9949,7 +10165,9 @@ def export_trade_journal(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN:
         return False
     trades = _journal_trades_for(chat_id)
-    raw = json.dumps({'version': 1, 'chat_id': chat_id, 'generated_at': time.time(), 'trades': trades},
+    raw = json.dumps({'version': 2, 'bot_version': BOT_VERSION, 'chat_id': chat_id, 'generated_at': time.time(), 'trades': trades,
+                      'settings': _settings_lookup([t.get('settings_hash') for t in trades]),
+                      'rejected': _reject_tail(chat_id, 500)},
                      ensure_ascii=False, indent=1, default=str).encode('utf-8')
     try:
         resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
