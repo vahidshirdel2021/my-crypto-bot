@@ -9,7 +9,7 @@ block = src[a:b]
 sent, calls, tgc = [], [], []
 favc, astc = [], []
 S = {'paper_positions': [], 'timeframe': '5min', 'trading_mode': 'PAPER', 'is_bot_active': True, 'daily_stopped': False,
-     'assist_expiry_seconds': 900, 'touch_auto_mode': 'all', 'traded_levels': {}, 'strategy_config': {}}
+     'assist_expiry_seconds': 1800, 'touch_auto_mode': 'all', 'traded_levels': {}, 'strategy_config': {}}
 ON = {f'gate_fc_{k}_enabled': True for k in ('btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'vol')}
 st = {'h4': 'BEARISH', 'tf': {'5min': 'BEARISH', '15min': 'BEARISH'}, 'btc': -2, 'eth': -1,
       'row': {'rsi': 40, 'macd_hist': -1.0, 'adx': 30, 'plus_di': 10, 'minus_di': 25, 'volume_ratio': 2.0, 'close': 99.0},
@@ -219,31 +219,93 @@ S['manual_block_sell_entries'] = False; rec = list(S['touch_wait'].values())[0];
 g['_touch_tick'](1); assert rec['status'] == 'expired'
 print('touch_vote_selftest OK')
 
-# --- لیست انتظار: هر مورد پیام مستقل؛ هدر فقط خلاصه؛ محافظت از حذف خودکار ---
+# --- V3.44.21: لیست انتظار فقط لیست است (نماد + تعداد رأی موافق)؛ کارت هر مورد با لمس نمادش می‌آید ---
 import ast
 tree = ast.parse(src)
-fsrc = {n.name: ast.get_source_segment(src, n) for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ('assist_pending_list', '_message_protected', '_after_message_deleted')}
-assert len(fsrc) == 3
+_names = ('assist_pending_list', 'touch_open_card', '_message_protected', '_after_message_deleted', '_pending_vote_ok', 'pending_vote_filter_cycle')
+fsrc = {n.name: ast.get_source_segment(src, n) for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in _names}
+assert len(fsrc) == 6
 S['touch_wait'].clear(); S['touch_wait_seen'].clear(); S['paper_positions'] = []; calls.clear(); tgc.clear(); st['row']['rsi'] = 50
 for i in range(10):
     g['_touch_register'](1, f'S{i:02d}', 'SELL', f'HVL={100 + i}.0 SCN=2', '5min'); time.sleep(0.005)
+tgc.clear()
 hdr = []
-g2 = dict(g, TOUCH_CARDS_PER_LIST=8, _KB_ANCHOR={}, _KB_ANCHOR_LOCK=RLock(), USER_SESSIONS={1: S}, _assist_pending_recs=lambda s_: [],
+g2 = dict(g, PENDING_HIGH_VOTE_PCT=0.70, _PENDING_VF_ORDER=('all', 'high', 'full'),
+          _PENDING_VF_LABEL={'all': 'ALL', 'high': 'HIGH', 'full': 'FULL'}, TOUCH_CARDS_PER_LIST=25, _KB_ANCHOR={}, _KB_ANCHOR_LOCK=RLock(), USER_SESSIONS={1: S}, _assist_pending_recs=lambda s_: [],
           send_message=lambda c, tx, mk=None, message_id=None, **k: hdr.append((tx, mk)), save_session=lambda c: None)
 for s_ in fsrc.values():
     exec(s_, g2)
 g2['assist_pending_list'](1)
-assert len(hdr) == 1 and '10 مورد' in hdr[0][0] and 'RSI' not in hdr[0][0]
-sends = [p for m, p in tgc if m == 'sendMessage']
-order = [re.search(r'`(S\d\d)`', p['text']).group(1) for p in sends]
-assert order == [f'S{i:02d}' for i in range(2, 10)], order                       # ۸ مورد جدیدتر؛ قدیمی‌تر اول، جدیدترین آخر
-for p in sends:
-    sym_ = re.search(r'`(S\d\d)`', p['text']).group(1)
-    assert any(f"/tw_qe_" in b.get('callback_data', '') for row in p['reply_markup']['inline_keyboard'] for b in row) and sym_ in p['text']
-mids = {r['symbol']: r['msg_id'] for r in S['touch_wait'].values() if r.get('msg_id')}
-assert len(mids) == 8
+assert len(hdr) == 1 and '10 مورد' in hdr[0][0]
+assert not [p for m, p in tgc if m == 'sendMessage'], 'لیست نباید کارت‌ها را خودکار بفرستد'
+txt, mk = hdr[0]
+for i in range(10):
+    assert f'`S{i:02d}`' in txt
+rows_ = [b for row in mk['inline_keyboard'] for b in row if b['callback_data'].startswith('/tw_open_')]
+assert len(rows_) == 10
+for rec_ in S['touch_wait'].values():
+    b_ = next(b for b in rows_ if b['callback_data'] == f"/tw_open_{rec_['id']}")
+    assert rec_['symbol'] in b_['text']
+    if rec_.get('dir'):
+        assert f"({rec_['agree']}/{rec_['total']})" in b_['text'] and f"{rec_['agree']} از {rec_['total']} رأی موافق" in txt
+# لمس یک نماد => فقط کارت همان مورد (با دکمه‌های خودش) می‌آید
 r5 = next(r for r in S['touch_wait'].values() if r['symbol'] == 'S05')
+g2['touch_open_card'](1, r5['id'])
+sends = [p for m, p in tgc if m == 'sendMessage']
+assert len(sends) == 1 and '`S05`' in sends[0]['text'] and r5['msg_id']
+assert any('/tw_qe_' in b.get('callback_data', '') for row in sends[0]['reply_markup']['inline_keyboard'] for b in row)
+# لمس دوباره: کارت قبلی همان مورد حذف و کارت تازه فرستاده می‌شود (تکراری نمی‌ماند)
+old_mid = r5['msg_id']; g2['touch_open_card'](1, r5['id'])
+assert any(m == 'deleteMessage' and p['message_id'] == old_mid for m, p in tgc)
+# مورد تمام‌شده
+hdr.clear(); r9 = next(r for r in S['touch_wait'].values() if r['symbol'] == 'S09'); r9['status'] = 'expired'
+g2['touch_open_card'](1, r9['id']); assert 'دیگر در لیست انتظار نیست' in hdr[-1][0]
 assert g2['_message_protected'](1, r5['msg_id'])                                  # منتظر => حذف خودکار ۳ دقیقه‌ای رد می‌شود
 r5['status'] = 'expired'; assert not g2['_message_protected'](1, r5['msg_id'])    # تمام شد => قابل پاک‌سازی
 mid5 = r5['msg_id']; g2['_after_message_deleted'](1, mid5); assert r5['msg_id'] is None
-print('assist list cards OK')
+print('assist list (symbols + votes, card on tap) OK')
+
+# --- V3.44.23: ثبت معکوس‌شده از صف تایید حرکت (flip_from) از بررسی «قبلاً ثبت شده» عبور می‌کند و جهتِ الگو مخالف است ---
+S['touch_wait'].clear(); S['touch_wait_seen'].clear(); S['paper_positions'] = []; S['manual_block_buy_entries'] = True
+r1 = g['_touch_register'](1, 'FLP', 'BUY', 'HVL=100.0 SCN=2', '5min')
+w = [r for r in S['touch_wait'].values() if r['symbol'] == 'FLP'][0]; w['status'] = 'expired'
+assert g['_touch_register'](1, 'FLP', 'SELL', 'HVL=100.0 SCN=2', '5min')[0] == 'touch_skipped'
+st_, _ = g['_touch_register'](1, 'FLP', 'SELL', '🔁 معکوس‌شده از صف تایید حرکت | HVL=100.0 SCN=2', '5min', flip_from='BUY')
+assert st_ != 'touch_skipped'
+fr = [r for r in S['touch_wait'].values() if r['symbol'] == 'FLP' and r['status'] == 'waiting'][0]
+assert fr['flipped_from'] == 'BUY' and fr['touch_sig'] == 'SELL' and any(v['key'] == 'pattern' and v['vote'] == 'SELL' for v in fr['votes'])
+assert '🔁' in g['_touch_card_text'](fr)
+print('flip register OK')
+
+# --- V3.44.24: دکمه‌ی فیلتر رأی در لیست انتظار (همه ← رأی بالا ≥۷۰٪ ← رأی کامل) ---
+_t = time.time() + 600
+def _mk(i, sym, d, ag, tot):
+    return {'id': f'v{i}', 'symbol': sym, 'dir': d, 'agree': ag, 'total': tot, 'status': 'waiting', 'created_at': _t - i, 'expires_at': _t,
+            'tf': '5min', 'votes': [], 'touch_sig': d or 'BUY'}
+S['touch_wait'] = {f'v{i}': r for i, r in enumerate([_mk(0, 'FULL1', 'BUY', 7, 7), _mk(1, 'HIGH1', 'SELL', 5, 7), _mk(2, 'LOW1', 'BUY', 4, 7),
+                                                       _mk(3, 'NODIR', None, 0, 7), _mk(4, 'NOF', 'BUY', 0, 0), _mk(5, 'EDGE', 'BUY', 7, 10)])}
+S.pop('pending_vote_filter', None)
+def _render():
+    hdr.clear(); g2['assist_pending_list'](1)
+    txt, mk = hdr[-1]
+    return txt, mk, [b['text'] for row in mk['inline_keyboard'] for b in row if b['callback_data'].startswith('/tw_open_')]
+txt, mk, btns = _render()
+assert len(btns) == 6 and mk['inline_keyboard'][0][0]['callback_data'] == '/pending_vote_filter' and mk['inline_keyboard'][0][0]['text'] == 'ALL'
+g2['pending_vote_filter_cycle'](1)                      # all -> high
+assert S['pending_vote_filter'] == 'high'
+txt, mk, btns = _render()
+names = sorted(b.split()[1] for b in btns)
+assert names == ['EDGE', 'FULL1', 'HIGH1'], names       # 7/10 = 70% هم رأی بالا حساب می‌شود؛ LOW1 (4/7) و بدون‌جهت/بدون‌فیلتر نه
+assert 'فیلتر رأی' in txt and '3 از 6' in txt and mk['inline_keyboard'][0][0]['text'] == 'HIGH'
+g2['pending_vote_filter_cycle'](1)                      # high -> full
+assert S['pending_vote_filter'] == 'full'
+txt, mk, btns = _render()
+assert [b.split()[1] for b in btns] == ['FULL1'] and 'همه‌ی فیلترها موافق' in txt
+g2['pending_vote_filter_cycle'](1)                      # full -> all
+assert S['pending_vote_filter'] == 'all' and len(_render()[2]) == 6
+# فیلتر همه‌ی موردها را پنهان کند: لیست و دکمه‌ی فیلتر می‌ماند (پیام «هیچ سیگنالی» نمی‌آید)
+for r in S['touch_wait'].values(): r['agree'] = 1
+S['pending_vote_filter'] = 'high'
+txt, mk, btns = _render()
+assert not btns and 'هیچ موردِ برخورد با سطح با این فیلتر جور نیست' in txt and mk['inline_keyboard'][0][0]['callback_data'] == '/pending_vote_filter'
+print('pending vote filter OK')

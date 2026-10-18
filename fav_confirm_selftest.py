@@ -78,6 +78,41 @@ g['_fav_confirm_hold'](1,'AST','BUY',plan,100,99,102,'r'); rec=list(S['fav_wait'
 state['df']=mkdf([100.0,100.2,100.2]); state['live']=100.2
 g['fav_confirm_tick'](1); print(rec['status'],calls[-1][:3])
 assert rec['status']=='card_sent' and calls[-1][0]=='assist' and calls[-1][1]==99 and sent==[]
+# ---- V3.44.23: رد شدن در صف تایید => رفتن به لیست انتظار در جهت مخالف (فقط یک بار) ----
+flips=[]
+g['_touch_register']=lambda chat_id,symbol,sig,reason,tf,plan=None,flip_from=None:(flips.append((symbol,sig,reason,tf,flip_from)) or ('touch_wait','ok'))
+S['assist_mode_enabled']=False
+def newrec(sym,sig,e,sl,tp):
+    S['fav_wait']={}; S['fav_wait_seen']={}
+    g['_fav_confirm_hold'](1,sym,sig,plan,e,sl,tp,'HVL=100.0 SCN=2'); return list(S['fav_wait'].values())[0]
+# 1) خلاف جهت رفت (cancel با قیمت لحظه‌ای) => برعکس
+flips.clear(); rec=newrec('F1','BUY',100,99,102)
+state['df']=mkdf([100,100,100]); state['live']=99.4
+g['fav_confirm_tick'](1); assert rec['status']=='cancelled' and flips and flips[0][:2]==('F1','SELL') and flips[0][4]=='BUY' and 'معکوس‌شده' in flips[0][2] and 'HVL=100.0' in flips[0][2], flips
+# 2) رسیدن به TP => برعکس نمی‌شود
+flips.clear(); rec=newrec('F2','BUY',100,99,102)
+state['df']=mkdf([100,100,100]); state['live']=102.1
+g['fav_confirm_tick'](1); assert rec['status']=='cancelled' and not flips
+# 3) مهلت تمام شد و تایید نگرفت (حرکت نکرد) => برعکس
+flips.clear(); rec=newrec('F3','SELL',100,101,98); rec['expires_at']=now-1
+state['df']=mkdf([100,100,100]); state['live']=100.0
+g['fav_confirm_tick'](1); assert rec['status']=='expired' and flips and flips[0][:2]==('F3','BUY')
+# 4) ورود دیرهنگام (overrun به نفع سیگنال) => برعکس نمی‌شود
+flips.clear(); rec=newrec('F4','BUY',100,99,102)
+state['df']=mkdf([100.0,100.6,100.6]); state['live']=100.7
+g['fav_confirm_tick'](1); rec['expires_at']=now-1; g['fav_confirm_tick'](1)
+assert rec['status']=='expired' and rec['why']=='overrun' and not flips
+# 5) سیگنالی که خودش برعکس‌شده بود دوباره برعکس نمی‌شود
+flips.clear(); S['fav_wait']={}; S['fav_wait_seen']={}
+g['_fav_confirm_hold'](1,'F5','SELL',plan,100,101,98,'🔁 معکوس‌شده از صف تایید حرکت | HVL=100.0'); rec=list(S['fav_wait'].values())[0]
+state['df']=mkdf([100,100,100]); state['live']=101.2
+g['fav_confirm_tick'](1); assert rec['status']=='cancelled' and not flips
+# 6) کلید محیطی خاموش
+flips.clear(); g['FAV_REVERSE_TO_TOUCH']=False; rec=newrec('F6','BUY',100,99,102)
+state['df']=mkdf([100,100,100]); state['live']=99.4
+g['fav_confirm_tick'](1); assert rec['status']=='cancelled' and not flips
+g['FAV_REVERSE_TO_TOUCH']=True
+print('flip to touch OK')
 # ---- shadow + stats ----
 g['USER_SESSIONS'][1]=S
 def mkhl(rows):

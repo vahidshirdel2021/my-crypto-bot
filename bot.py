@@ -948,11 +948,12 @@ def default_session():
         'priority_watch': {},
         # حالت دستیار: وقتی روشن باشد ربات سیگنال را می‌سازد ولی فقط بعد از تایید دستی وارد می‌شود.
         'assist_mode_enabled': False,
-        'assist_expiry_seconds': 900,
+        'assist_expiry_seconds': 1800,
         'assist_log': [],
         'assist_seen': {},
         # V3.42.7: هشدار هم‌جهتی با روند BTC/ETH (کلیدها در «ورود و فیلتر سیگنال»). پیش‌فرض روشن.
         'trend_warn_enabled': True,
+        'pending_vote_filter': 'all',
         'trend_warn_btc': True,
         'trend_warn_eth': True,
         # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
@@ -1071,13 +1072,16 @@ def normalize_session(data):
     # PRIORITY_WATCH_TTL_SECONDS) در همین‌جا پاک‌سازی می‌شوند تا صف بی‌نهایت رشد نکند.
     s['assist_mode_enabled'] = bool(data.get('assist_mode_enabled', False))
     try:
-        s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 900) or 900)
+        s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 1800) or 1800)
     except Exception:
-        s['assist_expiry_seconds'] = 900
-    if s['assist_expiry_seconds'] not in (180, 300, 600, 900):
-        s['assist_expiry_seconds'] = 900
+        s['assist_expiry_seconds'] = 1800
+    if s['assist_expiry_seconds'] == 900:        # V3.44.22: مهلت پیش‌فرض ۱۵ → ۳۰ دقیقه؛ مقدار ذخیره‌شده‌ی قبلی هم به ۳۰ می‌رود
+        s['assist_expiry_seconds'] = 1800
+    if s['assist_expiry_seconds'] not in (180, 300, 600, 1800):
+        s['assist_expiry_seconds'] = 1800
     s['assist_log'] = list(data.get('assist_log') or [])[-500:]
     s['trend_warn_enabled'] = bool(data.get('trend_warn_enabled', True))
+    s['pending_vote_filter'] = data.get('pending_vote_filter') if data.get('pending_vote_filter') in ('all', 'high', 'full') else 'all'
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
     s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', True))
@@ -1711,7 +1715,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 # فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
 # عمداً مسیر قبلی خودشان را نگه می‌دارند.
 _NEW_MESSAGE_PREFIXES = (
-    '/tw_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
+    '/tw_qe_', '/tw_open_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
     '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
@@ -4477,7 +4481,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.20'
+BOT_VERSION = '3.44.24'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -7154,7 +7158,7 @@ ASSIST_MAX_DRIFT_R = max(0.05, float(os.environ.get('ASSIST_MAX_DRIFT_R', '0.5')
 ASSIST_SHADOW_HORIZON_SECONDS = 24 * 3600
 ASSIST_LOG_CAP = 500
 ASSIST_SEEN_TTL_SECONDS = 6 * 3600
-ASSIST_EXPIRY_CHOICES = (180, 300, 600, 900)
+ASSIST_EXPIRY_CHOICES = (180, 300, 600, 1800)
 _ASSIST_LOCK = RLock()
 # V3.42.12: لمس دکمه توسط یک thread تک‌رشته‌ی دریافت پیام‌ها پردازش می‌شود؛ اگر آن thread مشغول کار دیگری بوده (چارت، قیمت‌گیری،
 # ...) پردازش لمس ممکن است چند ثانیه/دقیقه بعد از لمس واقعی انجام شود و سیگنال «در لحظه‌ی پردازش» منقضی دیده شود، در حالی
@@ -7248,7 +7252,7 @@ def _assist_describe_source(reason, level_token, level_value, scn):
     return level_txt, scn_txt
 
 
-ASSIST_EXTEND_SECONDS = max(60, int(os.environ.get('ASSIST_EXTEND_SECONDS', '900')))   # V3.38: با لمس «تمدید مهلت» مهلت روی ۱۵ دقیقه تنظیم می‌شود
+ASSIST_EXTEND_SECONDS = max(60, int(os.environ.get('ASSIST_EXTEND_SECONDS', '1800')))   # V3.38: با لمس «تمدید مهلت» مهلت روی ۳۰ دقیقه تنظیم می‌شود
 # V3.38.5: لیست «📋 سیگنال‌های در انتظار» فقط سیگنال‌هایی را نشان می‌دهد که حداقل این‌قدر ثانیه از مهلتشان باقی مانده (۳۰۰ = ۵ دقیقه؛ ۰ = همه).
 ASSIST_LIST_MIN_REMAINING_SECONDS = max(0, int(os.environ.get('ASSIST_LIST_MIN_REMAINING_SECONDS', '300')))
 # V3.38.8: کارت سیگنال‌های منقضی/نامعتبر این‌قدر ثانیه بعد از انقضا از چت حذف می‌شوند (۶۰ = ۱ دقیقه؛ ۰ = هرگز).
@@ -8209,6 +8213,42 @@ def _fav_finish(chat_id, s, rec, status, text):
     logger.info('fav confirm: %s %s -> %s | %s', rec.get('symbol'), rec.get('sig'), status, text)      # بی‌صدا: فقط لاگ
 
 
+FAV_REVERSE_TO_TOUCH = os.environ.get('FAV_REVERSE_TO_TOUCH', '1') != '0'
+_FAV_FLIP_TAG = '🔁 معکوس‌شده از صف تایید حرکت'
+
+
+def _fav_flip_to_touch(chat_id, s, rec, px=None, require_adverse=True):
+    """V3.44.23: سیگنالی که در «صف تایید حرکت» رد شد (قیمت خلاف جهت رفت، یا تا پایان مهلت به نفع معامله حرکت نکرد)
+    حذف نمی‌شود؛ در جهت مخالف وارد «📋 سیگنال‌های در انتظار» (رأی‌گیری فیلترها) می‌شود تا از اول بررسی شود.
+    require_adverse=True: فقط وقتی قیمت px واقعاً خلاف جهت سیگنال بوده (نه رسیدن به TP). هر سیگنال فقط یک بار برمی‌گردد (ping-pong نداریم).
+    بسته به تایید فیلترها همان مسیر عادی ادامه می‌یابد: ورود خودکار / صف تایید حرکت / کارت دستیار / ورود سریع دستی. True = ثبت شد."""
+    if not FAV_REVERSE_TO_TOUCH:
+        return False
+    reason = str(rec.get('reason') or '')
+    if rec.get('flipped') or _FAV_FLIP_TAG in reason:
+        return False
+    sig = rec.get('sig')
+    if sig not in ('BUY', 'SELL'):
+        return False
+    if require_adverse:
+        try:
+            x = _fav_move_r(sig, rec['entry'], rec['sl'], px) if px else None
+        except Exception:
+            x = None
+        if x is None or x >= 0:
+            return False
+    opp = 'SELL' if sig == 'BUY' else 'BUY'
+    try:
+        rec['flipped'] = True
+        status, txt = _touch_register(chat_id, rec['symbol'], opp, f"{_FAV_FLIP_TAG} | {reason}", rec.get('tf') or '5min', flip_from=sig)
+        rec['flip_status'] = status
+        logger.info('fav confirm: %s %s rejected -> touch list %s (%s: %s)', rec['symbol'], sig, opp, status, txt)
+        return status in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened')
+    except Exception:
+        logger.exception('fav confirm: flip to touch failed symbol=%s', rec.get('symbol'))
+        return False
+
+
 def _fav_process_one(chat_id, s, rec):
     symbol, sig = rec['symbol'], rec['sig']
     now = time.time()
@@ -8226,6 +8266,7 @@ def _fav_process_one(chat_id, s, rec):
     if live:
         d_live = _fav_decide(sig, rec['entry'], rec['sl'], rec['tp'], live, rec['min_r'], rec['max_r'])
         if d_live == 'cancel':
+            _fav_flip_to_touch(chat_id, s, rec, live)
             return _fav_finish(chat_id, s, rec, 'cancelled', f"🚫 سیگنال `{symbol}` ({side_txt}) لغو شد: قیمت خلاف جهت رفت یا به SL/TP رسید؛ بدون ورود.")
     # ارزیابی روی کلوز کندل‌های بسته‌شده‌ی بعد از سیگنال (فقط کندل‌های جدید)
     decision, close_px = 'wait', None
@@ -8250,6 +8291,7 @@ def _fav_process_one(chat_id, s, rec):
     except Exception:
         logger.exception('fav confirm: candle eval failed symbol=%s', symbol)
     if decision == 'cancel':
+        _fav_flip_to_touch(chat_id, s, rec, close_px or live)
         return _fav_finish(chat_id, s, rec, 'cancelled', f"🚫 سیگنال `{symbol}` ({side_txt}) لغو شد: کلوز کندل خلاف جهت یا به SL/TP رسید؛ بدون ورود.")
     if decision == 'confirm':
         # قیمت لحظه‌ای هم باید هنوز در محدوده‌ی مجاز باشد
@@ -8258,6 +8300,8 @@ def _fav_process_one(chat_id, s, rec):
             if x_live is not None and x_live > rec['max_r']:
                 rec['overran'] = True           # بعد از تایید قیمت لحظه‌ای از سقف رد شد؛ منتظر برگشت می‌مانیم
             if now >= float(rec.get('expires_at', 0)):
+                if x_live is not None and x_live < 0:
+                    _fav_flip_to_touch(chat_id, s, rec, live)
                 return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید برقرار بود ولی قیمت لحظه‌ای دیگر در محدوده نبود؛ بدون ورود.")
             rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره با قیمت لحظه‌ای سنجیده می‌شود
             save_session(chat_id)
@@ -8292,6 +8336,8 @@ def _fav_process_one(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
+        if not rec.get('overran'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+            _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
         why_txt = 'قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -8559,7 +8605,7 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     s.setdefault('auto_trend_pending', {})[rid] = rec
     _tgref_register(chat_id, rid, 'auto', symbol, sig, tf, head + text, f'/autotg_ok_{rid}', f'/autotg_no_{rid}',
                     entry=float(entry), sl=float(sl), tp=float(tp))
-    # V3.43.24: همین سیگنال در «📋 سیگنال‌های در انتظار» هم ثبت می‌شود (هم‌مهلت با کارت: expiry بالا، پیش‌فرض ۱۵ دقیقه)
+    # V3.43.24: همین سیگنال در «📋 سیگنال‌های در انتظار» هم ثبت می‌شود (هم‌مهلت با کارت: expiry بالا، پیش‌فرض ۳۰ دقیقه)
     try:
         _risk = abs(float(entry) - float(sl))
         _rr = float(plan.get('rr')) if plan.get('rr') is not None else (abs(float(tp) - float(entry)) / _risk if _risk > 0 else 0.0)
@@ -8920,7 +8966,7 @@ def assist_saved_touch_once():
 
 
 def assist_extend(chat_id, aid):
-    """V3.38: لمس «تمدید مهلت» → مهلت روی ASSIST_EXTEND_SECONDS (۱۵ دقیقه) از همین لحظه تنظیم می‌شود
+    """V3.38: لمس «تمدید مهلت» → مهلت روی ASSIST_EXTEND_SECONDS (۳۰ دقیقه) از همین لحظه تنظیم می‌شود
     و خودِ دکمه به شمارش معکوس زمان باقی‌مانده تبدیل می‌شود (در _assist_loop تازه می‌شود)."""
     s = get_session(chat_id)
     with _ASSIST_LOCK:
@@ -8952,7 +8998,7 @@ TOUCH_AUTO_DESC = {
 }
 TOUCH_EVAL_INTERVAL_SECONDS = 25
 TOUCH_MAX_RECORDS = 300
-TOUCH_CARDS_PER_LIST = 8          # V3.44.18: هر مورد در لیست انتظار یک پیامِ مستقل با دکمه‌های خودش است؛ حداکثر این‌قدر (جدیدترین‌ها)
+TOUCH_CARDS_PER_LIST = 25         # V3.44.21: حداکثر تعداد ردیف «برخورد با سطح» در لیست انتظار (فقط لیست؛ کارت هر مورد با لمس نمادش باز می‌شود)
 TOUCH_MAX_DRIFT_R = float(os.environ.get('TOUCH_MAX_DRIFT_R', '0.5'))     # V3.44.16: ورود خودکار فقط تا این‌قدر R دوری قیمت از لحظه‌ی برخورد
 # V3.44.16: گروه‌بندی رأی‌ها - فیلترهای هم‌خانواده (همه «روند» یا همه «مومنتوم») مستقل حساب نمی‌شوند؛ هر گروه یک رأی (با اکثریت اعضایش) می‌دهد
 # و الگوی برخورد وزن ۲ دارد؛ پس چند فیلتر هم‌خانواده به‌تنهایی الگو را کنار نمی‌زنند.
@@ -9094,15 +9140,16 @@ def _touch_eval_one(chat_id, rec):
         rec['last_eval'] = time.time()
 
 
-def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None):
-    """برخورد با سطح را در لیست انتظار ثبت می‌کند (بدون صدور سیگنال). خروجی: (status, متن)."""
+def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from=None):
+    """برخورد با سطح را در لیست انتظار ثبت می‌کند (بدون صدور سیگنال). خروجی: (status, متن).
+    V3.44.23: flip_from = جهتِ سیگنالی که در «صف تایید حرکت» رد شد و حالا در جهت مخالف از اول بررسی می‌شود؛ بررسی‌های «قبلاً ثبت/معامله شده» برایش کنار می‌رود."""
     s = get_session(chat_id)
     now = time.time()
     _tag, level_token, level_value = extract_setup_level(reason)
     scn = extract_scenario_tag(reason)
     if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
         return 'touch_skipped', 'روی این نماد پوزیشن باز داریم'
-    if level_token is not None and gate_on(s, 'gate_traded_level_enabled') and f"{symbol}:{level_token}:{level_value}" in s.get('traded_levels', {}):
+    if (not flip_from) and level_token is not None and gate_on(s, 'gate_traded_level_enabled') and f"{symbol}:{level_token}:{level_value}" in s.get('traded_levels', {}):
         return 'touch_skipped', 'روی همین سطح قبلاً معامله شده'
     with _TOUCH_LOCK:
         waits = s.setdefault('touch_wait', {})
@@ -9112,7 +9159,7 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None):
         for k in [k for k, v in seen.items() if now - float(v or 0) >= ASSIST_SEEN_TTL_SECONDS]:
             seen.pop(k, None)
         seen_key = f"{symbol}|{level_token}|{level_value}"
-        if seen_key in seen:
+        if seen_key in seen and not flip_from:
             return 'touch_skipped', 'این برخورد قبلاً ثبت شده'
         tid = hashlib.sha1(f"tw{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
         try:
@@ -9120,11 +9167,11 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None):
             _tp0 = float(_tp0) if _tp0 else None
         except Exception:
             _tp0 = None
-        expiry = int(s.get('assist_expiry_seconds', 900) or 900)
+        expiry = int(s.get('assist_expiry_seconds', 1800) or 1800)
         rec = {'id': tid, 'symbol': symbol, 'touch_sig': touch_sig, 'reason': str(reason or '')[:500], 'level_token': level_token,
                'level_value': level_value, 'scn': scn, 'tf': tf, 'created_at': now, 'expires_at': now + expiry, 'status': 'waiting',
                'last_eval': 0.0, 'votes': [], 'dir': None, 'agree': 0, 'total': 0, 'auto_ok': False,
-               'touch_price': _tp0, 'plan': (dict(plan) if plan else None)}
+               'touch_price': _tp0, 'plan': (dict(plan) if plan else None), 'flipped_from': flip_from}
         waits[tid] = rec
         seen[seen_key] = now
         if len(waits) > TOUCH_MAX_RECORDS:
@@ -9264,8 +9311,10 @@ def _touch_block_lines(r, n, now):
     head = f"{n}) " if n else ''
     left = f" · ⏳ {rem} دقیقه" if r.get('status') == 'waiting' else ''
     lines = [f"{head}`{r['symbol']}` · {TF_DISPLAY.get(tf, tf)}{left}",
-             f"    🎯 سطح: `{level_txt}` | سناریو: `{scn_txt}`",
-             f"    جهت: {dir_txt}"]
+             f"    🎯 سطح: `{level_txt}` | سناریو: `{scn_txt}`"]
+    if r.get('flipped_from'):
+        lines.append(f"    🔁 سیگنال {'خرید' if r['flipped_from'] == 'BUY' else 'فروش'} در صف تایید حرکت رد شد؛ اینجا در جهت مخالف از اول بررسی می‌شود")
+    lines.append(f"    جهت: {dir_txt}")
     votes = r.get('votes') or []
     if not votes:
         lines.append('    (هیچ فیلتر روشنی نیست؛ فقط ورود سریع)')
@@ -9429,30 +9478,90 @@ def _assist_pending_recs(s):
     return recs
 
 
+PENDING_HIGH_VOTE_PCT = min(1.0, max(0.5, float(os.environ.get('PENDING_HIGH_VOTE_PCT', '0.70'))))   # V3.44.24: حد «رأی بالا» (نسبت فیلترهای موافق به کل)
+_PENDING_VF_ORDER = ('all', 'high', 'full')
+_PENDING_VF_LABEL = {'all': '🔘 نمایش: همه', 'high': f'🔥 نمایش: رأی بالا (≥{int(round(PENDING_HIGH_VOTE_PCT * 100))}٪)', 'full': '💯 نمایش: رأی کامل'}
+
+
+def _pending_vote_ok(r, mode):
+    """آیا این مورد «برخورد با سطح» با فیلتر نمایش (all/high/full) جور است؟ بدون جهت یا بدون فیلتر در حالت فیلتر نمایش داده نمی‌شود."""
+    if mode == 'all':
+        return True
+    try:
+        agree, total = int(r.get('agree', 0) or 0), int(r.get('total', 0) or 0)
+    except Exception:
+        return False
+    if not r.get('dir') or total <= 0:
+        return False
+    return agree == total if mode == 'full' else (agree / total) >= PENDING_HIGH_VOTE_PCT - 1e-9
+
+
+def pending_vote_filter_cycle(chat_id, message_id=None):
+    """دکمه‌ی فیلتر لیست انتظار: همه ← رأی بالا ← رأی کامل ← همه؛ همان پیام لیست درجا بروز می‌شود."""
+    s = get_session(chat_id)
+    cur = s.get('pending_vote_filter') if s.get('pending_vote_filter') in _PENDING_VF_ORDER else 'all'
+    s['pending_vote_filter'] = _PENDING_VF_ORDER[(_PENDING_VF_ORDER.index(cur) + 1) % len(_PENDING_VF_ORDER)]
+    save_session(chat_id)
+    assist_pending_list(chat_id, message_id)
+
+
 def assist_pending_list(chat_id, message_id=None):
     """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
     recs = _assist_pending_recs(s)
-    t_recs = _touch_waiting_recs(s)
-    if not recs and not t_recs:
+    t_all = _touch_waiting_recs(s)
+    if not recs and not t_all:
         send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
         return
+    vf = s.get('pending_vote_filter') if s.get('pending_vote_filter') in _PENDING_VF_ORDER else 'all'
+    t_recs = [r for r in t_all if _pending_vote_ok(r, vf)]
     shown = recs[:25]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + len(t_recs)})*", ""]
-    rows = []
+    if vf != 'all':
+        lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
+        lines.append("")
+    rows = [[{'text': _PENDING_VF_LABEL[vf], 'callback_data': '/pending_vote_filter'}]]
+    n = 0
     t_shown = t_recs[:TOUCH_CARDS_PER_LIST]
+    _t_done = 0
+    if t_all and not t_recs:
+        lines.append(f"🎯 هیچ موردِ برخورد با سطح با این فیلتر جور نیست ({len(t_all)} مورد پنهان شد؛ برای دیدن همه، دکمه‌ی نمایش را بزنید).")
+        lines.append("")
     if t_recs:
         lines.append(f"🎯 *برخورد با سطح — رأی‌گیری فیلترها: {len(t_recs)} مورد*")
         lines.append(f"🤖 ورود خودکار: {TOUCH_AUTO_LABELS.get(s.get('touch_auto_mode', 'all'), '')}")
-        lines.append(f"هر مورد در یک پیام جدا و با دکمه‌های خودش پایین همین پیام آمده است ({len(t_shown)} مورد؛ قدیمی‌تر بالاتر، جدیدترین آخر).")
-        if len(t_recs) > len(t_shown):
-            lines.append(f"… {len(t_recs) - len(t_shown)} مورد قدیمی‌تر بعد از ورود یا انقضای این‌ها نمایش داده می‌شوند.")
         lines.append("")
-    _n_shown = 0
-    for n, r in enumerate(shown, 1):
+        _now = time.time()
+        for r in t_shown:
+            if sum(len(x) + 1 for x in lines) > 3300:
+                break
+            n += 1
+            _t_done += 1
+            d = r.get('dir')
+            tf = r.get('tf') or '5min'
+            _rem = max(0, int((float(r.get('expires_at', 0) or 0) - _now + 59) // 60))
+            agree, total = int(r.get('agree', 0) or 0), int(r.get('total', 0) or 0)
+            if d:
+                side_txt = '🟢 خرید' if d == 'BUY' else '🔴 فروش'
+                vote_txt = f"✅ {agree} از {total} رأی موافق"
+                btn_icon = '🟢' if d == 'BUY' else '🔴'
+                btn_votes = f" ({agree}/{total})"
+            else:
+                side_txt = '⏳ جهت نامشخص'
+                vote_txt = f"{total} فیلتر" if total else 'بدون فیلتر روشن'
+                btn_icon = '⏳'
+                btn_votes = ''
+            lines.append(f"{n}) `{r['symbol']}`{' 🔁' if r.get('flipped_from') else ''} {side_txt} · {vote_txt} · {TF_DISPLAY.get(tf, tf)} · ⏳ {_rem} دقیقه")
+            rows.append([{'text': f"🔎 {r['symbol']} {btn_icon}{btn_votes}", 'callback_data': f"/tw_open_{r['id']}"}])
+        if len(t_recs) > _t_done:
+            lines.append(f"… و {len(t_recs) - _t_done} مورد دیگر برخورد با سطح (بعد از ورود یا انقضای این‌ها نمایش داده می‌شوند)")
+        lines.append("")
+    _a_done = 0
+    for r in shown:
         if sum(len(x) + 1 for x in lines) > 3300:
             break
-        _n_shown = n
+        n += 1
+        _a_done += 1
         is_long = r['sig'] == 'BUY'
         tf = r.get('tf') or '5min'
         side_txt = '🟢 خرید' if is_long else '🔴 فروش'
@@ -9476,20 +9585,27 @@ def assist_pending_list(chat_id, message_id=None):
         lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · {state_txt}")
         lines.append(f"    ورود `{fmt(float(r['entry']))}`{price_txt}")
         rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'}" + (' 💾' if r.get('saved') else ''), 'callback_data': f"/assist_open_{r['id']}"}])
-    if len(recs) > _n_shown:
-        lines.append(f"\n… و {len(recs) - _n_shown} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
-    if recs:
-        lines.append("\nروی هر ردیف بزنید تا کارت آن سیگنال دوباره پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
+    if len(recs) > _a_done:
+        lines.append(f"\n… و {len(recs) - _a_done} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
+    lines.append("\nروی نماد هر ردیف بزنید تا کارت همان سیگنال پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
     rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
     rows.append([{'text': '⏳ صف تایید حرکت', 'callback_data': '/fav_queue'}])
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
-    for r in reversed(t_shown):          # قدیمی‌تر اول؛ جدیدترین پایین چت، کنار کیبورد
-        try:
-            _touch_send_card(chat_id, r)
-        except Exception:
-            logger.exception('touch card send failed symbol=%s', r.get('symbol'))
-    if t_shown:
-        save_session(chat_id)
+
+
+def touch_open_card(chat_id, tid):
+    """V3.44.21: لمس نماد در «📋 سیگنال‌های در انتظار» (بخش برخورد با سطح): فیلترها دوباره سنجیده می‌شوند و کارت همان مورد پایین چت می‌آید."""
+    s = get_session(chat_id)
+    rec = (s.get('touch_wait') or {}).get(tid)
+    if not rec or rec.get('status') != 'waiting':
+        send_message(chat_id, 'ℹ️ این مورد دیگر در لیست انتظار نیست.'); return
+    try:
+        _touch_eval_one(chat_id, rec)
+    except Exception:
+        logger.exception('touch open eval failed symbol=%s', rec.get('symbol'))
+    if not _touch_send_card(chat_id, rec):
+        send_message(chat_id, '⚠️ نمایش کارت ناموفق بود؛ چند ثانیه بعد دوباره امتحان کنید.'); return
+    save_session(chat_id)
 
 
 def _assist_card_text(rec):
@@ -11698,6 +11814,8 @@ def process_command(cmd,chat_id,message_id=None):
         ); return
     if cl.startswith('/tw_ref_'):
         touch_card_refresh(chat_id, cl[len('/tw_ref_'):]); return
+    if cl.startswith('/tw_open_'):
+        touch_open_card(chat_id, cl[len('/tw_open_'):]); return
     if cl.startswith('/tw_qe_'):
         # V3.44.14: ورود سریع زیر هر مورد لیست انتظار: /tw_qe_<buy|sell>_<id>
         _tw_side, _tw_id = cl[len('/tw_qe_'):].split('_', 1)
@@ -12281,6 +12399,8 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/assist_pending':
         assist_pending_list(chat_id, message_id); return
+    if cl=='/pending_vote_filter':
+        pending_vote_filter_cycle(chat_id, message_id); return
     if cl in ('/review_list', '/review_list_buy', '/review_list_sell'):
         review_list_show(chat_id, message_id, {'/review_list_buy': 'BUY', '/review_list_sell': 'SELL'}.get(cl)); return
     if cl=='/rvclear':
