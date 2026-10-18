@@ -4498,7 +4498,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.30'
+BOT_VERSION = '3.44.31'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8337,6 +8337,38 @@ def _fav_decide(sig, entry, sl, tp, px, min_r, max_r, min_rr=None, cancel_r=None
     return 'wait'
 
 
+# ===================== V3.44.31: کلید «رژیم بازار در مرحله‌ی آخر ورود» =====================
+# در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال
+# دوباره سنجیده می‌شود: خرید فقط وقتی رژیم «صعودی» و فروش فقط وقتی «نزولی» است. رژیمِ رنج یا خلافِ جهت (حتی قطعی) = سیگنال
+# رد نمی‌شود، در صف می‌ماند و در هر تیک دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود.
+# ورود سریع دستی (رأی خود کاربر) و تایید دستی کارت‌ها از این کلید عبور می‌کنند.
+_FINAL_REGIME_FA = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}
+
+
+def _final_regime_verdict(gate, sig):
+    """(ok, توضیح). gate = رژیم بازار ('BULLISH'/'BEARISH'/'RANGE' یا None)، sig = 'BUY'/'SELL'."""
+    want = 'BULLISH' if sig == 'BUY' else 'BEARISH'
+    if gate == want:
+        return True, ''
+    side_fa = 'خرید' if sig == 'BUY' else 'فروش'
+    want_fa = _FINAL_REGIME_FA[want]
+    if gate in ('BULLISH', 'BEARISH'):
+        return False, f"رژیم بازار {_FINAL_REGIME_FA[gate]} است و با {side_fa} نمی‌خواند؛ صبر تا {want_fa} شدن"
+    if gate == 'RANGE':
+        return False, f"رژیم بازار رنج است؛ صبر تا {want_fa} شدن"
+    return False, f"رژیم بازار نامشخص است؛ صبر تا {want_fa} شدن"
+
+
+def _final_regime_check(tf, sig):
+    """نسخه‌ی همگام (برای حلقه‌های پس‌زمینه): رژیم بازار تایم‌فریم tf را تازه می‌کند (کش TTL دارد) و حکم می‌دهد."""
+    try:
+        _ensure_tf_gate_sync(tf)
+    except Exception:
+        logger.exception('final regime: gate refresh failed tf=%s', tf)
+    gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+    return _final_regime_verdict(gate, sig)
+
+
 def _fav_confirm_active(chat_id):
     return bool(get_session(chat_id).get('fav_confirm_enabled', False))
 
@@ -8380,7 +8412,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('overrun' if rec.get('overran') else 'timeout') if status == 'expired' else status
+    rec['why'] = ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout')) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     save_session(chat_id)
     _fav_update_card(chat_id, rec, force=True)          # V3.44.26: کارت مستقل این سیگنال درجا «پایان» می‌شود و دکمه‌هایش برداشته می‌شود
@@ -8480,6 +8512,17 @@ def _fav_process_one(chat_id, s, rec):
             rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره با قیمت لحظه‌ای سنجیده می‌شود
             save_session(chat_id)
             return
+        if gate_on(s, 'gate_final_regime_enabled'):
+            # V3.44.31: آخرین مرحله‌ی خروج از صف: رژیم بازار باید به نفع معامله باشد؛ وگرنه در صف می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+            reg_ok, reg_txt = _final_regime_check(tf, sig)
+            if not reg_ok:
+                rec['regime_blocked'] = True; rec['regime_hold'] = reg_txt
+                if now >= float(rec.get('expires_at', 0)):
+                    return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {reg_txt}؛ بدون ورود.")
+                rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+                save_session(chat_id)
+                return
+            rec.pop('regime_blocked', None); rec.pop('regime_hold', None)
         rec['confirmed_at'] = now; rec['confirm_px'] = float(live)
         p_stub = {'structural_target': rec.get('structural_tp'), 'score': rec.get('score'), 'rr': rec.get('rr'),
                   'quality_label': rec.get('quality_label'), 'tp_level_name': rec.get('tp_level_name'), 'tp_stages': rec.get('tp_stages')}
@@ -8510,9 +8553,10 @@ def _fav_process_one(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = 'قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'
+        why_txt = ('رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+                   ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
 
@@ -8547,6 +8591,8 @@ def _fav_card_payload(r, now=None):
              f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}"]
     if r.get('max_mode') == 'tp':
         lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
+    if r.get('regime_hold') and r.get('status') == 'waiting':
+        lines.append(f"    🧭 {r['regime_hold']}")
     if r.get('status') != 'waiting':
         lines += ['', _FAV_FINAL_TXT.get(r.get('status'), 'پایان') + (' 🔁 در جهت مخالف به «📋 سیگنال‌های در انتظار» رفت.' if r.get('flipped') and r.get('flip_status') in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened') else '')]
         return '\n'.join(lines), {'inline_keyboard': []}
@@ -8797,7 +8843,7 @@ def fav_stats_text(s):
     if o_imm:
         w = sum(1 for r in o_imm if r['imm']['outcome'] == 'tp')
         lines.append(f"• تعیین‌تکلیف: `{len(o_imm)}` | می‌برد: `{w / len(o_imm) * 100:.0f}%` | میانگین R فرضی: `{avg([r['imm']['r'] for r in o_imm]):+.2f}`")
-        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
+        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
         for why, nm in names.items():
             g = [r for r in o_imm if r.get('why') == why]
             if g:
@@ -9548,6 +9594,16 @@ def _touch_auto_enter(chat_id, rec):
             return _finish('queued')
     except Exception:
         logger.exception('touch: fav confirm hold failed symbol=%s', symbol)
+    # V3.44.31: کلید «رژیم بازار در مرحله‌ی آخر»: وقتی صف تایید حرکت خاموش است، همین‌جا آخرین مرحله است؛ مورد در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+    if gate_on(s, 'gate_final_regime_enabled'):
+        try:
+            _rg_ok, _rg_txt = _final_regime_check(tf, side)
+        except Exception:
+            logger.exception('touch: final regime check failed symbol=%s', symbol)
+            _rg_ok, _rg_txt = False, 'خطا در بررسی رژیم بازار'
+        if not _rg_ok:
+            rec['block_note'] = _rg_txt[:120]
+            return False
     # 2) حالت دستیار: ورود فقط بعد از تایید دستی کاربر (کارت ✅ ورود / ❌ رد).
     if s.get('assist_mode_enabled'):
         try:
@@ -10418,6 +10474,15 @@ async def scan_symbol(http,chat_id,symbol):
         _fav_held = False
     if _fav_held:
         return _entry_diag_result(chat_id, symbol, 'fav_wait', 'در صف صبر برای تایید حرکت به نفع معامله', 'fav_confirm', sig)
+    if gate_on(s, 'gate_final_regime_enabled'):
+        # V3.44.31: مسیر مستقیم (بدون صف): رژیم بازار باید به نفع معامله باشد؛ وگرنه این دور وارد نمی‌شود و در اسکن بعدی دوباره سنجیده می‌شود.
+        try:
+            _fr_gate = await refresh_market_gate(http, tf)
+        except Exception:
+            _fr_gate = None
+        _fr_ok, _fr_txt = _final_regime_verdict(_fr_gate, sig)
+        if not _fr_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «رژیم بازار در مرحله‌ی آخر»: {_fr_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'final_regime', sig, diagnostics=diagnostics)
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
@@ -10687,6 +10752,7 @@ GATE_REGISTRY = {
     'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'entry_rules', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_rules', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود (صبر تا به نفع معامله شود)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),

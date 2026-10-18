@@ -15,7 +15,7 @@ g=dict(os=os,time=time,hashlib=hashlib,logger=logging.getLogger('t'),pd=pd,
   get_klines=lambda sym,tf,n:state['df'],
   _auto_trend_gate=lambda *a,**k:state['gate'],
   execute_trade=lambda *a,**k:(calls.append(k) or state['exec_ok']),
-  USER_SESSIONS={}, ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a,**k:(calls.append(('assist',a[5],a[3],k)) or 'assist_sent'))
+  gate_on=lambda s,k:False, USER_SESSIONS={}, ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a,**k:(calls.append(('assist',a[5],a[3],k)) or 'assist_sent'))
 exec(block,g)
 D=g['_fav_decide']
 # BUY entry 100, sl 99 (R=1), tp 102 (2R)
