@@ -9,7 +9,7 @@ REG = {m.group(1): (m.group(2), m.group(3) == 'True', m.group(4), '') for m in
 S = {'strategy_config': {}, 'touch_auto_mode': 'all', 'fav_confirm_enabled': False}
 g = dict(get_session=lambda c: S, GATE_REGISTRY=REG, gate_on=lambda s, k: REG[k][1], _fav_cfg=lambda s: (0.3, 1.0, 900),
          _fav_max_label=lambda s: '1R', _fav_max_mode=lambda s: 'r', regime_advanced_on=lambda: False,
-         _filter_info=lambda k: (k, ''), TOUCH_AUTO_LABELS={'all': 'همه'})
+         _filter_info=lambda k: (k, ''), TOUCH_AUTO_LABELS={'all': 'همه'}, _be_cfg=lambda s: (1.0, 0.5))
 exec(ast.get_source_segment(src, fn), g)
 kb = g['trade_filter_management_keyboard']
 
@@ -40,3 +40,8 @@ assert src.count("trade_filter_management_keyboard(chat_id, 'entry_rules'))") ==
 for k in ('gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled', 'gate_4h_close_block_enabled', 'gate_inverse_trading_enabled'):
     assert REG[k][2] == 'entry_rules', k
 print('entry_menu_selftest OK', len(flt), len(rul))
+
+# V3.44.28: منوی «خروج و حفظ سود» دو کلید بستن سر به سر (هشدار / خودکار) و دو دکمه‌ی آستانه دارد
+ex = cbs('exit')
+assert all(c in ex for c in ('/toggle_be_alert', '/toggle_be_auto', '/be_profit_next', '/be_loss_next')), ex
+print('exit menu breakeven buttons OK')

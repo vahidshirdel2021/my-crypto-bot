@@ -893,6 +893,12 @@ def default_session():
         'symbol_h4_regime_warn_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': True,
+        # V3.44.28: بستن سر به سر. اگر معامله به +X R سود رسید و برگشت تا نقطه‌ی ورود، یا تا -Y R منفی رفت و برگشت تا نقطه‌ی ورود:
+        # کلید هشدار (پیام + دکمه‌ی بستن) و کلید خودکار (بستن با قیمت بازار) جدا از هم‌اند. پیش‌فرض هر دو خاموش.
+        'be_close_alert_enabled': False,
+        'be_close_auto_enabled': False,
+        'be_close_profit_r': 1.0,
+        'be_close_loss_r': 0.5,
         # V3.43.32: صبر برای تایید (ورود فقط وقتی قیمت بعد از سیگنال کمی به نفع معامله رفته باشد). پیش‌فرض خاموش.
         'active_preset': None,   # V3.44.7: کلید پریست فعال (۱..۵) برای برچسب‌زدن معاملات
         'fav_confirm_enabled': False,
@@ -4492,12 +4498,13 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.27'
+BOT_VERSION = '3.44.28'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
                   'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'touch_auto_mode', 'timeframe', 'active_strategy',
+                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
 _SETTINGS_LOCK = RLock()
@@ -6577,6 +6584,156 @@ def profit_alert_scan_once():
             logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'profit_alert_scan_once', chat_id)  # خطای یک کاربر بقیه را متوقف نکند
 
 
+# ===================== V3.44.28: بستن سر به سر =====================
+# دو حالت (هر کدام با حداقل آستانه‌ی خودش):
+#   سودی: معامله حداقل +X R به نفع رفته بود و حالا قیمت به نقطه‌ی ورود (یا پایین‌تر) برگشته.
+#   ضرری: معامله حداقل Y R خلاف جهت رفته بود (Y < 1 چون -1R همان SL است) و حالا قیمت به نقطه‌ی ورود (یا بالاتر) برگشته.
+# R = فاصله‌ی ورود تا SL اولیه. اوج/کفِ دیده‌شده از قیمت لحظه‌ای (هر چرخه) و اوج/کف کندلی پوزیشن گرفته می‌شود.
+# کلید هشدار: فقط پیام + دکمه‌ی «بستن سر به سر»؛ کلید خودکار: بستن با قیمت بازار. هر دو پیش‌فرض خاموش. هر حالت برای هر پوزیشن یک‌بار.
+BE_CLOSE_PROFIT_CHOICES = (0.5, 0.75, 1.0, 1.5, 2.0)
+BE_CLOSE_LOSS_CHOICES = (0.3, 0.5, 0.7)
+BE_CLOSE_RETRY_SECONDS = 60
+
+
+def _be_cfg(s):
+    try:
+        pr = float(s.get('be_close_profit_r', 1.0))
+    except Exception:
+        pr = 1.0
+    try:
+        lr = float(s.get('be_close_loss_r', 0.5))
+    except Exception:
+        lr = 0.5
+    return max(0.1, pr), min(0.95, max(0.1, lr))
+
+
+def _be_state(p, price):
+    """(حرکت فعلی بر حسب R، اوج سود R، بیشترین ضرر R) یا None. R = فاصله‌ی ورود تا SL اولیه."""
+    entry = float(p.get('entry_price') or 0)
+    rd = float(p.get('risk_distance') or 0)
+    if rd <= 0:
+        rd = abs(entry - float(p.get('sl') or entry))
+    if entry <= 0 or rd <= 0:
+        return None
+    long_side = side_long(p.get('side', 'BUY'))
+    mv = ((price - entry) if long_side else (entry - price)) / rd
+    fav_r = adv_r = 0.0
+    try:
+        fav = p.get('peak_favorable_price'); adv = p.get('peak_adverse_price')
+        if fav:
+            fav_r = ((float(fav) - entry) if long_side else (entry - float(fav))) / rd
+        if adv:
+            adv_r = ((entry - float(adv)) if long_side else (float(adv) - entry)) / rd
+    except Exception:
+        pass
+    peak = max(float(p.get('be_peak_r') or 0.0), mv, fav_r, 0.0)
+    trough = max(float(p.get('be_trough_r') or 0.0), -mv, adv_r, 0.0)
+    return mv, peak, trough
+
+
+def _be_kind(mv, peak, trough, pr, lr, done=()):
+    """'profit' | 'loss' | None. سودی: اوج ≥ X و قیمت به ورود (یا پایین‌تر) برگشته؛ ضرری: کف ≥ Y و قیمت به ورود (یا بالاتر) برگشته.
+    حالتی که قبلاً برای این پوزیشن انجام شده (done) رد می‌شود تا حالت دیگر هنوز بتواند فعال شود."""
+    if 'profit' not in done and peak >= pr - 1e-9 and mv <= 0:
+        return 'profit'
+    if 'loss' not in done and trough >= lr - 1e-9 and mv >= 0:
+        return 'loss'
+    return None
+
+
+def _be_markup(symbol):
+    return {'inline_keyboard': [[{'text': '🔒 بستن سر به سر (همین الان)', 'callback_data': f'/becl_{str(symbol).upper()}'}]]}
+
+
+def _be_text(p, kind, peak, trough, price, pr, lr, auto_done=False):
+    side_txt = '🟢 خرید' if side_long(p.get('side', 'BUY')) else '🔴 فروش'
+    if kind == 'profit':
+        why = f"معامله تا `+{peak:.2f}R` سود رفته بود (آستانه `+{pr:g}R`) و حالا به نقطه‌ی ورود برگشته."
+    else:
+        why = f"معامله تا `-{trough:.2f}R` منفی رفته بود (آستانه `-{lr:g}R`) و حالا به نقطه‌ی ورود برگشته."
+    head = '🔒 *بستن خودکار سر به سر انجام شد*' if auto_done else '🔒 *بازگشت به نقطه‌ی ورود*'
+    lines = [f"{head} | *{p['symbol']}* ({side_txt})", f"• {why}",
+             f"• ورود: `{fmt(float(p['entry_price']))}` | قیمت فعلی: `{fmt(float(price))}`"]
+    if not auto_done:
+        lines.append(f"• SL: `{fmt(float(p['sl']))}` | TP: `{fmt(float(p['tp']))}`")
+        lines.append('فقط هشدار است؛ پوزیشن بسته نشده. بستن روی قیمت بازار انجام می‌شود (کارمزد جداست).')
+    else:
+        lines.append('بسته شد با قیمت بازار؛ نتیجه‌ی نهایی به‌علاوه‌ی کارمزد در گزارش بسته‌شدن پوزیشن است.')
+    return '\n'.join(lines)
+
+
+def _send_be_alert(chat_id, symbol, text):
+    if not is_allowed(chat_id):
+        return False
+    res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown', 'reply_markup': _be_markup(symbol)}, 10)
+    ok = bool(res and res.get('ok'))
+    if ok:
+        _mid = (res.get('result') or {}).get('message_id')
+        if _mid:
+            schedule_auto_delete(chat_id, _mid, ttl=PROFIT_ALERT_BUTTONS_TTL)
+    return ok
+
+
+def be_close_scan_once():
+    """V3.44.28: اوج/کفِ هر پوزیشن را به‌روز می‌کند و اگر شرط «برگشت به نقطه‌ی ورود» برقرار شد، هشدار می‌دهد یا (کلید خودکار) می‌بندد."""
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            alert_on = bool(s.get('be_close_alert_enabled', False))
+            auto_on = bool(s.get('be_close_auto_enabled', False))
+            if not (alert_on or auto_on):
+                continue
+            pr, lr = _be_cfg(s)
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    price = float(price)
+                    st = _be_state(p, price)
+                    if st is None:
+                        continue
+                    mv, peak, trough = st
+                    p['be_peak_r'] = peak; p['be_trough_r'] = trough
+                    kind = _be_kind(mv, peak, trough, pr, lr, done=tuple(k for k in ('profit', 'loss') if p.get(f'be_done_{k}')))
+                    if not kind:
+                        continue
+                    if auto_on:
+                        if time.time() - float(p.get('be_fail_ts') or 0) < BE_CLOSE_RETRY_SECONDS:
+                            continue
+                        reason = (f"بستن سر به سر: بعد از +{peak:.2f}R سود به نقطه‌ی ورود برگشت" if kind == 'profit'
+                                  else f"بستن سر به سر: بعد از -{trough:.2f}R ضرر به نقطه‌ی ورود برگشت")
+                        txt = _be_text(p, kind, peak, trough, price, pr, lr, auto_done=True)
+                        logger.info('breakeven autoclose chat=%s symbol=%s kind=%s peak=%.2f trough=%.2f', chat_id, p.get('symbol'), kind, peak, trough)
+                        close_position(chat_id, p, price, reason=reason)
+                        if p in (s.get('paper_positions') or []):
+                            p['be_fail_ts'] = time.time()          # بسته نشد؛ بعد از چند ثانیه دوباره تلاش می‌شود
+                            continue
+                        if alert_on:
+                            send_message(chat_id, txt)
+                        continue
+                    p[f'be_done_{kind}'] = True                    # فقط هشدار: هر حالت برای هر پوزیشن یک‌بار
+                    _send_be_alert(chat_id, p['symbol'], _be_text(p, kind, peak, trough, price, pr, lr))
+                    save_session(chat_id)
+                except Exception:
+                    logger.exception('breakeven scan failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'be_close_scan_once', chat_id)
+
+
+def handle_be_close(chat_id, symbol):
+    """دکمه‌ی «🔒 بستن سر به سر» زیر هشدار: پوزیشن را با قیمت بازار می‌بندد."""
+    s = get_session(chat_id)
+    sym = str(symbol).upper()
+    p = next((x for x in s['paper_positions'] if x.get('symbol') == sym), None)
+    back = {'inline_keyboard': [[{'text': '📂 نمایش پوزیشن‌های باز', 'callback_data': '/positions'}]]}
+    if not p:
+        send_message(chat_id, f'ℹ️ پوزیشن `{sym}` دیگر باز نیست.', back); return
+    if not close_position(chat_id, p, reason='بستن سر به سر (دکمه‌ی هشدار)'):
+        send_message(chat_id, f'❌ بستن `{sym}` انجام نشد.', back)
+
+
 # V3.43.15: ۳۰ دقیقه‌ی آخر هر کندل ۴ ساعته (مرز کندل‌ها: مضرب ۴ ساعت از epoch-UTC، مثل بایننس/کوینکس) ورود جدید ممنوع است
 # و یک هشدار برای کاربر می‌آید. کلید روشن/خاموش: «شرایط ورود» ← «بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته».
 FOUR_H_CLOSE_BLOCK_MINUTES = max(0.0, float(os.environ.get('FOUR_H_CLOSE_BLOCK_MINUTES', '30')))
@@ -6644,6 +6801,10 @@ def _background_scan_loop():
             profit_alert_scan_once()
         except Exception:
             logger.exception('profit alert loop failed')
+        try:
+            be_close_scan_once()
+        except Exception:
+            logger.exception('breakeven close loop failed')
         try:
             four_h_close_alert_scan_once()
         except Exception:
@@ -10576,6 +10737,10 @@ def _filter_info(key):
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
             f'اگر سود معامله به یک پله ({pa:g}$ و مضرب‌ها) برسد و بعد حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) از اوجش پایین بیاید، پیام «ضعف سود» می‌گیری. معامله بسته نمی‌شود.'),
+        'be_alert': ('هشدار بستن سر به سر',
+            'اگر معامله به آستانه‌ی سود (مثلاً +1R) رسید و دوباره به نقطه‌ی ورود برگشت، یا تا آستانه‌ی ضرر (مثلاً -0.5R) منفی رفت و دوباره به نقطه‌ی ورود برگشت، یک پیام با دکمه‌ی «بستن سر به سر» می‌گیری. معامله بسته نمی‌شود. R یعنی فاصله‌ی ورود تا SL. هر حالت برای هر پوزیشن یک‌بار. پیش‌فرض: خاموش.'),
+        'be_auto': ('بستن خودکار سر به سر',
+            'همان شرط هشدار بالا، ولی معامله خودکار با قیمت بازار بسته می‌شود (نتیجه حدوداً صفر منهای کارمزد). سود/ضرر آستانه با دو دکمه‌ی زیرش تنظیم می‌شود. پیش‌فرض: خاموش.'),
         'block_buy': ('ممنوع کردن خرید',
             'ربات هیچ معامله‌ی خریدِ جدیدی باز نمی‌کند. معامله‌های باز فعلی دست‌نخورده می‌مانند.'),
         'block_sell': ('ممنوع کردن فروش',
@@ -10601,7 +10766,7 @@ _FILTER_SECTION_KEYS = {
     'entry_warn': ['trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn'],
     'entry_filter': [],
     'entry_rules': ['sweep_confirm', 'fav_confirm'],
-    'exit': ['profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert'],
+    'exit': ['profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert', 'be_alert', 'be_auto'],
     'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
 }
@@ -10756,6 +10921,10 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('total_profit_autoclose_enabled', True)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
             [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
             [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
+            [fcell(bool(s.get('be_close_alert_enabled', False)), 'be_alert', '/toggle_be_alert')],
+            [fcell(bool(s.get('be_close_auto_enabled', False)), 'be_auto', '/toggle_be_auto')],
+            [{'text': f"📈 آستانه‌ی سود: +{_be_cfg(s)[0]:g}R (تغییر)", 'callback_data': '/be_profit_next'},
+             {'text': f"📉 آستانه‌ی ضرر: -{_be_cfg(s)[1]:g}R (تغییر)", 'callback_data': '/be_loss_next'}],
             back_row,
         ]}
 
@@ -12074,6 +12243,8 @@ def process_command(cmd,chat_id,message_id=None):
             if p['symbol']==sym:
                 send_message(chat_id,format_trade_status(p),trade_action_keyboard(sym, miniapp_chart_url(sym, p.get('timeframe','5min')), p.get('timeframe','5min'))); return
         send_message(chat_id,f'❌ پوزیشن `{sym}` پیدا نشد.'); return
+    if cl.startswith('/becl_'):
+        handle_be_close(chat_id, cl[len('/becl_'):]); return
     if cl.startswith('/pclose_'):
         _m = re.match(r'^/pclose_(50|75|100)_(.+)$', cl)
         if _m:
@@ -12210,6 +12381,23 @@ def process_command(cmd,chat_id,message_id=None):
             if not current else 'برگشت به حالت قبلی: ربات بلافاصله بعد از برگشت قیمت وارد می‌شود و منتظر کندل اضافه نمی‌ماند.'
         )
         send_message(chat_id, f"🕯 {_filter_info('sweep_confirm')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
+        return
+    if cl in ('/toggle_be_alert', '/toggle_be_auto'):
+        _bk, _bi = ('be_close_alert_enabled', 'be_alert') if cl == '/toggle_be_alert' else ('be_close_auto_enabled', 'be_auto')
+        s[_bk] = not bool(s.get(_bk, False))
+        save_session(chat_id)
+        _pr, _lr = _be_cfg(s)
+        _note = (f"{_filter_info(_bi)[1]}\n\nآستانه‌ها: سود `+{_pr:g}R` | ضرر `-{_lr:g}R`" if s[_bk] else 'خاموش شد.')
+        send_message(chat_id, f"🔒 {_filter_info(_bi)[0]}: {'🟢 روشن' if s[_bk] else '🔴 خاموش'}\n\n{_note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl in ('/be_profit_next', '/be_loss_next'):
+        _bk, _ch = ('be_close_profit_r', BE_CLOSE_PROFIT_CHOICES) if cl == '/be_profit_next' else ('be_close_loss_r', BE_CLOSE_LOSS_CHOICES)
+        _cur = _be_cfg(s)[0 if cl == '/be_profit_next' else 1]
+        _i = min(range(len(_ch)), key=lambda k: abs(float(_ch[k]) - _cur))
+        s[_bk] = _ch[(_i + 1) % len(_ch)]
+        save_session(chat_id)
+        _pr, _lr = _be_cfg(s)
+        send_message(chat_id, f"🔒 آستانه‌های بستن سر به سر: سود `+{_pr:g}R` | ضرر `-{_lr:g}R`\n\nروی پوزیشن‌های باز و بعدی اثر می‌کند. (-1R همان SL است، پس آستانه‌ی ضرر کمتر از 1R انتخاب می‌شود.)", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_fade_alert':
         current = bool(s.get('profit_fade_alert_enabled', True))
