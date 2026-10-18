@@ -4498,7 +4498,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.28'
+BOT_VERSION = '3.44.30'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8564,9 +8564,10 @@ def _fav_card_payload(r, now=None):
         mini = None
     if mini:
         row2.append({'text': '🌐 چارت تعاملی', 'web_app': {'url': mini}})
-    row2.append({'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"})
-    row3 = [{'text': f"⏳ تمدید مهلت (+{FAV_EXTEND_SECONDS // 60} دقیقه)", 'callback_data': f"/fq_ext_{rid}"}]      # V3.44.27
-    return '\n'.join(lines), {'inline_keyboard': [row1, row2, row3]}
+    # V3.44.30: «🔄 بروزرسانی» و «⏳ تمدید مهلت» کنار هم در یک ردیف؛ چارت تعاملی (اگر باشد) ردیف جدا
+    row3 = [{'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"},
+            {'text': f"⏳ تمدید (+{FAV_EXTEND_SECONDS // 60} دقیقه)", 'callback_data': f"/fq_ext_{rid}"}]
+    return '\n'.join(lines), {'inline_keyboard': [r_ for r_ in (row1, row2, row3) if r_]}
 
 
 def _fav_send_card(chat_id, rec):
@@ -9597,8 +9598,17 @@ def _touch_block_lines(r, n, now):
     votes = r.get('votes') or []
     if not votes:
         lines.append('    (هیچ فیلتر روشنی نیست؛ فقط ورود سریع)')
-    for i, v in enumerate(votes, 1):
-        lines.append(f"    {i}. {v['label']}: {_TOUCH_ST_TXT.get(v.get('status'), '⏳ منتظر تایید')}" + (f" ({v['detail']})" if v.get('detail') else ''))
+    # V3.44.29: فیلترهای تاییدشده (و رأی‌دهنده‌ها) بالا، «منتظر تایید» وسط، «مخالف» پایین؛ هر گروه با یک خط جدا می‌شود. شماره‌ها پشت‌سرهم‌اند.
+    _grp = ([v for v in votes if v.get('status') in ('ok', 'buy', 'sell')],
+            [v for v in votes if v.get('status') not in ('ok', 'buy', 'sell', 'against')],
+            [v for v in votes if v.get('status') == 'against'])
+    _i = 0
+    for _gi, _g in enumerate([g_ for g_ in _grp if g_]):
+        if _gi:
+            lines.append('    ┄┄┄┄┄┄┄┄┄┄┄┄')
+        for v in _g:
+            _i += 1
+            lines.append(f"    {_i}. {v['label']}: {_TOUCH_ST_TXT.get(v.get('status'), '⏳ منتظر تایید')}" + (f" ({v['detail']})" if v.get('detail') else ''))
     gv = r.get('groups') or {}
     if gv:
         _ic = {'BUY': '🟢', 'SELL': '🔴', None: '⏳'}

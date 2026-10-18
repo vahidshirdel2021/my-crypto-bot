@@ -166,6 +166,8 @@ assert abs(float(rc['expires_at'])-(e0+1800))<1 and rc['ext']==1 and rc['fq_msg_
 g['fav_extend'](1,rc['id']); assert abs(float(rc['expires_at'])-(e0+3600))<1 and rc['ext']==2      # لمس‌های پشت‌سرهم جمع می‌شوند
 rc['expires_at']=time.time()-5; g['fav_extend'](1,rc['id']); assert float(rc['expires_at'])>time.time()+1700    # مهلت گذشته‌ی هنوز-منتظر از «الان» ۳۰ دقیقه می‌شود
 sent.clear(); g['fav_extend'](1,rb['id']); assert 'دیگر در صف نیست' in sent[-1]                       # مورد تمام‌شده
+kb=g['_fav_card_payload'](rc)[1]['inline_keyboard']
+last=[b['callback_data'] for b in kb[-1]]; assert last==[f"/fq_ref_{rc['id']}", f"/fq_ext_{rc['id']}"], kb      # بروزرسانی و تمدید کنار هم
 print('fav extend OK')
 print('fav independent cards OK')
 # ---- shadow + stats ----
