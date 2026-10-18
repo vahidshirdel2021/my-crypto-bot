@@ -1406,6 +1406,9 @@ def _message_protected(chat_id, message_id):
         for _tr in ((sess or {}).get('touch_wait') or {}).values():      # V3.44.18: کارتِ مورد در انتظار تا وقتی منتظر است حذف نشود
             if _tr.get('msg_id') == message_id and _tr.get('status') == 'waiting':
                 return True
+        for _fr in ((sess or {}).get('fav_wait') or {}).values():        # V3.44.26: کارت مستقل سیگنال صف تایید حرکت هم تا وقتی منتظر است حذف نشود
+            if _fr.get('fq_msg_id') == message_id and _fr.get('status') == 'waiting':
+                return True
         positions = (sess or {}).get('paper_positions') or []
         if not positions:
             return False
@@ -1453,6 +1456,9 @@ def _after_message_deleted(chat_id, message_id):
         for _tr in (sess.get('touch_wait') or {}).values():
             if _tr.get('msg_id') == message_id:
                 _tr['msg_id'] = None; changed = True
+        for _fr in (sess.get('fav_wait') or {}).values():
+            if _fr.get('fq_msg_id') == message_id:
+                _fr['fq_msg_id'] = None; changed = True
         if changed:
             save_session(chat_id)
     except Exception:
@@ -1715,7 +1721,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 # فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
 # عمداً مسیر قبلی خودشان را نگه می‌دارند.
 _NEW_MESSAGE_PREFIXES = (
-    '/tw_qe_', '/tw_open_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
+    '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
     '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
@@ -4482,7 +4488,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.25'
+BOT_VERSION = '3.44.26'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8211,6 +8217,7 @@ def _fav_finish(chat_id, s, rec, status, text):
     rec['why'] = ('overrun' if rec.get('overran') else 'timeout') if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     save_session(chat_id)
+    _fav_update_card(chat_id, rec, force=True)          # V3.44.26: کارت مستقل این سیگنال درجا «پایان» می‌شود و دکمه‌هایش برداشته می‌شود
     logger.info('fav confirm: %s %s -> %s | %s', rec.get('symbol'), rec.get('sig'), status, text)      # بی‌صدا: فقط لاگ
 
 
@@ -8344,8 +8351,120 @@ def _fav_process_one(chat_id, s, rec):
     save_session(chat_id)
 
 
+FAV_CARDS_PER_LIST = 8     # V3.44.26: هر سیگنال صف تایید حرکت یک پیامِ مستقل با دکمه‌های خودش است؛ حداکثر این‌قدر (جدیدترین پایین چت)
+_FAV_FINAL_TXT = {'opened': '✅ بعد از تایید حرکت، معامله باز شد.', 'card_sent': '🤝 حرکت تایید شد و کارت دستیار (✅ ورود / ❌ رد) برایتان آمد.',
+                  'handed_to_warning': '⚠️ حرکت تایید شد و کارت هشدار ورود برایتان آمد.', 'expired': '⌛ مهلت تمام شد؛ ورودی انجام نشد.',
+                  'cancelled': '🚫 لغو شد: قیمت خلاف جهت رفت یا به SL/TP رسید.', 'skipped': '⏭ روی این نماد پوزیشن باز شد؛ از صف خارج شد.',
+                  'blocked': '⛔ بعد از تایید، ورود توسط محدودیت‌ها رد شد.', 'entered_manual': '✅ با ورود سریع دستی وارد شدید.'}
+
+
+def _fav_card_payload(r, now=None):
+    """متن + کیبورد پیامِ مستقلِ هر سیگنال صف تایید حرکت: ⚡ ورود سریع و 📈 TradingView کنار هم، زیر همان نماد."""
+    now = now or time.time()
+    s = None
+    is_long = r['sig'] == 'BUY'
+    tf = r.get('tf') or '5min'
+    try:
+        live = latest_price(r['symbol'])
+    except Exception:
+        live = None
+    x = _fav_move_r(r['sig'], r['entry'], r['sl'], live) if live else None
+    rem = max(0, int((float(r.get('expires_at', 0) or 0) - now + 59) // 60))
+    if x is None:
+        r_txt, hint = 'قیمت نامشخص', ''
+    else:
+        r_txt = f"`{x:+.2f}R`"
+        hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ فعلاً از سقف گذشته؛ منتظر برگشت' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
+    left = f" · ⏳ {rem} دقیقه" if r.get('status') == 'waiting' else ''
+    lines = ['⏳ *صف تایید حرکت*',
+             f"`{r['symbol']}` {'🟢 خرید' if is_long else '🔴 فروش'} · {TF_DISPLAY.get(tf, tf)}{left}",
+             f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}"]
+    if r.get('max_mode') == 'tp':
+        lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
+    if r.get('status') != 'waiting':
+        lines += ['', _FAV_FINAL_TXT.get(r.get('status'), 'پایان') + (' 🔁 در جهت مخالف به «📋 سیگنال‌های در انتظار» رفت.' if r.get('flipped') and r.get('flip_status') in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened') else '')]
+        return '\n'.join(lines), {'inline_keyboard': []}
+    lines += ['', 'تایید فقط روی کلوز کندل بسته‌شده انجام می‌شود.']
+    rid, sym = r['id'], r['symbol']
+    row1 = [{'text': f"⚡ ورود سریع {sym} {'🟢 خرید' if is_long else '🔴 فروش'}", 'callback_data': f"/fq_qe_{'buy' if is_long else 'sell'}_{rid}"}]
+    try:
+        row1.append({'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)})
+    except Exception:
+        logger.exception('fav queue: tradingview url failed symbol=%s', sym)
+    row2 = []
+    try:
+        mini = miniapp_chart_url(sym, tf)
+    except Exception:
+        mini = None
+    if mini:
+        row2.append({'text': '🌐 چارت تعاملی', 'web_app': {'url': mini}})
+    row2.append({'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"})
+    return '\n'.join(lines), {'inline_keyboard': [row1, row2]}
+
+
+def _fav_send_card(chat_id, rec):
+    """کارت مستقل این سیگنال را (جدید، پایین چت) می‌فرستد؛ کارت قبلیِ همین سیگنال حذف می‌شود تا تکراری نشود."""
+    if not is_allowed(chat_id):
+        return False
+    old = rec.get('fq_msg_id')
+    if old:
+        tg('deleteMessage', {'chat_id': chat_id, 'message_id': old}, 10)
+        rec['fq_msg_id'] = None
+    text, markup = _fav_card_payload(rec)
+    res = tg('sendMessage', {'chat_id': chat_id, 'text': text, 'reply_markup': markup, 'parse_mode': 'Markdown'}, 10)
+    if res and res.get('ok'):
+        rec['fq_msg_id'] = (res.get('result') or {}).get('message_id')
+        return True
+    return False
+
+
+def _fav_update_card(chat_id, rec, force=True):
+    """کارت همین سیگنال را درجا ویرایش می‌کند (وقتی تمام شد دکمه‌ها برداشته می‌شوند). هر خطایی بی‌صدا رد می‌شود."""
+    try:
+        mid = rec.get('fq_msg_id')
+        if not mid or not is_allowed(chat_id):
+            return False
+        text, markup = _fav_card_payload(rec)
+        res = tg('editMessageText', {'chat_id': chat_id, 'message_id': mid, 'text': text, 'reply_markup': markup, 'parse_mode': 'Markdown'}, 10)
+        return bool(res and res.get('ok'))
+    except Exception:
+        logger.exception('fav card update failed symbol=%s', rec.get('symbol'))
+        return False
+
+
+def fav_card_refresh(chat_id, rid):
+    """دکمه‌ی 🔄 زیر هر کارت: فقط همان کارت با قیمت لحظه‌ای تازه ویرایش می‌شود."""
+    s = get_session(chat_id)
+    rec = (s.get('fav_wait') or {}).get(rid)
+    if not rec:
+        send_message(chat_id, 'ℹ️ این مورد دیگر در صف نیست.'); return
+    ctx = getattr(_CB_CTX, 'data', None)
+    if ctx and ctx.get('chat_id') == chat_id and ctx.get('message_id'):
+        rec['fq_msg_id'] = ctx['message_id']
+        ctx['used'] = True
+    _fav_update_card(chat_id, rec, force=True)
+    save_session(chat_id)
+
+
+def fav_quick_entry(chat_id, rid, side):
+    """دکمه‌ی ⚡ ورود سریع زیر هر سیگنال صف تایید حرکت (بدون صبر برای تایید؛ با قیمت لحظه‌ای)."""
+    s = get_session(chat_id)
+    rec = (s.get('fav_wait') or {}).get(rid)
+    if not rec or rec.get('status') != 'waiting':
+        send_message(chat_id, 'ℹ️ این مورد دیگر در صف نیست.'); return
+    symbol = rec['symbol']
+    had = any(p.get('symbol') == symbol for p in s.get('paper_positions', []))
+    quick_channel_trade(chat_id, symbol, side, skip_trend=True)
+    s = get_session(chat_id)
+    if not had and any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
+        rec['status'] = 'entered_manual'; rec['manual_side'] = side; rec['finished_at'] = time.time()
+        _fav_update_card(chat_id, rec, force=True)
+        save_session(chat_id)
+
+
 def fav_queue_list(chat_id, message_id=None):
-    """V3.43.32: فهرست سیگنال‌هایی که در صف «صبر برای تایید» منتظرند (بی‌صدا در پس‌زمینه)."""
+    """V3.43.32: فهرست سیگنال‌هایی که در صف «صبر برای تایید» منتظرند (بی‌صدا در پس‌زمینه).
+    V3.44.26: بالای چت فقط خلاصه + دکمه‌های کلی؛ هر سیگنال پایین‌ترش یک پیام مستقل با ⚡ ورود سریع و 📈 TradingView خودش دارد."""
     s = get_session(chat_id)
     waiting = sorted([r for r in (s.get('fav_wait') or {}).values() if r.get('status') == 'waiting'],
                      key=lambda r: -float(r.get('created_at', 0) or 0))
@@ -8358,46 +8477,19 @@ def fav_queue_list(chat_id, message_id=None):
     if not waiting:
         send_message(chat_id, head + "\n\n✅ الان سیگنالی در صف نیست.", refresh, message_id=message_id)
         return
-    lines = [head, f"در صف: `{len(waiting)}`", ""]
-    for n, r in enumerate(waiting[:20], 1):
-        is_long = r['sig'] == 'BUY'
-        try:
-            live = latest_price(r['symbol'])
-        except Exception:
-            live = None
-        x = _fav_move_r(r['sig'], r['entry'], r['sl'], live) if live else None
-        rem = max(0, int((float(r.get('expires_at', 0) or 0) - time.time() + 59) // 60))
-        if x is None:
-            r_txt, hint = 'قیمت نامشخص', ''
-        else:
-            r_txt = f"`{x:+.2f}R`"
-            hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ فعلاً از سقف گذشته؛ منتظر برگشت' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
-        lines.append(f"{n}) `{r['symbol']}` {'🟢 خرید' if is_long else '🔴 فروش'} · ⏳ {rem} دقیقه")
-        lines.append(f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}")
-        if r.get('max_mode') == 'tp':
-            lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
-    if len(waiting) > 20:
-        lines.append(f"\n… و {len(waiting) - 20} سیگنال دیگر")
+    shown = waiting[:FAV_CARDS_PER_LIST]
+    lines = [head, f"در صف: `{len(waiting)}`", "",
+             f"هر سیگنال در یک پیام جدا و با دکمه‌های خودش (⚡ ورود سریع، 📈 TradingView) پایین همین پیام آمده است ({len(shown)} مورد؛ جدیدترین آخر)."]
+    if len(waiting) > len(shown):
+        lines.append(f"… {len(waiting) - len(shown)} سیگنال قدیمی‌تر بعد از ورود یا انقضای این‌ها نمایش داده می‌شوند.")
     lines.append("\nتایید فقط روی کلوز کندل بسته‌شده انجام می‌شود؛ ✅ یعنی قیمت لحظه‌ای الان در محدوده است. اگر قیمت از سقف گذشت، سیگنال تا پایان مهلت منتظر برگشت به محدوده می‌ماند.")
-    # دکمه‌ی چارت برای هر نماد: TradingView (و MiniApp اگر در دسترس باشد)
-    chart_rows = []
-    for r in waiting[:20]:
-        tf = r.get('tf') or '5min'
-        row = []
+    send_message(chat_id, "\n".join(lines), refresh, message_id=message_id)
+    for r in reversed(shown):            # قدیمی‌تر اول؛ جدیدترین پایین چت، کنار کیبورد
         try:
-            row.append({'text': f"📈 {r['symbol']} TradingView", 'url': tradingview_chart_url(r['symbol'], tf)})
+            _fav_send_card(chat_id, r)
         except Exception:
-            logger.exception('fav queue: tradingview url failed symbol=%s', r.get('symbol'))
-        try:
-            mini = miniapp_chart_url(r['symbol'], tf)
-        except Exception:
-            mini = None
-        if mini:
-            row.append({'text': '🌐 چارت تعاملی', 'web_app': {'url': mini}})
-        if row:
-            chart_rows.append(row)
-    markup = {'inline_keyboard': chart_rows + refresh['inline_keyboard']}
-    send_message(chat_id, "\n".join(lines), markup, message_id=message_id)
+            logger.exception('fav card send failed symbol=%s', r.get('symbol'))
+    save_session(chat_id)
 
 
 def fav_confirm_tick(chat_id):
@@ -11817,6 +11909,11 @@ def process_command(cmd,chat_id,message_id=None):
         touch_card_refresh(chat_id, cl[len('/tw_ref_'):]); return
     if cl.startswith('/tw_open_'):
         touch_open_card(chat_id, cl[len('/tw_open_'):]); return
+    if cl.startswith('/fq_ref_'):
+        fav_card_refresh(chat_id, cl[len('/fq_ref_'):]); return
+    if cl.startswith('/fq_qe_'):
+        _fq_side, _fq_id = cl[len('/fq_qe_'):].split('_', 1)
+        fav_quick_entry(chat_id, _fq_id, 'BUY' if _fq_side == 'buy' else 'SELL'); return
     if cl.startswith('/tw_qe_'):
         # V3.44.14: ورود سریع زیر هر مورد لیست انتظار: /tw_qe_<buy|sell>_<id>
         _tw_side, _tw_id = cl[len('/tw_qe_'):].split('_', 1)

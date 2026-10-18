@@ -113,6 +113,49 @@ state['df']=mkdf([100,100,100]); state['live']=99.4
 g['fav_confirm_tick'](1); assert rec['status']=='cancelled' and not flips
 g['FAV_REVERSE_TO_TOUCH']=True
 print('flip to touch OK')
+# ---- V3.44.26: هر سیگنال صف تایید حرکت یک کارت مستقل (⚡ ورود سریع + 📈 TradingView کنار هم) ----
+import threading
+tgc=[]; qt=[]
+def _tg(m,pl=None,t=10):
+    tgc.append((m,pl)); return {'ok':True,'result':{'message_id':len(tgc)+500}}
+g.update(tg=_tg, is_allowed=lambda c:True, TF_DISPLAY={'5min':'5م','15min':'15م'}, tradingview_chart_url=lambda sym,tf:f'https://tv/{sym}/{tf}',
+         miniapp_chart_url=lambda sym,tf:None, _CB_CTX=threading.local(),
+         quick_channel_trade=lambda c,sym,side,skip_trend=False:(qt.append((sym,side)) or S['paper_positions'].append({'symbol':sym})))
+S['fav_wait']={}; S['fav_wait_seen']={}; S['paper_positions']=[]; sent.clear(); flips.clear()
+g['FAV_REVERSE_TO_TOUCH']=False
+for i,(sym,sg) in enumerate([('AAA','BUY'),('BBB','SELL'),('CCC','BUY')]):
+    g['_fav_confirm_hold'](1,sym,sg,plan,100,99 if sg=='BUY' else 101,102 if sg=='BUY' else 98,'HVL=100.0'); time.sleep(0.01)
+state['live']=100.0
+g['fav_queue_list'](1)
+cards=[(m,p) for m,p in tgc if m=='sendMessage']
+assert len(cards)==3, len(cards)
+assert [re.search(r'`([A-Z]{3})`',p['text']).group(1) for m,p in cards]==['AAA','BBB','CCC']     # قدیمی‌تر اول، جدیدترین آخر
+for m,p in cards:
+    kb=p['reply_markup']['inline_keyboard']; sym=re.search(r'`([A-Z]{3})`',p['text']).group(1)
+    assert len(kb[0])==2 and kb[0][0]['callback_data'].startswith('/fq_qe_') and kb[0][1]['url'].startswith(f'https://tv/{sym}/'), kb
+    assert any(b.get('callback_data','').startswith('/fq_ref_') for row in kb for b in row)
+    assert ('خرید' if kb[0][0]['callback_data'].startswith('/fq_qe_buy') else 'فروش') in kb[0][0]['text'] and sym in kb[0][0]['text']
+# لمس دوباره‌ی لیست: کارت قبلیِ هر سیگنال پاک می‌شود، تکراری نمی‌ماند
+tgc.clear(); g['fav_queue_list'](1)
+assert len([1 for m,p in tgc if m=='deleteMessage'])==3 and len([1 for m,p in tgc if m=='sendMessage'])==3
+# ورود سریع روی BBB (فروش)
+rb=[r for r in S['fav_wait'].values() if r['symbol']=='BBB'][0]
+tgc.clear(); g['fav_quick_entry'](1,rb['id'],'SELL')
+assert qt==[('BBB','SELL')] and rb['status']=='entered_manual'
+ed=[p for m,p in tgc if m=='editMessageText']; assert ed and ed[-1]['reply_markup']['inline_keyboard']==[] and 'ورود سریع دستی' in ed[-1]['text']
+# مورد تمام‌شده
+sent.clear(); g['fav_quick_entry'](1,rb['id'],'SELL'); assert 'دیگر در صف نیست' in sent[-1]
+# پایان خودکار (لغو) کارت را درجا می‌بندد
+ra=[r for r in S['fav_wait'].values() if r['symbol']=='AAA'][0]
+tgc.clear(); state['df']=mkdf([100,100,100]); state['live']=99.4
+g['fav_confirm_tick'](1)
+assert ra['status']=='cancelled' and any(m=='editMessageText' and 'لغو شد' in p['text'] for m,p in tgc)
+# 🔄 همان کارت را ویرایش می‌کند
+rc=[r for r in S['fav_wait'].values() if r['symbol']=='CCC'][0]
+g['_CB_CTX'].data={'chat_id':1,'message_id':777,'used':False,'cmd':'/fq_ref_x'}
+tgc.clear(); g['fav_card_refresh'](1,rc['id'])
+assert rc['fq_msg_id']==777 and g['_CB_CTX'].data['used'] and tgc and tgc[-1][0]=='editMessageText' and tgc[-1][1]['message_id']==777
+print('fav independent cards OK')
 # ---- shadow + stats ----
 g['USER_SESSIONS'][1]=S
 def mkhl(rows):
