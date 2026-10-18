@@ -2798,7 +2798,8 @@ def expected_trade_metrics(trade):
 TV_INTERVAL_MAP = {'5min': '5', '15min': '15', '1hour': '60', '4hour': '240', '1day': 'D'}
 
 
-TRADINGVIEW_BUTTON_INTERVAL = os.environ.get('TRADINGVIEW_BUTTON_INTERVAL', '5').strip() or '5'   # 5 = پنج دقیقه
+TRADINGVIEW_BUTTON_INTERVAL = os.environ.get('TRADINGVIEW_BUTTON_INTERVAL', '').strip()   # V3.44.25: خالی = چارت با تایم‌فریم همان سیگنال/کاربر باز می‌شود؛ اگر مقدار بگذاری (مثلاً 5) همیشه همان تایم ثابت باز می‌شود
+_TV_INTERVALS = {'1min': '1', '3min': '3', '5min': '5', '15min': '15', '30min': '30', '1hour': '60', '2hour': '120', '4hour': '240', '1day': 'D', '1week': 'W'}
 
 
 def tradingview_symbol(symbol):
@@ -2816,8 +2817,8 @@ def tradingview_chart_url(symbol, timeframe='5min'):
     اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
     وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
     """
-    # همیشه تایم‌فریم ثابت (پیش‌فرض ۵ دقیقه) - مستقل از تایم‌فریم فعال ربات/سیگنال؛ با TRADINGVIEW_BUTTON_INTERVAL قابل تغییر است
-    interval = TRADINGVIEW_BUTTON_INTERVAL
+    # V3.44.25: تایم‌فریم چارت = تایم‌فریم همان سیگنال/کاربر (۱۵ دقیقه → ۱۵، ۴ ساعته → ۲۴۰ ...)؛ اگر TRADINGVIEW_BUTTON_INTERVAL ست شده باشد همان ثابت می‌ماند.
+    interval = TRADINGVIEW_BUTTON_INTERVAL or _TV_INTERVALS.get(str(timeframe or '').strip().lower(), '5')
     tv_symbol = urlparse.quote(tradingview_symbol(symbol), safe='')
     return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
 
@@ -4481,7 +4482,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.24'
+BOT_VERSION = '3.44.25'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
