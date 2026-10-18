@@ -54,7 +54,7 @@ BASE_SESSION = {
     'fav_confirm_max_r': 0.30,
     'fav_confirm_max_mode': 'tp',
     'fav_confirm_max_tp_pct': 0.20,
-    'fav_confirm_wait_sec': 900,
+    'fav_confirm_wait_sec': 1800,
 }
 
 PRESETS = {
@@ -71,7 +71,7 @@ PRESETS = {
     },
     '3': {
         'label': 'پایه + صبر برای تایید حرکت',
-        'desc': 'مثل کلید ۱، فقط «صبر برای تایید حرکت به نفع معامله» روشن (حداقل +0.15R، سقف ۲۰٪ مسیر تا هدف، مهلت ۱۵ دقیقه).',
+        'desc': 'مثل کلید ۱، فقط «صبر برای تایید حرکت به نفع معامله» روشن (حداقل +0.15R، سقف ۲۰٪ مسیر تا هدف، مهلت ۳۰ دقیقه).',
         'cfg': {}, 'session': {'fav_confirm_enabled': True},
     },
     '4': {

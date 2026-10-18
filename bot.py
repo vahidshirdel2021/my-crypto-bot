@@ -901,7 +901,8 @@ def default_session():
         # V3.44.2: سقف ورود به‌جای عدد ثابت R، درصدی از مسیر ورود تا هدف (TP) همان سیگنال است ('tp') یا عدد ثابت R ('r')
         'fav_confirm_max_mode': 'tp',
         'fav_confirm_max_tp_pct': 0.20,
-        'fav_confirm_wait_sec': 900,
+        'fav_confirm_wait_sec': 1800,      # V3.44.27: مهلت پیش‌فرض صف تایید حرکت ۳۰ دقیقه
+        'fav_wait30': True,                # V3.44.27: نشانه‌ی اینکه مهاجرت مهلت قدیمی (۱۵ دقیقه) به ۳۰ دقیقه انجام شده
         # V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح
         'touch_auto_mode': 'all',
         'touch_wait': {},
@@ -1005,6 +1006,9 @@ def _setup_mgmt_text(s):
 
 def normalize_session(data):
     s = default_session(); s.update(data or {})
+    if not (data or {}).get('fav_wait30'):      # V3.44.27: مهلت صف تایید حرکت یک‌بار به ۳۰ دقیقه می‌رسد؛ بعدش انتخاب دستی کاربر حفظ می‌شود
+        s['fav_confirm_wait_sec'] = 1800
+        s['fav_wait30'] = True
     s['filters'] = {**FILTER_DEFAULTS, **(data.get('filters') or {})}
     s['user_experience'] = data.get('user_experience') if data.get('user_experience') in ('simple','advanced') else 'simple'
     s['paper_positions'] = list(data.get('paper_positions') or [])
@@ -4488,7 +4492,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.26'
+BOT_VERSION = '3.44.27'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8089,6 +8093,7 @@ FAV_CONFIRM_CANCEL_R = float(os.environ.get('FAV_CONFIRM_CANCEL_R', '0.5'))
 FAV_MIN_R_CHOICES = (0.10, 0.15, 0.20, 0.25)
 FAV_MAX_R_CHOICES = (0.30, 0.35, 0.50)
 FAV_WAIT_CHOICES = (600, 900, 1200, 1800)
+FAV_EXTEND_SECONDS = max(60, int(os.environ.get('FAV_EXTEND_SECONDS', '1800')))   # V3.44.27: هر لمس «تمدید مهلت» این‌قدر به مهلت همان سیگنال اضافه می‌کند (۳۰ دقیقه)
 FAV_MAX_PCT_CHOICES = (0.10, 0.15, 0.20, 0.25, 0.30, 0.40)
 FAV_HARD_MAX_R = float(os.environ.get('FAV_HARD_MAX_R', '1.5'))      # در حالت «درصد مسیر تا هدف» هم سقف از این R بالاتر نمی‌رود
 
@@ -8096,9 +8101,9 @@ FAV_HARD_MAX_R = float(os.environ.get('FAV_HARD_MAX_R', '1.5'))      # در حا
 def _fav_cfg(s):
     try:
         mn = float(s.get('fav_confirm_min_r', 0.15)); mx = float(s.get('fav_confirm_max_r', 0.30))
-        wt = int(s.get('fav_confirm_wait_sec', 900))
+        wt = int(s.get('fav_confirm_wait_sec', 1800))
     except Exception:
-        mn, mx, wt = 0.15, 0.30, 900
+        mn, mx, wt = 0.15, 0.30, 1800
     if mx <= mn:
         mx = mn + 0.05
     return mn, mx, max(60, wt)
@@ -8399,7 +8404,8 @@ def _fav_card_payload(r, now=None):
     if mini:
         row2.append({'text': '🌐 چارت تعاملی', 'web_app': {'url': mini}})
     row2.append({'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"})
-    return '\n'.join(lines), {'inline_keyboard': [row1, row2]}
+    row3 = [{'text': f"⏳ تمدید مهلت (+{FAV_EXTEND_SECONDS // 60} دقیقه)", 'callback_data': f"/fq_ext_{rid}"}]      # V3.44.27
+    return '\n'.join(lines), {'inline_keyboard': [row1, row2, row3]}
 
 
 def _fav_send_card(chat_id, rec):
@@ -8444,6 +8450,25 @@ def fav_card_refresh(chat_id, rid):
         ctx['used'] = True
     _fav_update_card(chat_id, rec, force=True)
     save_session(chat_id)
+
+
+def fav_extend(chat_id, rid):
+    """V3.44.27: دکمه‌ی ⏳ تمدید مهلت زیر هر کارت صف تایید حرکت: با هر لمس ۳۰ دقیقه به مهلت همان سیگنال اضافه می‌شود
+    (از زمان باقی‌مانده‌ی فعلی؛ لمس‌های پشت‌سرهم جمع می‌شوند). فقط همان کارت درجا ویرایش می‌شود."""
+    s = get_session(chat_id)
+    rec = (s.get('fav_wait') or {}).get(rid)
+    if not rec or rec.get('status') != 'waiting':
+        send_message(chat_id, 'ℹ️ این مورد دیگر در صف نیست.'); return
+    now = time.time()
+    rec['expires_at'] = max(float(rec.get('expires_at', 0) or 0), now) + FAV_EXTEND_SECONDS
+    rec['ext'] = int(rec.get('ext', 0) or 0) + 1
+    ctx = getattr(_CB_CTX, 'data', None)
+    if ctx and ctx.get('chat_id') == chat_id and ctx.get('message_id'):
+        rec['fq_msg_id'] = ctx['message_id']
+        ctx['used'] = True
+    _fav_update_card(chat_id, rec, force=True)
+    save_session(chat_id)
+    logger.info('fav confirm: extended %s %s +%ss (ext=%s)', rec.get('symbol'), rec.get('sig'), FAV_EXTEND_SECONDS, rec['ext'])
 
 
 def fav_quick_entry(chat_id, rid, side):
@@ -11911,6 +11936,8 @@ def process_command(cmd,chat_id,message_id=None):
         touch_open_card(chat_id, cl[len('/tw_open_'):]); return
     if cl.startswith('/fq_ref_'):
         fav_card_refresh(chat_id, cl[len('/fq_ref_'):]); return
+    if cl.startswith('/fq_ext_'):
+        fav_extend(chat_id, cl[len('/fq_ext_'):]); return
     if cl.startswith('/fq_qe_'):
         _fq_side, _fq_id = cl[len('/fq_qe_'):].split('_', 1)
         fav_quick_entry(chat_id, _fq_id, 'BUY' if _fq_side == 'buy' else 'SELL'); return

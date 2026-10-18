@@ -155,6 +155,18 @@ rc=[r for r in S['fav_wait'].values() if r['symbol']=='CCC'][0]
 g['_CB_CTX'].data={'chat_id':1,'message_id':777,'used':False,'cmd':'/fq_ref_x'}
 tgc.clear(); g['fav_card_refresh'](1,rc['id'])
 assert rc['fq_msg_id']==777 and g['_CB_CTX'].data['used'] and tgc and tgc[-1][0]=='editMessageText' and tgc[-1][1]['message_id']==777
+# ---- V3.44.27: دکمه‌ی ⏳ تمدید مهلت؛ هر لمس ۳۰ دقیقه به مهلت همان سیگنال اضافه می‌کند ----
+assert g['FAV_EXTEND_SECONDS']==1800
+state['live']=100.0; g['_fav_confirm_hold'](1,'DDD','BUY',plan,100,99,102,'HVL=100.0'); rc=[r for r in S['fav_wait'].values() if r['symbol']=='DDD'][0]
+kb=g['_fav_card_payload'](rc)[1]['inline_keyboard']
+assert any(b.get('callback_data')==f"/fq_ext_{rc['id']}" and '30' in b['text'] for row in kb for b in row), kb
+e0=float(rc['expires_at']); g['_CB_CTX'].data={'chat_id':1,'message_id':778,'used':False,'cmd':'/fq_ext_x'}
+tgc.clear(); g['fav_extend'](1,rc['id'])
+assert abs(float(rc['expires_at'])-(e0+1800))<1 and rc['ext']==1 and rc['fq_msg_id']==778 and tgc and tgc[-1][0]=='editMessageText'
+g['fav_extend'](1,rc['id']); assert abs(float(rc['expires_at'])-(e0+3600))<1 and rc['ext']==2      # لمس‌های پشت‌سرهم جمع می‌شوند
+rc['expires_at']=time.time()-5; g['fav_extend'](1,rc['id']); assert float(rc['expires_at'])>time.time()+1700    # مهلت گذشته‌ی هنوز-منتظر از «الان» ۳۰ دقیقه می‌شود
+sent.clear(); g['fav_extend'](1,rb['id']); assert 'دیگر در صف نیست' in sent[-1]                       # مورد تمام‌شده
+print('fav extend OK')
 print('fav independent cards OK')
 # ---- shadow + stats ----
 g['USER_SESSIONS'][1]=S
