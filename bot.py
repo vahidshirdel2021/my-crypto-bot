@@ -899,6 +899,12 @@ def default_session():
         'be_close_auto_enabled': False,
         'be_close_profit_r': 1.0,
         'be_close_loss_r': 0.5,
+        # V3.44.33: تریلینگ استاپ هوشمند پله‌ای (قفل سود با حرکت دادن SL فقط به سمت سود). پیش‌فرض خاموش.
+        'trail_enabled': False,
+        # V3.44.34: فقط در «بهترین ساعات معامله» اسکن کن. پیش‌فرض خاموش.
+        'hours_filter_enabled': False,
+        'hours_profile': 'both',
+        'trail_profile': 'balanced',
         # V3.43.32: صبر برای تایید (ورود فقط وقتی قیمت بعد از سیگنال کمی به نفع معامله رفته باشد). پیش‌فرض خاموش.
         'active_preset': None,   # V3.44.7: کلید پریست فعال (۱..۵) برای برچسب‌زدن معاملات
         'fav_confirm_enabled': False,
@@ -4498,13 +4504,13 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.31'
+BOT_VERSION = '3.44.34'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
                   'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'touch_auto_mode', 'timeframe', 'active_strategy',
-                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r',
+                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
 _SETTINGS_LOCK = RLock()
@@ -6137,7 +6143,7 @@ def reconcile_real(chat_id):
                 p['pnl_usdt']=rp
                 p['pnl_is_estimate']=False
             p['close_timestamp']=time.time()
-            p['close_reason']='external TP/SL or exchange close'
+            p['close_reason']='external TP/SL or exchange close' + (' (trailing SL active)' if p.get('trail_active') else '')
             p['duration_seconds']=max(0, p['close_timestamp']-float(p.get('opened_at',p['close_timestamp'])))
             p['realized_r']=(float(p.get('pnl_usdt') or 0.0)/float(p.get('risk_usdt') or 0.0)) if float(p.get('risk_usdt') or 0.0)>0 else None
             if float(p.get('pnl_usdt') or 0.0) > PLATFORM_FEE_MIN_PROFIT_USDT:
@@ -6784,6 +6790,195 @@ def four_h_close_alert_scan_once():
             logger.exception('4h close alert failed chat=%s', chat_id)
 
 
+# ===================== V3.44.34: کلید «فقط در بهترین ساعات معامله اسکن کن» =====================
+# پنجره‌ها بر اساس UTC (ثابت؛ ساعت تابستانی/زمستانی لندن و نیویورک را با حاشیه‌ی کافی می‌پوشانند). نمایش به وقت تهران (UTC+3:30، بدون ساعت تابستانی).
+# فقط «اسکن نمادهای جدید» متوقف می‌شود؛ مدیریت پوزیشن‌های باز، تریلینگ، صف‌های در انتظار و «ورود سریع» دستیِ خودت ادامه دارند.
+TRADE_HOURS_PROFILES = {
+    'both':   ('لندن + نیویورک', [(7 * 60, 10 * 60), (12 * 60 + 30, 17 * 60)]),
+    'london': ('فقط بازشدن لندن', [(7 * 60, 10 * 60)]),
+    'ny':     ('فقط نیویورک و هم‌پوشانی', [(12 * 60 + 30, 17 * 60)]),
+}
+TRADE_HOURS_ORDER = ('both', 'london', 'ny')
+IRAN_UTC_OFFSET_MIN = 210
+
+
+def _hours_profile_key(s):
+    k = str((s or {}).get('hours_profile') or 'both')
+    return k if k in TRADE_HOURS_PROFILES else 'both'
+
+
+def _hm(m):
+    m %= 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def _trade_hours_ranges_text(key):
+    """مثلاً «۰۷:۰۰–۱۰:۰۰ UTC (۱۰:۳۰–۱۳:۳۰ تهران) | ...»"""
+    parts = []
+    for a, z in TRADE_HOURS_PROFILES[key][1]:
+        parts.append(f"{_hm(a)}–{_hm(z)} UTC ({_hm(a + IRAN_UTC_OFFSET_MIN)}–{_hm(z + IRAN_UTC_OFFSET_MIN)} تهران)")
+    return ' | '.join(parts)
+
+
+def _in_trade_hours(s, ts=None):
+    """(مجاز؟, توضیح). خاموش = همیشه مجاز."""
+    if not (s or {}).get('hours_filter_enabled', False):
+        return True, ''
+    key = _hours_profile_key(s)
+    t = time.gmtime(ts if ts is not None else time.time())
+    m = t.tm_hour * 60 + t.tm_min
+    for a, z in TRADE_HOURS_PROFILES[key][1]:
+        if a <= m < z:
+            return True, ''
+    return False, f"خارج از بهترین ساعات معامله ({TRADE_HOURS_PROFILES[key][0]}: {_trade_hours_ranges_text(key)})؛ اسکن نمادهای جدید متوقف است"
+
+
+# ===================== V3.44.33: تریلینگ استاپ هوشمند پله‌ای =====================
+# هدف: از سودهای بزرگ با یک برگشت کوچک جا نمانیم. SL فقط به سمت سود حرکت می‌کند (هرگز عقب نمی‌رود) و TP دست‌نخورده می‌ماند.
+#  ۱) قفل سر به سر: وقتی اوج سود به «آستانه‌ی BE» رسید، SL به نقطه‌ی ورود + کارمزد رفت‌وبرگشت می‌آید (دیگر ضرر نمی‌کنیم).
+#  ۲) قفل پله‌ای: هرچه اوج سود بزرگ‌تر شود، درصد بیشتری از آن قفل می‌شود (در سود کوچک جا برای نفس کشیدن، در سود بزرگ فشرده).
+#  ۳) اگر قیمت از سطح قفل هم پایین‌تر آمده باشد، SL با فاصله‌ی کوچک زیر قیمت می‌آید (هیچ‌وقت بالاتر از قیمت نمی‌نشیند).
+# اوج از قیمت‌های لحظه‌ای هر ۵ ثانیه گرفته می‌شود (نه ویک کندل) تا PAPER و REAL یکسان رفتار کنند. در REAL، SL روی خود صرافی جابه‌جا می‌شود.
+TRAIL_PROFILES = {
+    # کلید: (نام, آستانه‌ی سر به سر بر حسب R, [(اوج سود R، درصد قفل‌شده از اوج), ...])
+    'loose':    ('آرام (جا برای نفس کشیدن)', 1.0, [(1.5, 0.25), (2.5, 0.45), (4.0, 0.60), (6.0, 0.70)]),
+    'balanced': ('متعادل', 0.8, [(1.2, 0.35), (2.0, 0.55), (3.0, 0.70), (5.0, 0.80)]),
+    'tight':    ('فشرده (زود قفل می‌کند)', 0.6, [(1.0, 0.45), (1.6, 0.62), (2.5, 0.75), (4.0, 0.85)]),
+}
+TRAIL_PROFILE_ORDER = ('loose', 'balanced', 'tight')
+TRAIL_MIN_GAP_R = 0.10          # SL حداقل این‌قدر (R) از قیمت فعلی فاصله دارد
+TRAIL_MIN_STEP_R = 0.10         # جابه‌جایی کوچک‌تر از این انجام نمی‌شود (جلوگیری از درخواست‌های بی‌فایده به صرافی)
+TRAIL_REAL_MIN_INTERVAL = 15    # حداقل فاصله‌ی دو جابه‌جایی SL روی صرافی برای یک پوزیشن (ثانیه)
+TRAIL_RETRY_SECONDS = 60        # بعد از شکست جابه‌جایی SL در صرافی، این‌قدر صبر می‌کند
+TRAIL_NOTIFY_STEP_R = 0.5       # پیام جدید فقط وقتی قفل حداقل این‌قدر (R) بالاتر رفته باشد
+
+
+def _trail_profile_key(s):
+    k = str((s or {}).get('trail_profile') or 'balanced')
+    return k if k in TRAIL_PROFILES else 'balanced'
+
+
+def _trail_fee_r(entry, rd):
+    """کارمزد رفت‌وبرگشت (Taker) بر حسب R؛ سقف 0.4R."""
+    try:
+        return min(0.4, (2.0 * TAKER_FEE_PCT / 100.0) / (rd / entry))
+    except Exception:
+        return 0.1
+
+
+def _trail_target_lock_r(peak_r, profile, fee_r):
+    """جای SL (فاصله از ورود بر حسب R، مثبت = در سود) برای یک اوج سود؛ None = هنوز فعال نشده."""
+    _name, be_at, ladder = TRAIL_PROFILES[profile]
+    if peak_r < be_at:
+        return None
+    lock = fee_r
+    for thr, frac in ladder:
+        if peak_r >= thr:
+            lock = max(lock, peak_r * frac)
+    return lock
+
+
+def _trail_step(p, price, profile):
+    """اوج/کف لحظه‌ای را به‌روز می‌کند و اگر باید SL بالا بیاید {'new_sl','lock_r','peak_r'} برمی‌گرداند، وگرنه None."""
+    entry = float(p.get('entry_price') or 0)
+    rd = float(p.get('risk_distance') or 0)
+    if rd <= 0:
+        rd = abs(entry - float(p.get('sl_initial') or p.get('sl') or entry))
+    if entry <= 0 or rd <= 0 or price <= 0:
+        return None
+    long_side = side_long(p.get('side', 'BUY'))
+    pk = float(p.get('trail_peak_px') or entry)
+    pk = max(pk, price) if long_side else min(pk, price)
+    p['trail_peak_px'] = pk
+    p['trail_lo'] = min(float(p.get('trail_lo') or price), price)       # قیمت‌های دیده‌شده بعد از آخرین جابه‌جایی SL (تشخیص برخورد SL در PAPER)
+    p['trail_hi'] = max(float(p.get('trail_hi') or price), price)
+    peak_r = ((pk - entry) if long_side else (entry - pk)) / rd
+    p['trail_peak_r'] = round(peak_r, 4)
+    lock_r = _trail_target_lock_r(peak_r, profile, _trail_fee_r(entry, rd))
+    if lock_r is None:
+        return None
+    sl_cur = float(p.get('sl') or 0)
+    tp = float(p.get('tp') or 0)
+    gap = TRAIL_MIN_GAP_R * rd
+    if long_side:
+        target = min(entry + lock_r * rd, price - gap)
+        better = target - sl_cur
+        beyond_tp = tp > 0 and target >= tp
+    else:
+        target = max(entry - lock_r * rd, price + gap)
+        better = sl_cur - target
+        beyond_tp = tp > 0 and target <= tp
+    if better < TRAIL_MIN_STEP_R * rd or beyond_tp:
+        return None
+    return {'new_sl': target, 'lock_r': ((target - entry) if long_side else (entry - target)) / rd, 'peak_r': peak_r}
+
+
+def _trail_apply(chat_id, s, p, act, price):
+    """SL را جابه‌جا می‌کند (REAL: روی صرافی؛ فقط اگر موفق شد در پوزیشن ثبت می‌شود). True اگر جابه‌جا شد."""
+    now = time.time()
+    new_sl = float(act['new_sl'])
+    if p.get('is_real'):
+        if now - float(p.get('trail_last_try') or 0) < TRAIL_REAL_MIN_INTERVAL or now - float(p.get('trail_fail_ts') or 0) < TRAIL_RETRY_SECONDS:
+            return False
+        p['trail_last_try'] = now
+        new_sl = float(normalize_price(chat_id, p['symbol'], new_sl))
+        ok, err = move_stop_loss(chat_id, p['symbol'], new_sl)
+        if not ok:
+            p['trail_fail_ts'] = now
+            logger.warning('trailing SL move failed chat=%s symbol=%s: %s', chat_id, p.get('symbol'), err)
+            return False
+    if not p.get('sl_initial'):
+        p['sl_initial'] = float(p.get('sl') or 0)
+    old_sl = float(p.get('sl') or 0)
+    p['sl'] = new_sl
+    p['trail_active'] = True
+    p['trail_lock_r'] = round(float(act['lock_r']), 4)
+    p['trail_moves'] = int(p.get('trail_moves') or 0) + 1
+    p['trail_moved_at'] = now
+    p['trail_lo'] = price; p['trail_hi'] = price
+    last_note = p.get('trail_notified_r')
+    if last_note is None or float(act['lock_r']) - float(last_note) >= TRAIL_NOTIFY_STEP_R:
+        p['trail_notified_r'] = float(act['lock_r'])
+        try:
+            side_txt = '🟢 خرید' if side_long(p.get('side', 'BUY')) else '🔴 فروش'
+            send_message(chat_id,
+                f"🛡 *تریلینگ استاپ* | *{p['symbol']}* ({side_txt})\n"
+                f"• اوج سود تا الان: `+{float(act['peak_r']):.2f}R`\n"
+                f"• حد ضرر جابه‌جا شد: `{fmt(old_sl)}` ← `{fmt(new_sl)}` (قفل `{float(act['lock_r']):+.2f}R`)\n"
+                f"• حالا حتی با برگشت قیمت، حداقل این مقدار از سود حفظ می‌شود.")
+        except Exception:
+            logger.exception('trailing notify failed')
+    logger.info('trailing sl moved chat=%s symbol=%s %.8g->%.8g lock=%.2fR peak=%.2fR', chat_id, p.get('symbol'), old_sl, new_sl, act['lock_r'], act['peak_r'])
+    return True
+
+
+def trailing_scan_once():
+    """هر چرخه‌ی پس‌زمینه (۵ ثانیه): اوج سود پوزیشن‌ها را دنبال می‌کند و SL را فقط به سمت سود بالا می‌آورد."""
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not s.get('trail_enabled', False):
+                continue
+            profile = _trail_profile_key(s)
+            changed = False
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    price = float(price)
+                    act = _trail_step(p, price, profile)
+                    if act and _trail_apply(chat_id, s, p, act, price):
+                        changed = True
+                except Exception:
+                    logger.exception('trailing scan failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+            if changed:
+                save_session(chat_id)
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'trailing_scan_once', chat_id)
+
+
 BACKGROUND_SCAN_SECONDS = max(2, int(os.environ.get('BACKGROUND_SCAN_SECONDS', '5')))
 
 
@@ -6805,6 +7000,10 @@ def _background_scan_loop():
             be_close_scan_once()
         except Exception:
             logger.exception('breakeven close loop failed')
+        try:
+            trailing_scan_once()
+        except Exception:
+            logger.exception('trailing stop loop failed')
         try:
             four_h_close_alert_scan_once()
         except Exception:
@@ -6884,14 +7083,21 @@ def update_positions(chat_id):
         # Hard SL/TP is always checked before any discretionary stop movement.
         exit_price=None; reason=None
         if s['trading_mode']=='PAPER' and not primary_df.empty:
+            sl_low, sl_high = low, high
+            if p.get('trail_active'):
+                # V3.44.33: بعد از جابه‌جایی SL توسط تریلینگ، ویکِ کندل «قبل از جابه‌جایی» نباید SL جدید را بزند؛
+                # فقط قیمت‌های لحظه‌ای دیده‌شده بعد از آخرین جابه‌جایی سنجیده می‌شوند (مثل REAL که صرافی روی قیمت واقعی تریگر می‌کند).
+                sl_low = min(float(p.get('trail_lo') or price), float(price)); sl_high = max(float(p.get('trail_hi') or price), float(price))
+                p['trail_lo'] = sl_low; p['trail_hi'] = sl_high      # تریلینگ خاموش شده باشد هم ردیابی ادامه دارد
             if side_long(p['side']):
-                hit_tp=high>=float(p['tp']); hit_sl=low<=float(p['sl'])
+                hit_tp=high>=float(p['tp']); hit_sl=sl_low<=float(p['sl'])
             else:
-                hit_tp=low<=float(p['tp']); hit_sl=high>=float(p['sl'])
+                hit_tp=low<=float(p['tp']); hit_sl=sl_high>=float(p['sl'])
+            _trail_tag = (f" trailing {float(p.get('trail_lock_r') or 0):+.2f}R" if p.get('trail_active') else '')
             if hit_tp and hit_sl and PAPER_CONSERVATIVE_OHLC:
-                exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL (same candle)'
+                exit_price=_paper_stop_fill_price(p,sl_low,sl_high,risk_distance); reason=f'SL (same candle{_trail_tag})'
             elif hit_tp: exit_price=float(p['tp']); reason='TP'
-            elif hit_sl: exit_price=_paper_stop_fill_price(p,low,high,risk_distance); reason='SL'
+            elif hit_sl: exit_price=_paper_stop_fill_price(p,sl_low,sl_high,risk_distance); reason=f'SL ({_trail_tag.strip()})' if _trail_tag else 'SL'
             # خروج پله‌ای (مدل PDH/PDL+P4): پله‌هایی که در این کندل لمس شدند (و SL همزمان نخورده)
             # به ترتیب نزدیک به دور، قبل از TP نهایی بسته می‌شوند.
             if (reason is None or reason=='TP') and p.get('tp_stages'):
@@ -10813,6 +11019,10 @@ def _filter_info(key):
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
             f'اگر سود معامله به یک پله ({pa:g}$ و مضرب‌ها) برسد و بعد حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) از اوجش پایین بیاید، پیام «ضعف سود» می‌گیری. معامله بسته نمی‌شود.'),
+        'trail': ('🛡 تریلینگ استاپ هوشمند (قفل سود)',
+            'پیش‌فرض خاموش. روشن: وقتی معامله به سود رسید، حد ضرر (SL) فقط به سمت سود بالا می‌آید و هرگز عقب نمی‌رود؛ هدف (TP) دست‌نخورده می‌ماند. اول سر به سر (ورود + کارمزد) قفل می‌شود، بعد هرچه سود بزرگ‌تر شود درصد بیشتری از اوج سود قفل می‌شود؛ پس با یک برگشت کوچک از سود بزرگ جا نمی‌مانی. اوج از قیمت‌های لحظه‌ای هر ۵ ثانیه گرفته می‌شود. در حساب واقعی SL روی خود صرافی جابه‌جا می‌شود. با دکمه‌ی «نوع تریلینگ» می‌شود آرام/متعادل/فشرده انتخاب کرد. روی پوزیشن‌های باز هم اثر می‌کند.'),
+        'hours': ('🕐 فقط در بهترین ساعات معامله اسکن کن',
+            'پیش‌فرض خاموش. روشن: ربات فقط در ساعات پرحجم بازار دنبال سیگنال جدید می‌گردد و بیرون از آن‌ها اسکن نمادهای جدید متوقف است. مدیریت پوزیشن‌های باز (SL/TP، تریلینگ)، سیگنال‌هایی که از قبل در صف تایید یا لیست انتظار هستند، و «ورود سریع» دستیِ خودت ادامه دارد. ساعت‌ها به UTC ثابت‌اند و نمایش به وقت تهران است. با دکمه‌ی «بازه‌ی ساعت» می‌شود لندن + نیویورک، فقط لندن، یا فقط نیویورک را انتخاب کرد.'),
         'be_alert': ('هشدار بستن سر به سر',
             'اگر معامله به آستانه‌ی سود (مثلاً +1R) رسید و دوباره به نقطه‌ی ورود برگشت، یا تا آستانه‌ی ضرر (مثلاً -0.5R) منفی رفت و دوباره به نقطه‌ی ورود برگشت، یک پیام با دکمه‌ی «بستن سر به سر» می‌گیری. معامله بسته نمی‌شود. R یعنی فاصله‌ی ورود تا SL. هر حالت برای هر پوزیشن یک‌بار. پیش‌فرض: خاموش.'),
         'be_auto': ('بستن خودکار سر به سر',
@@ -10842,8 +11052,8 @@ _FILTER_SECTION_KEYS = {
     'entry_warn': ['trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn'],
     'entry_filter': [],
     'entry_rules': ['sweep_confirm', 'fav_confirm'],
-    'exit': ['profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert', 'be_alert', 'be_auto'],
-    'limits': ['block_buy', 'block_sell', 'block_all', 'same_dir'],
+    'exit': ['trail', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert', 'be_alert', 'be_auto'],
+    'limits': ['hours', 'block_buy', 'block_sell', 'block_all', 'same_dir'],
     'tools': ['scenarios', 'families', 'assist', 'my_profile'],
 }
 
@@ -10992,7 +11202,10 @@ def trade_filter_management_keyboard(chat_id, section=None):
         return {'inline_keyboard': gate_rows('quality') + [back_row]}
 
     if section == 'exit':
+        _tp_name = TRAIL_PROFILES[_trail_profile_key(s)][0]
         return {'inline_keyboard': [
+            [fcell(bool(s.get('trail_enabled', False)), 'trail', '/toggle_trail')],
+            [{'text': f"🛡 نوع تریلینگ: {_tp_name} (تغییر)", 'callback_data': '/trail_profile_next'}],
             [fcell(bool(s.get('profit_autoclose_enabled', True)), 'profit_autoclose', '/toggle_profit_autoclose')],
             [fcell(bool(s.get('total_profit_autoclose_enabled', True)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
             [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
@@ -11010,7 +11223,10 @@ def trade_filter_management_keyboard(chat_id, section=None):
         block_all = bool(s.get('manual_block_all_entries', False))
         max_same = int(s.get('max_same_direction_positions', 0) or 0)
         max_same_txt = str(max_same) if max_same > 0 else 'بدون محدودیت'
+        _hk = _hours_profile_key(s)
         return {'inline_keyboard': [
+            [fcell(bool(s.get('hours_filter_enabled', False)), 'hours', '/toggle_hours')],
+            [{'text': f"🕐 بازه‌ی ساعت: {TRADE_HOURS_PROFILES[_hk][0]} (تغییر)", 'callback_data': '/hours_profile_next'}],
             [fcell(block_buy, 'block_buy', '/toggle_block_buy')],
             [fcell(block_sell, 'block_sell', '/toggle_block_sell')],
             [fcell(block_all, 'block_all', '/toggle_block_all')],
@@ -12458,6 +12674,40 @@ def process_command(cmd,chat_id,message_id=None):
         )
         send_message(chat_id, f"🕯 {_filter_info('sweep_confirm')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
         return
+    if cl == '/toggle_hours':
+        s['hours_filter_enabled'] = not bool(s.get('hours_filter_enabled', False))
+        save_session(chat_id)
+        _hk = _hours_profile_key(s)
+        if s['hours_filter_enabled']:
+            _ok_now, _ = _in_trade_hours(s)
+            _note = (f"{_filter_info('hours')[1]}\n\nبازه‌ی فعلی: *{TRADE_HOURS_PROFILES[_hk][0]}*\n`{_trade_hours_ranges_text(_hk)}`\n\n"
+                     + ('الان داخل ساعات مجاز هستی؛ اسکن عادی ادامه دارد.' if _ok_now else 'الان بیرون از ساعات مجازی؛ اسکن نمادهای جدید تا شروع بازه متوقف است.'))
+        else:
+            _note = 'خاموش شد. اسکن دوباره ۲۴ ساعته است.'
+        send_message(chat_id, f"🕐 {_filter_info('hours')[0]}: {'🟢 روشن' if s['hours_filter_enabled'] else '🔴 خاموش'}\n\n{_note}", trade_filter_management_keyboard(chat_id, 'limits'))
+        return
+    if cl == '/hours_profile_next':
+        _i = TRADE_HOURS_ORDER.index(_hours_profile_key(s))
+        s['hours_profile'] = TRADE_HOURS_ORDER[(_i + 1) % len(TRADE_HOURS_ORDER)]
+        save_session(chat_id)
+        _hk = s['hours_profile']
+        send_message(chat_id, f"🕐 بازه‌ی ساعت: *{TRADE_HOURS_PROFILES[_hk][0]}*\n`{_trade_hours_ranges_text(_hk)}`\n\n" + ('(کلید فعلاً خاموش است؛ از همین صفحه روشنش کن.)' if not s.get('hours_filter_enabled') else 'از اسکن بعدی اعمال می‌شود.'), trade_filter_management_keyboard(chat_id, 'limits'))
+        return
+    if cl == '/toggle_trail':
+        s['trail_enabled'] = not bool(s.get('trail_enabled', False))
+        save_session(chat_id)
+        _tpk = _trail_profile_key(s); _tpn, _be_at, _lad = TRAIL_PROFILES[_tpk]
+        _note = (f"{_filter_info('trail')[1]}\n\nنوع فعلی: *{_tpn}* — سر به سر از `+{_be_at:g}R`" if s['trail_enabled'] else 'خاموش شد. SL پوزیشن‌هایی که قبلاً جابه‌جا شده‌اند همان‌جا می‌ماند.')
+        send_message(chat_id, f"🛡 {_filter_info('trail')[0]}: {'🟢 روشن' if s['trail_enabled'] else '🔴 خاموش'}\n\n{_note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl == '/trail_profile_next':
+        _i = TRAIL_PROFILE_ORDER.index(_trail_profile_key(s))
+        s['trail_profile'] = TRAIL_PROFILE_ORDER[(_i + 1) % len(TRAIL_PROFILE_ORDER)]
+        save_session(chat_id)
+        _tpn, _be_at, _lad = TRAIL_PROFILES[s['trail_profile']]
+        _steps = ' | '.join(f"اوج `{t:g}R` ← قفل `{int(f*100)}%`" for t, f in _lad)
+        send_message(chat_id, f"🛡 نوع تریلینگ: *{_tpn}*\n\n• سر به سر از `+{_be_at:g}R`\n• {_steps}\n\nروی پوزیشن‌های باز و بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
     if cl in ('/toggle_be_alert', '/toggle_be_auto'):
         _bk, _bi = ('be_close_alert_enabled', 'be_alert') if cl == '/toggle_be_alert' else ('be_close_auto_enabled', 'be_auto')
         s[_bk] = not bool(s.get(_bk, False))
@@ -13419,6 +13669,11 @@ async def scan_loop():
                             continue
                         user_tf = s.get('timeframe', '5min')
                         watchlist = base_watchlist_by_tf.get(user_tf) or []
+                        _hrs_ok, _hrs_why = _in_trade_hours(s)
+                        if not _hrs_ok:
+                            # V3.44.34: خارج از ساعات مجاز، واچ‌لیست عادی اسکن نمی‌شود؛ صف «ورود سریع» خودِ کاربر همچنان بررسی می‌شود.
+                            watchlist = []
+                            _entry_diag_batch_update(cid, [{'status':'blocked','reason':_hrs_why}])
                         for sym in watchlist:
                             tasks.append(scan_symbol(http,cid,sym))
                         # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»

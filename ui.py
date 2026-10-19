@@ -116,7 +116,7 @@ def get_balance_keyboard():
 
 
 def get_margin_keyboard():
-    return {"inline_keyboard": [[{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}], [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}]]}
+    return {"inline_keyboard": [[{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}], [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}], [{"text": "200 USDT", "callback_data": "/set_margin_200"}, {"text": "500 USDT", "callback_data": "/set_margin_500"}]]}
 
 
 def get_leverage_keyboard():
