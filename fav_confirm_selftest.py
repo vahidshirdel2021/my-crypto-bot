@@ -168,8 +168,39 @@ rc['expires_at']=time.time()-5; g['fav_extend'](1,rc['id']); assert float(rc['ex
 sent.clear(); g['fav_extend'](1,rb['id']); assert 'دیگر در صف نیست' in sent[-1]                       # مورد تمام‌شده
 kb=g['_fav_card_payload'](rc)[1]['inline_keyboard']
 last=[b['callback_data'] for b in kb[-2]]; assert last==[f"/fq_ref_{rc['id']}", f"/fq_ext_{rc['id']}"], kb      # بروزرسانی و تمدید کنار هم
-assert [b['callback_data'] for b in kb[-1]]==[f"/fq_rej_{rc['id']}"], kb      # V3.44.38: ردیف آخر = ❌ رد سیگنال
+assert [b['callback_data'] for b in kb[-1]]==[f"/fq_rej_{rc['id']}", f"/fq_flt_{rc['id']}"], kb      # V3.44.38/39: ردیف آخر = ❌ رد سیگنال + 🔍 فیلترها
 print('fav extend OK')
+# ---- V3.44.39: دکمه‌ی 🔍 فیلترها (پنجره‌ی بازشو؛ حداکثر ۲۰۰ کاراکتر تلگرام) ----
+import copy
+_ALL=['btceth','h4','tf','rsi','macd','adx','vol','level','ylevel']
+def _mkv(k, vote, detail): return {'key':k,'label':k,'vote':vote,'detail':detail}
+_long=[_mkv('btceth','SELL','ETH نزولی، BTC نزولی'),_mkv('h4','SELL','نزولی'),_mkv('tf','SELL','5 دقیقه نزولی، 15 دقیقه نزولی'),
+       _mkv('rsi','BUY','45'),_mkv('macd','SELL','منفی'),_mkv('adx',None,'ADX 18'),_mkv('vol',None,'1.2x (لازم 1.5x)'),
+       _mkv('level','SELL','آخرین کلوز پایین سطح'),_mkv('ylevel','SELL','برخورد به سقف دیروز (5.9770) و عبور نکرده')]
+g.update(_touch_enabled_keys=lambda s_:list(_ALL), _touch_votes=lambda sym,tf,reason,keys,ind_df=None:copy.deepcopy(_long),
+         _final_regime_check=lambda tf,sig:(False,'x'), TIMEFRAME_REGIME_CACHE={'5min':{'gate':'RANGE'}},
+         gate_on=lambda s_,k:True if k=='gate_final_regime_enabled' else False)
+state['live']=99.9
+state['df']=mkdf([100.0,99.95,99.9])
+rz=[r for r in S['fav_wait'].values() if r['symbol']=='DDD'][0]
+rz['sig']='SELL'; rz['entry']=100.0; rz['sl']=101.0; rz['tp']=98.0; rz['min_r']=0.3; rz['max_r']=0.38; rz['status']='waiting'; rz['created_at']=now-30
+before=copy.deepcopy(rz)
+txt=g['fav_filters_popup'](1,rz['id']); print(txt); print(len(txt), g['_tg_len'](txt))
+assert g['_tg_len'](txt)<=200, g['_tg_len'](txt)
+assert 'DDD' in txt and 'RSI' in txt and 'MACD' in txt and '✅' in txt and '❌' in txt and '⏳' in txt and 'رنج' in txt
+assert rz==before, 'popup must not modify the queue record'
+# فقط چند فیلتر روشن → جزئیات بیشتر (کلوز آخر و مقدارها) جا می‌شود
+g['_touch_enabled_keys']=lambda s_:['rsi','macd']
+g['_touch_votes']=lambda sym,tf,reason,keys,ind_df=None:[copy.deepcopy(_long[3]),copy.deepcopy(_long[4])]
+g['gate_on']=lambda s_,k:False
+txt=g['fav_filters_popup'](1,rz['id']); print(txt)
+assert 'کلوز آخر' in txt and 'RSI 45' in txt and g['_tg_len'](txt)<=200
+# هیچ فیلتری روشن نیست
+g['_touch_enabled_keys']=lambda s_:[]
+txt=g['fav_filters_popup'](1,rz['id']); print(txt); assert 'فیلتر دیگری روشن نیست' in txt
+# مورد تمام‌شده
+rz['status']='expired'; assert 'دیگر در صف نیست' in g['fav_filters_popup'](1,rz['id']); assert 'دیگر در صف نیست' in g['fav_filters_popup'](1,'nope')
+print('fav filters popup OK')
 print('fav independent cards OK')
 # ---- shadow + stats ----
 g['USER_SESSIONS'][1]=S

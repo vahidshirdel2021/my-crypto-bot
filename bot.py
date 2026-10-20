@@ -4633,7 +4633,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.38'
+BOT_VERSION = '3.44.39'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8950,7 +8950,9 @@ def _fav_card_payload(r, now=None):
     row3 = [{'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"},
             {'text': f"⏳ تمدید (+{FAV_EXTEND_SECONDS // 60} دقیقه)", 'callback_data': f"/fq_ext_{rid}"}]
     # V3.44.38: رد دستی سیگنال (ردیف جدا)
-    row4 = [{'text': '❌ رد سیگنال', 'callback_data': f"/fq_rej_{rid}"}]
+    # V3.44.39: کنارش «🔍 فیلترها»: نتیجه‌ی لحظه‌ای فیلترهای روشن به‌صورت پنجره‌ی بازشو (فقط نمایش؛ هیچ اثری روی صف ندارد)
+    row4 = [{'text': '❌ رد سیگنال', 'callback_data': f"/fq_rej_{rid}"},
+            {'text': '🔍 فیلترها', 'callback_data': f"/fq_flt_{rid}"}]
     return '\n'.join(lines), {'inline_keyboard': [r_ for r_ in (row1, row2, row3, row4) if r_]}
 
 
@@ -9030,6 +9032,126 @@ def fav_reject(chat_id, rid):
         rec['fq_msg_id'] = ctx['message_id']
         ctx['used'] = True
     _fav_finish(chat_id, s, rec, 'rejected', f"❌ {rec.get('symbol')} ({rec.get('sig')}) به‌صورت دستی توسط کاربر رد شد")
+
+
+def _tg_len(text):
+    """طول متن به شیوه‌ی تلگرام (واحد UTF-16؛ ایموجی‌های بزرگ ۲ حساب می‌شوند)."""
+    return len(str(text).encode('utf-16-le')) // 2
+
+
+FAV_FLT_POPUP_MAX = 200     # V3.44.39: سقف تلگرام برای متن پنجره‌ی بازشو (answerCallbackQuery)
+_FAV_FLT_SHORT = {'btceth': 'BTC/ETH', 'h4': '۴س', 'tf': '۵/۱۵', 'rsi': 'RSI', 'macd': 'MACD', 'adx': 'ADX',
+                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز'}
+
+
+def _fav_flt_mark(vote, sig):
+    if vote == 'OK' or vote == sig:
+        return '✅'
+    if vote in ('BUY', 'SELL'):
+        return '❌'
+    return '⏳'
+
+
+def _fav_flt_val(v):
+    """مقدار کوتاهِ فیلترهای عددی برای پنجره‌ی بازشو (برای بقیه خالی)."""
+    d = str(v.get('detail') or '')
+    k = v.get('key')
+    if k == 'rsi':
+        return d if d and d != 'داده نیست' else ''
+    if k == 'macd':
+        return d if d in ('مثبت', 'منفی') else ''
+    if k == 'adx':
+        return d.replace('ADX ', '') if d.startswith('ADX ') else ''
+    if k == 'vol':
+        return d.split(' (')[0] if d and d != 'داده نیست' else ''
+    return ''
+
+
+def _fav_flt_build(rec, votes, live, last_close_r, reg_line, rem_min, tier):
+    """متن پنجره‌ی بازشو در چند «سطح جزئیات»؛ هرچه tier بیشتر، فشرده‌تر. (tier 0 = کامل‌ترین)"""
+    sig = rec['sig']
+    x = _fav_move_r(sig, rec['entry'], rec['sl'], live) if live else None
+    side = 'خرید' if sig == 'BUY' else 'فروش'
+    head = f"🔍 {rec['symbol']} {side}" + (f" · ⏳{rem_min}د" if tier == 0 else '')
+    lines = [head]
+    mn, mx = float(rec['min_r']), float(rec['max_r'])
+    if x is None:
+        lines.append('حرکت: قیمت نامشخص')
+    else:
+        if mn <= x <= mx:
+            mk = '✅'
+        elif x > mx:
+            mk = '⚠️'
+        elif x <= -FAV_CONFIRM_CANCEL_R:
+            mk = '⛔'
+        else:
+            mk = '⏳'
+        lines.append(f"حرکت: {x:+.2f}R {mk}" + (f" (لازم {mn:+.2f} تا {mx:+.2f})" if tier <= 1 else ''))
+    if tier == 0 and last_close_r is not None:
+        lm = '✅' if mn <= last_close_r <= mx else '⏳'
+        lines.append(f"کلوز آخر: {last_close_r:+.2f}R {lm}")
+    if reg_line:
+        lines.append(reg_line)
+    parts = []
+    for v in votes:
+        nm = _FAV_FLT_SHORT.get(v['key'], v['key'])
+        val = _fav_flt_val(v) if tier <= 1 else ''
+        parts.append(f"{nm}{(' ' + val) if val else ''} {_fav_flt_mark(v['vote'], sig)}")
+    if parts:
+        lines.append(' '.join(parts) if tier >= 1 else ' · '.join(parts))
+    elif not reg_line:
+        lines.append('فیلتر دیگری روشن نیست')
+    return '\n'.join(lines)
+
+
+def fav_filters_popup(chat_id, rid):
+    """V3.44.39: دکمه‌ی 🔍 فیلترها زیر کارت صف تایید حرکت: نتیجه‌ی «لحظه‌ای» فیلترهای روشن همین سیگنال (بدون ذخیره، بدون اثر روی صف).
+    ✅ هم‌جهت با سیگنال | ❌ مخالف | ⏳ خنثی/منتظر. متن پنجره‌ی بازشو در تلگرام حداکثر ۲۰۰ کاراکتر است؛ اگر جزئیات جا نشد
+    به‌تدریج فشرده‌تر می‌شود (اول حذف «کلوز آخر»، بعد مقدارهای عددی)."""
+    s = get_session(chat_id)
+    rec = (s.get('fav_wait') or {}).get(rid)
+    if not rec or rec.get('status') != 'waiting':
+        return 'ℹ️ این مورد دیگر در صف نیست.'
+    try:
+        sym, sig = rec['symbol'], rec['sig']
+        tf = rec.get('tf') or '5min'
+        try:
+            live = exchange_latest_price(chat_id, sym) if s.get('trading_mode') == 'REAL' else latest_price(sym)
+            live = float(live) if live else None
+        except Exception:
+            live = None
+        keys = _touch_enabled_keys(s)
+        votes = _touch_votes(sym, tf, rec.get('reason') or '', keys) if keys else []
+        reg_line = ''
+        if gate_on(s, 'gate_final_regime_enabled'):
+            reg_ok, _t = _final_regime_check(tf, sig)
+            gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+            reg_fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}.get(gate, 'نامشخص')
+            reg_line = f"🧭 رژیم {TF_DISPLAY.get(tf, tf)}: {reg_fa} {'✅' if reg_ok else '❌'}"
+        last_close_r = None
+        try:
+            df = get_klines(sym, tf, 30)
+            if df is not None and len(df) >= 3:
+                row = df.iloc[-2]          # آخرین کندل بسته‌شده
+                ts = float(row['timestamp'])
+                if ts > 1e11:
+                    ts /= 1000.0
+                if ts >= float(rec.get('created_at', 0) or 0) - 90:
+                    last_close_r = _fav_move_r(sig, rec['entry'], rec['sl'], float(row['close']))
+        except Exception:
+            logger.exception('fav filters popup: last close failed symbol=%s', sym)
+        rem = max(0, int((float(rec.get('expires_at', 0) or 0) - time.time() + 59) // 60))
+        txt = ''
+        for tier in range(4):
+            txt = _fav_flt_build(rec, votes, live, last_close_r, reg_line, rem, tier)
+            if _tg_len(txt) <= FAV_FLT_POPUP_MAX:
+                return txt
+        while _tg_len(txt) > FAV_FLT_POPUP_MAX - 1:       # آخرین چاره: بریدن (نباید پیش بیاید)
+            txt = txt[:-1]
+        return txt + '…'
+    except Exception:
+        logger.exception('fav filters popup failed rid=%s', rid)
+        return '⚠️ بررسی فیلترها انجام نشد؛ کمی بعد دوباره امتحان کنید.'
 
 
 def fav_quick_entry(chat_id, rid, side):
@@ -13840,6 +13962,13 @@ def telegram_listener():
                         if is_allowed(chat):
                             _aid = str(callback['data'])[len('/assist_ind_'):]
                             answer_callback(callback['id'], text=assist_indicators_popup(chat, _aid), show_alert=True)
+                        else:
+                            answer_callback(callback['id'])
+                        continue
+                    if callback.get('id') and str(callback.get('data') or '').startswith('/fq_flt_'):
+                        # V3.44.39: دکمه‌ی «🔍 فیلترها» زیر کارت صف تایید حرکت: نتیجه‌ی لحظه‌ای فیلترهای روشن به‌صورت پنجره‌ی بازشو
+                        if is_allowed(chat):
+                            answer_callback(callback['id'], text=fav_filters_popup(chat, str(callback['data'])[len('/fq_flt_'):]), show_alert=True)
                         else:
                             answer_callback(callback['id'])
                         continue
