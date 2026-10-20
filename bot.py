@@ -3113,6 +3113,12 @@ def check_pending_orders(chat_id):
                     except Exception:
                         logger.exception('assist tag for pending order failed')
                 send_message(chat_id, f"✅ اوردر معاملاتی `{o['symbol']}` فعال و معامله باز شد.")
+            elif str(err).startswith(_BTC_CANDLE_BLOCK_PREFIX):
+                # V3.44.42: کندل BTC هنوز هم‌جهت نیست؛ اوردر حذف نمی‌شود و در چرخه‌ی بعد دوباره سنجیده می‌شود (فقط یک‌بار پیام).
+                remaining.append(o)
+                if not o.get('btc_wait_notified'):
+                    o['btc_wait_notified'] = True
+                    send_message(chat_id, f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی وارد نشد و منتظر می‌ماند:\n{err}")
             else:
                 send_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}")
         except Exception:
@@ -3365,6 +3371,89 @@ def _review_popup_text(uid, side=None):
 
 
 _REGIME_FA = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}
+
+
+# ===================== V3.44.42: کلید «هم‌جهتی با کندل در حال تشکیل BTC» =====================
+# هنگام ورود (خودکار یا دستی)، کندل «در حال تشکیل» BTC روی همان تایم‌فریم فعال سنجیده می‌شود:
+# خرید فقط وقتی قیمت لحظه‌ای BTC بالاتر از باز شدن همین کندل باشد (کندل صعودی)، فروش فقط وقتی پایین‌تر (کندل نزولی).
+# ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند. ورود دستی/دستیار/ورود سریع: رد می‌شود (حتی با اصرار کاربر).
+# اگر داده‌ی کندل BTC در دسترس نباشد یا کندل خنثی باشد، «هم‌جهت» حساب نمی‌شود (ورود انجام نمی‌شود).
+BTC_CANDLE_MIN_BODY_PCT = max(0.0, float(os.environ.get('BTC_CANDLE_MIN_BODY_PCT', '0') or 0))   # 0 = هر بدنه‌ی غیرصفر جهت دارد
+_BTC_CANDLE_BLOCK_PREFIX = '⛔ کندل BTC'
+_BTC_CANDLE_FA = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'NEUTRAL': 'خنثی'}
+
+
+def btc_forming_candle(tf):
+    """کندل در حال تشکیل BTC روی تایم‌فریم tf: {'open','price','start'} یا None.
+    باز شدن کندل از کلاینت‌ها و قیمت جاری از latest_price (کش ۵ ثانیه) می‌آید. اگر کش کندل‌ها کهنه باشد
+    (آخرین ردیف مربوط به کندل قبلی)، یک‌بار کش دور زده و دوباره دریافت می‌شود."""
+    secs = _TF_SECONDS.get(tf)
+    if not secs:
+        return None
+    period = TIMEFRAME_MAP.get(tf, tf)
+    row = None
+    for attempt in (0, 1):
+        now = time.time()
+        start = int(now // secs) * secs
+        try:
+            df = get_klines('BTC', tf, 60)
+        except Exception:
+            logger.exception('btc candle: klines failed tf=%s', tf)
+            df = None
+        if df is None or len(df) == 0:
+            return None
+        last = df.iloc[-1]
+        ts = float(last['timestamp'])
+        if ts > 1e11:
+            ts /= 1000.0
+        if start - 1 <= ts <= now + 1:
+            row = last
+            break
+        if attempt == 0:
+            with DATA_LOCK:
+                DATA_CACHE.pop(f'BTC:{period}:60', None)
+    if row is None:
+        return None
+    try:
+        o = float(row['open'])
+        px = None
+        try:
+            px = latest_price('BTC')
+        except Exception:
+            px = None
+        px = float(px) if px else float(row['close'])
+        if not (o > 0 and px > 0):
+            return None
+        return {'open': o, 'price': px, 'start': start}
+    except Exception:
+        return None
+
+
+def btc_candle_state(tf):
+    """('BULLISH'|'BEARISH'|'NEUTRAL'|None, candle). None = داده در دسترس نیست."""
+    c = btc_forming_candle(tf)
+    if not c:
+        return None, None
+    pct = (c['price'] - c['open']) / c['open'] * 100.0
+    c['pct'] = pct
+    if abs(pct) <= BTC_CANDLE_MIN_BODY_PCT:
+        return 'NEUTRAL', c
+    return ('BULLISH' if pct > 0 else 'BEARISH'), c
+
+
+def btc_candle_verdict(tf, sig):
+    """(ok, توضیح). sig = 'BUY'/'SELL'. ok فقط وقتی کندل در حال تشکیل BTC هم‌جهت معامله باشد."""
+    want = 'BULLISH' if sig == 'BUY' else 'BEARISH'
+    side_fa = 'خرید' if sig == 'BUY' else 'فروش'
+    tf_fa = TF_DISPLAY.get(tf, tf)
+    state, c = btc_candle_state(tf)
+    if state is None:
+        return False, f'{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در دسترس نیست؛ ورود تا دریافت داده‌ی BTC انجام نمی‌شود'
+    if state == want:
+        return True, ''
+    return False, (f"{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در حال تشکیل {_BTC_CANDLE_FA[state]} است "
+                   f"(باز شدن {fmt(c['open'])} ← الان {fmt(c['price'])}، {c['pct']:+.2f}٪) و با {side_fa} نمی‌خواند؛ "
+                   f"ورود تا هم‌جهت شدن کندل BTC با معامله انجام نمی‌شود")
 
 
 def btc_eth_regime_rows(tf):
@@ -4664,7 +4753,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.41'
+BOT_VERSION = '3.44.42'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -5597,6 +5686,33 @@ async def get_log_grid_levels(http, symbol):
     return levels
 
 
+def _btc_candle_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inverse):
+    """V3.44.42: کلید «هم‌جهتی با کندل BTC». True = اجازه‌ی ادامه. همه‌ی مسیرهای ورود (خودکار، دستی، دستیار، ورود سریع،
+    اوردر معلق) از execute_trade/execute_manual_trade می‌گذرند، پس این‌جا حتی با force=True هم دور زده نمی‌شود.
+    قبل از گرفتن قفل ورود اجرا می‌شود تا دریافت داده‌ی شبکه، بستن پوزیشن‌ها را معطل نکند. جهت، جهتِ نهایی معامله است
+    (اگر «معاملات معکوس» روشن باشد، جهت برعکس‌شده سنجیده می‌شود)."""
+    s = get_session(chat_id)
+    if not gate_on(s, 'gate_btc_candle_enabled'):
+        return True
+    try:
+        _BLK_CTX[chat_id] = {'ts': time.time(), 'symbol': symbol, 'side': side, 'signal_price': float(price), 'sl': float(sl), 'tp': float(tp),
+                             'scenario': None, 'force': bool(force)}
+    except Exception:
+        pass
+    eff_long = side_long(side)
+    if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
+        eff_long = not eff_long
+    try:
+        ok, txt = btc_candle_verdict(s.get('timeframe', '5min'), 'BUY' if eff_long else 'SELL')
+    except Exception:
+        logger.exception('btc candle precheck failed chat=%s symbol=%s', chat_id, symbol)
+        ok, txt = False, f'{_BTC_CANDLE_BLOCK_PREFIX}: خطا در بررسی کندل؛ ورود انجام نمی‌شود'
+    if ok:
+        return True
+    _blk(chat_id, txt)
+    return False
+
+
 def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp=False,plan_score=None,plan_rr=None,plan_quality_label=None,bypass_burst_cooldown=False,force=False,tp_level_name=None,tp_stages=None,keep_levels=False):
     """force=True (تایید دستی کاربر در حالت دستیار): محدودیت‌های خودکار (سقف پوزیشن، کول‌داون،
     محافظ ریسک، توقف روزانه، فعال‌نبودن ربات، ...) نادیده گرفته می‌شود. فقط موانع فنی می‌مانند
@@ -5609,6 +5725,8 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
             return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
         if s['daily_stopped']:
             return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
+    if not _btc_candle_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
+        return False
     lock=get_entry_lock(chat_id)
     with lock:
         s=get_session(chat_id)
@@ -5629,6 +5747,8 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
     if not live_price:
         return False, f'قیمت لحظه‌ای `{symbol}` دریافت نشد.'
     price=float(entry_price) if entry_price else live_price
+    if not _btc_candle_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):
+        return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (کندل BTC با جهت معامله نمی‌خواند).'
     generation=int(s.get('scan_generation',0))
     lock=get_entry_lock(chat_id)
     with lock:
@@ -8778,7 +8898,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout')) if status == 'expired' else status
+    rec['why'] = ('btc' if rec.get('btc_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     save_session(chat_id)
     _fav_update_card(chat_id, rec, force=True)          # V3.44.26: کارت مستقل این سیگنال درجا «پایان» می‌شود و دکمه‌هایش برداشته می‌شود
@@ -8889,6 +9009,22 @@ def _fav_process_one(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('regime_blocked', None); rec.pop('regime_hold', None)
+        if gate_on(s, 'gate_btc_candle_enabled') and not s.get('assist_mode_enabled'):
+            # V3.44.42: ورود خودکار باید با کندل در حال تشکیل BTC هم‌جهت باشد؛ وگرنه در صف می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+            # (در حالت دستیار کارت ساخته می‌شود و ورودِ دستیِ کارت در execute_trade رد می‌شود.)
+            try:
+                btc_ok, btc_txt = btc_candle_verdict(tf, sig)
+            except Exception:
+                logger.exception('fav confirm: btc candle check failed symbol=%s', symbol)
+                btc_ok, btc_txt = False, f'{_BTC_CANDLE_BLOCK_PREFIX}: خطا در بررسی کندل'
+            if not btc_ok:
+                rec['btc_blocked'] = True; rec['btc_hold'] = btc_txt
+                if now >= float(rec.get('expires_at', 0)):
+                    return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {btc_txt}؛ بدون ورود.")
+                rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+                save_session(chat_id)
+                return
+            rec.pop('btc_blocked', None); rec.pop('btc_hold', None)
         rec['confirmed_at'] = now; rec['confirm_px'] = float(live)
         p_stub = {'structural_target': rec.get('structural_tp'), 'score': rec.get('score'), 'rr': rec.get('rr'),
                   'quality_label': rec.get('quality_label'), 'tp_level_name': rec.get('tp_level_name'), 'tp_stages': rec.get('tp_stages')}
@@ -8919,9 +9055,9 @@ def _fav_process_one(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran') and not rec.get('regime_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = ('رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+        why_txt = ('کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
                    ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -8961,6 +9097,8 @@ def _fav_card_payload(r, now=None):
         lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
     if r.get('regime_hold') and r.get('status') == 'waiting':
         lines.append(f"    🧭 {r['regime_hold']}")
+    if r.get('btc_hold') and r.get('status') == 'waiting':
+        lines.append(f"    ₿ {r['btc_hold']}")
     if r.get('status') != 'waiting':
         lines += ['', _FAV_FINAL_TXT.get(r.get('status'), 'پایان') + (' 🔁 در جهت مخالف به «📋 سیگنال‌های در انتظار» رفت.' if r.get('flipped') and r.get('flip_status') in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened') else '')]
         return '\n'.join(lines), {'inline_keyboard': []}
@@ -9382,7 +9520,7 @@ def fav_stats_text(s):
     if o_imm:
         w = sum(1 for r in o_imm if r['imm']['outcome'] == 'tp')
         lines.append(f"• تعیین‌تکلیف: `{len(o_imm)}` | می‌برد: `{w / len(o_imm) * 100:.0f}%` | میانگین R فرضی: `{avg([r['imm']['r'] for r in o_imm]):+.2f}`")
-        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
+        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'btc': 'کندل BTC هم‌جهت معامله نشد', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
         for why, nm in names.items():
             g = [r for r in o_imm if r.get('why') == why]
             if g:
@@ -10199,6 +10337,16 @@ def _touch_auto_enter(chat_id, rec):
         _assist_queue_signal(chat_id, symbol, side, dict(p_stub, rr=None), live, sl, tp, full_reason,
                              df=(df_card if (df_card is not None and len(df_card)) else None))
         return _finish('card_sent')
+    if gate_on(s, 'gate_btc_candle_enabled'):
+        # V3.44.42: ورود خودکار از لیست انتظار: کندل در حال تشکیل BTC باید هم‌جهت باشد؛ وگرنه مورد در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+        try:
+            _bc_ok, _bc_txt = btc_candle_verdict(tf, side)
+        except Exception:
+            logger.exception('touch: btc candle check failed symbol=%s', symbol)
+            _bc_ok, _bc_txt = False, f'{_BTC_CANDLE_BLOCK_PREFIX}: خطا در بررسی کندل'
+        if not _bc_ok:
+            rec['block_note'] = _bc_txt[:120]
+            return False
     ok = execute_trade(chat_id, symbol, 'BUY (Long)' if is_long else 'SELL (Short)', live, sl, tp, full_reason,
                        bypass_burst_cooldown=True, **extra)
     if ok:
@@ -11119,6 +11267,15 @@ async def scan_symbol(http,chat_id,symbol):
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
+    if gate_on(s, 'gate_btc_candle_enabled'):
+        # V3.44.42: مسیر مستقیم (بدون صف): کندل در حال تشکیل BTC باید با جهت معامله هم‌جهت باشد؛ وگرنه این دور وارد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
+        try:
+            _bc_ok, _bc_txt = await asyncio.to_thread(btc_candle_verdict, tf, sig)
+        except Exception:
+            logger.exception('btc candle check failed symbol=%s', symbol)
+            _bc_ok, _bc_txt = False, f'{_BTC_CANDLE_BLOCK_PREFIX}: خطا در بررسی کندل'
+        if not _bc_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «هم‌جهتی با کندل BTC»: {_bc_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'btc_candle', sig, diagnostics=diagnostics)
     # V3.42.7: ورود خودکار هم قبل از اجرا با روند BTC/ETH سنجیده می‌شود؛ در صورت تضاد ورود نگه داشته می‌شود و منتظر تایید کاربر می‌ماند.
     try:
         _held = await asyncio.to_thread(_auto_trend_gate, chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
@@ -11388,6 +11545,7 @@ GATE_REGISTRY = {
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد.'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_rules', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود (صبر تا به نفع معامله شود)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
+    'gate_btc_candle_enabled': ('₿ هم‌جهتی با کندل در حال تشکیل BTC (ورود فقط وقتی کندل BTC با معامله هم‌جهت است)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
