@@ -939,7 +939,7 @@ def default_session():
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
-                            'halving_model_enabled': True, 'halving_k_atr': 3.0, 'halving_max_depth': 12},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
+                            'halving_model_enabled': True, 'halving_k_atr': 3.0, 'halving_max_depth': 12, 'halving_tf': {}},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
         'risk_per_trade_pct': RISK_PER_TRADE_PCT,
         'max_margin_usage_pct': MAX_MARGIN_USAGE_PCT,
@@ -978,7 +978,35 @@ def default_session():
 
 
 _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
-                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k')
+                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_tf')
+
+# V3.44.40: پیش‌فرضِ «فاصله‌ی حداقل سطوح (×ATR)» و «سقف عمق درخت» برای هر تایم‌فریم جدا؛ با تغییر تایم‌فریم خودکار اعمال می‌شود.
+# تغییر دستی کاربر با دکمه‌ها فقط برای همان تایم‌فریمِ فعال ذخیره می‌شود (کلید halving_tf). تایم‌فریم‌های دیگر (۱ و ۴ ساعته) دست‌نخورده می‌مانند.
+HALVING_TF_DEFAULTS = {'5min': {'halving_k_atr': 3.0, 'halving_max_depth': 12},
+                       '15min': {'halving_k_atr': 4.0, 'halving_max_depth': 10}}
+
+
+def _halving_tf_params(cfg, tf):
+    """{'halving_k_atr','halving_max_depth'} این تایم‌فریم (انتخاب کاربر، وگرنه پیش‌فرض)؛ {} اگر برای این تایم‌فریم چیزی تعریف نشده."""
+    base = dict(HALVING_TF_DEFAULTS.get(tf) or {})
+    user = ((cfg or {}).get('halving_tf') or {}).get(tf) or {}
+    for k in ('halving_k_atr', 'halving_max_depth'):
+        if k in user:
+            base[k] = user[k]
+    return base
+
+
+def _halving_tf_apply(cfg, tf):
+    """مقدار k و عمقِ تایم‌فریم tf را روی کانفیگ فعال می‌گذارد."""
+    if isinstance(cfg, dict):
+        cfg.update(_halving_tf_params(cfg, tf))
+    return cfg
+
+
+def _halving_tf_store(cfg, tf):
+    """مقدار فعلیِ k و عمق (بعد از تغییر دستی) را برای تایم‌فریم tf ذخیره می‌کند."""
+    hv = cfg.setdefault('halving_tf', {})
+    hv[tf] = {'halving_k_atr': float(cfg.get('halving_k_atr', 3.0)), 'halving_max_depth': int(cfg.get('halving_max_depth', 12))}
 
 
 def _p4_keep_flags(old_cfg, new_cfg):
@@ -1062,7 +1090,7 @@ def normalize_session(data):
         'sweep_require_confirmation_candle',
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
-        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k',
+        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_tf',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -1074,6 +1102,7 @@ def normalize_session(data):
             if _nk not in _stored_scfg:
                 s['strategy_config'][_nk] = bool(_stored_scfg['gate_fc_ind_enabled'])
     s['strategy_config'].pop('gate_fc_ind_enabled', None)
+    _halving_tf_apply(s['strategy_config'], s['timeframe'])      # V3.44.40: k و عمقِ درخت = مقدار همین تایم‌فریم
     _p4_sync_tags(s)
     s['is_bot_active'] = False if REAL_RESTART_LOCK else bool(s.get('is_bot_active', False))
     s['scan_generation'] = int(s.get('scan_generation', 0) or 0)
@@ -1087,6 +1116,7 @@ def normalize_session(data):
     # ولی لحظه‌ی درخواست آماده‌ی ورود نبوده‌اند. ورودی‌های خیلی قدیمی (فراتر از
     # PRIORITY_WATCH_TTL_SECONDS) در همین‌جا پاک‌سازی می‌شوند تا صف بی‌نهایت رشد نکند.
     s['assist_mode_enabled'] = bool(data.get('assist_mode_enabled', False))
+    s['fav_star_only'] = bool(data.get('fav_star_only', False))      # V3.44.41
     try:
         s['assist_expiry_seconds'] = int(data.get('assist_expiry_seconds', 1800) or 1800)
     except Exception:
@@ -3553,6 +3583,7 @@ def _signal_channel_halving_cfg_for(symbol, timeframe):
     for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k'):
         if k in scfg:
             cfg[k] = scfg[k]
+    cfg.update(_halving_tf_params(scfg, timeframe))      # V3.44.40: کانال هم برای هر تایم‌فریم k و عمق خودش را می‌گیرد
     return cfg
 
 
@@ -4633,7 +4664,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.39'
+BOT_VERSION = '3.44.41'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8922,7 +8953,8 @@ def _fav_card_payload(r, now=None):
         r_txt = f"`{x:+.2f}R`"
         hint = ' ✅ در محدوده' if (r['min_r'] <= x <= r['max_r']) else (' ⚠️ فعلاً از سقف گذشته؛ منتظر برگشت' if x > r['max_r'] else (' ⛔ خلاف جهت' if x <= -FAV_CONFIRM_CANCEL_R else ' · منتظر حرکت'))
     left = f" · ⏳ {rem} دقیقه" if r.get('status') == 'waiting' else ''
-    lines = ['⏳ *صف تایید حرکت*',
+    star = '⭐ ' if (x is not None and r.get('status') == 'waiting' and r['min_r'] <= x <= r['max_r']) else ''      # V3.44.41: ⭐ = الان در محدوده
+    lines = [f'{star}⏳ *صف تایید حرکت*',
              f"`{r['symbol']}` {'🟢 خرید' if is_long else '🔴 فروش'} · {TF_DISPLAY.get(tf, tf)}{left}",
              f"    ورود `{fmt(float(r['entry']))}` | الان {r_txt}{hint}"]
     if r.get('max_mode') == 'tp':
@@ -9170,6 +9202,24 @@ def fav_quick_entry(chat_id, rid, side):
         save_session(chat_id)
 
 
+def _fav_in_range(chat_id, r):
+    """V3.44.41: True اگر قیمت لحظه‌ای الان در محدوده‌ی تایید این سیگنال است (همان ✅ و ⭐ کارت)."""
+    try:
+        s = get_session(chat_id)
+        live = exchange_latest_price(chat_id, r['symbol']) if s.get('trading_mode') == 'REAL' else latest_price(r['symbol'])
+        x = _fav_move_r(r['sig'], r['entry'], r['sl'], float(live)) if live else None
+        return x is not None and float(r['min_r']) <= x <= float(r['max_r'])
+    except Exception:
+        return False
+
+
+def fav_star_toggle(chat_id, message_id=None):
+    s = get_session(chat_id)
+    s['fav_star_only'] = not bool(s.get('fav_star_only', False))
+    save_session(chat_id)
+    fav_queue_list(chat_id, message_id=message_id)
+
+
 def fav_queue_list(chat_id, message_id=None):
     """V3.43.32: فهرست سیگنال‌هایی که در صف «صبر برای تایید» منتظرند (بی‌صدا در پس‌زمینه).
     V3.44.26: بالای چت فقط خلاصه + دکمه‌های کلی؛ هر سیگنال پایین‌ترش یک پیام مستقل با ⚡ ورود سریع و 📈 TradingView خودش دارد."""
@@ -9178,15 +9228,29 @@ def fav_queue_list(chat_id, message_id=None):
                      key=lambda r: -float(r.get('created_at', 0) or 0))
     state_txt = '🟢 روشن' if s.get('fav_confirm_enabled', False) else '🔴 خاموش'
     mn, mx, wt = _fav_cfg(s)
-    refresh = {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
+    star_on = bool(s.get('fav_star_only', False))
+    refresh = {'inline_keyboard': [[{'text': f"⭐ فقط در محدوده: {'🟢 روشن' if star_on else '🔴 خاموش'}", 'callback_data': '/fav_star'}],
+                                   [{'text': '🔄 بروزرسانی', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
                                    [{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'},
                                     {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}
     head = f"⏳ *صف تایید حرکت* ({state_txt})\nحداقل تایید: `+{mn:g}R` | سقف ورود: `{_fav_max_label(s)}` | مهلت: `{wt // 60}` دقیقه"
     if not waiting:
         send_message(chat_id, head + "\n\n✅ الان سیگنالی در صف نیست.", refresh, message_id=message_id)
         return
+    total_waiting = len(waiting)
+    if star_on:        # V3.44.41: فقط سیگنال‌های ⭐ (الان در محدوده)؛ کارت بقیه از چت پاک می‌شود (سیگنالشان در صف می‌ماند)
+        in_rng = [r for r in waiting if _fav_in_range(chat_id, r)]
+        for r in waiting:
+            if r not in in_rng and r.get('fq_msg_id'):
+                tg('deleteMessage', {'chat_id': chat_id, 'message_id': r['fq_msg_id']}, 10)
+                r['fq_msg_id'] = None
+        waiting = in_rng
+        if not waiting:
+            send_message(chat_id, head + f"\n\n⭐ الان هیچ سیگنالی در محدوده نیست (در صف: `{total_waiting}`).", refresh, message_id=message_id)
+            save_session(chat_id)
+            return
     shown = waiting[:FAV_CARDS_PER_LIST]
-    lines = [head, f"در صف: `{len(waiting)}`", "",
+    lines = [head, (f"⭐ در محدوده: `{len(waiting)}` از `{total_waiting}` سیگنال صف" if star_on else f"در صف: `{len(waiting)}`"), "",
              f"هر سیگنال در یک پیام جدا و با دکمه‌های خودش (⚡ ورود سریع، 📈 TradingView) پایین همین پیام آمده است ({len(shown)} مورد؛ جدیدترین آخر)."]
     if len(waiting) > len(shown):
         lines.append(f"… {len(waiting) - len(shown)} سیگنال قدیمی‌تر بعد از ورود یا انقضای این‌ها نمایش داده می‌شوند.")
@@ -11942,6 +12006,7 @@ def reload_and_restart_scan(chat_id, message_id=None):
         s = get_session(chat_id)
         _old_cfg = s.get('strategy_config')
         s['strategy_config'] = _p4_keep_flags(_old_cfg, get_timeframe_preset(s.get('timeframe', '5min')))
+        _halving_tf_apply(s['strategy_config'], s.get('timeframe', '5min'))      # V3.44.40
         _p4_sync_tags(s)
         save_session(chat_id)
         start_scan(chat_id, message_id)
@@ -12638,6 +12703,7 @@ def process_command(cmd,chat_id,message_id=None):
         if cl in tf_map:
             _old_cfg = s.get('strategy_config')
             s['timeframe']=tf_map[cl]; s['strategy_config']=_p4_keep_flags(_old_cfg, get_timeframe_preset(s['timeframe']))
+            _halving_tf_apply(s['strategy_config'], s['timeframe'])      # V3.44.40
             _p4_sync_tags(s)
             save_session(chat_id); menu(chat_id, message_id); return
     if cl=='/market_report':
@@ -12691,9 +12757,11 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl == '/halving_k_cycle':
             _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
+            _halving_tf_store(_cfg_hv, s.get('timeframe', '5min'))      # V3.44.40: فقط برای تایم‌فریم فعال ذخیره می‌شود
         elif cl == '/halving_depth_cycle':
             _opts = (8, 10, 12); _cur = int(_cfg_hv.get('halving_max_depth', 10))
             _cfg_hv['halving_max_depth'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 10
+            _halving_tf_store(_cfg_hv, s.get('timeframe', '5min'))      # V3.44.40
         else:
             _opts = (0, 4, 5, 6); _cur = int(_cfg_hv.get('halving_max_trade_depth', 0))
             _cfg_hv['halving_max_trade_depth'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 0
@@ -13405,6 +13473,8 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/fav_stats':
         send_message(chat_id, fav_stats_text(s), {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/fav_stats'}], [{'text': '⏳ صف تایید حرکت', 'callback_data': '/fav_queue'}, {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}, message_id=message_id)
         return
+    if cl=='/fav_star':
+        fav_star_toggle(chat_id, message_id=message_id); return
     if cl=='/fav_queue':
         fav_queue_list(chat_id, message_id=message_id)
         return

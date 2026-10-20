@@ -201,6 +201,35 @@ txt=g['fav_filters_popup'](1,rz['id']); print(txt); assert 'فیلتر دیگر�
 # مورد تمام‌شده
 rz['status']='expired'; assert 'دیگر در صف نیست' in g['fav_filters_popup'](1,rz['id']); assert 'دیگر در صف نیست' in g['fav_filters_popup'](1,'nope')
 print('fav filters popup OK')
+# ---- V3.44.41: ⭐ برای سیگنال‌های داخل محدوده + فیلتر «فقط در محدوده» ----
+S['fav_wait']={}
+state['live']=100.0
+for sym in ('IN1','OUT1'):
+    g['_fav_confirm_hold'](1,sym,'BUY',plan,100,99,102,'HVL=100.0')
+recs={r['symbol']:r for r in S['fav_wait'].values()}
+for r in recs.values(): r['min_r']=0.15; r['max_r']=0.30; r['fq_msg_id']=None
+# IN1 در محدوده، OUT1 خلاف جهت
+live_by={'IN1':100.2,'OUT1':100.0}
+g['latest_price']=lambda sym:live_by[sym]; g['exchange_latest_price']=lambda c,sym:live_by[sym]
+assert g['_fav_in_range'](1,recs['IN1']) and not g['_fav_in_range'](1,recs['OUT1'])
+t_in=g['_fav_card_payload'](recs['IN1'])[0]; t_out=g['_fav_card_payload'](recs['OUT1'])[0]
+assert t_in.startswith('⭐') and not t_out.startswith('⭐'), (t_in, t_out)
+# فیلتر خاموش: هر دو کارت
+S['fav_star_only']=False; tgc.clear(); g['fav_queue_list'](1)
+assert len([1 for m,p in tgc if m=='sendMessage'])==2
+# فیلتر روشن با دکمه‌ی ⭐: فقط IN1 + کارت OUT1 پاک می‌شود
+recs['OUT1']['fq_msg_id']=4242
+tgc.clear(); g['fav_star_toggle'](1)
+assert S['fav_star_only'] is True
+cards=[p for m,p in tgc if m=='sendMessage' and 'IN1' in p['text']]
+assert len(cards)==1 and not any('OUT1' in p['text'] for m,p in tgc if m=='sendMessage' and p.get('text','').startswith('⭐ ⏳')) 
+assert any(m=='deleteMessage' and p['message_id']==4242 for m,p in tgc) and recs['OUT1']['fq_msg_id'] is None
+assert recs['OUT1']['status']=='waiting'        # سیگنال از صف حذف نمی‌شود، فقط نمایش داده نمی‌شود
+# هیچ‌کدام در محدوده نباشد
+live_by['IN1']=100.0; sent.clear(); tgc.clear(); g['fav_queue_list'](1)
+assert sent and 'هیچ سیگنالی در محدوده نیست' in sent[-1] and not [1 for m,p in tgc if m=='sendMessage']
+g['fav_star_toggle'](1); assert S['fav_star_only'] is False
+print('fav star filter OK')
 print('fav independent cards OK')
 # ---- shadow + stats ----
 g['USER_SESSIONS'][1]=S
