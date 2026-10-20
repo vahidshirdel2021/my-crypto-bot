@@ -40,7 +40,7 @@ from strategy import (
     _compute_prev_htf_levels, LEVEL_SETUP_DEFS, _pdh_pdl_at,
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
     is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, extract_p4_case, MIN_RR_FLOOR,
-    _halving_cfg, _halving_context, _halving_cells_named,
+    _halving_cfg, _halving_context, _halving_cells_named, simple_touch_signal,
 )
 from halving_levels import depth_label_fa as _hv_depth_label
 from ui import (
@@ -4504,7 +4504,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.34'
+BOT_VERSION = '3.44.37'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -9534,18 +9534,56 @@ TOUCH_CARDS_PER_LIST = 25         # V3.44.21: حداکثر تعداد ردیف �
 TOUCH_MAX_DRIFT_R = float(os.environ.get('TOUCH_MAX_DRIFT_R', '0.5'))     # V3.44.16: ورود خودکار فقط تا این‌قدر R دوری قیمت از لحظه‌ی برخورد
 # V3.44.16: گروه‌بندی رأی‌ها - فیلترهای هم‌خانواده (همه «روند» یا همه «مومنتوم») مستقل حساب نمی‌شوند؛ هر گروه یک رأی (با اکثریت اعضایش) می‌دهد
 # و الگوی برخورد وزن ۲ دارد؛ پس چند فیلتر هم‌خانواده به‌تنهایی الگو را کنار نمی‌زنند.
-_TOUCH_GROUP = {'pattern': 'pattern', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure'}
-_TOUCH_GROUP_W = {'pattern': 2, 'trend': 1, 'momentum': 1, 'structure': 1}
-_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح'}
+_TOUCH_GROUP = {'pattern': 'pattern', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
+_TOUCH_GROUP_W = {'pattern': 2, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
+_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
 _TOUCH_LOCK = RLock()
-_TOUCH_KEYS = ('btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'vol')
+_TOUCH_KEYS = ('btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
 _TOUCH_LABELS = {'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
-                 'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'vol': 'حجم'}
+                 'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'ylevel': 'برخورد/عبور از سقف و کف دیروز', 'vol': 'حجم'}
 _TOUCH_ST_TXT = {'ok': '✅ تایید', 'wait': '⏳ منتظر تایید', 'against': '❌ مخالف', 'buy': '🟢 رأی خرید', 'sell': '🔴 رأی فروش'}
 
 
 def _touch_enabled_keys(s):
     return [k for k in _TOUCH_KEYS if gate_on(s, f'gate_fc_{k}_enabled')]
+
+
+YLEVEL_TOL_ATR = 0.15      # V3.44.36: «رسیدن به سطح» = تا این‌قدر (×ATR) مانده هم برخورد حساب می‌شود
+
+
+def _ylevel_vote(ind, px):
+    """رأیِ «سقف/کف دیروز» (PDH/PDL) از روی قیمت لحظه‌ای. خروجی (vote, توضیح)؛ vote: 'BUY' | 'SELL' | None.
+    • قیمت از سقف دیروز گذشته (بالاتر از PDH + تلورانس) = خرید (ادامه‌ی صعود)
+    • قیمت کف دیروز را از دست داده (پایین‌تر از PDL − تلورانس) = فروش (ادامه‌ی نزول)
+    • به سقف دیروز رسیده ولی از آن نگذشته (فتیله/برخورد) = فروش (رد از سقف)
+    • به کف دیروز رسیده ولی از آن پایین نرفته = خرید (حمایت کف)
+    • وسط رنج دیروز = بدون رأی"""
+    d, pdh, pdl = _compute_prev_day_levels(ind)
+    if d is None or pdh is None or pdl is None or px is None or px <= 0:
+        return None, 'سقف/کف دیروز نامشخص'
+    try:
+        atr = float(d['atr'].iloc[-2]) if 'atr' in d.columns else 0.0
+    except (TypeError, ValueError):
+        atr = 0.0
+    if atr != atr:
+        atr = 0.0
+    tol = max(atr * YLEVEL_TOL_ATR, px * 0.0003)
+    last2 = d.iloc[-2:]
+    hi_c = max(float(last2['high'].max()), px)
+    lo_c = min(float(last2['low'].min()), px)
+    if px > pdh + tol:
+        return 'BUY', f"از سقف دیروز ({fmt(pdh)}) گذشته"
+    if px < pdl - tol:
+        return 'SELL', f"کف دیروز ({fmt(pdl)}) را از دست داده"
+    near_hi, near_lo = hi_c >= pdh - tol, lo_c <= pdl + tol
+    if near_hi and near_lo:
+        near_hi = abs(px - pdh) <= abs(px - pdl)
+        near_lo = not near_hi
+    if near_hi:
+        return 'SELL', f"برخورد به سقف دیروز ({fmt(pdh)}) و عبور نکرده"
+    if near_lo:
+        return 'BUY', f"برخورد به کف دیروز ({fmt(pdl)}) و پایین‌تر نرفته"
+    return None, 'وسط رنج دیروز'
 
 
 def _touch_votes(symbol, tf, reason, keys, ind_df=None):
@@ -9583,7 +9621,7 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None):
         vs = {r2v.get(regs.get(t)) for t in _TFR_TIMEFRAMES}
         vote = next(iter(vs)) if (len(vs) == 1 and None not in vs) else None
         add('tf', vote, '، '.join(f"{TF_DISPLAY.get(t, t)} {fa.get(regs.get(t), 'نامشخص')}" for t in _TFR_TIMEFRAMES))
-    if any(k in keys for k in ('rsi', 'macd', 'adx', 'vol', 'level')):
+    if any(k in keys for k in ('rsi', 'macd', 'adx', 'vol', 'level', 'ylevel')):
         row, bias, raw = None, {}, {}
         try:
             ind = ind_df
@@ -9616,6 +9654,15 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None):
                 add('level', vote, f"آخرین کلوز {'بالای' if last > lvl else 'پایین'} سطح" if vote else 'روی سطح')
             else:
                 add('level', None, 'سطح/داده نامشخص')
+        if 'ylevel' in keys:
+            try:
+                _yp = latest_price(symbol)
+                _yp = float(_yp) if _yp else (float(row['close']) if row is not None else None)
+                _yv, _yd = _ylevel_vote(ind, _yp)
+            except Exception:
+                logger.exception('touch votes ylevel failed symbol=%s', symbol)
+                _yv, _yd = None, 'داده نیست'
+            add('ylevel', _yv, _yd)
     return out
 
 
@@ -10589,9 +10636,19 @@ async def scan_symbol(http,chat_id,symbol):
         cfg_entry = _with_halving_cfg(cfg_entry, _hv_rng)
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], cfg_entry, None, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
+    _simple_touch = False
+    if not sig and is_scalp_strategy and cfg_entry.get('scenario_7_enabled', False):
+        # V3.44.35: حالت ۷ «برخورد ساده»: وقتی هیچ‌کدام از ۶ حالتِ دیگر سیگنال نداده، فقط رسیدن قیمت به سطح کافی است؛ مستقیم به لیست انتظار و رأی‌گیری می‌رود.
+        try:
+            _st_sig, _st_reason = simple_touch_signal(primary, cfg_entry, live_entry_price, primary_tf)
+        except Exception:
+            logger.exception('simple touch failed symbol=%s', symbol)
+            _st_sig, _st_reason = None, None
+        if _st_sig in ('BUY', 'SELL'):
+            sig, reason, _simple_touch = _st_sig, _st_reason, True
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
-    if gate_on(s, 'gate_touch_vote_enabled'):
+    if _simple_touch or gate_on(s, 'gate_touch_vote_enabled'):
         # V3.44.14: برخورد با سطح وارد لیست انتظار می‌شود؛ جهت بعد از رأی‌گیری فیلترها تعیین می‌شود (نه از خود برخورد).
         try:
             _tplan = None
@@ -10933,6 +10990,7 @@ _SCENARIO_LABELS_PLAIN = {
     "1": "برخورد به سطح بالایی و برگشت (فروش)", "2": "برخورد به سطح پایینی و برگشت (خرید)",
     "3": "شکست سطح بالایی و ادامه صعود (خرید)", "4": "شکست سطح پایینی و ادامه نزول (فروش)",
     "5": "شکست کاذب سطح بالایی (فروش)", "6": "شکست کاذب سطح پایینی (خرید)",
+    "7": "برخورد ساده با سطح (بدون نیاز به نفوذ؛ مستقیم به رأی‌گیری)",
 }
 
 
@@ -10941,6 +10999,7 @@ _SCENARIO_LABELS_HV = {
     "1": "برخورد به سطح بالایی و برگشت (فروش)", "2": "برخورد به سطح پایینی و برگشت (خرید)",
     "3": "شکست سطح بالایی و ادامه صعود (خرید)", "4": "شکست سطح پایینی و ادامه نزول (فروش)",
     "5": "شکست کاذب سطح بالایی (فروش)", "6": "شکست کاذب سطح پایینی (خرید)",
+    "7": "برخورد ساده با سطح (بدون نیاز به نفوذ؛ مستقیم به رأی‌گیری)",
 }
 
 
@@ -10967,6 +11026,7 @@ GATE_REGISTRY = {
     'gate_fc_macd_enabled':       ('تایید MACD', True, 'entry_filter', 'هیستوگرام MACD آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (خرید: مثبت، فروش: منفی). صفر یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_vol_enabled':        ('تایید حجم', False, 'entry_filter', f'حجم آخرین کندل بسته‌شده باید حداقل {FULL_CONFIRM_MIN_VOLUME_RATIO:g} برابر میانگین ۲۰ کندل قبل باشد (همان معیار «حجم بالا» در پیام اندیکاتورها). حجم پایین‌تر یا نبود داده = سیگنال صادر نمی‌شود. پیش‌فرض: خاموش.'),
     'gate_fc_adx_enabled':        ('تایید روند ADX', True, 'entry_filter', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
+    'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', True, 'entry_filter', 'یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): قیمت از سقف دیروز (PDH) گذشته = رأی خرید؛ کف دیروز (PDL) را از دست داده = رأی فروش؛ به سقف دیروز رسیده ولی نگذشته = رأی فروش؛ به کف دیروز رسیده ولی پایین‌تر نرفته = رأی خرید؛ وسط رنج دیروز = بدون رأی. توجه: در حالت «همه‌ی فیلترها موافق» یا «همه به‌جز یکی»، این رأی هم باید موافق باشد؛ پس ورود خودکار سخت‌گیرانه‌تر می‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی جهت معامله برعکس می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. فاصله‌ی حد ضرر و فاصله‌ی حد سود همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)، پس نسبت پاداش به ریسک هم همان سیگنال اصلی است و ضرر از سود کمتر می‌ماند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     'gate_h4_tier_enabled': ('رتبه‌ی نرم با رژیم ۴ ساعته (کاهش حجم، بدون رد سیگنال)', False, 'quality', 'پیش‌فرض خاموش. سیگنالی را رد نمی‌کند؛ فقط حجم/ریسک معامله را کم می‌کند. اگر رژیم ۴ ساعته‌ی نماد با جهتِ سیگنال هم‌جهت باشد (خرید با ۴ ساعته‌ی صعودی، فروش با نزولی) با حجم کامل وارد می‌شود؛ اگر هم‌جهت نباشد (خلاف یا رنج) ریسک معامله به نصف (قابل‌تنظیم با H4_TIER_REDUCED_RISK_MULT) کم می‌شود. در حالت معکوس منطق برعکس است: سیگنال‌های هم‌جهت با ۴ ساعته (که بیشتر برنده‌اند) با حجم کم‌تر معکوس می‌شوند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
@@ -11822,8 +11882,8 @@ def my_profile_summary_text(snapshot):
         return "هنوز چیزی ذخیره نشده."
     cfg = snapshot.get('strategy_config') or {}
     top = snapshot.get('top') or {}
-    _fa_digits = str.maketrans("123456", "۱۲۳۴۵۶")
-    on_scenarios = [n.translate(_fa_digits) for n in '123456' if bool(cfg.get(f'scenario_{n}_enabled', True))]
+    _fa_digits = str.maketrans("1234567", "۱۲۳۴۵۶۷")
+    on_scenarios = [n.translate(_fa_digits) for n in '1234567' if bool(cfg.get(f'scenario_{n}_enabled', n != '7'))]
     confirms = []
     if cfg.get('confirm_simple_reject_enabled'):
         confirms.append('۱/۲')
@@ -12906,15 +12966,19 @@ def process_command(cmd,chat_id,message_id=None):
             get_scenario_management_keyboard(s),
         )
         return
-    if cl.startswith('/toggle_scenario_') and cl.split('_')[-1] in ('1', '2', '3', '4', '5', '6'):
+    if cl.startswith('/toggle_scenario_') and cl.split('_')[-1] in ('1', '2', '3', '4', '5', '6', '7'):
         n = cl.split('_')[-1]
         s.setdefault('strategy_config', {})
         key = f'scenario_{n}_enabled'
-        current = bool(s['strategy_config'].get(key, True))
+        current = bool(s['strategy_config'].get(key, n != '7'))
         s['strategy_config'][key] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
-        send_message(chat_id, f"حالت {n} ({_SCENARIO_LABELS_PLAIN.get(n, n)}): {new_state}", get_scenario_management_keyboard(s))
+        _extra = ''
+        if n == '7' and not current:
+            _extra = ('\n\nبه‌محض رسیدن قیمت به سطح (بدون نیاز به نفوذ، برگشت یا کندل تأیید)، نماد وارد «📋 سیگنال‌های در انتظار» می‌شود و رأی‌گیری فیلترها شروع می‌شود؛ '
+                      'جهت نهایی را رأی‌گیری تعیین می‌کند. ورود خودکار پس از رأی‌گیری فقط وقتی انجام می‌شود که کلید «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن باشد.')
+        send_message(chat_id, f"حالت {n} ({_SCENARIO_LABELS_PLAIN.get(n, n)}): {new_state}{_extra}", get_scenario_management_keyboard(s))
         return
     if cl=='/toggle_confirm_simple':
         s.setdefault('strategy_config', {})

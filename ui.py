@@ -208,6 +208,7 @@ _SCENARIO_LABELS = {
     "1": "۱ برخورد به سطح بالایی و برگشت (فروش)", "2": "۲ برخورد به سطح پایینی و برگشت (خرید)",
     "3": "۳ شکست سطح بالایی و ادامه صعود (خرید)", "4": "۴ شکست سطح پایینی و ادامه نزول (فروش)",
     "5": "۵ شکست کاذب سطح بالایی (فروش)", "6": "۶ شکست کاذب سطح پایینی (خرید)",
+    "7": "۷ برخورد ساده با سطح (بدون نیاز به نفوذ؛ مستقیم به رأی‌گیری)",
 }
 
 
@@ -217,8 +218,8 @@ def get_scenario_management_keyboard(session=None):
     s = session or {}
     cfg = s.get("strategy_config") or {}
     rows = []
-    for n in ("1", "2", "3", "4", "5", "6"):
-        is_on = bool(cfg.get(f"scenario_{n}_enabled", True))
+    for n in ("1", "2", "3", "4", "5", "6", "7"):
+        is_on = bool(cfg.get(f"scenario_{n}_enabled", n != "7"))
         icon = "🟢" if is_on else "🔴"
         rows.append([{"text": f"{icon} حالت {_SCENARIO_LABELS[n]}", "callback_data": f"/toggle_scenario_{n}"}])
     conf_simple = bool(cfg.get("confirm_simple_reject_enabled", False))

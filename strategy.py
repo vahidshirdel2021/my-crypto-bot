@@ -250,6 +250,10 @@ STRATEGY_DEFAULTS = {
     "scenario_4_enabled": True,
     "scenario_5_enabled": True,
     "scenario_6_enabled": True,
+    # V3.44.35: حالت ۷ = «برخورد ساده»: به‌محض رسیدن قیمت (فتیله/قیمت زنده) به یک سطح، بدون نیاز به نفوذ، برگشت، کندل تأیید یا هر شرط دیگر،
+    # مستقیم به «لیست سیگنال‌های در انتظار» می‌رود و رأی‌گیری فیلترها شروع می‌شود (جهت نهایی را رأی‌گیری تعیین می‌کند). پیش‌فرض خاموش.
+    "scenario_7_enabled": False,
+    "simple_touch_tol_atr": 0.15,          # فاصله‌ی «رسیدن به سطح» (×ATR)؛ قیمت تا این‌قدر مانده به سطح هم برخورد حساب می‌شود
     # --- تاییدیه‌ی اختیاری برای هر جفت سناریو (پیش‌فرض خاموش - همان پیشنهادهایی که
     # قبلاً درباره‌ی هر حالت باهم صحبت کردیم؛ می‌تونی از دکمه‌های ربات فعال/غیرفعالشون کنی) ---
     # ۱/۲ (برخورد ساده): کندل رد‌کننده (فتیله‌ی بلند) + حجم بالاتر از میانگین
@@ -782,7 +786,7 @@ def extract_setup_tag(reason):
     return m.group(1) if m else None
 
 
-_SCENARIO_TAG_RE = re.compile(r"\|SCN=([1-6])\b")
+_SCENARIO_TAG_RE = re.compile(r"\|SCN=([1-7])\b")
 _P4CASE_TAG_RE = re.compile(r"\|P4CASE=([123])\b")
 
 
@@ -1304,6 +1308,7 @@ _SCENARIO_TOGGLE_KEYS = {
     "1": "scenario_1_enabled", "2": "scenario_2_enabled",
     "3": "scenario_3_enabled", "4": "scenario_4_enabled",
     "5": "scenario_5_enabled", "6": "scenario_6_enabled",
+    "7": "scenario_7_enabled",
 }
 
 
@@ -1424,6 +1429,99 @@ def _tag_scenario(reason, kind, sig):
     if n is None or reason is None:
         return reason
     return f"{reason}|SCN={n}"
+
+
+def _simple_touch_halving(df, strategy_config, live_price):
+    """حالت ۷ (برخورد ساده) روی سطوح نصف‌کردن: همان درخت و سطوحِ مدل نصف‌کردن (عمق/فاصله از k×ATR و سقف/کف تاریخی نماد)،
+    ضخامت ناحیه = halving_zone_atr × ATR (همان معیار ناحیه‌ی مدل نصف‌کردن). هر سطحِ درخت که رنج کندل در حال تشکیل یا قیمت زنده به آن
+    برسد (و در صورت تنظیم halving_max_trade_depth عمقش مجاز باشد) برخورد است؛ نزدیک‌ترین به قیمت (و کم‌عمق‌تر) انتخاب می‌شود.
+    سطحِ بالاتر از قیمت = مقاومت = رأی فروش؛ سطحِ پایین‌تر یا هم‌سطح = حمایت = رأی خرید (فقط یک رأی؛ جهت نهایی با رأی‌گیری است)."""
+    cfg = _halving_cfg(strategy_config)
+    d, _pdh, _pdl = _compute_prev_day_levels(df)
+    if d is None or len(d) < 8:
+        return None, "داده کافی برای مدل نصف‌کردن نیست"
+    idx = len(d) - 2                                   # همان کندلِ مرجعِ مدل نصف‌کردن (آخرین بسته‌شده)
+    ctx = _halving_context(d, idx, cfg)
+    if ctx is None:
+        return None, "سقف/کف تاریخی نماد برای مدل نصف‌کردن در دسترس نیست"
+    atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
+    if not np.isfinite(atr) or atr <= 0:
+        return None, "ATR نامعتبر است"
+    row = d.iloc[-1]                                   # کندل در حال تشکیل
+    px = float(live_price) if live_price else float(row["close"])
+    hi_c, lo_c = max(float(row["high"]), px), min(float(row["low"]), px)
+    tol = max(atr * max(0.0, float(cfg.get("halving_zone_atr", 0.30))), px * 0.0003)
+    max_depth_trade = int(cfg.get("halving_max_trade_depth", 0) or 0)
+    hits = []
+    for lv in ctx["levels"]:
+        price, depth = float(lv["price"]), int(lv["depth"])
+        if max_depth_trade > 0 and depth > max_depth_trade:
+            continue
+        if lo_c <= price + tol and hi_c >= price - tol:
+            hits.append((abs(px - price), depth, price))
+    if not hits:
+        return None, "برخورد ساده: قیمت به هیچ سطح نصف‌کردنی نرسیده است"
+    _dist, depth, price = min(hits)
+    upper = price >= px
+    token = "HVH" if upper else "HVL"
+    label = f"سطح نصف‌کردن ({_hv_depth_label(depth)})"
+    reason = (f"برخورد ساده با {label} ({token}={price:.10g})|ANCHOR={price:.10g}|SCN=7"
+              f"|HVDEPTH={depth}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}")
+    return ("SELL" if upper else "BUY"), tag_setup_reason("Halving", reason)
+
+
+def simple_touch_signal(df, strategy_config=None, live_price=None, timeframe="5min"):
+    """V3.44.35 - حالت ۷: «برخورد ساده». (sig, reason) یا (None, توضیح).
+    بدون هیچ شرطِ نفوذ/برگشت/کندل تأیید/اسپایک/حجم: اگر رنج کندل در حال تشکیل (و قیمت زنده) به یکی از سطوح فعال برسد
+    (تا simple_touch_tol_atr × ATR مانده هم حساب می‌شود)، همان‌جا یک «برخورد» ثبت می‌شود. جهتِ پیشنهادیِ خودِ برخورد: سطح بالایی = فروش،
+    سطح پایینی = خرید (فقط یک رأی؛ جهت نهایی با رأی‌گیری فیلترها تعیین می‌شود). سطوح: همان سطوح فعال استراتژی (مدل PDH/PDL: سقف/کف روز قبل،
+    و در حالت برگشت P4: ۴ساعته هم). خروجی reason تگ [SETUP ...] و |SCN=7 دارد تا لیست انتظار و رأی‌گیری مثل بقیه‌ی حالت‌ها کار کنند."""
+    cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
+    if not bool(cfg.get("scenario_7_enabled", False)):
+        return None, "حالت ۷ (برخورد ساده) خاموش است"
+    if cfg.get("halving_model_enabled"):
+        return _simple_touch_halving(df, strategy_config, live_price)     # V3.44.37: روی سطوح نصف‌کردن
+    d, pdh, pdl = _compute_prev_day_levels(df)
+    if d is None or pdh is None or pdl is None or len(d) < 8:
+        return None, "داده کافی برای سطوح نیست"
+    idx = len(d) - 1                                   # کندل در حال تشکیل
+    enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
+    if bool(cfg.get("daily_p4_mode", True)):
+        enabled_tags = {"Daily", "4h"} if bool(cfg.get("p4_reversal_enabled", False)) else {"Daily"}
+    htf = _compute_prev_htf_levels(d, idx)
+    row = d.iloc[idx]
+    hi_c, lo_c = float(row["high"]), float(row["low"])
+    px = float(live_price) if live_price else float(row["close"])
+    hi_c, lo_c = max(hi_c, px), min(lo_c, px)          # قیمت زنده هم در رنج حساب می‌شود
+    try:
+        atr = float(d["atr"].iloc[-2]) if "atr" in d.columns else 0.0
+    except (TypeError, ValueError):
+        atr = 0.0
+    if atr != atr:                                     # NaN
+        atr = 0.0
+    tol = max(atr * max(0.0, float(cfg.get("simple_touch_tol_atr", 0.15))), px * 0.0003)
+    hits = []
+    for prio, (tag, (hi_key, lo_key, hi_label, lo_label)) in enumerate(LEVEL_SETUP_DEFS.items()):
+        if tag not in enabled_tags:
+            continue
+        if tag == "Daily":
+            hi, lo = _pdh_pdl_at(d, idx)
+            if hi is None or lo is None:
+                hi, lo = pdh, pdl
+        else:
+            hi, lo = htf.get(hi_key), htf.get(lo_key)
+        for level, token, label, sig_ in ((hi, hi_key, hi_label, "SELL"), (lo, lo_key, lo_label, "BUY")):
+            if level is None:
+                continue
+            level = float(level)
+            if lo_c <= level + tol and hi_c >= level - tol:
+                hits.append((prio, abs(px - level), tag, token, label, level, sig_))
+    if not hits:
+        return None, "برخورد ساده: قیمت به هیچ سطحی نرسیده است"
+    hits.sort(key=lambda h: (h[0], h[1]))              # اولویت: ماهانه > هفتگی > روزانه > ۴ساعته > ۱ساعته؛ بعد نزدیک‌تر به قیمت
+    prio, dist, tag, token, label, level, sig_ = hits[0]
+    reason = tag_setup_reason(tag, f"برخورد ساده با {label} ({token}={level:.10g})|ANCHOR={level:.10g}|SCN=7")
+    return sig_, reason
 
 
 def strategy_liquidity_sweep_5m(df, filters=None, strategy_config=None, live_price=None, timeframe="5min", _skip_confirmation_wrap=False):

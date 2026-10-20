@@ -26,6 +26,7 @@ _GATES_OFF = (
     'gate_fc_btceth_enabled', 'gate_fc_h4_enabled', 'gate_fc_tf_enabled',
     'gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_adx_enabled',
     'gate_fc_vol_enabled', 'use_edge_proxy_gate',
+    'gate_fc_ylevel_enabled',      # V3.44.36: رأی «سقف/کف دیروز» در پریست‌ها خاموش می‌ماند تا مقایسه‌ی پریست‌ها تغییر نکند
 )
 
 BASE_CFG = {
