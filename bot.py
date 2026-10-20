@@ -1784,6 +1784,135 @@ def end_callback_context():
     _CB_CTX.data = None
 
 
+# ===================== V3.44.38: تایید «بله / خیر» برای دکمه‌های ورود / رد / بستن دستی =====================
+# هر دکمه‌ای که با یک لمس ورود، رد یا بستن انجام می‌دهد اول یک سؤال «مطمئنی؟ ✅ بله / ❌ خیر» نشان می‌دهد.
+# روی کارتِ داخل چت خصوصی: فقط دکمه‌های همان پیام درجا عوض می‌شود (متن کارت دست نمی‌خورد؛ «خیر» دکمه‌های اصلی را برمی‌گرداند).
+# زیر پست کانال (که دکمه‌هایش برای همه مشترک است) یا وقتی کیبوردِ اصلیِ پیام در دسترس نیست: یک پیام جدا در چت خصوصی می‌آید.
+# «بله» همان دستور اصلی را عیناً اجرا می‌کند. اگر پیام تایید نشان داده نشود، دستور اجرا نمی‌شود (امن‌تر از اجرای ناخواسته).
+# مرحله‌های دوم که خودشان تاییدِ آگاهانه‌اند (تضاد با روند، دور شدن قیمت، تایید بستن، ورود دستی با قیمت) دوباره سؤال نمی‌شوند.
+_CONFIRM_TTL_SECONDS = 15 * 60
+_CONFIRM_PENDING = {}
+_CONFIRM_LOCK = RLock()
+_CONFIRM_RULES = (
+    ('/assist_ok_', 'entry'), ('/assist_no_', 'reject'), ('/assist_rev_', 'reverse'),
+    ('/autotg_ok_', 'entry'), ('/autotg_no_', 'reject'),
+    ('/fq_qe_', 'quick'), ('/tw_qe_', 'quick'), ('/qt_buy_', 'qt'), ('/qt_sell_', 'qt'),
+    ('/fq_rej_', 'reject'), ('/pclose_', 'pclose'),
+    ('/cancel_pending_', 'cancel_order'), ('/cancel_watch_', 'cancel_watch'),
+)
+_CONFIRM_SKIP_EXACT = ('/cancel_pending_all', '/cancel_pending_all_prompt')
+
+
+def _confirm_needed(data):
+    c = str(data or '')
+    if c in _CONFIRM_SKIP_EXACT:
+        return None
+    for pfx, kind in _CONFIRM_RULES:
+        if c.startswith(pfx):
+            return kind
+    return None
+
+
+def _confirm_label(chat_id, data):
+    return ' '.join(_confirm_label_raw(chat_id, data).split())
+
+
+def _confirm_label_raw(chat_id, data):
+    """متن کوتاه «چه کاری» برای سؤال تایید؛ هر خطایی فقط به برچسب کلی برمی‌گردد."""
+    c = str(data or '')
+    side_fa = {'buy': 'خرید', 'sell': 'فروش', 'BUY': 'خرید', 'SELL': 'فروش'}
+    try:
+        s = get_session(chat_id)
+        m = re.match(r'^/assist_(ok|no|rev)_(.+)$', c)
+        if m:
+            rec = _assist_find(s, m.group(2)) or {}
+            sym, sg = rec.get('symbol', ''), rec.get('sig')
+            if m.group(1) == 'rev':
+                sg = {'BUY': 'SELL', 'SELL': 'BUY'}.get(sg, sg)
+            return {'ok': 'ورود', 'rev': 'ورود معکوس', 'no': 'رد سیگنال'}[m.group(1)] + (f" {side_fa.get(sg, '')}" if m.group(1) != 'no' else '') + f' {sym}'.rstrip()
+        m = re.match(r'^/autotg_(ok|no)_(.+)$', c)
+        if m:
+            rec = (s.get('auto_trend_pending') or {}).get(m.group(2)) or {}
+            return ('ورود ' + side_fa.get(rec.get('sig'), '') if m.group(1) == 'ok' else 'رد سیگنال') + f" {rec.get('symbol', '')}".rstrip()
+        m = re.match(r'^/fq_qe_(buy|sell)_(.+)$', c)
+        if m:
+            rec = (s.get('fav_wait') or {}).get(m.group(2)) or {}
+            return f"ورود سریع {side_fa[m.group(1)]} {rec.get('symbol', '')}".rstrip()
+        m = re.match(r'^/tw_qe_(buy|sell)_(.+)$', c)
+        if m:
+            rec = (s.get('touch_wait') or {}).get(m.group(2)) or {}
+            return f"ورود سریع {side_fa[m.group(1)]} {rec.get('symbol', '')}".rstrip()
+        m = re.match(r'^/qt_(buy|sell)_(.+)$', c)
+        if m:
+            return f"ورود سریع {side_fa[m.group(1)]} {m.group(2).upper()}"
+        m = re.match(r'^/fq_rej_(.+)$', c)
+        if m:
+            rec = (s.get('fav_wait') or {}).get(m.group(1)) or {}
+            return f"رد سیگنال {rec.get('symbol', '')}".rstrip()
+        m = re.match(r'^/pclose_(\d+)_(.+)$', c)
+        if m:
+            return f"بستن {m.group(1)}٪ از معامله‌ی {m.group(2).upper()}"
+        if c.startswith('/cancel_pending_'):
+            return 'لغو این اوردر معلق'
+        m = re.match(r'^/cancel_watch_(.+)$', c)
+        if m:
+            return f"حذف {m.group(1).upper()} از صف بررسی"
+    except Exception:
+        logger.exception('confirm label failed cmd=%s', c)
+    return 'این کار'
+
+
+def _confirm_prompt(chat_id, data, msg, orig_mid, in_channel):
+    """سؤال بله/خیر را نشان می‌دهد. True = نشان داده شد (دستور اصلی هنوز اجرا نشده)."""
+    label = _confirm_label(chat_id, data)
+    tok = hashlib.sha1(f"{chat_id}{data}{time.time()}".encode()).hexdigest()[:8]
+    kb = {'inline_keyboard': [[{'text': f"⚠️ مطمئنی؟ {label}", 'callback_data': '/noop'}],
+                              [{'text': '✅ بله', 'callback_data': f'/cfm_{tok}'}, {'text': '❌ خیر', 'callback_data': f'/cfmno_{tok}'}]]}
+    markup = (msg or {}).get('reply_markup')
+    inplace = bool(isinstance(markup, dict) and markup.get('inline_keyboard') and orig_mid and not in_channel)
+    ok = False
+    if inplace:
+        res = tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': orig_mid, 'reply_markup': kb}, 10)
+        ok = bool(res and res.get('ok'))
+    if not ok:
+        inplace = False
+        res = tg('sendMessage', {'chat_id': chat_id, 'text': f"⚠️ مطمئنی؟\n{label}", 'reply_markup': kb}, 10)
+        ok = bool(res and res.get('ok'))
+    if ok:
+        with _CONFIRM_LOCK:
+            _CONFIRM_PENDING[tok] = {'chat': chat_id, 'data': str(data), 'orig_mid': orig_mid, 'inplace': inplace,
+                                     'markup': markup if inplace else None, 'ts': time.time()}
+    return ok
+
+
+def _confirm_handle(chat_id, data, now_mid):
+    """دکمه‌ی «✅ بله» (/cfm_<tok>) یا «❌ خیر» (/cfmno_<tok>)."""
+    yes = str(data).startswith('/cfm_')
+    tok = str(data).split('_', 1)[1] if '_' in str(data) else ''
+    now = time.time()
+    with _CONFIRM_LOCK:
+        for k in [k for k, v in _CONFIRM_PENDING.items() if now - v['ts'] > _CONFIRM_TTL_SECONDS]:
+            _CONFIRM_PENDING.pop(k, None)
+        ent = _CONFIRM_PENDING.pop(tok, None)
+    if not ent or ent['chat'] != chat_id:
+        if now_mid:
+            tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': now_mid, 'reply_markup': {'inline_keyboard': []}}, 10)
+        send_message(chat_id, 'ℹ️ این تایید منقضی شده و کاری انجام نشد؛ اگر لازم است دوباره از خودِ کارت یا دکمه اقدام کن.')
+        return
+    if ent['inplace'] and ent.get('markup'):
+        tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': now_mid or ent['orig_mid'], 'reply_markup': ent['markup']}, 10)
+    elif now_mid:
+        tg('deleteMessage', {'chat_id': chat_id, 'message_id': now_mid}, 10)
+    if not yes:
+        return
+    begin_callback_context(chat_id, ent['orig_mid'], ent['data'])
+    try:
+        process_command(ent['data'], chat_id, ent['orig_mid'])
+    finally:
+        end_callback_context()
+
+
+
 
 # --- V3.38.3: کیبورد ثابت پایین چت ---
 # تلگرام کیبورد ثابت (Reply Keyboard) را به «آخرین پیامی که آن را ست کرده» گره می‌زند؛ اگر آن پیام
@@ -4504,7 +4633,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.37'
+BOT_VERSION = '3.44.38'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8771,7 +8900,8 @@ FAV_CARDS_PER_LIST = 8     # V3.44.26: هر سیگنال صف تایید حرک�
 _FAV_FINAL_TXT = {'opened': '✅ بعد از تایید حرکت، معامله باز شد.', 'card_sent': '🤝 حرکت تایید شد و کارت دستیار (✅ ورود / ❌ رد) برایتان آمد.',
                   'handed_to_warning': '⚠️ حرکت تایید شد و کارت هشدار ورود برایتان آمد.', 'expired': '⌛ مهلت تمام شد؛ ورودی انجام نشد.',
                   'cancelled': '🚫 لغو شد: قیمت خلاف جهت رفت یا به SL/TP رسید.', 'skipped': '⏭ روی این نماد پوزیشن باز شد؛ از صف خارج شد.',
-                  'blocked': '⛔ بعد از تایید، ورود توسط محدودیت‌ها رد شد.', 'entered_manual': '✅ با ورود سریع دستی وارد شدید.'}
+                  'blocked': '⛔ بعد از تایید، ورود توسط محدودیت‌ها رد شد.', 'entered_manual': '✅ با ورود سریع دستی وارد شدید.',
+                  'rejected': '❌ شما این سیگنال را رد کردید؛ ورودی انجام نشد.'}
 
 
 def _fav_card_payload(r, now=None):
@@ -8819,7 +8949,9 @@ def _fav_card_payload(r, now=None):
     # V3.44.30: «🔄 بروزرسانی» و «⏳ تمدید مهلت» کنار هم در یک ردیف؛ چارت تعاملی (اگر باشد) ردیف جدا
     row3 = [{'text': '🔄 بروزرسانی', 'callback_data': f"/fq_ref_{rid}"},
             {'text': f"⏳ تمدید (+{FAV_EXTEND_SECONDS // 60} دقیقه)", 'callback_data': f"/fq_ext_{rid}"}]
-    return '\n'.join(lines), {'inline_keyboard': [r_ for r_ in (row1, row2, row3) if r_]}
+    # V3.44.38: رد دستی سیگنال (ردیف جدا)
+    row4 = [{'text': '❌ رد سیگنال', 'callback_data': f"/fq_rej_{rid}"}]
+    return '\n'.join(lines), {'inline_keyboard': [r_ for r_ in (row1, row2, row3, row4) if r_]}
 
 
 def _fav_send_card(chat_id, rec):
@@ -8883,6 +9015,21 @@ def fav_extend(chat_id, rid):
     _fav_update_card(chat_id, rec, force=True)
     save_session(chat_id)
     logger.info('fav confirm: extended %s %s +%ss (ext=%s)', rec.get('symbol'), rec.get('sig'), FAV_EXTEND_SECONDS, rec['ext'])
+
+
+def fav_reject(chat_id, rid):
+    """V3.44.38: دکمه‌ی ❌ رد سیگنال زیر کارت صف تایید حرکت: کاربر دستی سیگنال را رد می‌کند؛ از صف خارج می‌شود، ورودی انجام نمی‌شود
+    و در جهت مخالف هم دوباره بررسی نمی‌شود (تصمیم کاربر است). در «آمار فیلتر» هم حساب نمی‌شود چون تصمیم فیلتر نبوده."""
+    s = get_session(chat_id)
+    rec = (s.get('fav_wait') or {}).get(rid)
+    if not rec or rec.get('status') != 'waiting':
+        send_message(chat_id, 'ℹ️ این مورد دیگر در صف نیست.'); return
+    rec['manual_rejected'] = True
+    ctx = getattr(_CB_CTX, 'data', None)
+    if ctx and ctx.get('chat_id') == chat_id and ctx.get('message_id'):
+        rec['fq_msg_id'] = ctx['message_id']
+        ctx['used'] = True
+    _fav_finish(chat_id, s, rec, 'rejected', f"❌ {rec.get('symbol')} ({rec.get('sig')}) به‌صورت دستی توسط کاربر رد شد")
 
 
 def fav_quick_entry(chat_id, rid, side):
@@ -10103,6 +10250,38 @@ def pending_vote_filter_cycle(chat_id, message_id=None):
     assist_pending_list(chat_id, message_id)
 
 
+PENDING_PRESSURE_MIN_TOTAL = 4     # V3.44.38: کمتر از این تعداد سیگنال جهت‌دار، پیام فشار بازار با هشدار «نمونه کم» می‌آید
+
+
+def _pending_pressure_lines(recs, t_all):
+    """V3.44.38: فقط اطلاع‌رسانی (هیچ اثری روی رأی‌گیری، ورود یا مسدودسازی ندارد).
+    تعداد سیگنال‌های خرید و فروش در «📋 سیگنال‌های در انتظار» (هم کارت‌های دستیار هم برخوردهای در حال رأی‌گیری) و پیام فشار بازار."""
+    buy = sell = unk = 0
+    for r in recs:
+        if r.get('sig') == 'BUY':
+            buy += 1
+        elif r.get('sig') == 'SELL':
+            sell += 1
+    for r in t_all:
+        d = r.get('dir')
+        if d == 'BUY':
+            buy += 1
+        elif d == 'SELL':
+            sell += 1
+        else:
+            unk += 1
+    line = f"📊 خرید: {buy} | فروش: {sell}" + (f" | جهت نامشخص: {unk}" if unk else '')
+    if buy > sell:
+        msg = '🟢 ظاهراً در بازار فشار خرید بیشتر است'
+    elif sell > buy:
+        msg = '🔴 ظاهراً در بازار فشار فروش بیشتر است'
+    else:
+        msg = '⚖️ فعلاً فشار خرید و فروش تقریباً برابر است'
+    if buy + sell < PENDING_PRESSURE_MIN_TOTAL:
+        msg += ' (تعداد سیگنال کم است؛ اطمینان پایین)'
+    return [line, msg]
+
+
 def assist_pending_list(chat_id, message_id=None):
     """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
@@ -10114,7 +10293,12 @@ def assist_pending_list(chat_id, message_id=None):
     vf = s.get('pending_vote_filter') if s.get('pending_vote_filter') in _PENDING_VF_ORDER else 'all'
     t_recs = [r for r in t_all if _pending_vote_ok(r, vf)]
     shown = recs[:25]
-    lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + len(t_recs)})*", ""]
+    lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + len(t_recs)})*"]
+    try:
+        lines.extend(_pending_pressure_lines(recs, t_all))
+    except Exception:
+        logger.exception('pending pressure line failed')
+    lines.append("")
     if vf != 'all':
         lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
         lines.append("")
@@ -12459,6 +12643,8 @@ def process_command(cmd,chat_id,message_id=None):
         fav_card_refresh(chat_id, cl[len('/fq_ref_'):]); return
     if cl.startswith('/fq_ext_'):
         fav_extend(chat_id, cl[len('/fq_ext_'):]); return
+    if cl.startswith('/fq_rej_'):
+        fav_reject(chat_id, cl[len('/fq_rej_'):]); return
     if cl.startswith('/fq_qe_'):
         _fq_side, _fq_id = cl[len('/fq_qe_'):].split('_', 1)
         fav_quick_entry(chat_id, _fq_id, 'BUY' if _fq_side == 'buy' else 'SELL'); return
@@ -13669,6 +13855,22 @@ def telegram_listener():
                         _notify_not_allowed(chat)
                         continue
                     data=callback.get('data') or (u.get('message') or {}).get('text')
+                    if callback and str(data or '').startswith(('/cfm_', '/cfmno_')):
+                        try:
+                            _confirm_handle(chat, str(data), message_id_for_reply)
+                        except Exception:
+                            logger.exception('confirm handle failed chat=%s', chat)
+                        continue
+                    if callback and _confirm_needed(data):
+                        # V3.44.38: ورود/رد/بستن دستی فقط بعد از «✅ بله»؛ اگر سؤال نشان داده نشد، اجرا نمی‌شود.
+                        _cf_ok = False
+                        try:
+                            _cf_ok = _confirm_prompt(chat, str(data), msg, message_id_for_reply, is_channel_post)
+                        except Exception:
+                            logger.exception('confirm prompt failed chat=%s cmd=%s', chat, data)
+                        if not _cf_ok:
+                            send_message(chat, '❌ سؤال تایید نشان داده نشد و برای امنیت کاری انجام نشد؛ دوباره دکمه را بزن.')
+                        continue
                     if callback:
                         begin_callback_context(chat, message_id_for_reply, data)
                         try: process_command(data,chat,message_id_for_reply)

@@ -167,7 +167,8 @@ g['fav_extend'](1,rc['id']); assert abs(float(rc['expires_at'])-(e0+3600))<1 and
 rc['expires_at']=time.time()-5; g['fav_extend'](1,rc['id']); assert float(rc['expires_at'])>time.time()+1700    # مهلت گذشته‌ی هنوز-منتظر از «الان» ۳۰ دقیقه می‌شود
 sent.clear(); g['fav_extend'](1,rb['id']); assert 'دیگر در صف نیست' in sent[-1]                       # مورد تمام‌شده
 kb=g['_fav_card_payload'](rc)[1]['inline_keyboard']
-last=[b['callback_data'] for b in kb[-1]]; assert last==[f"/fq_ref_{rc['id']}", f"/fq_ext_{rc['id']}"], kb      # بروزرسانی و تمدید کنار هم
+last=[b['callback_data'] for b in kb[-2]]; assert last==[f"/fq_ref_{rc['id']}", f"/fq_ext_{rc['id']}"], kb      # بروزرسانی و تمدید کنار هم
+assert [b['callback_data'] for b in kb[-1]]==[f"/fq_rej_{rc['id']}"], kb      # V3.44.38: ردیف آخر = ❌ رد سیگنال
 print('fav extend OK')
 print('fav independent cards OK')
 # ---- shadow + stats ----
