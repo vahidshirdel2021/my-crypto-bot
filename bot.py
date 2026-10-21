@@ -907,7 +907,7 @@ def default_session():
         'hours_profile': 'both',
         'trail_profile': 'balanced',
         # V3.43.32: صبر برای تایید (ورود فقط وقتی قیمت بعد از سیگنال کمی به نفع معامله رفته باشد). پیش‌فرض خاموش.
-        'active_preset': None,   # V3.44.7: کلید پریست فعال (۱..۵) برای برچسب‌زدن معاملات
+        'active_preset': None,   # V3.44.7: کلید پریست فعال (۱) برای برچسب‌زدن معاملات
         'fav_confirm_enabled': False,
         'fav_confirm_min_r': 0.15,
         'fav_confirm_max_r': 0.30,
@@ -6375,6 +6375,20 @@ def _journal_extra_fields(pos):
     return out
 
 
+def _journal_votes(reason):
+    """V3.44.47: |VOTES=key:Y,key:N,key:-| از متن دلیل ورود -> {'key': 'Y'|'N'|'-'} (Y موافق، N مخالف، - بی‌نظر). نبود = None."""
+    m = re.search(r'\|VOTES=([^|]*)\|', reason or '')
+    if not m:
+        return None
+    out = {}
+    for part in m.group(1).split(','):
+        if ':' in part:
+            k, v = part.split(':', 1)
+            if k.strip():
+                out[k.strip()] = v.strip()[:1] or '-'
+    return out or None
+
+
 def journal_append_closed(chat_id, pos):
     """رکورد پوزیشن بسته‌شده را به فایل ژورنال JSON اضافه می‌کند (نوشتن اتمیک؛ خطا هیچ‌وقت جلوی بستن پوزیشن را نمی‌گیرد)."""
     try:
@@ -6384,6 +6398,7 @@ def journal_append_closed(chat_id, pos):
             'chat_id': chat_id, 'trade_id': pos.get('trade_id'), 'symbol': pos.get('symbol'), 'side': pos.get('side'),
             'is_real': bool(pos.get('is_real')), 'timeframe': pos.get('timeframe'), 'setup': setup_tag,
             'scenario': int(m.group(1)) if m else None,
+            'votes': _journal_votes(pos.get('entry_reason') or pos.get('signal_reason') or ''),
             'opened_at': pos.get('opened_at'), 'closed_at': pos.get('close_timestamp'),
             'opened_at_text': fmt_scan_time(pos.get('opened_at')), 'closed_at_text': fmt_scan_time(pos.get('close_timestamp')),
             'entry_price': pos.get('entry_price'), 'close_price': pos.get('close_price'), 'sl': pos.get('sl'), 'tp': pos.get('tp'),
@@ -9383,7 +9398,7 @@ def _tg_len(text):
 
 FAV_FLT_POPUP_MAX = 200     # V3.44.39: سقف تلگرام برای متن پنجره‌ی بازشو (answerCallbackQuery)
 _FAV_FLT_SHORT = {'btceth': 'BTC/ETH', 'h4': '۴س', 'tf': '۵/۱۵', 'rsi': 'RSI', 'macd': 'MACD', 'adx': 'ADX',
-                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز'}
+                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز', 'btcpat': 'الگوی BTC'}
 
 
 def _fav_flt_mark(vote, sig):
@@ -9463,7 +9478,7 @@ def fav_filters_popup(chat_id, rid):
         except Exception:
             live = None
         keys = _touch_enabled_keys(s)
-        votes = _touch_votes(sym, tf, rec.get('reason') or '', keys) if keys else []
+        votes = _touch_votes(sym, tf, rec.get('reason') or '', keys, cfg=s.get('strategy_config')) if keys else []
         reg_line = ''
         if gate_on(s, 'gate_final_regime_enabled'):
             reg_ok, _t = _final_regime_check(tf, sig)
@@ -10177,12 +10192,12 @@ TOUCH_CARDS_PER_LIST = 25         # V3.44.21: حداکثر تعداد ردیف �
 TOUCH_MAX_DRIFT_R = float(os.environ.get('TOUCH_MAX_DRIFT_R', '0.5'))     # V3.44.16: ورود خودکار فقط تا این‌قدر R دوری قیمت از لحظه‌ی برخورد
 # V3.44.16: گروه‌بندی رأی‌ها - فیلترهای هم‌خانواده (همه «روند» یا همه «مومنتوم») مستقل حساب نمی‌شوند؛ هر گروه یک رأی (با اکثریت اعضایش) می‌دهد
 # و الگوی برخورد وزن ۲ دارد؛ پس چند فیلتر هم‌خانواده به‌تنهایی الگو را کنار نمی‌زنند.
-_TOUCH_GROUP = {'pattern': 'pattern', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
-_TOUCH_GROUP_W = {'pattern': 2, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
-_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
+_TOUCH_GROUP = {'pattern': 'pattern', 'btcpat': 'btc', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
+_TOUCH_GROUP_W = {'pattern': 2, 'btc': 1, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
+_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'btc': 'الگوی BTC', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
 _TOUCH_LOCK = RLock()
-_TOUCH_KEYS = ('btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
-_TOUCH_LABELS = {'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
+_TOUCH_KEYS = ('btcpat', 'btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
+_TOUCH_LABELS = {'btcpat': 'الگوی BTC روی سطح خودش', 'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
                  'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'ylevel': 'برخورد/عبور از سقف و کف دیروز', 'vol': 'حجم'}
 _TOUCH_ST_TXT = {'ok': '✅ تایید', 'wait': '⏳ منتظر تایید', 'against': '❌ مخالف', 'buy': '🟢 رأی خرید', 'sell': '🔴 رأی فروش'}
 
@@ -10229,7 +10244,67 @@ def _ylevel_vote(ind, px):
     return None, 'وسط رنج دیروز'
 
 
-def _touch_votes(symbol, tf, reason, keys, ind_df=None):
+_BTCPAT_CACHE = {}
+BTCPAT_CACHE_TTL = 15.0
+
+
+def _btc_pattern_vote(tf, cfg=None):
+    """V3.44.47: رأیِ «الگوی BTC روی سطح خودش». همان تشخیص‌دهنده‌ی الگوی برخورد (برگشت / شکست کاذب / نفوذ و پولبک و ادامه)
+    که برای نماد استفاده می‌شود روی داده‌ی BTC و سطوح خودِ BTC اجرا می‌شود. خروجی (vote, توضیح)؛ vote: 'BUY' | 'SELL' | None
+    (الگویی روی BTC نیست، BTC بلاتکلیف است یا داده نیست). نتیجه ۱۵ ثانیه کش می‌شود تا هر بار بررسی لیست انتظار BTC را دوباره نخواند."""
+    base = {**STRATEGY_DEFAULTS, **(cfg or {})}
+    ckey = (tf, hash(repr(sorted((k, repr(v)) for k, v in base.items()))))
+    now = time.time()
+    hit = _BTCPAT_CACHE.get(ckey)       # عملیات ساده‌ی dict زیر GIL امن است؛ بدون قفل (تا کد در تست‌های مستقل هم بارگذاری شود)
+    if hit and now - hit[0] < BTCPAT_CACHE_TTL:
+        return hit[1], hit[2]
+    vote, detail = None, 'داده‌ی BTC نیست'
+    try:
+        limit = 650 if tf in ('5min', '15min') else 200
+        d = get_klines('BTC', tf, limit)
+        if d is not None and not d.empty and len(d) >= 62:
+            ind = calculate_indicators(d)
+            c = dict(base)
+            if c.get('halving_model_enabled'):
+                rng = get_halving_range_sync('BTC')
+                c = _with_halving_cfg(c, rng) if rng else c
+            try:
+                live = latest_price('BTC')
+                live = float(live) if live else None
+            except Exception:
+                live = None
+            md = {}
+            for htf_key, htf_tf in {'5min': [('1h', '1hour'), ('4h', '4hour')], '15min': [('1h', '1hour'), ('4h', '4hour')],
+                                    '1hour': [('4h', '4hour'), ('1d', '1day')], '4hour': [('1d', '1day')]}.get(tf, []):
+                try:
+                    hd = get_klines('BTC', htf_tf, 160)
+                    if hd is not None and not hd.empty:
+                        md[htf_key] = calculate_indicators(hd)
+                except Exception:
+                    logger.warning('btc pattern vote: htf klines failed tf=%s', htf_tf)
+            # همان تابعی که اسکن نماد برای تولید سیگنال صدا می‌زند (get_signal_with_reason با استراتژی dynamic)
+            sig, reason = get_signal_with_reason(ind, md, 'single', tf, 'dynamic', dict(FILTER_DEFAULTS), c, None, live_price=live)
+            if sig in ('BUY', 'SELL'):
+                _tag, _lt, _lv = extract_setup_level(reason)
+                _scn = extract_scenario_tag(reason)
+                try:
+                    _lvl_txt, _scn_txt = _assist_describe_source(reason or '', _lt, _lv, _scn)
+                except Exception:
+                    _scn_txt = ''
+                vote = sig
+                detail = f"BTC: {'خرید' if sig == 'BUY' else 'فروش'}" + (f" ({_scn_txt})" if _scn_txt else '')
+            else:
+                detail = 'BTC الگویی روی سطح ندارد'
+    except Exception:
+        logger.exception('btc pattern vote failed tf=%s', tf)
+        vote, detail = None, 'خطا در بررسی الگوی BTC'
+    if len(_BTCPAT_CACHE) > 64:
+        _BTCPAT_CACHE.clear()
+    _BTCPAT_CACHE[ckey] = (now, vote, detail)
+    return vote, detail
+
+
+def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
     """sync (از thread صدا زده شود). خروجی: [{'key','label','vote','detail'}]؛ vote: 'BUY' | 'SELL' | None (خنثی/نبود داده)،
     و برای «حجم»: 'OK' | None."""
     out = []
@@ -10239,6 +10314,9 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None):
     def add(k, vote, detail=''):
         out.append({'key': k, 'label': _TOUCH_LABELS[k], 'vote': vote, 'detail': detail})
     sym_u = str(symbol or '').upper()
+    if 'btcpat' in keys and sym_u != 'BTC':
+        _bv, _bd = _btc_pattern_vote(tf, cfg)
+        add('btcpat', _bv, _bd)
     if 'btceth' in keys:
         regs = {}
         for sym in ('BTC', 'ETH'):
@@ -10309,22 +10387,26 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None):
     return out
 
 
-def _touch_summarize(votes, mode):
+def _touch_summarize(votes, mode, fixed_dir=None):
     """votes را (درجا) با کلید 'status' علامت می‌زند. جهت از رأی گروه‌ها با وزن می‌آید (نه شمارش تک‌تک فیلترها)؛
     'agree/total' همچنان شمارش تک‌تک فیلترهای موافق است (برای حد ورود خودکار).
     خروجی: {'dir','agree','total','auto_ok','groups'}."""
+    fixed = fixed_dir in ('BUY', 'SELL')
     members = {}
     for v in votes:
         if v['key'] == 'vol':
             continue
-        members.setdefault(_TOUCH_GROUP.get(v['key'], v['key']), []).append(v['vote'])
+        g_k = _TOUCH_GROUP.get(v['key'], v['key'])
+        if fixed and g_k == 'ylevel':
+            g_k = 'structure'      # V3.44.47: «سطح» در حالت جهتِ ثابت یک رأی است (سقف/کف دیروز هم‌گروه با سطح)
+        members.setdefault(g_k, []).append(v['vote'])
     groups = {}
     for g_, vs_ in members.items():
         b_, s_ = vs_.count('BUY'), vs_.count('SELL')
         groups[g_] = 'BUY' if b_ > s_ else ('SELL' if s_ > b_ else None)
     buy_w = sum(_TOUCH_GROUP_W.get(g_, 1) for g_, x in groups.items() if x == 'BUY')
     sell_w = sum(_TOUCH_GROUP_W.get(g_, 1) for g_, x in groups.items() if x == 'SELL')
-    direction = 'BUY' if buy_w > sell_w else ('SELL' if sell_w > buy_w else None)
+    direction = fixed_dir if fixed else ('BUY' if buy_w > sell_w else ('SELL' if sell_w > buy_w else None))
     agree = 0
     for v in votes:
         if v['key'] == 'vol':
@@ -10341,6 +10423,11 @@ def _touch_summarize(votes, mode):
         if st == 'ok':
             agree += 1
     total = len(votes)
+    if fixed:
+        # V3.44.47: جهت از الگوی برخورد ثابت است؛ شمارش روی «گروه‌های رأی» است نه تک‌تک فیلترها (حجم، اگر روشن باشد، جدا شمرده می‌شود)
+        n_vol = sum(1 for v in votes if v['key'] == 'vol')
+        agree = sum(1 for x in groups.values() if x == direction) + sum(1 for v in votes if v['key'] == 'vol' and v['vote'] == 'OK')
+        total = len(groups) + n_vol
     need = {'all': total, 'minus1': max(1, total - 1), 'majority': total // 2 + 1}.get(mode, total)
     return {'dir': direction, 'agree': agree, 'total': total, 'groups': groups,
             'auto_ok': bool(direction and total > 0 and agree >= need)}
@@ -10350,12 +10437,13 @@ def _touch_eval_one(chat_id, rec):
     s = get_session(chat_id)
     keys = _touch_enabled_keys(s)
     tf = rec.get('tf') or s.get('timeframe', '5min')
-    votes = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', keys) if keys else []
-    if gate_on(s, 'gate_touch_pattern_vote_enabled') and rec.get('touch_sig') in ('BUY', 'SELL'):
+    votes = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', keys, cfg=s.get('strategy_config')) if keys else []
+    fixed_dir = rec.get('touch_sig') if (gate_on(s, 'gate_touch_dir_fixed_enabled') and rec.get('touch_sig') in ('BUY', 'SELL')) else None
+    if (not fixed_dir) and gate_on(s, 'gate_touch_pattern_vote_enabled') and rec.get('touch_sig') in ('BUY', 'SELL'):
         # V3.44.15: جهتِ پیشنهادیِ خودِ الگوی برخورد (برگشت بدون نفوذ / شکست کاذب / پولبک و ادامه) هم یک رأی است
         _lt, _st = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
         votes.insert(0, {'key': 'pattern', 'label': 'الگوی برخورد با سطح', 'vote': rec['touch_sig'], 'detail': _st})
-    summ = _touch_summarize(votes, s.get('touch_auto_mode', 'all'))
+    summ = _touch_summarize(votes, s.get('touch_auto_mode', 'all'), fixed_dir=fixed_dir)
     with _TOUCH_LOCK:
         rec['votes'] = votes
         rec.update(summ)
@@ -10474,7 +10562,9 @@ def _touch_auto_enter(chat_id, rec):
             rec['block_note'] = f'قیمت {drift:.2f}R از لحظه‌ی برخورد دور شده (حداکثر {TOUCH_MAX_DRIFT_R:g}R)'
             return False
     side_fa = 'خرید' if is_long else 'فروش'
-    full_reason = (f"{base_reason} | ⚖️ رأی فیلترها: {side_fa} ({rec.get('agree')}/{rec.get('total')})"
+    # V3.44.47: وضعیت هر رأی در لحظه‌ی عبور از مرحله‌ی رأی‌گیری (Y موافق، N مخالف، - بی‌نظر/منتظر) برای ثبت در ژورنال
+    _vt = ','.join(f"{v.get('key')}:{ {'ok': 'Y', 'against': 'N'}.get(v.get('status'), '-') }" for v in (rec.get('votes') or []))
+    full_reason = (f"{base_reason} | ⚖️ رأی فیلترها: {side_fa} ({rec.get('agree')}/{rec.get('total')}) |VOTES={_vt}|"
                    + (' | طرح اصلی ستاپ' if plan else ' | طرح ورود سریع'))[:500]
     p_stub = {'structural_target': extra.get('structural_tp', False), 'score': extra.get('plan_score'), 'rr': extra.get('plan_rr'),
               'quality_label': extra.get('plan_quality_label'), 'tp_level_name': extra.get('tp_level_name'), 'tp_stages': extra.get('tp_stages')}
@@ -11346,6 +11436,7 @@ async def scan_symbol(http,chat_id,symbol):
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     if _simple_touch or gate_on(s, 'gate_touch_vote_enabled'):
         # V3.44.14: برخورد با سطح وارد لیست انتظار می‌شود؛ جهت بعد از رأی‌گیری فیلترها تعیین می‌شود (نه از خود برخورد).
+        # V3.44.47: با کلید «جهت فقط از الگوی برخورد» (پیش‌فرض روشن) جهت همان جهتِ الگوست و رأی‌ها فقط تایید/رد می‌کنند.
         try:
             _tplan = None
             try:       # طرح اصلی ستاپ برای جهتِ خودِ برخورد (اگر جهت نهایی همین شد، SL/TP و امتیاز کیفیت همین است)
@@ -11725,13 +11816,15 @@ def _scenario_label(scn, reason=''):
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'entry_rules', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
-    'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد.'),
+    'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت فقط از الگوی برخورد (رأی‌ها جهت را عوض نکنند)', True, 'entry_rules', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد. (از V3.44.47: اگر «جهت فقط از الگوی برخورد» روشن باشد جهت از رأی‌ها عوض نمی‌شود و فقط تعداد رأی‌های موافق برای ورود خودکار سنجیده می‌شود.)'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_rules', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود (صبر تا به نفع معامله شود)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
     'gate_btc_candle_enabled': ('₿ هم‌جهتی با کندل در حال تشکیل BTC (ورود فقط وقتی کندل BTC با معامله هم‌جهت است)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btc_front_level_enabled': ('📏 فاصله تا سطح جلویی BTC (ورود فقط وقتی فاصله معقول است)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
+    'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'entry_filter', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'entry_filter', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
     'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'entry_filter', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
     'gate_fc_rsi_enabled':        ('تایید RSI', True, 'entry_filter', 'RSI آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (برای خرید: RSI رو به بالا یا اشباع فروش؛ برای فروش: رو به پایین یا اشباع خرید). RSI خنثی یا نبود داده = سیگنال صادر نمی‌شود.'),
@@ -11950,7 +12043,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
     if section == 'entry_rules':
         sweep_confirm = bool(scfg.get('sweep_require_confirmation_candle', False))
         _fmn, _fmx, _fwt = _fav_cfg(s)
-        _first = ['gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled']
+        _first = ['gate_touch_vote_enabled', 'gate_touch_dir_fixed_enabled', 'gate_touch_pattern_vote_enabled']
         _rest = [k for k, v in GATE_REGISTRY.items() if v[2] == 'entry_rules' and k not in _first]
 
         def _grow(k):
@@ -12016,7 +12109,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         ]}
 
     return {'inline_keyboard': [
-        [{'text': '🎚 پریست‌های آماده (کلید ۱، ۲، ...)', 'callback_data': '/preset_menu'}],
+        [{'text': '🎚 پریست‌ها (کلید ۱ تا ۵)', 'callback_data': '/preset_menu'}],
         [{'text': '📥 شرایط ورود به معامله', 'callback_data': '/trade_filter_entry'}],
         [{'text': '🧩 شناسایی فرصت (الگوی قیمت)', 'callback_data': '/trade_filter_structure'}],
         [{'text': '🧱 کیفیت و کنترل ریسک', 'callback_data': '/trade_filter_quality'}],

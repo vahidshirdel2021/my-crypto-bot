@@ -177,7 +177,7 @@ def _mkv(k, vote, detail): return {'key':k,'label':k,'vote':vote,'detail':detail
 _long=[_mkv('btceth','SELL','ETH نزولی، BTC نزولی'),_mkv('h4','SELL','نزولی'),_mkv('tf','SELL','5 دقیقه نزولی، 15 دقیقه نزولی'),
        _mkv('rsi','BUY','45'),_mkv('macd','SELL','منفی'),_mkv('adx',None,'ADX 18'),_mkv('vol',None,'1.2x (لازم 1.5x)'),
        _mkv('level','SELL','آخرین کلوز پایین سطح'),_mkv('ylevel','SELL','برخورد به سقف دیروز (5.9770) و عبور نکرده')]
-g.update(_touch_enabled_keys=lambda s_:list(_ALL), _touch_votes=lambda sym,tf,reason,keys,ind_df=None:copy.deepcopy(_long),
+g.update(_touch_enabled_keys=lambda s_:list(_ALL), _touch_votes=lambda sym,tf,reason,keys,ind_df=None,cfg=None:copy.deepcopy(_long),
          _final_regime_check=lambda tf,sig:(False,'x'), TIMEFRAME_REGIME_CACHE={'5min':{'gate':'RANGE'}},
          gate_on=lambda s_,k:True if k=='gate_final_regime_enabled' else False)
 state['live']=99.9
@@ -191,7 +191,7 @@ assert 'DDD' in txt and 'RSI' in txt and 'MACD' in txt and '✅' in txt and '❌
 assert rz==before, 'popup must not modify the queue record'
 # فقط چند فیلتر روشن → جزئیات بیشتر (کلوز آخر و مقدارها) جا می‌شود
 g['_touch_enabled_keys']=lambda s_:['rsi','macd']
-g['_touch_votes']=lambda sym,tf,reason,keys,ind_df=None:[copy.deepcopy(_long[3]),copy.deepcopy(_long[4])]
+g['_touch_votes']=lambda sym,tf,reason,keys,ind_df=None,cfg=None:[copy.deepcopy(_long[3]),copy.deepcopy(_long[4])]
 g['gate_on']=lambda s_,k:False
 txt=g['fav_filters_popup'](1,rz['id']); print(txt)
 assert 'کلوز آخر' in txt and 'RSI 45' in txt and g['_tg_len'](txt)<=200
