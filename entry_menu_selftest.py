@@ -26,7 +26,7 @@ fc = {f'/toggle_gate_{k}' for k in REG if k.startswith('gate_fc_')} | {'/toggle_
 assert set(flt) == fc | {'/trade_filter_entry', '/menu'}, set(flt) ^ (fc | {'/trade_filter_entry', '/menu'})
 need = {'/toggle_gate_gate_touch_vote_enabled', '/toggle_gate_gate_touch_pattern_vote_enabled', '/touch_auto_next', '/toggle_sweep_confirm',
         '/toggle_fav_confirm', '/fav_min_r_next', '/fav_max_r_next', '/fav_wait_next', '/fav_max_mode_toggle', '/fav_queue', '/fav_stats',
-        '/toggle_gate_gate_4h_close_block_enabled', '/toggle_gate_gate_inverse_trading_enabled', '/toggle_gate_gate_final_regime_enabled', '/toggle_gate_gate_btc_candle_enabled', '/trade_filter_entry', '/menu'}
+        '/toggle_gate_gate_4h_close_block_enabled', '/toggle_gate_gate_inverse_trading_enabled', '/toggle_gate_gate_final_regime_enabled', '/toggle_gate_gate_btc_candle_enabled', '/toggle_gate_gate_btc_front_level_enabled', '/trade_filter_entry', '/menu'}
 assert set(rul) == need, set(rul) ^ need
 assert rul.index('/toggle_gate_gate_touch_vote_enabled') < rul.index('/touch_auto_next') < rul.index('/toggle_fav_confirm')   # رأی‌گیری بالاتر از تایید حرکت
 # هر کلید رجیستری دقیقاً در یکی از دو صفحه‌ی «ورود» است و چیزی گم یا تکراری نمی‌شود
@@ -38,7 +38,7 @@ for sec in ('entry_filter', 'entry_rules'):
     assert sec in src.split('_FILTER_SECTION_TITLES = {')[1].split('}')[0] and f"'{sec}'" in src.split('has_toggles = section in (')[1][:140]
 # بازگشت دکمه‌های تنظیم تایید حرکت/رأی‌گیری به همین صفحه‌ی «شرایط ورود»
 assert src.count("trade_filter_management_keyboard(chat_id, 'entry_rules'))") == 5
-for k in ('gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled', 'gate_4h_close_block_enabled', 'gate_inverse_trading_enabled', 'gate_final_regime_enabled', 'gate_btc_candle_enabled'):
+for k in ('gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled', 'gate_4h_close_block_enabled', 'gate_inverse_trading_enabled', 'gate_final_regime_enabled', 'gate_btc_candle_enabled', 'gate_btc_front_level_enabled'):
     assert REG[k][2] == 'entry_rules', k
 print('entry_menu_selftest OK', len(flt), len(rul))
 

@@ -6,7 +6,7 @@ log = logging.getLogger('t')
 
 # ---------------------------------------------------------------- ۱) حکم خالص کندل BTC ----------
 a = src.index("# ===================== V3.44.42: کلید «هم‌جهتی با کندل در حال تشکیل BTC»")
-b = src.index("def btc_eth_regime_rows(")
+b = src.index("# ===================== V3.44.44: کلید «فاصله تا سطح جلویی BTC»")
 HELPERS = src[a:b]
 st = {'rows': None, 'price': None, 'calls': 0, 'stale_first': False}
 CACHE = {}
@@ -186,7 +186,7 @@ SP = {'pending_orders': [{'symbol': 'AAA', 'side': 'SELL', 'trigger_price': None
                           'margin': 10, 'leverage': 5, 'triggered': True, 'order_id': 'o1'}], 'trade_amount_usdt': 5, 'leverage': 3, 'paper_positions': []}
 sent = []; res = {'v': (False, f'{P} (5م) در حال تشکیل صعودی است')}
 gp = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent.append(t),
-          side_long=g3['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX=P,
+          side_long=g3['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX=P, _BTC_FRONT_PREFIX='⚠️ هشدار ورود',
           execute_manual_trade=lambda *a, **k: res['v'])
 exec(src[a:b], gp)
 gp['check_pending_orders'](1)
@@ -203,5 +203,5 @@ i = src.index("'gate_btc_candle_enabled': ("); assert "False, 'entry_rules'" in 
 assert "'btc_candle', sig" in src and "_bc_ok, _bc_txt = btc_candle_verdict(tf, side)" in src
 fq = src[src.index("def fav_quick_entry("):src.index("def fav_queue_list(")]
 assert 'btc_candle' not in fq        # ورود سریع دستی خودش از execute_manual_trade (پیش‌بررسی) رد می‌شود، نه با منطق جدا
-assert "BOT_VERSION = '3.44.42'" in src
+import re as _re; assert _re.search(r"BOT_VERSION = '3\.44\.\d+'", src)
 print('ALL OK')
