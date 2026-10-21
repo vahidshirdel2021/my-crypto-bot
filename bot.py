@@ -12917,7 +12917,7 @@ def process_command(cmd,chat_id,message_id=None):
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
             _halving_tf_store(_cfg_hv, s.get('timeframe', '5min'))      # V3.44.40: فقط برای تایم‌فریم فعال ذخیره می‌شود
         elif cl == '/halving_depth_cycle':
-            _opts = (8, 10, 12); _cur = int(_cfg_hv.get('halving_max_depth', 10))
+            _opts = (8, 10, 12, 14); _cur = int(_cfg_hv.get('halving_max_depth', 10))
             _cfg_hv['halving_max_depth'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 10
             _halving_tf_store(_cfg_hv, s.get('timeframe', '5min'))      # V3.44.40
         else:
