@@ -5570,7 +5570,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:500],'entry_reason':reason[:500],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
     if inverse_applied and _shadow_spec:
@@ -6375,6 +6375,12 @@ def _journal_extra_fields(pos):
     return out
 
 
+def _journal_int(pattern, text):
+    """V3.44.50: عدد صحیحِ اولین تطابق الگو در متن (مثلاً عمق سطح نصف‌کردن از HVDEPTH=)؛ نبود = None."""
+    m = re.search(pattern, text or '')
+    return int(m.group(1)) if m else None
+
+
 def _journal_votes(reason):
     """V3.44.47: |VOTES=key:Y,key:N,key:-| از متن دلیل ورود -> {'key': 'Y'|'N'|'-'} (Y موافق، N مخالف، - بی‌نظر). نبود = None."""
     m = re.search(r'\|VOTES=([^|]*)\|', reason or '')
@@ -6399,6 +6405,8 @@ def journal_append_closed(chat_id, pos):
             'is_real': bool(pos.get('is_real')), 'timeframe': pos.get('timeframe'), 'setup': setup_tag,
             'scenario': int(m.group(1)) if m else None,
             'votes': _journal_votes(pos.get('entry_reason') or pos.get('signal_reason') or ''),
+            'hv_depth': _journal_int(r'HVDEPTH=(\d+)', pos.get('entry_reason') or pos.get('signal_reason') or ''),
+            'hv_tree': _journal_int(r'HVTREE=(\d+)', pos.get('entry_reason') or pos.get('signal_reason') or ''),
             'opened_at': pos.get('opened_at'), 'closed_at': pos.get('close_timestamp'),
             'opened_at_text': fmt_scan_time(pos.get('opened_at')), 'closed_at_text': fmt_scan_time(pos.get('close_timestamp')),
             'entry_price': pos.get('entry_price'), 'close_price': pos.get('close_price'), 'sl': pos.get('sl'), 'tp': pos.get('tp'),
@@ -10478,7 +10486,7 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
         except Exception:
             _tp0 = None
         expiry = int(s.get('assist_expiry_seconds', 1800) or 1800)
-        rec = {'id': tid, 'symbol': symbol, 'touch_sig': touch_sig, 'reason': str(reason or '')[:500], 'level_token': level_token,
+        rec = {'id': tid, 'symbol': symbol, 'touch_sig': touch_sig, 'reason': str(reason or '')[:900], 'level_token': level_token,
                'level_value': level_value, 'scn': scn, 'tf': tf, 'created_at': now, 'expires_at': now + expiry, 'status': 'waiting',
                'last_eval': 0.0, 'votes': [], 'dir': None, 'agree': 0, 'total': 0, 'auto_ok': False,
                'touch_price': _tp0, 'plan': (dict(plan) if plan else None), 'flipped_from': flip_from}
@@ -10565,7 +10573,7 @@ def _touch_auto_enter(chat_id, rec):
     # V3.44.47: وضعیت هر رأی در لحظه‌ی عبور از مرحله‌ی رأی‌گیری (Y موافق، N مخالف، - بی‌نظر/منتظر) برای ثبت در ژورنال
     _vt = ','.join(f"{v.get('key')}:{ {'ok': 'Y', 'against': 'N'}.get(v.get('status'), '-') }" for v in (rec.get('votes') or []))
     full_reason = (f"{base_reason} | ⚖️ رأی فیلترها: {side_fa} ({rec.get('agree')}/{rec.get('total')}) |VOTES={_vt}|"
-                   + (' | طرح اصلی ستاپ' if plan else ' | طرح ورود سریع'))[:500]
+                   + (' | طرح اصلی ستاپ' if plan else ' | طرح ورود سریع'))[:900]
     p_stub = {'structural_target': extra.get('structural_tp', False), 'score': extra.get('plan_score'), 'rr': extra.get('plan_rr'),
               'quality_label': extra.get('plan_quality_label'), 'tp_level_name': extra.get('tp_level_name'), 'tp_stages': extra.get('tp_stages')}
 
@@ -11515,7 +11523,7 @@ async def scan_symbol(http,chat_id,symbol):
         full_reason = planner_reason
     else:
         full_reason = f"{signal_reason} | {planner_reason}"
-    full_reason = full_reason[:500]
+    full_reason = full_reason[:900]
     # V3.43.32: «صبر برای تایید حرکت» (کلید جدا، پیش‌فرض خاموش) - سیگنال در صف می‌ماند و بعد از تایید به همان مسیر عادی (کارت دستیار یا ورود خودکار) می‌رود.
     try:
         _fav_held = await asyncio.to_thread(_fav_confirm_hold, chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
@@ -11816,12 +11824,12 @@ def _scenario_label(scn, reason=''):
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'entry_rules', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
-    'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت فقط از الگوی برخورد (رأی‌ها جهت را عوض نکنند)', True, 'entry_rules', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت ثابت از الگو', True, 'entry_rules', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد. (از V3.44.47: اگر «جهت فقط از الگوی برخورد» روشن باشد جهت از رأی‌ها عوض نمی‌شود و فقط تعداد رأی‌های موافق برای ورود خودکار سنجیده می‌شود.)'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'entry_rules', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود (صبر تا به نفع معامله شود)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
-    'gate_btc_candle_enabled': ('₿ هم‌جهتی با کندل در حال تشکیل BTC (ورود فقط وقتی کندل BTC با معامله هم‌جهت است)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_btc_front_level_enabled': ('📏 فاصله تا سطح جلویی BTC (ورود فقط وقتی فاصله معقول است)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
+    'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
+    'gate_btc_candle_enabled': ('₿ کندل BTC هم‌جهت با معامله', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'entry_filter', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
@@ -11834,7 +11842,7 @@ GATE_REGISTRY = {
     'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', True, 'entry_filter', 'یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): قیمت از سقف دیروز (PDH) گذشته = رأی خرید؛ کف دیروز (PDL) را از دست داده = رأی فروش؛ به سقف دیروز رسیده ولی نگذشته = رأی فروش؛ به کف دیروز رسیده ولی پایین‌تر نرفته = رأی خرید؛ وسط رنج دیروز = بدون رأی. توجه: در حالت «همه‌ی فیلترها موافق» یا «همه به‌جز یکی»، این رأی هم باید موافق باشد؛ پس ورود خودکار سخت‌گیرانه‌تر می‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'entry_filter', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی جهت معامله برعکس می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. فاصله‌ی حد ضرر و فاصله‌ی حد سود همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)، پس نسبت پاداش به ریسک هم همان سیگنال اصلی است و ضرر از سود کمتر می‌ماند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
-    'gate_h4_tier_enabled': ('رتبه‌ی نرم با رژیم ۴ ساعته (کاهش حجم، بدون رد سیگنال)', False, 'quality', 'پیش‌فرض خاموش. سیگنالی را رد نمی‌کند؛ فقط حجم/ریسک معامله را کم می‌کند. اگر رژیم ۴ ساعته‌ی نماد با جهتِ سیگنال هم‌جهت باشد (خرید با ۴ ساعته‌ی صعودی، فروش با نزولی) با حجم کامل وارد می‌شود؛ اگر هم‌جهت نباشد (خلاف یا رنج) ریسک معامله به نصف (قابل‌تنظیم با H4_TIER_REDUCED_RISK_MULT) کم می‌شود. در حالت معکوس منطق برعکس است: سیگنال‌های هم‌جهت با ۴ ساعته (که بیشتر برنده‌اند) با حجم کم‌تر معکوس می‌شوند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
+    'gate_h4_tier_enabled': ('رتبه‌ی نرم با رژیم ۴ ساعته', False, 'quality', 'پیش‌فرض خاموش. سیگنالی را رد نمی‌کند؛ فقط حجم/ریسک معامله را کم می‌کند. اگر رژیم ۴ ساعته‌ی نماد با جهتِ سیگنال هم‌جهت باشد (خرید با ۴ ساعته‌ی صعودی، فروش با نزولی) با حجم کامل وارد می‌شود؛ اگر هم‌جهت نباشد (خلاف یا رنج) ریسک معامله به نصف (قابل‌تنظیم با H4_TIER_REDUCED_RISK_MULT) کم می‌شود. در حالت معکوس منطق برعکس است: سیگنال‌های هم‌جهت با ۴ ساعته (که بیشتر برنده‌اند) با حجم کم‌تر معکوس می‌شوند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
@@ -11843,9 +11851,9 @@ GATE_REGISTRY = {
     'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', True, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
     'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
     'gate_max_sl_atr_enabled':    ('سقف فاصله‌ی حد ضرر', True, 'quality', 'اگر حد ضرر لازم از نوسان معمول بازار خیلی دورتر باشد (ریسک زیاد)، سیگنال رد می‌شود.'),
-    'gate_fee_ratio_enabled':     ('جلوگیری از معامله‌ی کم‌ارزش (مرحله‌ی سیگنال)', True, 'quality', 'اگر مبلغ ریسک معامله آن‌قدر کوچک باشد که کارمزد بخش بزرگی از آن را می‌خورد، سیگنال رد می‌شود.'),
+    'gate_fee_ratio_enabled':     ('جلوگیری از معامله‌ی کم‌ارزش (سیگنال)', True, 'quality', 'اگر مبلغ ریسک معامله آن‌قدر کوچک باشد که کارمزد بخش بزرگی از آن را می‌خورد، سیگنال رد می‌شود.'),
     'use_edge_proxy_gate':        ('فیلتر آزمایشی سودآوری مورد انتظار', False, 'quality', 'یک فیلتر آزمایشی که سودآوری مورد انتظار هر سیگنال را تخمین می‌زند. فقط برای کاربران باتجربه؛ پیش‌فرض خاموش.'),
-    'gate_open_fee_ratio_enabled': ('جلوگیری از معامله‌ی کم‌ارزش (لحظه‌ی ورود)', True, 'quality', 'در لحظه‌ی ورود هم بررسی می‌شود که مبلغ ریسک چند برابر کارمزد باشد؛ وگرنه ورود انجام نمی‌شود.'),
+    'gate_open_fee_ratio_enabled': ('جلوگیری از معامله‌ی کم‌ارزش (ورود)', True, 'quality', 'در لحظه‌ی ورود هم بررسی می‌شود که مبلغ ریسک چند برابر کارمزد باشد؛ وگرنه ورود انجام نمی‌شود.'),
     'gate_total_risk_cap_enabled': ('سقف جمع ریسک معامله‌های باز', True, 'quality', 'جمع ریسک همه‌ی معامله‌های باز نباید از درصد مشخصی از سرمایه بیشتر شود.'),
     'gate_cooldown_enabled':      ('استراحت بعد از هر معامله', True, 'quality', 'بعد از بسته شدن معامله روی یک ارز، تا مدتی دوباره وارد همان ارز نمی‌شود.'),
     'gate_traded_level_enabled':  ('عدم تکرار ورود روی یک سطح', True, 'quality', 'روی سطحی که قبلاً معامله شده و هنوز آزاد نشده، ورود جدید انجام نمی‌شود.'),
@@ -12004,6 +12012,9 @@ def trade_filter_management_keyboard(chat_id, section=None):
 
     def cell(flag_val, on_label, cb):
         icon = '🟢' if flag_val else '🔴'
+        # V3.44.49: تلگرام متن بلند دکمه را از ابتدا می‌برد و آیکن روشن/خاموش دیده نمی‌شود؛ برچسب‌ها کوتاه نگه داشته می‌شوند
+        if len(on_label) > 46:
+            on_label = on_label[:45].rstrip() + '…'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
     def fcell(flag_val, key, cb):
@@ -12144,6 +12155,9 @@ def strategy_families_keyboard(chat_id):
 
     def cell(flag_val, on_label, cb):
         icon = '🟢' if flag_val else '🔴'
+        # V3.44.49: تلگرام متن بلند دکمه را از ابتدا می‌برد و آیکن روشن/خاموش دیده نمی‌شود؛ برچسب‌ها کوتاه نگه داشته می‌شوند
+        if len(on_label) > 46:
+            on_label = on_label[:45].rstrip() + '…'
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
     # تنها یک استراتژی معاملاتی وجود دارد - Liquidity Sweep پنج‌سطحی (۵/۱۵ دقیقه).

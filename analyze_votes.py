@@ -4,7 +4,8 @@
     python analyze_votes.py trade_journal.json [trade_journal2.json ...]
 
 ۱) خلاصه‌ی هر پریست (کلید): تعداد، نرخ برد، جمع، میانگین R
-۲) برای هر رأی (BTC، روند، مومنتوم، سطح...): معامله‌هایی که آن رأی «موافق» بود در برابر «مخالف/بی‌نظر»
+۲) به‌تفکیک عمق سطح نصف‌کردن (فیلد hv_depth)
+۳) برای هر رأی (BTC، روند، مومنتوم، سطح...): معامله‌هایی که آن رأی «موافق» بود در برابر «مخالف/بی‌نظر»
    (معامله‌های قدیمی بدون فیلد votes نادیده گرفته می‌شوند)
 نمونه‌ی کم (کمتر از ۳۰) = تفاوت‌ها بیشتر شانس است تا واقعیت.
 """
@@ -63,6 +64,13 @@ def main(paths):
         print(f"[{k}]")
         for lab, code in (('موافق', 'Y'), ('مخالف', 'N'), ('بی‌نظر/منتظر', '-')):
             print(line(lab, stat([t for t in voted if t['votes'].get(k) == code])))
+    print('\n== به‌تفکیک عمق سطح نصف‌کردن (عمق کمتر = سطح مهم‌تر) ==')
+    by_depth = collections.defaultdict(list)
+    for t in trades:
+        d = t.get('hv_depth')
+        by_depth[d if isinstance(d, int) else -1].append(t)
+    for d in sorted(by_depth):
+        print(line('نامشخص' if d == -1 else f'عمق {d}', stat(by_depth[d])))
     print('\n(Y = رأی موافق جهت معامله، N = مخالف، - = بی‌نظر؛ وضعیت در لحظه‌ی عبور از مرحله‌ی رأی‌گیری)')
 
 
