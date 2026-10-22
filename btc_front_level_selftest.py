@@ -49,7 +49,15 @@ g = dict(os=os, time=time, math=math, threading=threading, logger=log,
          send_message=lambda c, t, *a, **k: st['sent'].append((c, t)),
          gate_on=lambda s, k: bool((s.get('cfg') or {}).get(k, False)))
 exec(HELPERS, g)
-info_f, verdict, warn, gate = g['btc_front_level_info'], g['btc_front_level_verdict'], g['_btc_front_warn'], g['_btc_front_gate']
+_real_info = g['btc_front_level_info']
+def _info_noside(s, tf, is_long):
+    # بخش‌های ۱ تا ۸ فقط منطق «فاصله» را می‌سنجند؛ سنجش «سمت سطح» (V3.44.54) در بخش ۹ جدا و با تابع واقعی تست می‌شود.
+    i = _real_info(s, tf, is_long)
+    if i:
+        i['side_ok'] = True
+    return i
+g['btc_front_level_info'] = _info_noside
+info_f, verdict, warn, gate = _info_noside, g['btc_front_level_verdict'], g['_btc_front_warn'], g['_btc_front_gate']
 PFX = g['_BTC_FRONT_PREFIX']
 
 def S(**cfg):
@@ -186,7 +194,7 @@ SF['cfg']['gate_btc_front_level_enabled'] = False; calls.update(exec=0, front_ok
 r = mkr(); gf['_fav_process_one'](1, SF, r); assert r['status'] == 'opened' and calls['exec'] == 1, r
 
 # ---------------------------------------------------------------- ۷) ثبت کلید + سیم‌کشی مسیرها ----------
-i = src.index("'gate_btc_front_level_enabled': ("); assert "False, 'entry_rules'" in src[i:i + 260]
+i = src.index("'gate_btc_front_level_enabled': ("); assert "True, 'entry_rules'" in src[i:i + 260]
 assert src.count("_btc_front_gate(") >= 3 and src.count("gate_on(s, 'gate_btc_front_level_enabled')") == 4     # صف تایید + لیست انتظار + مسیر مستقیم + پیش‌بررسی همه‌ی مسیرها
 assert "_btc_front_gate(chat_id, s, symbol, sig, tf)" in src and "_btc_front_gate(chat_id, s, symbol, side, tf)" in src
 assert "asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf)" in src
@@ -299,3 +307,60 @@ assert "s['paper_start_balance']=v" in src and "'paper_start_balance': None" in 
 assert 'reset_stats_prompt_text(chat_id)' in src and 'ریست آمار و موجودی' in open(os.path.join(HERE, 'ui.py'), encoding='utf-8').read()
 
 print('ALL OK')
+
+# ---------------------------------------------------------------- ۹) V3.44.54: سمت درست سطح (کلوز بسته‌شده‌ی BTC نسبت به نزدیک‌ترین سطح) ----------
+def fake_levels(up, down):
+    # up/down: فاصله‌ی سطح بالا/پایین از ورودی (None = نبود)
+    def f(df, entry, is_long, grid=None, cfg=None):
+        out = []
+        if is_long and up is not None: out.append((entry + up, 'سطح بالا'))
+        if (not is_long) and down is not None: out.append((entry - down, 'سطح پایین'))
+        return out
+    return f
+
+def side_env(up, down):
+    g9 = dict(g); g9['_quick_opposing_levels'] = fake_levels(up, down); exec(HELPERS, g9)
+    g9['_quick_opposing_levels'] = fake_levels(up, down)     # exec بالا نام را روی تابع واقعی برنمی‌گرداند؛ برای اطمینان دوباره تنظیم می‌شود
+    g9['_BTC_FRONT_CACHE'].clear(); g9['_BTC_FRONT_WARNED'].clear()
+    return g9
+
+# سناریوی تصویر: کلوز 82,021.62 ، سطح پایین 81,859 (۱۶۲.۶۲ پایین‌تر) ، سطح بالا 82,822.92 (۸۰۱.۳ بالاتر) => BTC بالای نزدیک‌ترین سطح
+g9 = side_env(up=801.30, down=162.62); sv, si9 = g9['btc_front_level_verdict'], g9['btc_front_level_info']
+ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')
+assert not ok and i9['side_ok'] is False and i9['ref_above'] is False, (ok, t, i9)                    # فروش وقتی BTC بالای سطح بسته: به هیچ عنوان
+assert t.startswith(PFX) and 'بالای سطح' in t and 'با فروش نمی‌خواند' in t and 'زیر سطح ببندد' in t and 'رد نمی‌شود' in t, t
+ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')
+assert ok and t == '' and i9['side_ok'] is True, (ok, t, i9)                                          # خرید همین‌جا مجاز است
+# حتی وقتی آستانه‌ی فاصله صفر است (فاصله مانع نیست) فروش بسته می‌ماند؛ اولویت با سمت سطح است
+assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+# وارونه: نزدیک‌ترین سطح بالای کلوز => BTC پایین سطح بسته => خرید بسته، فروش مجاز
+g9 = side_env(up=40.0, down=700.0); sv = g9['btc_front_level_verdict']
+ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')
+assert not ok and i9['ref_above'] is True and 'زیر سطح' in t and 'با خرید نمی‌خواند' in t and 'بالای سطح ببندد' in t, t
+assert sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+# فقط یک سطح، پایین کلوز: فروش بسته، خرید باز ؛ فقط یک سطح، بالای کلوز: برعکس
+g9 = side_env(up=None, down=100.0); sv = g9['btc_front_level_verdict']
+assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0] and sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')[0]
+g9 = side_env(up=100.0, down=None); sv = g9['btc_front_level_verdict']
+assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')[0] and sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+# هیچ سطحی نیست: مانعی نیست (مثل قبل)
+g9 = side_env(up=None, down=None); sv = g9['btc_front_level_verdict']
+assert sv(S(), '5min', 'SELL')[0] and sv(S(), '5min', 'BUY')[0]
+# سمت درست ولی فاصله‌ی نامعقول: همان پیام فاصله می‌آید (رفتار قبلی)
+g9 = side_env(up=40.0, down=700.0); sv = g9['btc_front_level_verdict']
+ok, t, _i = sv(S(sc={'btc_front_min_atr': 1e6}), '5min', 'SELL'); assert not ok and 'سطح حمایتی نزدیک است' in t, t
+# هشدار ورود: یک‌بار برای هر سطح مرجع در سمت نادرست، با جهت درست در متن
+g9 = side_env(up=801.30, down=162.62); st['sent'].clear()
+G9 = g9['_btc_front_gate']; sent9 = []
+g9['send_message'] = lambda c, t, *a, **k: sent9.append((c, t))
+for _ in range(3):
+    ok, t = G9(5, S(sc={'btc_front_min_atr': 0}), 'XYZ', 'SELL', '5min'); assert not ok
+assert len(sent9) == 1 and 'فروش' in sent9[0][1] and 'XYZ' in sent9[0][1], sent9
+assert G9(5, S(sc={'btc_front_min_atr': 0}), 'XYZ', 'BUY', '5min') == (True, '')
+# معاملات معکوس: سیگنال خرید => معامله‌ی فروش => سمت سطح برای فروش سنجیده می‌شود
+ok, t = G9(5, S(sc={'btc_front_min_atr': 0}, gate_inverse_trading_enabled=True), 'INV', 'BUY', '5min'); assert not ok and 'با فروش نمی‌خواند' in t, t
+# فراخوانان دیگر info (محافظ BTC) فقط به front_price/dist_atr نگاه می‌کنند و دست‌نخورده‌اند
+i_guard = g9['btc_front_level_info'](S(), '5min', True); assert i_guard['front_price'] is None or i_guard['front_price'] > i_guard['close']
+print('side-of-level OK')
+print('btc_front_level_selftest: ALL OK')
+
