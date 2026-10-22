@@ -309,7 +309,17 @@ def get_admin_panel_keyboard():
         [{"text": "👥 لیست کاربران", "callback_data": "/admin_users_list"}],
         [{"text": "🔐 مدیریت دسترسی", "callback_data": "/admin_access"}],
         [{"text": "📡 تنظیمات کانال سیگنال", "callback_data": "/signal_channel_settings"}],
+        [{"text": "🧪 اجرای تست‌ها", "callback_data": "/admin_tests"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
+    ]}
+
+
+def get_admin_tests_keyboard():
+    """V3.44.51: منوی اجرای تست‌ها (فقط ادمین)."""
+    return {"inline_keyboard": [
+        [{"text": "▶️ اجرای همه‌ی تست‌ها", "callback_data": "/admin_tests_run_all"}],
+        [{"text": "⚡ تست‌های سریع (رأی‌گیری، پریست، منو)", "callback_data": "/admin_tests_run_core"}],
+        [{"text": "👑 بازگشت به پنل مدیریت", "callback_data": "/admin_panel"}],
     ]}
 
 

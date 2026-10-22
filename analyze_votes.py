@@ -5,7 +5,8 @@
 
 ۱) خلاصه‌ی هر پریست (کلید): تعداد، نرخ برد، جمع، میانگین R
 ۲) به‌تفکیک عمق سطح نصف‌کردن (فیلد hv_depth)
-۳) برای هر رأی (BTC، روند، مومنتوم، سطح...): معامله‌هایی که آن رأی «موافق» بود در برابر «مخالف/بی‌نظر»
+۳) معامله‌های دارای محافظ BTC در برابر بقیه (فیلد btc_guard)
+۴) برای هر رأی (BTC، روند، مومنتوم، سطح...): معامله‌هایی که آن رأی «موافق» بود در برابر «مخالف/بی‌نظر»
    (معامله‌های قدیمی بدون فیلد votes نادیده گرفته می‌شوند)
 نمونه‌ی کم (کمتر از ۳۰) = تفاوت‌ها بیشتر شانس است تا واقعیت.
 """
@@ -71,6 +72,12 @@ def main(paths):
         by_depth[d if isinstance(d, int) else -1].append(t)
     for d in sorted(by_depth):
         print(line('نامشخص' if d == -1 else f'عمق {d}', stat(by_depth[d])))
+    g = [t for t in trades if t.get('btc_guard')]
+    print(f"\n== محافظ BTC (معامله‌هایی که محافظ روی‌شان اجرا شد: {len(g)}) ==")
+    print(line('با محافظ', stat(g)))
+    print(line('بدون محافظ', stat([t for t in trades if not t.get('btc_guard')])))
+    for fr in sorted({t['btc_guard'].get('frac') for t in g if isinstance(t.get('btc_guard'), dict)}):
+        print(line(f"سهم بستن {int(float(fr) * 100)}٪", stat([t for t in g if isinstance(t['btc_guard'], dict) and t['btc_guard'].get('frac') == fr])))
     print('\n(Y = رأی موافق جهت معامله، N = مخالف، - = بی‌نظر؛ وضعیت در لحظه‌ی عبور از مرحله‌ی رأی‌گیری)')
 
 

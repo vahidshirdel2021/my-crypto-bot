@@ -54,7 +54,7 @@ from ui import (
     get_pending_side_keyboard, get_pending_confirm_keyboard,
     get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
-    get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_fee_menu_keyboard,
+    get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_tests_keyboard, get_admin_fee_menu_keyboard,
     get_setup_management_keyboard, get_scenario_management_keyboard, get_my_profile_keyboard,
 )
 
@@ -900,6 +900,9 @@ def default_session():
         'be_close_auto_enabled': False,
         'be_close_profit_r': 1.0,
         'be_close_loss_r': 0.5,
+        # V3.44.53: محافظ BTC برای معامله‌های باز (PAPER): با واکنش تاییدشده‌ی BTC به سطح روبه‌رو، معامله‌ی در سود بخشی بسته و استاپ باقی‌مانده سر به سر می‌شود.
+        'btc_guard_enabled': True,
+        'btc_guard_frac': 0.5,
         # V3.44.33: تریلینگ استاپ هوشمند پله‌ای (قفل سود با حرکت دادن SL فقط به سمت سود). پیش‌فرض خاموش.
         'trail_enabled': False,
         # V3.44.34: فقط در «بهترین ساعات معامله» اسکن کن. پیش‌فرض خاموش.
@@ -1441,6 +1444,22 @@ def _track_bot_message(chat_id, message_id):
         pass
 
 
+# V3.44.52: کارت ورود (سیگنال) و پیام «پوزیشن بسته شد» برای معامله‌های بسته‌شده‌ی «امروز» (چه سود چه ضرر) تا پایان روز می‌مانند؛
+# روز همان روز پاک‌سازی روزانه است (CRYPTO_DAY_TZ). با شروع روز جدید دیگر محافظت نمی‌شوند و حذف می‌شوند.
+KEEP_CLOSED_CARDS_TODAY = os.environ.get('KEEP_CLOSED_CARDS_TODAY', 'true').lower() not in ('0', 'false', 'no')
+
+
+def _closed_today(pos, today_str=None):
+    try:
+        ts = float(pos.get('close_timestamp') or 0)
+        if ts <= 0:
+            return False
+        now = _crypto_now()
+        return datetime.fromtimestamp(ts, now.tzinfo).strftime('%Y-%m-%d') == (today_str or now.strftime('%Y-%m-%d'))
+    except Exception:
+        return False
+
+
 def _message_protected(chat_id, message_id):
     """True = این پیام الان حذف نشود:
     ۱) پیام حامل کیبورد ثابت پایین چت؛ ۲) کارت زنده‌ی پوزیشن‌ها و کارت ورود (سیگنال) هر پوزیشن *باز*.
@@ -1456,6 +1475,11 @@ def _message_protected(chat_id, message_id):
         for _fr in ((sess or {}).get('fav_wait') or {}).values():        # V3.44.26: کارت مستقل سیگنال صف تایید حرکت هم تا وقتی منتظر است حذف نشود
             if _fr.get('fq_msg_id') == message_id and _fr.get('status') == 'waiting':
                 return True
+        if KEEP_CLOSED_CARDS_TODAY:
+            _today = _crypto_now().strftime('%Y-%m-%d')
+            for _cp in reversed((sess or {}).get('closed_positions') or []):
+                if message_id in (_cp.get('entry_card_mid'), _cp.get('close_msg_mid')) and _closed_today(_cp, _today):
+                    return True
         positions = (sess or {}).get('paper_positions') or []
         if not positions:
             return False
@@ -1762,6 +1786,7 @@ def answer_callback(cid, text=None, show_alert=False):
 
 import threading as _threading
 _CB_CTX = _threading.local()
+_LAST_SENT = _threading.local()       # V3.44.52: message_id آخرین پیامی که send_message در همین thread «ارسال» کرد (نه ویرایش)
 _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی که send_photo در همین thread فرستاد
 
 # V3.42.8: «همه‌ی» دکمه‌های اینلاین به‌صورت پیش‌فرض همان پیامِ منو را ویرایش می‌کنند (نه پیام جدید).
@@ -1999,6 +2024,7 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     ok = bool(res and res.get('ok'))
     if ok:
         _mid = (res.get('result') or {}).get('message_id')
+        _LAST_SENT.mid = _mid
         _is_anchor = _register_kb_anchor(chat_id, _mid, markup)
         if not keep and not _is_anchor:
             schedule_auto_delete(chat_id, _mid)
@@ -4894,7 +4920,7 @@ _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_s
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
                   'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'touch_auto_mode', 'timeframe', 'active_strategy',
-                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
+                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
 _SETTINGS_LOCK = RLock()
@@ -6123,6 +6149,96 @@ def realized_history_value(chat_id,symbol,opened_at):
 def is_admin(chat_id):
     return int(chat_id) in ADMIN_CHAT_IDS
 
+# ===== V3.44.51: اجرای تست‌ها از داخل ربات (فقط ادمین) =====
+ADMIN_TESTS_TIMEOUT_SEC = 180
+ADMIN_TESTS_CORE = ('touch_vote_selftest.py', 'touch_fixed_dir_selftest.py', 'ylevel_vote_selftest.py', 'preset_selftest.py',
+                    'entry_menu_selftest.py', 'touch_card_order_selftest.py', 'fav_confirm_selftest.py', 'fav_max_selftest.py',
+                    'keep_closed_cards_selftest.py', 'btc_guard_selftest.py')
+_ADMIN_TESTS_STATE = {'running': False}
+
+
+def _admin_tests_collect(base_dir, kind='all'):
+    """فایل‌های تست داخل پوشه‌ی ربات. kind: 'all' همه‌ی *_selftest.py / test_*.py / *_tests.py ؛ 'core' فقط تست‌های سریعِ رأی‌گیری/پریست/منو."""
+    import glob
+    names = set()
+    for pat in ('*_selftest.py', 'test_*.py', '*_tests.py'):
+        names |= {os.path.basename(x) for x in glob.glob(os.path.join(base_dir, pat))}
+    if kind == 'core':
+        names = {n for n in names if n in ADMIN_TESTS_CORE}
+    return sorted(names)
+
+
+def _admin_tests_is_pytest_style(path):
+    try:
+        src = open(path, encoding='utf-8').read()
+    except Exception:
+        return False
+    return ('def test_' in src) and ('__main__' not in src) and ('sys.exit' not in src)
+
+
+def _admin_tests_execute(base_dir, names, timeout=ADMIN_TESTS_TIMEOUT_SEC):
+    """هر تست را در پروسه‌ی جدا و روی پوشه‌ی موقت اجرا می‌کند (توکن ساختگی، بدون کلید صرافی، بدون دست‌زدن به داده‌ی واقعی ربات).
+    خروجی: لیست (نام، وضعیت 'ok'|'fail'|'skip'|'timeout', ثانیه، توضیح کوتاه)."""
+    import subprocess, sys, tempfile, shutil
+    out = []
+    with tempfile.TemporaryDirectory(prefix='bot_tests_') as tmp:
+        env = {**os.environ, 'TELEGRAM_BOT_TOKEN': '123:abc', 'TELEGRAM_TOKEN': '123:abc', 'BINANCE_ACCOUNTS_JSON': '',
+               'PAPER_ONLY': 'true', 'BOT_DB_PATH': '', 'ADMIN_CHAT_IDS': '', 'ALLOWED_CHAT_IDS': '',
+               'TRADE_JOURNAL_PATH': os.path.join(tmp, 'journal.json'), 'PYTHONPATH': base_dir, 'PYTHONIOENCODING': 'utf-8'}
+        for name in names:
+            path = os.path.join(base_dir, name)
+            pytest_style = _admin_tests_is_pytest_style(path)
+            cmd = [sys.executable, '-m', 'pytest', '-q', path] if pytest_style else [sys.executable, path]
+            if shutil.which('nice'):
+                cmd = ['nice', '-n', '10'] + cmd      # کم‌اولویت تا اسکن زنده‌ی ربات کند نشود
+            t0 = time.time()
+            try:
+                r = subprocess.run(cmd, cwd=tmp, env=env, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout)
+                txt = (r.stdout or '') + '\n' + (r.stderr or '')
+                if pytest_style and 'No module named pytest' in txt:
+                    out.append((name, 'skip', time.time() - t0, 'نیاز به pytest دارد'))
+                    continue
+                failed = r.returncode != 0 or 'SOME FAILED' in txt or re.search(r'^FAIL\b', txt, re.M) is not None
+                tail = '\n'.join([x for x in txt.strip().split('\n') if x.strip()][-4:])
+                out.append((name, 'fail' if failed else 'ok', time.time() - t0, tail))
+            except subprocess.TimeoutExpired:
+                out.append((name, 'timeout', time.time() - t0, f'بیش از {timeout} ثانیه'))
+            except Exception as e:
+                out.append((name, 'fail', time.time() - t0, f'اجرا نشد: {e}'))
+    return out
+
+
+def _admin_tests_format(results, kind='all'):
+    ok = sum(1 for r in results if r[1] == 'ok')
+    bad = [r for r in results if r[1] in ('fail', 'timeout')]
+    skip = [r for r in results if r[1] == 'skip']
+    total_s = sum(r[2] for r in results)
+    head = f"🧪 *نتیجه‌ی تست‌ها* ({'سریع' if kind == 'core' else 'همه'})\n✅ پاس: {ok}   ❌ رد: {len(bad)}   ⚪ ردشده: {len(skip)}   ⏱ {total_s:.0f} ثانیه\n"
+    if not results:
+        return head + '\nهیچ فایل تستی پیدا نشد.'
+    if not bad:
+        return head + '\n✅ همه‌ی تست‌ها پاس شدند.' + (('\n⚪ ' + '، '.join(f"`{r[0]}`" for r in skip) + ' (نیاز به pytest)') if skip else '')
+    lines = [head]
+    for name, st, sec, tail in bad:
+        lines.append(f"❌ `{name}` ({'زمان تمام شد' if st == 'timeout' else 'رد شد'})")
+        lines.append('```\n' + str(tail).replace('```', "'''")[:500] + '\n```')
+    return '\n'.join(lines)[:3800]
+
+
+def _admin_tests_worker(chat_id, kind):
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        names = _admin_tests_collect(base_dir, kind)
+        results = _admin_tests_execute(base_dir, names)
+        send_message(chat_id, _admin_tests_format(results, kind), get_admin_tests_keyboard())
+    except Exception as e:
+        logger.exception('admin tests failed')
+        send_message(chat_id, f'⚠️ اجرای تست‌ها با خطا متوقف شد: {e}', get_admin_tests_keyboard())
+    finally:
+        _ADMIN_TESTS_STATE['running'] = False
+# ===== END admin tests =====
+
+
 
 def get_user_fee_rate(chat_id):
     try:
@@ -6404,6 +6520,7 @@ def journal_append_closed(chat_id, pos):
             'chat_id': chat_id, 'trade_id': pos.get('trade_id'), 'symbol': pos.get('symbol'), 'side': pos.get('side'),
             'is_real': bool(pos.get('is_real')), 'timeframe': pos.get('timeframe'), 'setup': setup_tag,
             'scenario': int(m.group(1)) if m else None,
+            'btc_guard': pos.get('btc_guard'),
             'votes': _journal_votes(pos.get('entry_reason') or pos.get('signal_reason') or ''),
             'hv_depth': _journal_int(r'HVDEPTH=(\d+)', pos.get('entry_reason') or pos.get('signal_reason') or ''),
             'hv_tree': _journal_int(r'HVTREE=(\d+)', pos.get('entry_reason') or pos.get('signal_reason') or ''),
@@ -6556,7 +6673,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         be_line = _be_finalize(pos)
         audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'position_closed', {'close_price': price, 'pnl_usdt': pnl, 'pnl_before_platform_fee_usdt': pos.get('pnl_before_platform_fee_usdt'), 'fee_usdt': fee, 'platform_fee_usdt': pos.get('platform_fee_usdt', 0.0), 'reason': reason, 'duration_seconds': pos['duration_seconds'], 'realized_r': pos.get('realized_r'), 'mfe_usdt': pos.get('mfe_usdt',0.0), 'mae_usdt': pos.get('mae_usdt',0.0), 'mfe_r': pos.get('mfe_r',0.0), 'mae_r': pos.get('mae_r',0.0)})
         cooldown_len = int(s.get('strategy_config', {}).get('cooldown_seconds', 1200))
-        s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; s['closed_positions'].append(pos.copy()); s['paper_positions'].remove(pos); save_session(chat_id)
+        s['cooldowns'][pos['symbol']]=time.time()+cooldown_len; _cp_rec=pos.copy(); s['closed_positions'].append(_cp_rec); s['paper_positions'].remove(pos); save_session(chat_id)
         est=' تقریبی' if pos.get('pnl_is_estimate') else ''
         fee_line=f"\n• کارمزد تخمینی رفت‌وبرگشت: `{fee:.2f} USDT`{fee_note}" if fee>0 else ''
         platform_line = f'\n• سهم پلتفرم: `{platform_fee:.2f} USDT` ({get_user_fee_rate(chat_id):.2f}%)' if platform_fee > 0 else ''
@@ -6569,7 +6686,15 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         _w_close = _entry_warn_line(pos).rstrip('\n')
         if _w_close: snapshot_lines = f"{snapshot_lines}\n{_w_close}" if snapshot_lines else f"\n{_w_close}"
         journal_append_closed(chat_id, pos)
+        _LAST_SENT.mid = None
         send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`{be_line}{shadow_block}")
+        try:
+            _cmid = getattr(_LAST_SENT, 'mid', None)
+            if _cmid:
+                _cp_rec['close_msg_mid'] = int(_cmid)
+                save_session(chat_id)
+        except Exception:
+            logger.exception('close message id save failed')
         return True
 
 
@@ -7190,6 +7315,8 @@ def be_close_scan_once():
             logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'be_close_scan_once', chat_id)
 
 
+
+
 def handle_be_close(chat_id, symbol):
     """دکمه‌ی «🔒 بستن سر به سر» زیر هشدار: پوزیشن را با قیمت بازار می‌بندد."""
     s = get_session(chat_id)
@@ -7444,6 +7571,147 @@ def trailing_scan_once():
 BACKGROUND_SCAN_SECONDS = max(2, int(os.environ.get('BACKGROUND_SCAN_SECONDS', '5')))
 
 
+# ===== V3.44.53: محافظ BTC برای معامله‌های باز =====
+# وقتی BTC به سطحِ روبه‌روی جهت معامله نزدیک می‌شود (فروش: حمایت زیر BTC؛ خرید: مقاومت بالای BTC) «حالت مراقبت» روشن می‌شود و هشدار می‌آید.
+# اگر BTC به آن سطح واکنش نشان دهد و واکنش تایید شود (همان ۳ الگوی برخورد روی BTC، در جهت مخالف معامله، با بسته‌شدن کندل)،
+# معامله‌هایی که در سودند (حداقل BTC_GUARD_MIN_PROFIT_R) به‌اندازه‌ی «سهم بستن» (۵۰٪ یا ۷۵٪ حجم اولیه) بسته می‌شوند و استاپ باقی‌مانده
+# روی نقطه‌ی ورود (کمی داخل سود، برای پوشش کارمزد) می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. برای هر معامله یک‌بار. فقط PAPER.
+BTC_GUARD_TF = os.environ.get('BTC_GUARD_TF', '15min')
+BTC_GUARD_NEAR_ATR = float(os.environ.get('BTC_GUARD_NEAR_ATR', '1.0'))             # «نزدیک سطح» = فاصله‌ی کلوز BTC تا سطح ≤ این‌قدر ATR
+BTC_GUARD_MIN_PROFIT_R = float(os.environ.get('BTC_GUARD_MIN_PROFIT_R', '0.3'))     # حداقل سود (R) برای بستن بخشی
+BTC_GUARD_WATCH_MINUTES = float(os.environ.get('BTC_GUARD_WATCH_MINUTES', '120'))   # حالت مراقبت بعد از دورشدن BTC از سطح تا این مدت می‌ماند
+BTC_GUARD_FRAC_CHOICES = (0.5, 0.75)
+_BTC_GUARD_WATCH = {}          # {'short'|'long': {'ts', 'level', 'dist_atr', 'alerted': set(chat_id)}}
+_BTC_GUARD_LOCK = RLock()
+
+
+def _btc_guard_frac(s):
+    try:
+        f = float(s.get('btc_guard_frac', 0.5))
+    except Exception:
+        f = 0.5
+    return f if f in BTC_GUARD_FRAC_CHOICES else 0.5
+
+
+def _btc_guard_should_act(p, mv, vote, min_r=None):
+    """آیا این معامله همین حالا باید محافظت شود؟ (واکنش BTC خلاف جهت معامله + سود کافی + هنوز اجرا نشده + PAPER)"""
+    min_r = BTC_GUARD_MIN_PROFIT_R if min_r is None else min_r
+    if p.get('btc_guard_done') or p.get('is_real'):
+        return False
+    want = 'SELL' if side_long(p.get('side', 'BUY')) else 'BUY'
+    return vote == want and mv is not None and float(mv) >= float(min_r)
+
+
+def _btc_guard_new_sl(p):
+    """نقطه‌ی ورود + پوشش کارمزد رفت‌وبرگشت (فروش کمی زیر ورود، خرید کمی بالای ورود)."""
+    entry = float(p['entry_price'])
+    fee_frac = (TAKER_FEE_PCT / 100.0) * 2
+    return entry * (1.0 + fee_frac) if side_long(p.get('side', 'BUY')) else entry * (1.0 - fee_frac)
+
+
+def _btc_guard_sl_improves(p, new_sl, price):
+    """SL فقط به سمت سود جابه‌جا شود و هنوز پشت قیمت فعلی بماند (وگرنه همان لحظه استاپ می‌خورد)."""
+    cur = float(p.get('sl') or 0)
+    if side_long(p.get('side', 'BUY')):
+        return new_sl > cur and new_sl < price
+    return (cur <= 0 or new_sl < cur) and new_sl > price
+
+
+def _btc_guard_watch_update(chat_id, s, side, is_long, plist, now=None):
+    """True اگر حالت مراقبت برای این جهت فعال است: BTC همین الان نزدیک سطحِ روبه‌رو هست، یا در WATCH_MINUTES گذشته بوده.
+    اولین بار که مراقبت روشن می‌شود برای هر چت یک هشدار می‌آید."""
+    now = time.time() if now is None else now
+    try:
+        info = btc_front_level_info(s, BTC_GUARD_TF, is_long)
+    except Exception:
+        logger.exception('btc guard: front level failed')
+        info = None
+    near = bool(info and info.get('front_price') and info.get('dist_atr') is not None and abs(float(info['dist_atr'])) <= BTC_GUARD_NEAR_ATR)
+    with _BTC_GUARD_LOCK:
+        w = _BTC_GUARD_WATCH.setdefault(side, {'ts': 0.0, 'alerted': set()})
+        if near:
+            if (now - w['ts']) > BTC_GUARD_WATCH_MINUTES * 60:
+                w['alerted'] = set()
+            w['ts'] = now
+            w['level'] = info.get('front_price'); w['dist_atr'] = abs(float(info['dist_atr']))
+        active = w['ts'] > 0 and (now - w['ts']) <= BTC_GUARD_WATCH_MINUTES * 60
+        alert = near and chat_id not in w['alerted']
+        if alert:
+            w['alerted'].add(chat_id)
+        lvl = w.get('level'); dist = w.get('dist_atr')
+    if alert:
+        try:
+            names = '، '.join(f"`{p['symbol']}`" for p in plist[:8])
+            kind = 'مقاومت' if is_long else 'حمایت'
+            send_message(chat_id, f"🛡 *محافظ BTC: حالت مراقبت*\nBTC به {kind} `{fmt(lvl)}` نزدیک شد (فاصله `{dist:.2f}` ATR).\n"
+                                  f"معامله‌های {'خرید' if is_long else 'فروش'} باز: {names}\n"
+                                  f"اگر BTC واکنش نشان دهد و واکنش تایید شود، معامله‌های در سود `{int(_btc_guard_frac(s) * 100)}٪` بسته و استاپ باقی‌مانده سر به سر می‌شود.")
+        except Exception:
+            logger.exception('btc guard watch alert failed')
+    return active
+
+
+def _btc_guard_act(chat_id, s, p, frac, vote, det):
+    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+    if not price:
+        return False
+    price = float(price)
+    st = _be_state(p, price)
+    if st is None or not _btc_guard_should_act(p, st[0], vote):
+        return False
+    mv = float(st[0])
+    lock = get_entry_lock(chat_id)
+    with lock:
+        if p not in s['paper_positions'] or p.get('btc_guard_done'):
+            return False
+        p['btc_guard_done'] = True          # حتی اگر بخشی بسته نشد، دوباره تلاش نمی‌شود
+        partial_ok = bool(partial_close_position(chat_id, p, price, frac, label='محافظ BTC'))
+        new_sl = _btc_guard_new_sl(p)
+        moved = False
+        if _btc_guard_sl_improves(p, new_sl, price):
+            if not p.get('sl_initial'):
+                p['sl_initial'] = float(p.get('sl') or 0)
+            p['sl'] = new_sl
+            moved = True
+        p['btc_guard'] = {'ts': time.time(), 'frac': frac, 'partial_ok': partial_ok, 'sl_moved': moved, 'r_at_trigger': round(mv, 3),
+                          'price': price, 'btc_vote': vote, 'btc_detail': str(det or '')[:120]}
+        save_session(chat_id)
+    side_txt = 'خرید' if side_long(p.get('side', 'BUY')) else 'فروش'
+    send_message(chat_id, f"🛡 *محافظ BTC* | `{p['symbol']}` ({side_txt})\n• واکنش BTC تایید شد: {det}\n"
+                          f"• معامله در سود `{mv:+.2f}R` بود\n"
+                          + (f"• `{int(frac * 100)}٪` از حجم بسته شد\n" if partial_ok else "• بستن بخشی ممکن نبود (حجم باقی‌مانده کم یا قبلاً پله‌ای بسته شده)\n")
+                          + (f"• استاپ باقی‌مانده روی `{fmt(new_sl)}` (سر به سر + پوشش کارمزد)" if moved else "• استاپ فعلی از سر به سر بهتر است؛ دست‌نخورده ماند"))
+    return True
+
+
+def btc_guard_scan_once():
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not s.get('btc_guard_enabled', True):
+                continue
+            plist = [p for p in (s.get('paper_positions') or []) if not p.get('is_real') and not p.get('btc_guard_done')]
+            if not plist:
+                continue
+            frac = _btc_guard_frac(s)
+            for is_long in (False, True):
+                side_list = [p for p in plist if side_long(p.get('side', 'BUY')) == is_long]
+                if not side_list:
+                    continue
+                if not _btc_guard_watch_update(chat_id, s, 'long' if is_long else 'short', is_long, side_list):
+                    continue
+                vote, det = _btc_pattern_vote(BTC_GUARD_TF, s.get('strategy_config'))
+                if vote != ('SELL' if is_long else 'BUY'):
+                    continue
+                for p in side_list:
+                    try:
+                        _btc_guard_act(chat_id, s, p, frac, vote, det)
+                    except Exception:
+                        logger.exception('btc guard act failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'btc_guard_scan_once', chat_id)
+# ===== END btc guard =====
+
+
 def _background_scan_loop():
     while True:
         try:
@@ -7462,6 +7730,10 @@ def _background_scan_loop():
             be_close_scan_once()
         except Exception:
             logger.exception('breakeven close loop failed')
+        try:
+            btc_guard_scan_once()
+        except Exception:
+            logger.exception('btc guard loop failed')
         try:
             trailing_scan_once()
         except Exception:
@@ -12090,6 +12362,8 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('be_close_auto_enabled', False)), 'be_auto', '/toggle_be_auto')],
             [{'text': f"📈 آستانه‌ی سود: +{_be_cfg(s)[0]:g}R (تغییر)", 'callback_data': '/be_profit_next'},
              {'text': f"📉 آستانه‌ی ضرر: -{_be_cfg(s)[1]:g}R (تغییر)", 'callback_data': '/be_loss_next'}],
+            [cell(bool(s.get('btc_guard_enabled', True)), '🛡 محافظ BTC (بستن بخشی + سر به سر)', '/toggle_btc_guard')],
+            [{'text': f"✂️ سهم بستن محافظ BTC: {int(round(float(s.get('btc_guard_frac', 0.5)) * 100))}٪ (تغییر)", 'callback_data': '/btc_guard_frac_next'}],
             back_row,
         ]}
 
@@ -12990,6 +13264,21 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
         edit_page(chat_id, '👑 *پنل مدیریت*\n\nاز منوی زیر بخش موردنظر را انتخاب کن:', get_admin_panel_keyboard(), message_id)
         return
+    if cmd == '/admin_tests':
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        edit_page(chat_id, '🧪 *اجرای تست‌ها*\n\nتست‌ها در یک پروسه‌ی جدا و روی پوشه‌ی موقت اجرا می‌شوند؛ به معامله‌ها و داده‌ی واقعی ربات دست نمی‌زنند و اسکن ربات را متوقف نمی‌کنند. «همه» ممکن است چند دقیقه طول بکشد؛ نتیجه در همین چت می‌آید.', get_admin_tests_keyboard(), message_id)
+        return
+    if cmd in ('/admin_tests_run_all', '/admin_tests_run_core'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        if _ADMIN_TESTS_STATE.get('running'):
+            send_message(chat_id, '⏳ یک اجرای تست هنوز در جریان است؛ نتیجه‌اش که آمد دوباره بزن.', get_admin_tests_keyboard()); return
+        _kind = 'core' if cmd.endswith('_core') else 'all'
+        _ADMIN_TESTS_STATE['running'] = True
+        send_message(chat_id, f"▶️ اجرای تست‌ها ({'سریع' if _kind == 'core' else 'همه'}) شروع شد؛ نتیجه که آماده شد همین‌جا می‌آید.", None)
+        threading.Thread(target=_admin_tests_worker, args=(chat_id, _kind), daemon=True).start()
+        return
     if cmd in ('/admin_users_list','/users'):
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
@@ -13681,6 +13970,21 @@ def process_command(cmd,chat_id,message_id=None):
         _pr, _lr = _be_cfg(s)
         _note = (f"{_filter_info(_bi)[1]}\n\nآستانه‌ها: سود `+{_pr:g}R` | ضرر `-{_lr:g}R`" if s[_bk] else 'خاموش شد.')
         send_message(chat_id, f"🔒 {_filter_info(_bi)[0]}: {'🟢 روشن' if s[_bk] else '🔴 خاموش'}\n\n{_note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl == '/toggle_btc_guard':
+        s['btc_guard_enabled'] = not bool(s.get('btc_guard_enabled', True))
+        save_session(chat_id)
+        _bn = (f"وقتی BTC به سطحِ روبه‌روی جهت معامله (فروش: حمایت، خرید: مقاومت) نزدیک شود «حالت مراقبت» روشن و هشدار داده می‌شود. اگر BTC واکنش نشان دهد و "
+               f"واکنش با بسته‌شدن کندل تایید شود، معامله‌های در سود (حداقل `{BTC_GUARD_MIN_PROFIT_R:g}R`) به‌اندازه‌ی `{int(_btc_guard_frac(s) * 100)}٪` بسته و استاپ باقی‌مانده "
+               f"روی نقطه‌ی ورود می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. فقط PAPER.") if s['btc_guard_enabled'] else 'خاموش شد.'
+        send_message(chat_id, f"🛡 محافظ BTC: {'🟢 روشن' if s['btc_guard_enabled'] else '🔴 خاموش'}\n\n{_bn}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl == '/btc_guard_frac_next':
+        _chs = BTC_GUARD_FRAC_CHOICES
+        _cur = _btc_guard_frac(s)
+        s['btc_guard_frac'] = _chs[(_chs.index(_cur) + 1) % len(_chs)]
+        save_session(chat_id)
+        send_message(chat_id, f"✂️ سهم بستن محافظ BTC: `{int(s['btc_guard_frac'] * 100)}٪` از حجم اولیه\n\nروی معامله‌های باز و بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl in ('/be_profit_next', '/be_loss_next'):
         _bk, _ch = ('be_close_profit_r', BE_CLOSE_PROFIT_CHOICES) if cl == '/be_profit_next' else ('be_close_loss_r', BE_CLOSE_LOSS_CHOICES)
