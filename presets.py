@@ -23,6 +23,7 @@ _GATES_ON = (
     'gate_fc_ylevel_enabled',               # برخورد/عبور از سقف و کف دیروز
     'gate_btc_candle_enabled',              # ورود وقتی کندل BTC با معامله هم‌جهت است
     'gate_btc_front_level_enabled',         # ورود وقتی فاصله‌ی BTC تا سطح مقابل معقول است
+    'gate_btc_chop_enabled',                # بدون ورود وقتی BTC دور سطح کلاف است (حالت نامشخص)
     # الگوهای سطح
     'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
     # کیفیت و ریسک

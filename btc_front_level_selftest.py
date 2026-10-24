@@ -55,6 +55,7 @@ def _info_noside(s, tf, is_long):
     i = _real_info(s, tf, is_long)
     if i:
         i['side_ok'] = True
+        i['chop'] = False            # کلاف هم در بخش ۱۰ جدا تست می‌شود
     return i
 g['btc_front_level_info'] = _info_noside
 info_f, verdict, warn, gate = _info_noside, g['btc_front_level_verdict'], g['_btc_front_warn'], g['_btc_front_gate']
@@ -140,7 +141,7 @@ good = S(sc={'btc_front_min_atr': 0}); n0 = len(st['sent'])
 assert gate(7, good, 'AAA', 'BUY', '5min') == (True, '') and len(st['sent']) == n0                       # معقول: بی‌صدا و عبور
 # معاملات معکوس: جهت نهایی برعکس‌شده سنجیده می‌شود (سیگنال خرید => معامله‌ی فروش => سطح پایینی)
 seen = []
-g['btc_front_level_verdict'] = lambda s_, tf, sig: (seen.append(sig) or (True, '', None))
+g['btc_front_level_verdict'] = lambda s_, tf, sig, **k: (seen.append(sig) or (True, '', None))
 gate(1, S(gate_inverse_trading_enabled=True), 'AAA', 'BUY', '5min'); gate(1, S(), 'AAA', 'BUY', '5min')
 assert seen == ['SELL', 'BUY'], seen
 g['btc_front_level_verdict'] = verdict
@@ -163,7 +164,8 @@ gf = dict(os=os, logger=log, time=time, FAV_CONFIRM_MIN_RR=0.0, FAV_CONFIRM_CANC
           get_session=lambda c: SF, save_session=lambda c: None, _fav_update_card=lambda *a, **k: None,
           gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC',
           btc_candle_verdict=lambda tf, sig: (True, ''),
-          _btc_front_gate=lambda chat_id, s, sym, sig, tf: (True, '') if calls['front_ok'] else (False, FRONT_TXT),
+          _btc_front_gate=lambda chat_id, s, sym, sig, tf, *a, **k: (True, '') if calls['front_ok'] else (False, FRONT_TXT),
+          _btc_front_flags=lambda s: (bool(SF['cfg'].get('gate_btc_front_level_enabled', False)), bool(SF['cfg'].get('gate_btc_chop_enabled', False))),
           execute_trade=lambda *a, **k: (calls.__setitem__('exec', calls['exec'] + 1) or True),
           _auto_trend_gate=lambda *a, **k: False, _assist_queue_signal=lambda *a, **k: (calls.__setitem__('card', calls['card'] + 1) or 'ok'),
           _touch_register=lambda *a, **k: (calls.__setitem__('flip', calls['flip'] + 1) or ('touch_wait', 'x')))
@@ -195,9 +197,9 @@ r = mkr(); gf['_fav_process_one'](1, SF, r); assert r['status'] == 'opened' and 
 
 # ---------------------------------------------------------------- ۷) ثبت کلید + سیم‌کشی مسیرها ----------
 i = src.index("'gate_btc_front_level_enabled': ("); assert "True, 'entry_rules'" in src[i:i + 260]
-assert src.count("_btc_front_gate(") >= 3 and src.count("gate_on(s, 'gate_btc_front_level_enabled')") == 4     # صف تایید + لیست انتظار + مسیر مستقیم + پیش‌بررسی همه‌ی مسیرها
-assert "_btc_front_gate(chat_id, s, symbol, sig, tf)" in src and "_btc_front_gate(chat_id, s, symbol, side, tf)" in src
-assert "asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf)" in src
+assert src.count("_btc_front_gate(") >= 3 and src.count("gate_on(s, 'gate_btc_front_level_enabled')") == 1 and src.count("_btc_front_flags(s)") == 5     # تعریف + صف تایید + لیست انتظار + مسیر مستقیم + پیش‌بررسی همه‌ی مسیرها
+assert "_btc_front_gate(chat_id, s, symbol, sig, tf, front=_ff, chop=_fc)" in src and "_btc_front_gate(chat_id, s, symbol, side, tf, front=_ff, chop=_fc)" in src
+assert "asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf, True, True, _ff, _fc)" in src
 assert "'btc_front', sig" in src and "'front': 'فاصله‌ی BTC تا سطح جلویی معقول نشد'" in src
 et_src = src[src.index("def execute_trade("):src.index("def execute_manual_trade(")]
 em_src = src[src.index("def execute_manual_trade("):src.index("def _log_grid_levels_sync(")]
@@ -218,7 +220,7 @@ class _L:
 def blk(chat_id, reason):
     LBR[chat_id] = reason; return False
 
-def fake_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True):
+def fake_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True, front=True, chop=True):
     fg['calls'].append((sig, warn, allow_inverse))
     return (True, '') if fg['ok'] else (False, f'{PFX}: بیتکوین (BTC) به سطح مقاومتی نزدیک است و تا واکنش به سطح منتظر ورود می‌مانیم؛ لطفاً صبور باشید')
 
@@ -309,6 +311,7 @@ assert 'reset_stats_prompt_text(chat_id)' in src and 'ریست آمار و مو�
 print('ALL OK')
 
 # ---------------------------------------------------------------- ۹) V3.44.54: سمت درست سطح (کلوز بسته‌شده‌ی BTC نسبت به نزدیک‌ترین سطح) ----------
+SC0 = {'btc_front_min_atr': 0, 'btc_chop_flips': 0}
 def fake_levels(up, down):
     # up/down: فاصله‌ی سطح بالا/پایین از ورودی (None = نبود)
     def f(df, entry, is_long, grid=None, cfg=None):
@@ -326,41 +329,120 @@ def side_env(up, down):
 
 # سناریوی تصویر: کلوز 82,021.62 ، سطح پایین 81,859 (۱۶۲.۶۲ پایین‌تر) ، سطح بالا 82,822.92 (۸۰۱.۳ بالاتر) => BTC بالای نزدیک‌ترین سطح
 g9 = side_env(up=801.30, down=162.62); sv, si9 = g9['btc_front_level_verdict'], g9['btc_front_level_info']
-ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')
+ok, t, i9 = sv(S(sc=SC0), '5min', 'SELL')
 assert not ok and i9['side_ok'] is False and i9['ref_above'] is False, (ok, t, i9)                    # فروش وقتی BTC بالای سطح بسته: به هیچ عنوان
 assert t.startswith(PFX) and 'بالای سطح' in t and 'با فروش نمی‌خواند' in t and 'زیر سطح ببندد' in t and 'رد نمی‌شود' in t, t
-ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')
+ok, t, i9 = sv(S(sc=SC0), '5min', 'BUY')
 assert ok and t == '' and i9['side_ok'] is True, (ok, t, i9)                                          # خرید همین‌جا مجاز است
 # حتی وقتی آستانه‌ی فاصله صفر است (فاصله مانع نیست) فروش بسته می‌ماند؛ اولویت با سمت سطح است
-assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+assert not sv(S(sc=SC0), '5min', 'SELL')[0]
 # وارونه: نزدیک‌ترین سطح بالای کلوز => BTC پایین سطح بسته => خرید بسته، فروش مجاز
 g9 = side_env(up=40.0, down=700.0); sv = g9['btc_front_level_verdict']
-ok, t, i9 = sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')
+ok, t, i9 = sv(S(sc=SC0), '5min', 'BUY')
 assert not ok and i9['ref_above'] is True and 'زیر سطح' in t and 'با خرید نمی‌خواند' in t and 'بالای سطح ببندد' in t, t
-assert sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+assert sv(S(sc=SC0), '5min', 'SELL')[0]
 # فقط یک سطح، پایین کلوز: فروش بسته، خرید باز ؛ فقط یک سطح، بالای کلوز: برعکس
 g9 = side_env(up=None, down=100.0); sv = g9['btc_front_level_verdict']
-assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0] and sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')[0]
+assert not sv(S(sc=SC0), '5min', 'SELL')[0] and sv(S(sc=SC0), '5min', 'BUY')[0]
 g9 = side_env(up=100.0, down=None); sv = g9['btc_front_level_verdict']
-assert not sv(S(sc={'btc_front_min_atr': 0}), '5min', 'BUY')[0] and sv(S(sc={'btc_front_min_atr': 0}), '5min', 'SELL')[0]
+assert not sv(S(sc=SC0), '5min', 'BUY')[0] and sv(S(sc=SC0), '5min', 'SELL')[0]
 # هیچ سطحی نیست: مانعی نیست (مثل قبل)
 g9 = side_env(up=None, down=None); sv = g9['btc_front_level_verdict']
-assert sv(S(), '5min', 'SELL')[0] and sv(S(), '5min', 'BUY')[0]
+assert sv(S(sc={'btc_chop_flips': 0}), '5min', 'SELL')[0] and sv(S(sc={'btc_chop_flips': 0}), '5min', 'BUY')[0]
 # سمت درست ولی فاصله‌ی نامعقول: همان پیام فاصله می‌آید (رفتار قبلی)
 g9 = side_env(up=40.0, down=700.0); sv = g9['btc_front_level_verdict']
-ok, t, _i = sv(S(sc={'btc_front_min_atr': 1e6}), '5min', 'SELL'); assert not ok and 'سطح حمایتی نزدیک است' in t, t
+ok, t, _i = sv(S(sc={'btc_front_min_atr': 1e6, 'btc_chop_flips': 0}), '5min', 'SELL'); assert not ok and 'سطح حمایتی نزدیک است' in t, t
 # هشدار ورود: یک‌بار برای هر سطح مرجع در سمت نادرست، با جهت درست در متن
 g9 = side_env(up=801.30, down=162.62); st['sent'].clear()
 G9 = g9['_btc_front_gate']; sent9 = []
 g9['send_message'] = lambda c, t, *a, **k: sent9.append((c, t))
 for _ in range(3):
-    ok, t = G9(5, S(sc={'btc_front_min_atr': 0}), 'XYZ', 'SELL', '5min'); assert not ok
+    ok, t = G9(5, S(sc=SC0), 'XYZ', 'SELL', '5min'); assert not ok
 assert len(sent9) == 1 and 'فروش' in sent9[0][1] and 'XYZ' in sent9[0][1], sent9
-assert G9(5, S(sc={'btc_front_min_atr': 0}), 'XYZ', 'BUY', '5min') == (True, '')
+assert G9(5, S(sc=SC0), 'XYZ', 'BUY', '5min') == (True, '')
 # معاملات معکوس: سیگنال خرید => معامله‌ی فروش => سمت سطح برای فروش سنجیده می‌شود
-ok, t = G9(5, S(sc={'btc_front_min_atr': 0}, gate_inverse_trading_enabled=True), 'INV', 'BUY', '5min'); assert not ok and 'با فروش نمی‌خواند' in t, t
+ok, t = G9(5, S(sc=SC0, gate_inverse_trading_enabled=True), 'INV', 'BUY', '5min'); assert not ok and 'با فروش نمی‌خواند' in t, t
 # فراخوانان دیگر info (محافظ BTC) فقط به front_price/dist_atr نگاه می‌کنند و دست‌نخورده‌اند
-i_guard = g9['btc_front_level_info'](S(), '5min', True); assert i_guard['front_price'] is None or i_guard['front_price'] > i_guard['close']
+i_guard = g9['btc_front_level_info'](S(sc={'btc_chop_flips': 0}), '5min', True); assert i_guard['front_price'] is None or i_guard['front_price'] > i_guard['close']
 print('side-of-level OK')
-print('btc_front_level_selftest: ALL OK')
 
+
+# ---------------------------------------------------------------- ۱۰) V3.44.55: BTC در حالت نامشخص (کلاف دور سطح) ----------
+L = 82000.0
+def lvl_abs(df, entry, is_long, grid=None, cfg=None):
+    # یک سطح مطلق L؛ فقط در سمتی که «روبه‌روی» جهت است برمی‌گردد (مثل تابع واقعی)
+    return [(L, 'سطح آزمایشی')] if ((is_long and L > entry) or ((not is_long) and L < entry)) else []
+
+def mk_closes(closes_tail, base_noise=6.0, n=650):
+    """n-کندل آرام و دور از سطح (۸۱۵۰۰)، سپس closes_tail به‌عنوان کلوزهای کندل‌های بسته‌شده؛ آخر یک کندل در حال تشکیل."""
+    now = time.time(); start = int(now // SECS) * SECS
+    ts = [(start - (n - 1 - i) * SECS) * 1000 for i in range(n)]
+    rng = np.random.default_rng(3)
+    cl = list(81500.0 + rng.normal(0, base_noise, n - len(closes_tail) - 1)) + list(closes_tail) + [closes_tail[-1]]
+    rows = []
+    for i, c in enumerate(cl):
+        o = cl[i - 1] if i else c
+        rows.append({'timestamp': ts[i], 'open': o, 'high': max(o, c) + 15, 'low': min(o, c) - 15, 'close': c, 'volume': 10.0})
+    return pd.DataFrame(rows)
+
+def chop_env(closes_tail):
+    g10 = dict(g); st['df'] = mk_closes(closes_tail); exec(HELPERS, g10)
+    g10['_quick_opposing_levels'] = lvl_abs
+    g10['_BTC_FRONT_CACHE'].clear(); g10['_BTC_FRONT_WARNED'].clear()
+    return g10
+
+# سناریوی تصویر دوم: ۱۶ کلوز که مدام دور سطح بالا و پایین می‌روند (رد و برگشت ≥ ۳) ⇒ خرید و فروش هر دو بسته
+choppy = [L + d for d in (-60, 70, -40, 55, -70, 40, -50, 60, 45, -55, 50, -65, 60, -45, 35, -40)]
+g10 = chop_env(choppy); cv = g10['btc_front_level_verdict']
+S0 = S(sc={'btc_front_min_atr': 0})
+for sig in ('BUY', 'SELL'):
+    ok, t, i10 = cv(S0, '5min', sig)
+    assert not ok and i10['chop'] and i10['chop_flips'] >= 3 and i10['chop_window'] >= 12, (sig, ok, t, i10)
+    assert t.startswith(PFX) and 'حالت نامشخص' in t and 'رد نمی‌شود' in t and 'رد و برگشت' in t, t
+# کلید بستن: btc_chop_flips=0 ⇒ فیلتر کلاف خاموش (فقط چک‌های قبلی)
+g10['_BTC_FRONT_CACHE'].clear()
+i_off = g10['btc_front_level_info'](S(sc={'btc_front_min_atr': 0, 'btc_chop_flips': 0}), '5min', False); assert i_off['chop'] is False
+# بعد از کلاف، شکست قطعی: ۳ کلوز پشت‌سرهم زیر سطح و ≥ ۰٫۵ATR فاصله ⇒ کلاف حساب نمی‌شود؛ فروش مجاز (BTC زیر سطح)، خرید همچنان با «سمت سطح» بسته
+broke = choppy[:-3] + [L - 250, L - 300, L - 320]
+g10 = chop_env(broke); cv = g10['btc_front_level_verdict']
+ok, t, i10 = cv(S0, '5min', 'SELL'); assert ok and not i10['chop'] and i10['chop_flips'] >= 3, (ok, t, i10)
+ok, t, i10 = cv(S0, '5min', 'BUY'); assert not ok and not i10['chop'] and 'با خرید نمی‌خواند' in t, t
+# شکست ناقص: ۳ کلوز یک طرف ولی خیلی نزدیک سطح (< ۰٫۵ATR) ⇒ هنوز کلاف
+tight = choppy[:-3] + [L - 4, L - 6, L - 5]
+g10 = chop_env(tight); i10 = g10['btc_front_level_info'](S0, '5min', False); assert i10['chop'] and i10['chop_flips'] >= 3, i10
+# بازار تمیز: فقط یک عبور از سطح (شکست) یا اصلاً عبوری نیست ⇒ کلاف نیست
+clean = [L + 300] * 5 + [L - 200, L - 260, L - 300, L - 320, L - 350, L - 360, L - 380, L - 400, L - 420, L - 430, L - 440]
+g10 = chop_env(clean); i10 = g10['btc_front_level_info'](S0, '5min', False); assert not i10['chop'] and i10['chop_flips'] == 1, i10
+# هشدار کلاف: یک‌بار برای هر سطح/جهت (پیام تکراری نمی‌سازد)
+g10 = chop_env(choppy); sent10 = []; g10['send_message'] = lambda c, t, *a, **k: sent10.append((c, t))
+G10 = g10['_btc_front_gate']
+for _ in range(3):
+    ok, t = G10(9, S(sc={'btc_front_min_atr': 0}, gate_btc_front_level_enabled=True), 'KLF', 'BUY', '5min'); assert not ok
+assert len(sent10) == 1 and 'حالت نامشخص' in sent10[0][1] and 'KLF' in sent10[0][1], sent10
+
+# ---------------------------------------------------------------- ۱۱) کلید مستقل «BTC کلاف» (gate_btc_chop_enabled) ----------
+i = src.index("'gate_btc_chop_enabled': ("); assert "True, 'entry_rules'" in src[i:i + 260]       # پیش‌فرض روشن، صفحه‌ی «شرایط ورود»
+g10 = chop_env(choppy); cv = g10['btc_front_level_verdict']
+for sig in ('BUY', 'SELL'):
+    ok, t, _i = cv(S0, '5min', sig, front=False, chop=True);  assert not ok and 'حالت نامشخص' in t, (sig, t)      # فقط کلید کلاف روشن: کلاف را می‌بندد
+    ok, t, _i = cv(S0, '5min', sig, front=True, chop=False);  assert 'حالت نامشخص' not in t, (sig, t)               # فقط کلید سطح روشن: کلاف دیده نمی‌شود
+    assert cv(S0, '5min', sig, front=False, chop=False)[0] is True                                                   # هر دو خاموش در خود تابع: مانعی نیست
+# فقط کلید کلاف روشن، بازار تمیز و سمت اشتباه: چک «سمت سطح» اعمال نمی‌شود؛ با هر دو روشن همان خرید بسته می‌شود
+g10 = chop_env(clean); cv = g10['btc_front_level_verdict']
+assert cv(S0, '5min', 'BUY', front=False, chop=True)[0] is True
+ok, t, _i = cv(S0, '5min', 'BUY', front=True, chop=True); assert not ok and 'با خرید نمی‌خواند' in t, t
+# فقط کلید سطح روشن در یک بازار کلاف: چک کلاف اعمال نمی‌شود (جهتِ مجاز ورود دارد)
+g10 = chop_env(choppy[:-1] + [L - 300]); cv = g10['btc_front_level_verdict']
+assert cv(S0, '5min', 'SELL', front=True, chop=False)[0] is True
+# پیش‌بررسی همه‌ی مسیرها: کلیدها مستقل‌اند و پرچم درست به گیت می‌رسد
+rec5 = []
+g5 = dict(g4); g5['_btc_front_gate'] = lambda *a, **k: (rec5.append((k.get('front'), k.get('chop'))) or (True, ''))
+exec(src[a3:b3], g5); g5['_btc_front_gate'] = lambda *a, **k: (rec5.append((k.get('front'), k.get('chop'))) or (True, ''))
+pc = g5['_btc_front_precheck']; cfg_keep = SX['cfg']
+for cfg_, want in (({'gate_btc_chop_enabled': True}, [(False, True)]), ({'gate_btc_front_level_enabled': True}, [(True, False)]),
+                   ({'gate_btc_front_level_enabled': True, 'gate_btc_chop_enabled': True}, [(True, True)]), ({}, [])):
+    SX['cfg'] = cfg_; rec5.clear()
+    assert pc(1, 'AAA', 'BUY (Long)', 100.0, 98.0, 110.0, False, True) is True and rec5 == want, (cfg_, rec5)
+SX['cfg'] = cfg_keep
+print('independent chop toggle OK')
+print('btc_front_level_selftest: ALL OK')

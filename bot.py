@@ -900,7 +900,7 @@ def default_session():
         'be_close_auto_enabled': False,
         'be_close_profit_r': 1.0,
         'be_close_loss_r': 0.5,
-        # V3.44.53: محافظ BTC برای معامله‌های باز (PAPER): با واکنش تاییدشده‌ی BTC به سطح روبه‌رو، معامله‌ی در سود بخشی بسته و استاپ باقی‌مانده سر به سر می‌شود.
+        # V3.44.53: محافظ BTC برای معامله‌های باز (PAPER و REAL از V3.44.54): با واکنش تاییدشده‌ی BTC به سطح روبه‌رو، معامله‌ی در سود بخشی بسته و استاپ باقی‌مانده سر به سر می‌شود.
         'btc_guard_enabled': True,
         'btc_guard_frac': 0.5,
         # V3.44.33: تریلینگ استاپ هوشمند پله‌ای (قفل سود با حرکت دادن SL فقط به سمت سود). پیش‌فرض خاموش.
@@ -3494,6 +3494,14 @@ def btc_candle_verdict(tf, sig):
 # از همین سنجش می‌گذرند (پیش‌بررسی در execute_trade/execute_manual_trade): تا فاصله معقول نشود ورود انجام نمی‌شود (حتی با اصرار کاربر).
 BTC_FRONT_MIN_ATR = max(0.0, float(os.environ.get('BTC_FRONT_MIN_ATR', '1.0') or 0))
 BTC_FRONT_WARN_TTL = 1800.0
+# V3.44.55: فیلتر «BTC در حالت نامشخص (کلاف دور سطح)»: اگر در N کندل بسته‌شده‌ی اخیر، کلوز BTC دست‌کم M بار از نزدیک‌ترین سطح رد و برگشت کرده باشد،
+# BTC تصمیم نگرفته و ورود (خرید و فروش هر دو) بسته می‌ماند؛ سیگنال رد نمی‌شود و با هر کندل جدید دوباره سنجیده می‌شود.
+# استثنا: اگر آخرین K کلوز همه یک طرف سطح باشند و کلوز آخر دست‌کم X×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته (شکست قطعی) و کلاف حساب نمی‌شود.
+# کلیدهای strategy_config: btc_chop_flips (۰ = خاموش)، btc_chop_window، btc_chop_clear_closes، btc_chop_clear_atr؛ یا متغیرهای محیطی BTC_CHOP_*.
+BTC_CHOP_FLIPS = max(0, int(float(os.environ.get('BTC_CHOP_FLIPS', '3') or 0)))
+BTC_CHOP_WINDOW = max(4, int(float(os.environ.get('BTC_CHOP_WINDOW', '16') or 16)))
+BTC_CHOP_CLEAR_CLOSES = max(1, int(float(os.environ.get('BTC_CHOP_CLEAR_CLOSES', '3') or 3)))
+BTC_CHOP_CLEAR_ATR = max(0.0, float(os.environ.get('BTC_CHOP_CLEAR_ATR', '0.5') or 0))
 _BTC_FRONT_PREFIX = '⚠️ هشدار ورود'
 _BTC_FRONT_CACHE = {}
 _BTC_FRONT_WARNED = {}
@@ -3533,7 +3541,23 @@ def btc_front_level_info(s, tf, is_long):
     cfg0 = {**STRATEGY_DEFAULTS, **(s.get('strategy_config') or {})}
     min_atr = cfg0.get('btc_front_min_atr')
     min_atr = BTC_FRONT_MIN_ATR if min_atr is None else max(0.0, float(min_atr))
-    ckey = (tf, cts, bool(is_long), round(min_atr, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
+    def _ci(key, default, lo=0):
+        v = cfg0.get(key)
+        try:
+            return default if v is None else max(lo, int(float(v)))
+        except Exception:
+            return default
+    def _cf(key, default):
+        v = cfg0.get(key)
+        try:
+            return default if v is None else max(0.0, float(v))
+        except Exception:
+            return default
+    chop_flips = _ci('btc_chop_flips', BTC_CHOP_FLIPS)
+    chop_win = _ci('btc_chop_window', BTC_CHOP_WINDOW, 4)
+    chop_k = _ci('btc_chop_clear_closes', BTC_CHOP_CLEAR_CLOSES, 1)
+    chop_x = _cf('btc_chop_clear_atr', BTC_CHOP_CLEAR_ATR)
+    ckey = (tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
             cfg0.get('halving_min_depth'), cfg0.get('halving_max_depth'), bool(cfg0.get('halving_dynamic_k')),
             bool(cfg0.get('halving_only_targets', True)))
     with _BTC_FRONT_LOCK:
@@ -3556,7 +3580,8 @@ def btc_front_level_info(s, tf, is_long):
     levels = _quick_opposing_levels(ind, close, bool(is_long), _grid, cfg)
     info = {'ok': True, 'close': close, 'atr': atr, 'front_price': None, 'front_label': None, 'dist': None, 'dist_atr': None,
             'min_atr': min_atr, 'closed_ts': cts, 'is_long': bool(is_long),
-            'side_ok': True, 'ref_price': None, 'ref_label': None, 'ref_above': None}
+            'side_ok': True, 'ref_price': None, 'ref_label': None, 'ref_above': None,
+            'chop': False, 'chop_flips': 0, 'chop_window': 0}
     if levels:
         fp, fl = min(levels, key=lambda t: abs(t[0] - close))
         dist = abs(float(fp) - close)
@@ -3572,6 +3597,17 @@ def btc_front_level_info(s, tf, is_long):
         rp, rl = min(_all, key=lambda t: abs(t[0] - close))
         above = float(rp) > close
         info.update(ref_price=float(rp), ref_label=rl, ref_above=above, side_ok=((not above) if is_long else above))
+        # V3.44.55: کلاف دور سطح (تعداد رد و برگشت کلوزها از سطح مرجع در چند کندل بسته‌شده‌ی اخیر)
+        if chop_flips > 0:
+            try:
+                _cl = [float(x) for x in ind['close'].iloc[-(chop_win + 1):-1] if math.isfinite(float(x))]
+                _sg = [1 if c_ > float(rp) else -1 for c_ in _cl if c_ != float(rp)]
+                flips = sum(1 for a_, b_ in zip(_sg, _sg[1:]) if a_ != b_)
+                tail = _sg[-chop_k:]
+                decisive = (len(tail) == chop_k and len(set(tail)) == 1 and abs(close - float(rp)) / atr >= chop_x)
+                info.update(chop=(flips >= chop_flips and not decisive), chop_flips=flips, chop_window=len(_sg))
+            except Exception:
+                logger.exception('btc chop: failed')
     with _BTC_FRONT_LOCK:
         if len(_BTC_FRONT_CACHE) > 64:
             _BTC_FRONT_CACHE.clear()
@@ -3579,13 +3615,22 @@ def btc_front_level_info(s, tf, is_long):
     return info
 
 
-def btc_front_level_verdict(s, tf, sig):
-    """(ok, توضیح، info). sig = 'BUY'/'SELL' (جهت نهایی معامله). ok وقتی فاصله‌ی BTC تا سطح جلویی معقول (یا سطحی روبه‌رو نیست) باشد."""
+def btc_front_level_verdict(s, tf, sig, front=True, chop=True):
+    """(ok, توضیح، info). sig = 'BUY'/'SELL' (جهت نهایی معامله). ok وقتی فاصله‌ی BTC تا سطح جلویی معقول (یا سطحی روبه‌رو نیست) باشد.
+    front: چک «سمت سطح + فاصله» (کلید gate_btc_front_level_enabled)؛ chop: چک «کلاف دور سطح» (کلید مستقل gate_btc_chop_enabled)."""
     tf_fa = TF_DISPLAY.get(tf, tf)
     info = btc_front_level_info(s, tf, sig == 'BUY')
     if info is None:
         return False, (f'{_BTC_FRONT_PREFIX}: داده‌ی BTC برای سنجش فاصله تا سطح جلویی ({tf_fa}) در دسترس نیست؛ '
                        f'منتظر ورود می‌مانیم، لطفاً صبور باشید'), None
+    if chop and info.get('chop'):
+        # V3.44.55: BTC دور سطح کلاف است (رد و برگشت‌های پیاپی) → ورود هر دو جهت بسته است تا BTC تصمیم بگیرد.
+        info['warn_price'] = info.get('ref_price')
+        return False, (f"{_BTC_FRONT_PREFIX}: بیتکوین (BTC) دور سطح {info['ref_label']} {fmt(info['ref_price'])} در حالت نامشخص است "
+                       f"({info['chop_flips']} بار رد و برگشت کلوز از سطح در {info['chop_window']} کندل بسته‌شده‌ی اخیر · {tf_fa})؛ "
+                       f"تا تصمیم‌گیری BTC و بسته شدن چند کندل پشت‌سرهم یک طرف سطح، ورود انجام نمی‌شود. سیگنال رد نمی‌شود و منتظر می‌مانیم، لطفاً صبور باشید"), info
+    if not front:
+        return True, '', info          # V3.44.55: فقط کلید «کلاف» روشن است؛ چک سمت سطح و فاصله اعمال نمی‌شود
     if not info.get('side_ok', True):
         # V3.44.54: کلوز کندل بسته‌شده‌ی BTC سمت درستِ سطح نیست (خرید: باید بالای سطح؛ فروش: باید پایین سطح) → ورود بسته است.
         info['warn_price'] = info.get('ref_price')
@@ -3622,7 +3667,7 @@ def _btc_front_warn(chat_id, symbol, sig, tf, txt, info):
         logger.exception('btc front: warning send failed chat=%s symbol=%s', chat_id, symbol)
 
 
-def _btc_front_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True):
+def _btc_front_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True, front=True, chop=True):
     """(ok, توضیح). جهتِ سنجیده‌شده جهتِ نهایی معامله است (با «معاملات معکوس» روشن و allow_inverse برعکس می‌شود).
     warn=True: وقتی ok نیست، هشدار ورود یک‌بار (به ازای هر سطح) فرستاده می‌شود؛ فراخواننده سیگنال را (بدون رد کردن) نگه می‌دارد.
     مسیرهای دستی warn=False می‌گیرند چون دلیل رد را خودشان به کاربر نشان می‌دهند."""
@@ -3630,7 +3675,7 @@ def _btc_front_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True):
     if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
         eff = 'SELL' if sig == 'BUY' else 'BUY'
     try:
-        ok, txt, info = btc_front_level_verdict(s, tf, eff)
+        ok, txt, info = btc_front_level_verdict(s, tf, eff, front=front, chop=chop)
     except Exception:
         logger.exception('btc front gate failed symbol=%s', symbol)
         ok, txt, info = False, f'{_BTC_FRONT_PREFIX}: خطا در سنجش فاصله تا سطح جلویی BTC؛ منتظر ورود می‌مانیم، لطفاً صبور باشید', None
@@ -5896,12 +5941,18 @@ def _btc_candle_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inve
     return False
 
 
+def _btc_front_flags(s):
+    """(front, chop): کلید «فاصله/سمت سطح جلویی BTC» و کلید مستقل «BTC کلاف دور سطح»."""
+    return bool(gate_on(s, 'gate_btc_front_level_enabled')), bool(gate_on(s, 'gate_btc_chop_enabled'))
+
+
 def _btc_front_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inverse):
     """V3.44.45: کلید «فاصله تا سطح جلویی BTC» روی همه‌ی مسیرهای ورود (خودکار، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق).
     True = اجازه‌ی ادامه. با force=True هم دور زده نمی‌شود. مسیرهای دستی دلیل رد را از _LAST_BLOCK_REASON به کاربر نشان می‌دهند؛
     مسیر خودکار (force=False) هشدار ورود را یک‌بار می‌فرستد."""
     s = get_session(chat_id)
-    if not gate_on(s, 'gate_btc_front_level_enabled'):
+    _ff, _fc = _btc_front_flags(s)
+    if not (_ff or _fc):
         return True
     try:
         _BLK_CTX[chat_id] = {'ts': time.time(), 'symbol': symbol, 'side': side, 'signal_price': float(price), 'sl': float(sl), 'tp': float(tp),
@@ -5909,7 +5960,7 @@ def _btc_front_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inver
     except Exception:
         pass
     sig = 'BUY' if side_long(side) else 'SELL'
-    ok, txt = _btc_front_gate(chat_id, s, symbol, sig, s.get('timeframe', '5min'), warn=not force, allow_inverse=allow_inverse)
+    ok, txt = _btc_front_gate(chat_id, s, symbol, sig, s.get('timeframe', '5min'), warn=not force, allow_inverse=allow_inverse, front=_ff, chop=_fc)
     if ok:
         return True
     _blk(chat_id, txt)
@@ -6424,6 +6475,68 @@ def partial_close_position(chat_id,pos,price,frac_orig,label=''):
         return True
 
 
+def partial_close_real_position(chat_id,pos,price,frac_orig,label=''):
+    """V3.44.54: بستن بخشی از پوزیشن REAL با سفارش مارکت reduce-only (سهم frac_orig از حجم اولیه).
+    SL/TP روی صرافی از نوع closePosition هستند و بعد از بستن بخشی برای بقیه‌ی پوزیشن سر جایشان می‌مانند.
+    PnL نهایی REAL از تاریخچه‌ی معاملات صرافی (از زمان باز شدن) محاسبه می‌شود و خروج بخشی را خودکار شامل است؛
+    عدد partial_real_est_usdt فقط برآورد برای حالتی است که تاریخچه در دسترس نباشد.
+    هرگز کل پوزیشن را نمی‌بندد و هر خطایی فقط False برمی‌گرداند (ربات متوقف نمی‌شود)."""
+    lock=get_entry_lock(chat_id)
+    with lock:
+        s=get_session(chat_id)
+        if pos not in s['paper_positions'] or not pos.get('is_real'): return False
+        ex=get_exchange(chat_id)
+        if not ex: return False
+        try:
+            fsym,scale,m=_fsym(ex,pos['symbol'])
+            live=find_position(chat_id,pos['symbol'])
+            if not live: return False
+            cur_amt=float(live['amount'])
+            orig_amt=float(pos.get('orig_amount') or cur_amt)
+            close_amt=min(cur_amt, orig_amt*float(frac_orig))
+            if close_amt<=0 or close_amt>=cur_amt*0.999: return False
+            contracts=float(ex.amount_to_precision(fsym, close_amt/scale))
+            rem_contracts=cur_amt/scale-contracts
+            lim=(m.get('limits') or {}) if isinstance(m,dict) else {}
+            min_amt=float((lim.get('amount') or {}).get('min') or 0)
+            min_cost=float((lim.get('cost') or {}).get('min') or 0)
+            ref_px=float(price)
+            if contracts<=0 or rem_contracts<=0: return False
+            if min_amt and (contracts<min_amt or rem_contracts<min_amt): return False
+            if min_cost and (contracts*scale*ref_px<min_cost or rem_contracts*scale*ref_px<min_cost): return False
+            order=_close_market(ex,fsym,side_long(pos['side']),contracts)
+            avg=_order_avg_price(ex,fsym,order) or 0.0
+            px=(float(avg)/scale) if float(avg)>0 else ref_px
+        except Exception as exc:
+            logger.warning('partial close REAL failed %s: %s',pos.get('symbol'),exc)
+            return False
+        # از اینجا به بعد سفارش اجرا شده؛ خطای تایید وضعیت نباید حساب‌وکتاب را خراب کند
+        closed_amt=contracts*scale
+        new_amt=max(0.0,cur_amt-closed_amt)
+        try:
+            for _ in range(4):
+                time.sleep(0.5)
+                lv=find_position(chat_id,pos['symbol'])
+                if lv is None: new_amt=0.0; break
+                new_amt=float(lv['amount'])
+                if new_amt<cur_amt*0.999: break
+        except Exception as exc:
+            logger.warning('partial close REAL verify failed %s: %s',pos.get('symbol'),exc)
+        cur_margin=float(pos.get('margin') or 0)
+        if not pos.get('orig_amount'): pos['orig_amount']=orig_amt
+        if not pos.get('orig_margin'): pos['orig_margin']=cur_margin
+        if new_amt>0 and cur_amt>0: pos['margin']=cur_margin*(new_amt/cur_amt)
+        pos['amount']=new_amt
+        entry=float(pos['entry_price'])
+        gross=(px-entry)*closed_amt if side_long(pos['side']) else (entry-px)*closed_amt
+        fee=px*closed_amt*TAKER_FEE_PCT/100.0*2
+        pos['partial_real_est_usdt']=float(pos.get('partial_real_est_usdt') or 0.0)+gross-fee
+        pos['partial_real_gross_est_usdt']=float(pos.get('partial_real_gross_est_usdt') or 0.0)+gross
+        pos.setdefault('partial_exits',[]).append({'stage':label,'price':px,'fraction':float(frac_orig),'pnl_usdt_est':gross-fee,'real':True,'ts':time.time()})
+        audit_event(chat_id, pos.get('trade_id') or new_trade_id(chat_id, pos.get('symbol','?')), 'partial_exit', {'stage':label,'price':px,'fraction':float(frac_orig),'pnl_usdt_est':gross-fee,'remaining_amount':new_amt,'real':True})
+        save_session(chat_id)
+        return True
+
 # ===================== V3.43.27: ژورنال معاملات (JSON) + سود/زیان روزانه =====================
 # ژورنال: برای هر پوزیشنِ بسته‌شده یک رکورد در یک فایل JSON ذخیره می‌شود (وضعیت لحظه‌ی ورود: رژیم BTC/ETH، RSI/MACD/ADX،
 # سطح، حجم + نتیجه‌ی معامله). مسیر پیش‌فرض: کنار دیتابیس (پوشه‌ی trader_bot_data) با نام trade_journal.json؛ با TRADE_JOURNAL_PATH عوض می‌شود.
@@ -6643,7 +6756,8 @@ def close_position(chat_id,pos,price=None,reason='manual'):
                 if realized is None:
                     entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
                     pnl_gross=float(pos['margin'])*frac*float(pos['leverage'])
-                    realized=pnl_gross-fee
+                    pnl_gross += float(pos.get('partial_real_gross_est_usdt') or 0.0)
+                    realized=pnl_gross-fee+float(pos.get('partial_real_est_usdt') or 0.0)-float(pos.get('partial_real_gross_est_usdt') or 0.0)
                     pos['pnl_is_estimate']=True
                     pos['pnl_gross_usdt']=pnl_gross
                     fee_note=' (کسر شده در برآورد)'
@@ -7597,7 +7711,7 @@ BACKGROUND_SCAN_SECONDS = max(2, int(os.environ.get('BACKGROUND_SCAN_SECONDS', '
 # وقتی BTC به سطحِ روبه‌روی جهت معامله نزدیک می‌شود (فروش: حمایت زیر BTC؛ خرید: مقاومت بالای BTC) «حالت مراقبت» روشن می‌شود و هشدار می‌آید.
 # اگر BTC به آن سطح واکنش نشان دهد و واکنش تایید شود (همان ۳ الگوی برخورد روی BTC، در جهت مخالف معامله، با بسته‌شدن کندل)،
 # معامله‌هایی که در سودند (حداقل BTC_GUARD_MIN_PROFIT_R) به‌اندازه‌ی «سهم بستن» (۵۰٪ یا ۷۵٪ حجم اولیه) بسته می‌شوند و استاپ باقی‌مانده
-# روی نقطه‌ی ورود (کمی داخل سود، برای پوشش کارمزد) می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. برای هر معامله یک‌بار. فقط PAPER.
+# روی نقطه‌ی ورود (کمی داخل سود، برای پوشش کارمزد) می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. برای هر معامله یک‌بار. V3.44.54: PAPER و REAL (در REAL با سفارش reduce-only و جابه‌جایی SL روی صرافی).
 BTC_GUARD_TF = os.environ.get('BTC_GUARD_TF', '15min')
 BTC_GUARD_NEAR_ATR = float(os.environ.get('BTC_GUARD_NEAR_ATR', '1.0'))             # «نزدیک سطح» = فاصله‌ی کلوز BTC تا سطح ≤ این‌قدر ATR
 BTC_GUARD_MIN_PROFIT_R = float(os.environ.get('BTC_GUARD_MIN_PROFIT_R', '0.3'))     # حداقل سود (R) برای بستن بخشی
@@ -7616,9 +7730,9 @@ def _btc_guard_frac(s):
 
 
 def _btc_guard_should_act(p, mv, vote, min_r=None):
-    """آیا این معامله همین حالا باید محافظت شود؟ (واکنش BTC خلاف جهت معامله + سود کافی + هنوز اجرا نشده + PAPER)"""
+    """آیا این معامله همین حالا باید محافظت شود؟ (واکنش BTC خلاف جهت معامله + سود کافی + هنوز اجرا نشده؛ PAPER و REAL)"""
     min_r = BTC_GUARD_MIN_PROFIT_R if min_r is None else min_r
-    if p.get('btc_guard_done') or p.get('is_real'):
+    if p.get('btc_guard_done'):
         return False
     want = 'SELL' if side_long(p.get('side', 'BUY')) else 'BUY'
     return vote == want and mv is not None and float(mv) >= float(min_r)
@@ -7673,6 +7787,12 @@ def _btc_guard_watch_update(chat_id, s, side, is_long, plist, now=None):
     return active
 
 
+def _btc_guard_partial(chat_id, p, price, frac):
+    if p.get('is_real'):
+        return bool(partial_close_real_position(chat_id, p, price, frac, label='محافظ BTC'))
+    return bool(partial_close_position(chat_id, p, price, frac, label='محافظ BTC'))
+
+
 def _btc_guard_act(chat_id, s, p, frac, vote, det):
     price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
     if not price:
@@ -7687,22 +7807,38 @@ def _btc_guard_act(chat_id, s, p, frac, vote, det):
         if p not in s['paper_positions'] or p.get('btc_guard_done'):
             return False
         p['btc_guard_done'] = True          # حتی اگر بخشی بسته نشد، دوباره تلاش نمی‌شود
-        partial_ok = bool(partial_close_position(chat_id, p, price, frac, label='محافظ BTC'))
         new_sl = _btc_guard_new_sl(p)
         moved = False
+        sl_failed = False
+        # REAL: اول استاپ سر به سر روی صرافی (پوزیشن زودتر محافظت شود)، بعد بستن بخشی
+        if p.get('is_real'):
+            try:
+                new_sl = float(normalize_price(chat_id, p['symbol'], new_sl))
+            except Exception:
+                logger.exception('btc guard: normalize price failed')
         if _btc_guard_sl_improves(p, new_sl, price):
-            if not p.get('sl_initial'):
-                p['sl_initial'] = float(p.get('sl') or 0)
-            p['sl'] = new_sl
-            moved = True
-        p['btc_guard'] = {'ts': time.time(), 'frac': frac, 'partial_ok': partial_ok, 'sl_moved': moved, 'r_at_trigger': round(mv, 3),
+            ok_sl = True
+            if p.get('is_real'):
+                try:
+                    ok_sl, _err = move_stop_loss(chat_id, p['symbol'], new_sl)
+                except Exception as exc:
+                    ok_sl = False; logger.warning('btc guard: move SL failed %s: %s', p.get('symbol'), exc)
+                sl_failed = not ok_sl
+            if ok_sl:
+                if not p.get('sl_initial'):
+                    p['sl_initial'] = float(p.get('sl') or 0)
+                p['sl'] = new_sl
+                moved = True
+        partial_ok = _btc_guard_partial(chat_id, p, price, frac)
+        p['btc_guard'] = {'ts': time.time(), 'frac': frac, 'partial_ok': partial_ok, 'sl_moved': moved, 'sl_failed': sl_failed, 'r_at_trigger': round(mv, 3),
                           'price': price, 'btc_vote': vote, 'btc_detail': str(det or '')[:120]}
         save_session(chat_id)
     side_txt = 'خرید' if side_long(p.get('side', 'BUY')) else 'فروش'
     send_message(chat_id, f"🛡 *محافظ BTC* | `{p['symbol']}` ({side_txt})\n• واکنش BTC تایید شد: {det}\n"
                           f"• معامله در سود `{mv:+.2f}R` بود\n"
                           + (f"• `{int(frac * 100)}٪` از حجم بسته شد\n" if partial_ok else "• بستن بخشی ممکن نبود (حجم باقی‌مانده کم یا قبلاً پله‌ای بسته شده)\n")
-                          + (f"• استاپ باقی‌مانده روی `{fmt(new_sl)}` (سر به سر + پوشش کارمزد)" if moved else "• استاپ فعلی از سر به سر بهتر است؛ دست‌نخورده ماند"))
+                          + (f"• استاپ باقی‌مانده روی `{fmt(new_sl)}` (سر به سر + پوشش کارمزد)" if moved else
+                             ("• ⚠️ جابه‌جایی استاپ روی صرافی ناموفق بود؛ استاپ قبلی سر جایش است. لطفاً در Binance چک کنید" if sl_failed else "• استاپ فعلی از سر به سر بهتر است؛ دست‌نخورده ماند")))
     return True
 
 
@@ -7711,7 +7847,8 @@ def btc_guard_scan_once():
         try:
             if not s.get('btc_guard_enabled', True):
                 continue
-            plist = [p for p in (s.get('paper_positions') or []) if not p.get('is_real') and not p.get('btc_guard_done')]
+            _real_mode = (s.get('trading_mode') == 'REAL')       # در حالت REAL فقط پوزیشن‌های واقعی، در PAPER فقط کاغذی
+            plist = [p for p in (s.get('paper_positions') or []) if bool(p.get('is_real')) == _real_mode and not p.get('btc_guard_done')]
             if not plist:
                 continue
             frac = _btc_guard_frac(s)
@@ -9485,9 +9622,11 @@ def _fav_process_one(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('regime_blocked', None); rec.pop('regime_hold', None)
-        if gate_on(s, 'gate_btc_front_level_enabled'):
+        _ff, _fc = _btc_front_flags(s)
+        if _ff or _fc:
             # V3.44.44: آخرین مرحله‌ی خروج از صف: فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید و سیگنال (رد نمی‌شود) در صف می‌ماند.
-            fl_ok, fl_txt = _btc_front_gate(chat_id, s, symbol, sig, tf)
+            # V3.44.55: کلید مستقل «BTC کلاف دور سطح» هم از همین مرحله می‌گذرد.
+            fl_ok, fl_txt = _btc_front_gate(chat_id, s, symbol, sig, tf, front=_ff, chop=_fc)
             if not fl_ok:
                 rec['front_blocked'] = True; rec['front_hold'] = fl_txt
                 if now >= float(rec.get('expires_at', 0)):
@@ -10892,9 +11031,10 @@ def _touch_auto_enter(chat_id, rec):
         if not _rg_ok:
             rec['block_note'] = _rg_txt[:120]
             return False
-    if gate_on(s, 'gate_btc_front_level_enabled'):
+    _ff, _fc = _btc_front_flags(s)
+    if _ff or _fc:
         # V3.44.44: لیست انتظار: فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید و مورد (رد نمی‌شود) در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
-        _fl_ok, _fl_txt = _btc_front_gate(chat_id, s, symbol, side, tf)
+        _fl_ok, _fl_txt = _btc_front_gate(chat_id, s, symbol, side, tf, front=_ff, chop=_fc)
         if not _fl_ok:
             rec['block_note'] = _fl_txt[:120]
             return False
@@ -11835,11 +11975,12 @@ async def scan_symbol(http,chat_id,symbol):
         _fr_ok, _fr_txt = _final_regime_verdict(_fr_gate, sig)
         if not _fr_ok:
             return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «رژیم بازار در مرحله‌ی آخر»: {_fr_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'final_regime', sig, diagnostics=diagnostics)
-    if gate_on(s, 'gate_btc_front_level_enabled'):
+    _ff, _fc = _btc_front_flags(s)
+    if _ff or _fc:
         # V3.44.44: مسیر مستقیم (بدون صف): فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید، سیگنال رد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
-        _fl_ok, _fl_txt = await asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf)
+        _fl_ok, _fl_txt = await asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf, True, True, _ff, _fc)
         if not _fl_ok:
-            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «فاصله تا سطح جلویی BTC»: {_fl_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'btc_front', sig, diagnostics=diagnostics)
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «BTC سطح/کلاف»: {_fl_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'btc_front', sig, diagnostics=diagnostics)
     if s.get('assist_mode_enabled'):
         # حالت دستیار: سیگنال و طرح معامله ساخته شد، اما ورود فقط بعد از تایید دستی کاربر انجام می‌شود.
         return _assist_queue_signal(chat_id, symbol, sig, plan, entry, sl, tp, full_reason, df=primary)
@@ -12124,6 +12265,7 @@ GATE_REGISTRY = {
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
     'gate_btc_candle_enabled': ('₿ کندل BTC هم‌جهت با معامله', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'entry_rules', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
+    'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'entry_rules', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'entry_filter', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
@@ -13998,7 +14140,7 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         _bn = (f"وقتی BTC به سطحِ روبه‌روی جهت معامله (فروش: حمایت، خرید: مقاومت) نزدیک شود «حالت مراقبت» روشن و هشدار داده می‌شود. اگر BTC واکنش نشان دهد و "
                f"واکنش با بسته‌شدن کندل تایید شود، معامله‌های در سود (حداقل `{BTC_GUARD_MIN_PROFIT_R:g}R`) به‌اندازه‌ی `{int(_btc_guard_frac(s) * 100)}٪` بسته و استاپ باقی‌مانده "
-               f"روی نقطه‌ی ورود می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. فقط PAPER.") if s['btc_guard_enabled'] else 'خاموش شد.'
+               f"روی نقطه‌ی ورود می‌رود. معامله‌ی غیرسودی دست‌نخورده می‌ماند. در REAL با سفارش reduce-only و جابه‌جایی SL روی صرافی.") if s['btc_guard_enabled'] else 'خاموش شد.'
         send_message(chat_id, f"🛡 محافظ BTC: {'🟢 روشن' if s['btc_guard_enabled'] else '🔴 خاموش'}\n\n{_bn}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl == '/btc_guard_frac_next':

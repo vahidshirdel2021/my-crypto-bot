@@ -26,7 +26,7 @@ g = dict(os=os, logger=logging.getLogger('t'), time=time, FAV_CONFIRM_MIN_RR=0.0
          exchange_latest_price=lambda c, s: 100.8, latest_price=lambda s: 100.8,
          get_klines=lambda sym, tf, n: pd.DataFrame(rows),
          get_session=lambda c: S, save_session=lambda c: None, _fav_update_card=lambda *a, **k: None,
-         gate_on=lambda s, k: bool(S['cfg'].get(k, False)),
+         gate_on=lambda s, k: bool(S['cfg'].get(k, False)), _btc_front_flags=lambda s: (False, False),
          _final_regime_check=lambda tf, sig: g['_final_regime_verdict'](calls['regime'], sig),
          execute_trade=lambda *a, **k: (calls.__setitem__('exec', calls['exec'] + 1) or True),
          _auto_trend_gate=lambda *a, **k: False, _assist_queue_signal=lambda *a, **k: 'ok',

@@ -148,6 +148,7 @@ gf = dict(os=os, logger=log, time=time, FAV_CONFIRM_MIN_RR=0.0, FAV_CONFIRM_CANC
           get_klines=lambda sym, tf, n: pd.DataFrame(rows),
           get_session=lambda c: SF, save_session=lambda c: None, _fav_update_card=lambda *a, **k: None,
           gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX=P,
+          _btc_front_flags=lambda s: (bool(SF['cfg'].get('gate_btc_front_level_enabled', False)), bool(SF['cfg'].get('gate_btc_chop_enabled', False))),
           btc_candle_verdict=lambda tf, sig: (True, '') if (calls['btc'] == ('BULLISH' if sig == 'BUY' else 'BEARISH')) else (False, f"{P} {calls['btc']}"),
           execute_trade=lambda *a, **k: (calls.__setitem__('exec', calls['exec'] + 1) or True),
           _auto_trend_gate=lambda *a, **k: False, _assist_queue_signal=lambda *a, **k: (calls.__setitem__('card', calls['card'] + 1) or 'ok'),
