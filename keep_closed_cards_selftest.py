@@ -7,7 +7,7 @@ a = src.index("KEEP_CLOSED_CARDS_TODAY = ")
 b = src.index("def _message_protected(")
 b2 = src.index("\n\n\n", b)
 now = datetime.now(timezone.utc)
-g = {'os': os, 'datetime': datetime, 'timezone': timezone, 'RLock': RLock, 'logger': logging.getLogger('t'),
+g = {'fee_protected_ids': lambda c: set(), 'os': os, 'datetime': datetime, 'timezone': timezone, 'RLock': RLock, 'logger': logging.getLogger('t'),
      '_crypto_now': lambda: datetime.now(timezone.utc), '_KB_ANCHOR_LOCK': RLock(), '_KB_ANCHOR': {}, 'USER_SESSIONS': {}}
 exec(src[a:b2], g)
 P = g['_message_protected']

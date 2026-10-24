@@ -189,6 +189,14 @@ ROLE_LOCK_ENABLED = os.environ.get('ROLE_LOCK', 'true').lower() not in ('0', 'fa
 
 def is_restricted_user(chat_id):
     return _ap.is_restricted(chat_id, ADMIN_CHAT_IDS, ROLE_LOCK_ENABLED)
+
+
+def send_detail_message(chat_id, full_text, *args, simple_text=None, **kwargs):
+    """V3.44.62: پیام‌های فنی/هشداری (دلیل‌های عدم ورود، محافظ BTC و ...). ادمین متن کامل را می‌گیرد؛
+    کاربر عادی یا یک جمله‌ی ساده (simple_text) می‌گیرد یا اگر simple_text نباشد هیچ پیامی دریافت نمی‌کند."""
+    if is_restricted_user(chat_id):
+        return send_message(chat_id, simple_text) if simple_text else None
+    return send_message(chat_id, full_text, *args, **kwargs)
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -3458,9 +3466,9 @@ def check_pending_orders(chat_id):
                 remaining.append(o)
                 if not o.get('btc_wait_notified'):
                     o['btc_wait_notified'] = True
-                    send_message(chat_id, f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی وارد نشد و منتظر می‌ماند:\n{err}")
+                    send_detail_message(chat_id, f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی وارد نشد و منتظر می‌ماند:\n{err}")
             else:
-                send_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}")
+                send_detail_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}", simple_text=f"❌ اوردر `{o['symbol']}` باز نشد.")
         except Exception:
             logger.exception('pending order check failed chat_id=%s order=%s', chat_id, o.get('order_id'))
             remaining.append(o)
@@ -5111,7 +5119,7 @@ def _hv_level_label(depth):
     return 'HV top/bottom' if int(depth) == 0 else f'HV d{int(depth)}'
 
 
-def render_trade_chart_png(symbol, df, trade):
+def render_trade_chart_png(symbol, df, trade, plain=False):
     """چارت PNG معامله (کندل‌ها + ENTRY/TP/SL + سطح ستاپ). هم برای پوزیشن باز‌شده و هم برای
     سیگنال منتظر تایید (trade['assist_pending']=True) استفاده می‌شود. خروجی: (BytesIO, ctx) یا (None, None)."""
     try:
@@ -5130,6 +5138,11 @@ def render_trade_chart_png(symbol, df, trade):
                     setup_level_name, setup_level_value = _tok, float(_val)
             if setup_tag is None:
                 setup_tag = 'Halving'
+
+        if plain:
+            # V3.44.62: چارت کاربر عادی: فقط ENTRY/TP/SL؛ بدون ستاپ، سطح‌های نصف‌کردن، PDH/PDL و سطح ورود
+            setup_tag = None; setup_level_name = None; setup_level_value = None
+            pdh = pdl = None; _hv_mode = False
 
         fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
         fig.patch.set_facecolor('#0f172a')
@@ -5174,7 +5187,7 @@ def render_trade_chart_png(symbol, df, trade):
             # فقط سطحی که واقعاً معامله روی آن باز شده رسم می‌شود (Daily/1h/4h/Weekly/Monthly)،
             # نه همیشه PDH/PDL پیش‌فرض.
             levels.append((float(setup_level_value), '#f97316', setup_level_name, ':', 1.6))
-        else:
+        elif not plain:
             if pdh is not None:
                 levels.append((float(pdh), '#f97316', 'PDH', ':', 1.4))
             if pdl is not None:
@@ -5236,7 +5249,8 @@ def render_trade_chart_png(symbol, df, trade):
 def chart(chat_id, symbol, df, trade, entry_card=False):
     """entry_card=True: این عکس «کارت سیگنال/ورود» پوزیشن تازه‌باز است؛ تا وقتی پوزیشن باز است حذف نمی‌شود."""
     try:
-        b, ctx = render_trade_chart_png(symbol, df, trade)
+        _plain = bool(is_restricted_user(chat_id))      # V3.44.62: کاربر عادی کارت ساده می‌بیند
+        b, ctx = render_trade_chart_png(symbol, df, trade, plain=_plain)
         if b is None:
             return
         tf = ctx['tf']; tf_label = ctx['tf_label']; setup_tag = ctx['setup_tag']
@@ -5267,6 +5281,26 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         level_line = f"• سطح: `{setup_level_name} = {fmt(float(setup_level_value))}`\n" if (setup_level_name is not None and setup_level_value is not None) else ""
         tp_lvl_line = f"• سطح هدف (TP): `{trade['tp_level_name']}`\n" if trade.get('tp_level_name') else ''
         fee_c = round_trip_fee_usdt(trade.get('margin'), trade.get('leverage'))
+        if _plain:
+            # V3.44.62: فقط اطلاعات معمولی؛ ستاپ/سطح/سناریو/سطح هدف/هم‌جهتی/هشدارها فقط برای ادمین
+            send_photo(
+                chat_id, b.getvalue(),
+                f"📊 *پوزیشن معامله [{mode}]*\n"
+                f"• نماد: `{symbol}` ({trade['side']})\n"
+                f"• تایم‌فریم: `{tf_label}`\n"
+                f"• ورود: `{fmt(entry)}`\n"
+                f"• حد سود: `{fmt(tp)}` → `{metrics['reward'] - fee_c:+.2f} USDT` (پس از کسر کارمزد `{fee_c:.2f}`)\n"
+                f"• حد ضرر: `{fmt(sl)}` → `{-(metrics['risk'] + fee_c):+.2f} USDT` (شامل کارمزد)\n"
+                f"• نسبت پاداش به ریسک: `{metrics['rr']:.2f}R`\n",
+                trade_action_keyboard(symbol, miniapp_chart_url(symbol, tf), tf),
+                keep=bool(getattr(_SIGNAL_ORIGIN, 'on', False))
+            )
+            if entry_card:
+                _emid = getattr(_LAST_PHOTO, 'mid', None)
+                if _emid:
+                    trade['entry_card_mid'] = int(_emid)
+                    save_session(chat_id)
+            return
         send_photo(
             chat_id, b.getvalue(),
             f"📊 *پوزیشن معامله [{mode}]*\n"
@@ -6509,7 +6543,7 @@ def quick_channel_trade(chat_id, symbol, side, skip_trend=False):
         tp_level_name=plan.get('tp_level_name'),
     )
     if not ok:
-        send_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}'); return
+        send_detail_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}', simple_text=f'❌ ورود سریع `{symbol}` باز نشد.'); return
     s = get_session(chat_id)
     pos = next((p for p in reversed(s['paper_positions']) if p['symbol'] == symbol), None)
     if pos:
@@ -7659,6 +7693,9 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         if _w_close: snapshot_lines = f"{snapshot_lines}\n{_w_close}" if snapshot_lines else f"\n{_w_close}"
         journal_append_closed(chat_id, pos)
         _LAST_SENT.mid = None
+        if is_restricted_user(chat_id):
+            # V3.44.62: کاربر عادی پیام بسته‌شدن ساده می‌بیند؛ ستاپ/سطح/رژیم‌ها/اندیکاتورها/هشدارها/سر به سر مجازی/سایه فقط برای ادمین
+            setup_line = snapshot_lines = be_line = shadow_block = ''
         send_message(chat_id,f"📌 *پوزیشن {'REAL' if pos.get('is_real') else 'PAPER'} بسته شد*\n• `{pos['symbol']}` ({side_fa}){setup_line}{snapshot_lines}{entry_time_line}{close_time_line}\n• خروج: `{fmt(pos['close_price'])}`\n• PnL خالص کاربر{est}: `{pnl:+.2f} USDT`{fee_line}{platform_line}\n• علت: `{reason}`{be_line}{shadow_block}")
         try:
             _cmid = getattr(_LAST_SENT, 'mid', None)
@@ -8615,7 +8652,7 @@ def _btc_guard_watch_update(chat_id, s, side, is_long, plist, now=None):
         try:
             names = '، '.join(f"`{p['symbol']}`" for p in plist[:8])
             kind = 'مقاومت' if is_long else 'حمایت'
-            send_message(chat_id, f"🛡 *محافظ BTC: حالت مراقبت*\nBTC به {kind} `{fmt(lvl)}` نزدیک شد (فاصله `{dist:.2f}` ATR).\n"
+            send_detail_message(chat_id, f"🛡 *محافظ BTC: حالت مراقبت*\nBTC به {kind} `{fmt(lvl)}` نزدیک شد (فاصله `{dist:.2f}` ATR).\n"
                                   f"معامله‌های {'خرید' if is_long else 'فروش'} باز: {names}\n"
                                   f"اگر BTC واکنش نشان دهد و واکنش تایید شود، معامله‌های در سود `{int(_btc_guard_frac(s) * 100)}٪` بسته و استاپ باقی‌مانده سر به سر می‌شود.")
         except Exception:
@@ -8670,7 +8707,7 @@ def _btc_guard_act(chat_id, s, p, frac, vote, det):
                           'price': price, 'btc_vote': vote, 'btc_detail': str(det or '')[:120]}
         save_session(chat_id)
     side_txt = 'خرید' if side_long(p.get('side', 'BUY')) else 'فروش'
-    send_message(chat_id, f"🛡 *محافظ BTC* | `{p['symbol']}` ({side_txt})\n• واکنش BTC تایید شد: {det}\n"
+    send_detail_message(chat_id, f"🛡 *محافظ BTC* | `{p['symbol']}` ({side_txt})\n• واکنش BTC تایید شد: {det}\n"
                           f"• معامله در سود `{mv:+.2f}R` بود\n"
                           + (f"• `{int(frac * 100)}٪` از حجم بسته شد\n" if partial_ok else "• بستن بخشی ممکن نبود (حجم باقی‌مانده کم یا قبلاً پله‌ای بسته شده)\n")
                           + (f"• استاپ باقی‌مانده روی `{fmt(new_sl)}` (سر به سر + پوشش کارمزد)" if moved else
@@ -11169,7 +11206,7 @@ def auto_trend_decide(chat_id, rid, approve):
     drift_r = abs(live - rec['entry']) / risk_dist if risk_dist > 0 else 0.0
     if crossed or drift_r > ASSIST_MAX_DRIFT_R:
         rec['status'] = 'invalidated'; _auto_gate_mark(s, rid, 'invalidated'); save_session(chat_id)
-        send_message(chat_id, f"🚫 ورود `{symbol}` انجام نشد: قیمت لحظه‌ای (`{fmt(live)}`) از ورود/SL/TP پیشنهادی فاصله گرفته و ستاپ دیگر معتبر نیست.")
+        send_detail_message(chat_id, f"🚫 ورود `{symbol}` انجام نشد: قیمت لحظه‌ای (`{fmt(live)}`) از ورود/SL/TP پیشنهادی فاصله گرفته و ستاپ دیگر معتبر نیست.", simple_text=f"🚫 ورود `{symbol}` انجام نشد.")
         return
     ok = execute_trade(chat_id, symbol, rec['side_label'], rec['entry'], rec['sl'], rec['tp'], rec['reason'],
                        structural_tp=rec.get('structural_tp', False), plan_score=rec.get('score'), plan_rr=rec.get('rr'),
@@ -11180,7 +11217,7 @@ def auto_trend_decide(chat_id, rid, approve):
         rec['status'] = 'approved'; _auto_gate_mark(s, rid, 'approved'); save_session(chat_id)
     else:
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
-        send_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}")
+        send_detail_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}", simple_text=f"❌ ورود `{symbol}` باز نشد.")
 
 
 def _strip_all_buttons(chat_id, message_id):
@@ -11260,8 +11297,9 @@ def assist_approve(chat_id, aid, skip_trend=False, skip_far=False):
     if ok or not rec.get('saved'):
         _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
     if not ok:
-        send_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}"
-                     + ("\n💾 سیگنال همچنان در «📋 سیگنال‌های در انتظار» می‌ماند." if rec.get('saved') else ''))
+        _saved_note = ("\n💾 سیگنال همچنان در «📋 سیگنال‌های در انتظار» می‌ماند." if rec.get('saved') else '')
+        send_detail_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}" + _saved_note,
+                            simple_text="🛑 ورود انجام نشد." + _saved_note)
     elif warn:
         send_message(chat_id, warn)
 
@@ -11465,7 +11503,7 @@ def assist_saved_touch_once():
                         px = f" | ورود `{fmt(float(pos[-1]['entry_price']))}` · SL `{fmt(float(pos[-1]['sl']))}` · TP `{fmt(float(pos[-1]['tp']))}`" if pos else ''
                         send_message(chat_id, f"✅ قیمت `{sym}` به ورود رسید؛ با قیمت بازار وارد شدم{px}.")
                     else:
-                        send_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
+                        send_detail_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
                 except Exception:
                     logger.exception('assist saved touch failed aid=%s', rec.get('id'))
         except Exception:
@@ -12212,6 +12250,36 @@ def _pending_pressure_lines(recs, t_all):
     return [line, msg]
 
 
+PENDING_PLAIN_MAX_SYMBOLS = 30
+
+
+def _assist_pending_list_plain(chat_id, message_id, recs, t_all):
+    """V3.44.62: نسخه‌ی کاربر عادی «📋 سیگنال‌های در انتظار»: فقط نام نمادها + دکمه‌ی چارت TradingView
+    (بدون رأی‌گیری، جهت، تعداد رأی، مهلت، فشار بازار، فیلتر نمایش یا هر اطلاعات فنی).
+    لمس نام نماد همان کارت قبلی را پایین چت می‌آورد (تا کاربر همچنان بتواند تصمیم بگیرد)."""
+    items, seen = [], set()
+    for r in recs:                                   # کارت‌های دستیار
+        sym = r.get('symbol')
+        if sym and sym not in seen:
+            seen.add(sym); items.append((sym, r.get('tf') or '5min', f"/assist_open_{r['id']}"))
+    for r in t_all:                                  # برخورد با سطح
+        sym = r.get('symbol')
+        if sym and sym not in seen:
+            seen.add(sym); items.append((sym, r.get('tf') or '5min', f"/tw_open_{r['id']}"))
+    shown = items[:PENDING_PLAIN_MAX_SYMBOLS]
+    lines = [f"📋 *سیگنال‌های در انتظار ({len(items)})*", ""]
+    rows = []
+    for i, (sym, tf, cb) in enumerate(shown, 1):
+        lines.append(f"{i}) `{sym}`")
+        rows.append([{'text': f"🔎 {sym}", 'callback_data': cb},
+                     {'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}])
+    if len(items) > len(shown):
+        lines.append(f"… و {len(items) - len(shown)} نماد دیگر")
+    lines += ["", "روی نام نماد بزنید تا کارتش پایین چت بیاید."]
+    rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
+    send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
+
+
 def assist_pending_list(chat_id, message_id=None):
     """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
@@ -12219,6 +12287,9 @@ def assist_pending_list(chat_id, message_id=None):
     t_all = _touch_waiting_recs(s)
     if not recs and not t_all:
         send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
+        return
+    if is_restricted_user(chat_id):                  # V3.44.62: کاربر عادی لیست ساده می‌بیند
+        _assist_pending_list_plain(chat_id, message_id, recs, t_all)
         return
     vf = s.get('pending_vote_filter') if s.get('pending_vote_filter') in _PENDING_VF_ORDER else 'all'
     t_recs = [r for r in t_all if _pending_vote_ok(r, vf)]
@@ -13454,6 +13525,30 @@ def trade_filter_management_keyboard(chat_id, section=None):
         [{'text': '🧭 روش معامله و ابزارها', 'callback_data': '/trade_filter_tools'}],
         [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
     ]}
+
+
+def wizard_same_dir_keyboard(chat_id):
+    """V3.44.62: مرحله‌ی «حداکثر پوزیشن هم‌جهت» در ویزارد تنظیمات معامله (بین «حداکثر پوزیشن» و «تایم‌فریم»).
+    callback جدا (/set_wsame_N) دارد تا بعد از انتخاب، ویزارد ادامه پیدا کند (نه برگشت به منوی محدودیت‌ها)."""
+    s = get_session(chat_id)
+    cur = int(s.get('max_same_direction_positions', 0) or 0)
+
+    def opt(n, label):
+        return {'text': f"{'✅ ' if cur == n else ''}{label}", 'callback_data': f'/set_wsame_{n}'}
+
+    return {'inline_keyboard': [
+        [opt(1, '1'), opt(2, '2')],
+        [opt(3, '3'), opt(5, '5')],
+        [opt(10, '10'), opt(0, 'بدون محدودیت')],
+    ]}
+
+
+def wizard_same_dir_text(chat_id):
+    s = get_session(chat_id)
+    overall = int(s.get('max_open_positions', 0) or 0)
+    return ("⚙️ *حداکثر پوزیشن هم‌جهت*\n\n"
+            "یعنی حداکثر چند معامله‌ی خرید (یا چند معامله‌ی فروش) هم‌زمان باز بماند.\n"
+            f"سقف کل معامله‌های باز: {overall or 'بدون محدودیت'}")
 
 
 def same_direction_limit_keyboard(chat_id):
@@ -14775,9 +14870,12 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_dir_cooldown_'):
         s['same_direction_entry_cooldown_seconds']=max(0.0,float(cl.replace('/set_dir_cooldown_',''))); save_session(chat_id)
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
+    if cl.startswith('/set_wsame_'):          # V3.44.62: مرحله‌ی هم‌جهت ویزارد
+        s['max_same_direction_positions']=max(0,int(cl.replace('/set_wsame_',''))); save_session(chat_id)
+        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
-        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
+        edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
     if cl.startswith('/set_tf_'):
         tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
         if cl in tf_map:
@@ -15371,6 +15469,16 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, FILTER_MAIN_TEXT, trade_filter_management_keyboard(chat_id))
         return
     # V3.44.7: پریست‌های آماده (کلید ۱، ۲، ...)
+    if cl == '/trade_mode_menu':               # V3.44.62: منوی سه حالت معامله (همه‌ی کاربران)
+        send_message(chat_id, presets_mod.mode_menu_text(s), presets_mod.mode_keyboard(s)); return
+    if cl.startswith('/trade_mode_set_'):
+        _mk = cl[len('/trade_mode_set_'):]
+        _mi = next((x for x in presets_mod.TRADE_MODES if x[0] == _mk), None)
+        if not _mi or not presets_mod.apply_preset(s, _mk):
+            send_message(chat_id, '⚠️ این حالت شناخته نشد.', presets_mod.mode_keyboard(s)); return
+        save_session(chat_id)
+        send_message(chat_id, f"✅ حالت معامله روی «{_mi[1]} {_mi[2]}» تنظیم شد.\n\n{_mi[3]}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.",
+                     presets_mod.mode_keyboard(s)); return
     if cl == '/preset_menu':
         send_message(chat_id, presets_mod.menu_text(s), presets_mod.keyboard(s))
         return

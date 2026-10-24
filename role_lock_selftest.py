@@ -58,7 +58,7 @@ for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list'
     assert hidden not in cbs, hidden
 
 settings = callbacks(ap.filter_markup(ui.get_settings_menu_keyboard()))
-assert settings == ['/check_wizard', '/menu'], settings
+assert settings == ['/check_wizard', '/trade_mode_menu', '/menu'], settings      # V3.44.62: «🎯 حالت معامله» اضافه شد
 
 perf = callbacks(ap.filter_markup(ui.get_performance_keyboard()))
 assert set(perf) == {'/performance_today', '/performance_week', '/performance_month', '/performance', '/today_trades', '/menu'}, perf

@@ -65,17 +65,29 @@ base_same = ('halving_k_atr', 'halving_max_depth', 'gate_btc_candle_enabled', 'g
 s1, c1 = _apply('1')
 check("کلید ۱: رفتار قبلی (جهت ثابت خاموش، رأی الگو روشن، الگوی BTC خاموش)",
       c1['gate_touch_dir_fixed_enabled'] is False and c1['gate_touch_pattern_vote_enabled'] is True and c1['gate_fc_btcpat_enabled'] is False)
+_auto = {'2': 'majority', '3': 'majority', '4': 'minus1', '5': 'all'}     # V3.44.62: ۳ تا ۵ = معمولی / محافظه‌کار / سخت‌گیر
 for n in ('2', '3', '4', '5'):
     sn, cn = _apply(n)
-    check(f"کلید {n}: جهت ثابت روشن، رأی الگو خاموش، اکثریت، ۱۵ دقیقه‌ی ATR ۴ و عمق ۱۰ و دروازه‌های BTC مثل هم",
+    check(f"کلید {n}: جهت ثابت روشن، رأی الگو خاموش، ورود خودکار {_auto[n]}، ۱۵ دقیقه‌ی ATR ۴ و عمق ۱۰ و دروازه‌های BTC مثل هم",
           cn['gate_touch_dir_fixed_enabled'] is True and cn['gate_touch_pattern_vote_enabled'] is False
-          and sn['touch_auto_mode'] == 'majority' and all(cn[k] == c1[k] for k in base_same))
+          and sn['touch_auto_mode'] == _auto[n] and all(cn[k] == c1[k] for k in base_same))
     check(f"کلید {n}: diff خالی", P.preset_diff(sn) == [])
 mom = ('gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_adx_enabled')
 _, c2 = _apply('2'); _, c3 = _apply('3'); _, c4 = _apply('4'); _, c5 = _apply('5')
 check("کلید ۲: بدون مومنتوم و بدون BTC", not any(c2[k] for k in mom) and not c2['gate_fc_btcpat_enabled'])
 check("کلید ۳: فقط مومنتوم اضافه", all(c3[k] for k in mom) and not c3['gate_fc_btcpat_enabled'] and not c3['gate_fc_vol_enabled'])
-check("کلید ۴: فقط الگوی BTC اضافه", c4['gate_fc_btcpat_enabled'] and not any(c4[k] for k in mom))
+check("کلید ۴ (محافظه‌کار): مومنتوم + الگوی BTC + BTC/ETH، بدون ۴ساعته/حجم/aligned", all(c4[k] for k in mom + ('gate_fc_btcpat_enabled', 'gate_fc_btceth_enabled')) and not c4['gate_fc_h4_enabled'] and not c4['gate_fc_vol_enabled'] and not c4['gate_btceth_aligned_enabled'])
+s4, _ = _apply('4'); s3, _ = _apply('3'); s5x, c5x = _apply('5')
+check("معمولی/محافظه‌کار/سخت‌گیر: نام‌ها", [P.PRESETS[k]['label'] for k in '345'] == ['معمولی', 'محافظه‌کار', 'سخت‌گیر'])
+check("سخت‌گیری پله‌ای: حداقل تایید حرکت 0.15 < 0.25 < 0.35 و سقف همیشه بزرگ‌تر از حداقل",
+      s3['fav_confirm_min_r'] == 0.15 < s4['fav_confirm_min_r'] == 0.25 < s5x['fav_confirm_min_r'] == 0.35
+      and all(x['fav_confirm_max_r'] > x['fav_confirm_min_r'] for x in (s3, s4, s5x)))
+check("سخت‌گیر: BTC و ETH هم‌جهت لازم است", c5x['gate_btceth_aligned_enabled'] is True and c3['gate_btceth_aligned_enabled'] is False)
+check("منوی حالت معامله: سه دکمه + بازگشت + منو، تیک حالت فعال",
+      [r[0]['callback_data'] for r in P.mode_keyboard(s4)['inline_keyboard']] == ['/trade_mode_set_3', '/trade_mode_set_4', '/trade_mode_set_5', '/menu_settings', '/menu']
+      and P.mode_keyboard(s4)['inline_keyboard'][1][0]['text'].startswith('✅') and not P.mode_keyboard(s4)['inline_keyboard'][0][0]['text'].startswith('✅'))
+check("متن منوی حالت معامله: حالت فعلی + بدون اصطلاح فنی", 'محافظه‌کار' in P.mode_menu_text(s4) and 'کلید' not in P.mode_menu_text(s4) and 'RSI' not in P.mode_menu_text(s4) and len(P.mode_menu_text(s4)) < 1200)
+check("بدون پریست فعال: تنظیم پیش‌فرض", 'پیش‌فرض' in P.mode_menu_text({}))
 check("کلید ۵: همه روشن", all(c5[k] for k in mom + ('gate_fc_btcpat_enabled', 'gate_fc_btceth_enabled', 'gate_fc_h4_enabled', 'gate_fc_vol_enabled')))
 # اعمال کلید ۲ روی سشنی که قبلاً کلید ۵ بود، همه‌چیز را کامل برمی‌گرداند (چیزی از قبلی نمی‌ماند)
 s5, _ = _apply('5')

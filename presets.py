@@ -101,21 +101,30 @@ PRESETS = {
         'desc': 'جهت فقط از الگوی برخورد؛ رأی‌دهنده‌ها: روند (رژیم ۵/۱۵) و سطح (کلوز + سقف/کف دیروز). بدون اندیکاتور و بدون الگوی BTC. خط مبنای مقایسه.',
         'cfg': {**_FIXED_DIR}, 'session': {},
     },
+    # V3.44.62: کلیدهای ۳ تا ۵ = سه حالت معامله‌ی کاربر (منوی «🎯 حالت معامله»). همه‌ی تنظیمات پایه مثل هم است (۱۵ دقیقه،
+    # ATR ۴، عمق ۱۰، جهت ثابت از الگوی برخورد، دروازه‌های BTC)؛ فقط «چند رأی‌دهنده» و «چند رأی موافق لازم است» و
+    # «حداقل تایید حرکت قبل از ورود» فرق می‌کند. هرچه سخت‌گیرتر، معامله کمتر و (امیدواریم) باکیفیت‌تر.
     '3': {
-        'label': 'جهت ثابت + مومنتوم',
-        'desc': 'مثل کلید ۲ + رأی مومنتوم (RSI، MACD، ADX؛ هر سه یک رأی). مقایسه با کلید ۲ نشان می‌دهد اندیکاتورها کمک می‌کنند یا نه.',
-        'cfg': {**_FIXED_DIR, **_MOMENTUM}, 'session': {},
+        'label': 'معمولی',
+        'desc': 'رأی‌دهنده‌ها: روند (رژیم ۵/۱۵)، سطح (کلوز + سقف/کف دیروز) و مومنتوم (RSI، MACD، ADX). ورود با اکثریت ساده‌ی رأی‌ها؛ '
+                'صبر برای تایید حرکت: حداقل +0.15R.',
+        'cfg': {**_FIXED_DIR, **_MOMENTUM},
+        'session': {},
     },
     '4': {
-        'label': 'جهت ثابت + الگوی BTC',
-        'desc': 'مثل کلید ۲ + رأی «الگوی BTC روی سطح خودش» (همان ۳ الگو روی BTC). مقایسه با کلید ۲ نشان می‌دهد الگوی BTC کمک می‌کند یا نه.',
-        'cfg': {**_FIXED_DIR, 'gate_fc_btcpat_enabled': True}, 'session': {},
+        'label': 'محافظه‌کار',
+        'desc': 'مثل معمولی + دو رأی‌دهنده‌ی جدید: الگوی BTC روی سطح خودش و هم‌جهتی رژیم BTC/ETH. ورود فقط وقتی همه به‌جز یک رأی موافق باشند؛ '
+                'صبر برای تایید حرکت: حداقل +0.25R.',
+        'cfg': {**_FIXED_DIR, **_MOMENTUM, 'gate_fc_btcpat_enabled': True, 'gate_fc_btceth_enabled': True},
+        'session': {'touch_auto_mode': 'minus1', 'fav_confirm_min_r': 0.25, 'fav_confirm_max_r': 0.50},
     },
     '5': {
-        'label': 'جهت ثابت + همه‌ی فیلترها',
-        'desc': 'جهت ثابت + همه‌ی رأی‌دهنده‌ها روشن: الگوی BTC، روند (BTC/ETH، ۴ ساعته، ۵/۱۵)، مومنتوم، سطح و حجم. ترکیب همه.',
+        'label': 'سخت‌گیر',
+        'desc': 'همه‌ی رأی‌دهنده‌ها (الگوی BTC، BTC/ETH، رژیم ۴ ساعته، ۵/۱۵، مومنتوم، سطح و حجم) + شرط «BTC و ETH هم‌جهت باشند». '
+                'ورود فقط وقتی همه‌ی رأی‌ها موافق باشند؛ صبر برای تایید حرکت: حداقل +0.35R.',
         'cfg': {**_FIXED_DIR, **_MOMENTUM, 'gate_fc_btcpat_enabled': True, 'gate_fc_btceth_enabled': True,
-                'gate_fc_h4_enabled': True, 'gate_fc_vol_enabled': True}, 'session': {},
+                'gate_fc_h4_enabled': True, 'gate_fc_vol_enabled': True, 'gate_btceth_aligned_enabled': True},
+        'session': {'touch_auto_mode': 'all', 'fav_confirm_min_r': 0.35, 'fav_confirm_max_r': 0.60},
     },
 }
 
@@ -207,6 +216,34 @@ def menu_text(s):
     lines.append('در پریست نیست و دست‌نخورده می‌ماند: ریسک هر معامله، تایم‌فریم، نمادها، حالت دستیار و تشخیص رژیم دقیق‌تر. '
                  'هشدارهای «بله، وارد شو / نه» خاموش‌اند.')
     return '\n'.join(lines)[:3900]
+
+
+# V3.44.62: منوی «🎯 حالت معامله» (برای همه‌ی کاربران): سه حالت = کلیدهای ۳ تا ۵ پریست
+TRADE_MODES = (
+    ('3', '⚖️', 'معمولی', 'تعادل بین تعداد معامله و کیفیت. پیش‌فرض پیشنهادی.'),
+    ('4', '🛡', 'محافظه‌کار', 'معامله‌ی کمتر؛ ورود فقط با تایید بیشتر (شامل هم‌جهتی BTC و ETH).'),
+    ('5', '🔒', 'سخت‌گیر', 'کمترین معامله؛ ورود فقط وقتی همه‌ی تاییدها کامل باشد.'),
+)
+
+
+def mode_menu_text(s):
+    act = s.get('active_preset')
+    cur = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
+    lines = ['🎯 *حالت معامله*', '',
+             f"حالت فعلی: {cur or 'تنظیم پیش‌فرض (هیچ‌کدام انتخاب نشده)'}", '']
+    for k, ic, nm, d in TRADE_MODES:
+        lines.append(f"{'✅ ' if k == act else ''}{ic} *{nm}*: {d}")
+    lines += ['', 'روی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.']
+    return '\n'.join(lines)
+
+
+def mode_keyboard(s):
+    act = s.get('active_preset')
+    rows = [[{'text': f"{'✅ ' if k == act else ''}{ic} {nm}", 'callback_data': f'/trade_mode_set_{k}'}]
+            for k, ic, nm, _ in TRADE_MODES]
+    rows.append([{'text': '⬅️ بازگشت', 'callback_data': '/menu_settings'}])
+    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
+    return {'inline_keyboard': rows}
 
 
 def keyboard(s):

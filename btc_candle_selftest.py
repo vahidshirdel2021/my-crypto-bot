@@ -186,7 +186,7 @@ a = src.index("def check_pending_orders("); b = src.index("# مدت اعتبار
 SP = {'pending_orders': [{'symbol': 'AAA', 'side': 'SELL', 'trigger_price': None, 'entry_price': 100.0, 'sl': 102.0, 'tp': 90.0,
                           'margin': 10, 'leverage': 5, 'triggered': True, 'order_id': 'o1'}], 'trade_amount_usdt': 5, 'leverage': 3, 'paper_positions': []}
 sent = []; res = {'v': (False, f'{P} (5م) در حال تشکیل صعودی است')}
-gp = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent.append(t),
+gp = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent.append(t), send_detail_message=lambda c, t, *a, **k: sent.append(t),
           side_long=g3['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX=P, _BTC_FRONT_PREFIX='⚠️ هشدار ورود',
           execute_manual_trade=lambda *a, **k: res['v'])
 exec(src[a:b], gp)

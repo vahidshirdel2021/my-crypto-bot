@@ -19,7 +19,7 @@ def vote_fn(tf, cfg=None):
 g = {'os': os, 'time': time, 'RLock': RLock, 'logger': logging.getLogger('t'), 'TAKER_FEE_PCT': 0.05, 'side_long': side_long, 'real_venue_name': lambda chat_id=None, venue=None: 'Binance Futures',
      'USER_SESSIONS': S, 'fmt': lambda x: f'{float(x):g}', '_be_state': _be_state, 'partial_close_position': partial,
      'get_entry_lock': lambda c: RLock(), 'save_session': lambda c: None, '_btc_pattern_vote': vote_fn,
-     'send_message': lambda c, tx, *a, **k: sent.append(tx), 'latest_price': lambda sym: state['price'].get(sym),
+     'send_message': lambda c, tx, *a, **k: sent.append(tx), 'send_detail_message': lambda c, tx, *a, **k: sent.append(tx), 'latest_price': lambda sym: state['price'].get(sym),
      'exchange_latest_price': lambda c, sym: state['price'].get(sym),
      'btc_front_level_info': lambda s, tf, is_long: state['info']}
 exec(src[a:b], g)

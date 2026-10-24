@@ -30,7 +30,7 @@ USER_EXACT = frozenset({
     '/performance', '/performance_today', '/performance_week', '/performance_month',
     '/daily_pnl', '/today_trades',
     # تنظیمات ریسک و حساب
-    '/menu_settings', '/check_wizard', '/mode_paper', '/mode_real',
+    '/menu_settings', '/check_wizard', '/mode_paper', '/mode_real', '/trade_mode_menu',
     # کارمزد خود کاربر
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
@@ -40,8 +40,8 @@ USER_EXACT = frozenset({
 # --- الگوهای مجاز (regex کامل‌منطبق) -------------------------------------------------------------
 _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/start(\s.*)?$',
-    # تنظیمات ریسک (فقط عدد؛ «هم‌جهت» و «کولداون» عمداً بیرون است)
-    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$',
+    # تنظیمات ریسک (فقط عدد). «هم‌جهت» فقط از داخل ویزارد (/set_wsame_N)؛ منوی جداگانه‌ی آن و «کولداون» بیرون است
+    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', r'^/trade_mode_set_[345]$',
     # تایم‌فریم: مرحله‌ی اجباریِ ویزارد اولیه
     r'^/set_tf_(5m|15m|1h|4h)$',
     # اتصال صرافی (REAL)

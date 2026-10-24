@@ -257,7 +257,7 @@ a5 = src.index("def check_pending_orders("); b5 = src.index("# مدت اعتبا
 SP = {'pending_orders': [{'symbol': 'AAA', 'side': 'BUY', 'trigger_price': None, 'entry_price': 100.0, 'sl': 98.0, 'tp': 110.0,
                           'margin': 10, 'leverage': 5, 'triggered': True, 'order_id': 'o1'}], 'trade_amount_usdt': 5, 'leverage': 3, 'paper_positions': []}
 sent2 = []
-gp2 = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent2.append(t),
+gp2 = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent2.append(t), send_detail_message=lambda c, t, *a, **k: sent2.append(t),
            side_long=g4['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC', _BTC_FRONT_PREFIX=PFX,
            execute_manual_trade=lambda *a, **k: (False, f'{PFX}: بیتکوین (BTC) به سطح مقاومتی نزدیک است'))
 exec(src[a5:b5], gp2)

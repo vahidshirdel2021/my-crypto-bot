@@ -232,7 +232,7 @@ tgc.clear()
 hdr = []
 g2 = dict(g, PENDING_HIGH_VOTE_PCT=0.70, _PENDING_VF_ORDER=('all', 'high', 'full'),
           _PENDING_VF_LABEL={'all': 'ALL', 'high': 'HIGH', 'full': 'FULL'}, TOUCH_CARDS_PER_LIST=25, KEEP_CLOSED_CARDS_TODAY=False, _KB_ANCHOR={}, _KB_ANCHOR_LOCK=RLock(), USER_SESSIONS={1: S}, _assist_pending_recs=lambda s_: [],
-          send_message=lambda c, tx, mk=None, message_id=None, **k: hdr.append((tx, mk)), save_session=lambda c: None)
+          send_message=lambda c, tx, mk=None, message_id=None, **k: hdr.append((tx, mk)), save_session=lambda c: None, is_restricted_user=lambda c: False, fee_protected_ids=lambda c: set())
 for s_ in fsrc.values():
     exec(s_, g2)
 g2['assist_pending_list'](1)
