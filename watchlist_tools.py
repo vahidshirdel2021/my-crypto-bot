@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-اعتبارسنجی واچ‌لیست با فهرست *اسپات* صرافی‌ها (Binance / Bybit / KuCoin) - بدون API key و
+اعتبارسنجی واچ‌لیست با فهرست نمادهای صرافی‌ها (Bitunix فیوچرز USDT + Binance اسپات) - بدون API key و
 بدون وابستگی به bot.py. هم داخل ربات استفاده می‌شود و هم به‌صورت CLI:
 
-    python watchlist_tools.py            # گزارش: کدام نمادها روی اسپات نیستند و چه جایگزینی پیشنهاد می‌شود
+    python watchlist_tools.py            # گزارش: کدام نمادها روی هیچ منبعی نیستند، چه جایگزینی پیشنهاد می‌شود و کدام‌ها روی بیتیونیکس نیستند
     python watchlist_tools.py --json     # همان گزارش به‌صورت JSON
 
-منطق: نمادی که روی هیچ‌کدام از منابع اسپات (USDT، وضعیت Trading) نیست حذف می‌شود و به‌جایش از
+منطق: نمادی که روی هیچ‌کدام از منابع (بیتیونیکس: USDT با وضعیت OPEN، باینانس اسپات: USDT با وضعیت Trading) نیست حذف می‌شود و به‌جایش از
 RESERVE_TOP_SYMBOLS (به ترتیب اولویت) نماد موجود اضافه می‌شود تا اندازه‌ی لیست حفظ شود.
 اگر هیچ منبعی فهرست قابل‌اعتماد (≥ MIN_SANE_SYMBOLS نماد) برنگرداند، هیچ چیزی حذف نمی‌شود.
 """
@@ -19,8 +19,7 @@ import requests
 
 BINANCE_SPOT = os.environ.get('BINANCE_SPOT_URL', 'https://api.binance.com').rstrip('/')
 BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')
-BYBIT_PUBLIC = os.environ.get('BYBIT_PUBLIC_URL', 'https://api.bybit.com').rstrip('/')
-KUCOIN_SPOT = os.environ.get('KUCOIN_SPOT_URL', 'https://api.kucoin.com/api/v1').rstrip('/')
+BITUNIX_PUBLIC = os.environ.get('BITUNIX_PUBLIC_URL', 'https://fapi.bitunix.com').rstrip('/')
 
 MIN_SANE_SYMBOLS = 100
 MAX_REMOVE_FRACTION = 0.6   # اگر بیش از ۶۰٪ لیست حذف شود، داده‌ی صرافی مشکوک است و هیچ حذفی انجام نمی‌شود
@@ -59,36 +58,19 @@ def fetch_binance_spot(timeout=12):
     raise RuntimeError(f'binance spot: {last}')
 
 
-def fetch_bybit_spot(timeout=12):
-    out, cursor = set(), None
-    for _ in range(10):
-        params = {'category': 'spot', 'limit': 1000}
-        if cursor: params['cursor'] = cursor
-        j = _get(f'{BYBIT_PUBLIC}/v5/market/instruments-info', params, timeout)
-        if j.get('retCode') != 0:
-            raise RuntimeError(f"bybit spot: retCode={j.get('retCode')}")
-        res = j.get('result') or {}
-        for s in res.get('list') or []:
-            if s.get('quoteCoin') == 'USDT' and str(s.get('status', '')).lower() == 'trading':
-                out.add(str(s.get('baseCoin', '')).upper())
-        cursor = res.get('nextPageCursor')
-        if not cursor: break
-    return out
-
-
-def fetch_kucoin_spot(timeout=12):
-    base = KUCOIN_SPOT.replace('/api/v1', '')
-    j = _get(f'{base}/api/v2/symbols', None, timeout)
-    if j.get('code') != '200000':
-        raise RuntimeError(f"kucoin spot: code={j.get('code')}")
-    return {str(s.get('baseCurrency', '')).upper() for s in j.get('data') or []
-            if s.get('quoteCurrency') == 'USDT' and s.get('enableTrading') is True}
+def fetch_bitunix_futures(timeout=12):
+    """نام پایه‌ی همه‌ی قراردادهای USDT بیتیونیکس با وضعیت OPEN (GET /api/v1/futures/market/trading_pairs)."""
+    j = _get(f'{BITUNIX_PUBLIC}/api/v1/futures/market/trading_pairs', None, timeout)
+    if j.get('code') != 0:
+        raise RuntimeError(f"bitunix futures: code={j.get('code')}")
+    return {str(s.get('base', '')).upper() for s in j.get('data') or []
+            if str(s.get('quote', '')).upper() == 'USDT' and str(s.get('symbolStatus', 'OPEN')).upper() == 'OPEN'}
 
 
 def fetch_available(timeout=12):
     """(union, per_source, errors). منبعِ خراب نادیده گرفته می‌شود و خطایش در errors می‌آید."""
     per, errors = {}, {}
-    for name, fn in (('binance', fetch_binance_spot), ('bybit', fetch_bybit_spot), ('kucoin', fetch_kucoin_spot)):
+    for name, fn in (('bitunix', fetch_bitunix_futures), ('binance', fetch_binance_spot)):
         try:
             per[name] = fn(timeout)
         except Exception as exc:  # noqa: BLE001
@@ -134,6 +116,8 @@ def main(argv=None):
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
     report.update(removed=plan['removed'], added=plan['added'], kept_count=len(plan['kept']), final_count=len(plan['final']))
     report['per_source_missing'] = {k: [s for s in plan['final'] if s not in v] for k, v in per.items()}
+    if 'bitunix' in per:
+        report['not_on_bitunix'] = [s for s in candidates if s not in per['bitunix']]     # نمادهای واچ‌لیست فعلی که بیتیونیکس ندارد (داده‌شان از باینانس می‌آید)
     if '--json' in argv:
         report['final'] = plan['final']
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 0
@@ -141,6 +125,11 @@ def main(argv=None):
     print(f"لیست فعلی: {len(candidates)} نماد | حذف: {len(plan['removed'])} | جایگزین: {len(plan['added'])}")
     print('حذف‌شده (روی هیچ اسپاتی نیست):', ', '.join(plan['removed']) or '-')
     print('جایگزین‌شده (به ترتیب):', ', '.join(plan['added']) or '-')
+    if 'not_on_bitunix' in report:
+        nb = report['not_on_bitunix']
+        print(f"روی بیتیونیکس نیست ({len(nb)} از {len(candidates)}؛ داده‌ی این‌ها از باینانس می‌آید):", ', '.join(nb) or '-')
+    elif 'bitunix' in errors:
+        print('بیتیونیکس در دسترس نبود:', errors['bitunix'])
     return 0
 
 

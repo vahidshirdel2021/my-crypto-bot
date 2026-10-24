@@ -2218,6 +2218,11 @@ HALVING_DEFAULTS = {
     "halving_dyn_fast_candles": 30,    # پنجره‌ی ATR سریع (میانه‌ی N کندل اخیر)
     "halving_dyn_min": 0.7,            # حداقل ضریب (جلوی ریزشدن بیش‌ازحد سطوح در بازار خواب)
     "halving_dyn_max": 1.6,            # حداکثر ضریب (جلوی درشت‌شدن بیش‌ازحد در هیجان)
+    # V3.44.58: گارد PDH/PDL در مدل نصف‌کردن (کلید gate_pd_level_enabled). سقف/کف دیروز مثل مانع جلوی قیمت دیده می‌شود.
+    "gate_pd_level_enabled": True,
+    "pd_guard_room_atr": 1.5,          # فروش: اگر PDL کمتر از این‌قدر×ATR زیر قیمت است (خرید: PDH بالای قیمت) ورود نگه داشته می‌شود
+    "pd_guard_touch_atr": 0.15,        # تلورانس «رسیدن به سطح» = این‌قدر×ATR
+    "pd_guard_lookback_candles": 12,   # اگر در این‌تعداد کندل اخیر به PDL/PDH رسیده و برگشته، ورود هم‌جهت با مانع نگه داشته می‌شود
 }
 
 
@@ -2327,6 +2332,79 @@ def _halving_cells_named(ctx):
     return out
 
 
+def pd_level_guard(d, idx, sig, live_price, cfg):
+    """V3.44.58: گارد «سقف/کف دیروز (PDH/PDL) جلوی معامله» برای مدل نصف‌کردن. (ok, توضیح)
+    مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ بدون این گارد، فروشِ بعد از شکست یک سطح نصف‌کردن می‌توانست درست روی PDL (کف دیروز)
+    وارد شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و PDH همین‌طور). سیگنال رد نمی‌شود؛ فقط ورود نگه داشته می‌شود
+    و در بررسی بعدی دوباره سنجیده می‌شود. دو حالت:
+      الف) «مانع نزدیک»: PDL (برای فروش) کمتر از pd_guard_room_atr × ATR زیر قیمت است، یا قیمت همین حالا روی آن نشسته (برای خرید: PDH بالای قیمت).
+      ب) «واکنش رخ داده»: در pd_guard_lookback_candles کندل اخیر قیمت به PDL/PDH رسیده (یا فتیله زده) و بعد برگشته و هنوز نزدیک آن است؛
+         ورود هم‌جهت با مانع (فروش پس از برگشت از PDL / خرید پس از برگشت از PDH) خلاف واکنش قیمت است.
+    اگر قیمت PDL را (برای فروش) بیش از تلورانس پایین‌تر شکسته باشد، فروش آزاد است (ادامه‌ی شکست). فقط وقتی مدل نصف‌کردن روشن است اعمال می‌شود
+    (در مدل PDH/PDL خودِ سطح ستاپ است). d باید خروجی _compute_prev_day_levels با ستون‌های atr/_pdh/_pdl باشد."""
+    try:
+        cfg = cfg or {}
+        if sig not in ("BUY", "SELL") or not bool(cfg.get("halving_model_enabled")) or not bool(cfg.get("gate_pd_level_enabled", True)):
+            return True, ""
+        if d is None or idx is None or idx < 1 or idx >= len(d):
+            return True, ""
+        row = d.iloc[idx]
+        atr = _safe_float(row.get("atr"), 0.0)
+        if not np.isfinite(atr) or atr <= 0:
+            return True, ""
+        try:
+            lp = float(live_price) if live_price else float(row["close"])
+        except (TypeError, ValueError):
+            lp = float(row["close"])
+        if not np.isfinite(lp) or lp <= 0:
+            lp = float(row["close"])
+        room = atr * max(0.0, float(cfg.get("pd_guard_room_atr", 1.5)))
+        touch = atr * max(0.0, float(cfg.get("pd_guard_touch_atr", 0.15)))
+        n = max(1, int(cfg.get("pd_guard_lookback_candles", 12)))
+        ph, pl = _pdh_pdl_at(d, idx)
+        if sig == "SELL":
+            level, name, fa, verb = pl, "PDL", "کف دیروز", "فروش"
+            col, gap = "_pdl", (lp - pl) if pl is not None else None
+        else:
+            level, name, fa, verb = ph, "PDH", "سقف دیروز", "خرید"
+            col, gap = "_pdh", (ph - lp) if ph is not None else None
+        if level is None or gap is None:
+            return True, ""
+        lv = f"{level:.8g}"
+        # الف) مانعِ نزدیک (یا قیمت روی خودِ سطح نشسته)
+        if -touch <= gap < room:
+            if gap <= touch:
+                return False, f"قیمت روی {fa} ({name}={lv}) نشسته؛ {verb} تا مشخص‌شدن واکنش به این سطح نگه داشته می‌شود"
+            return False, (f"{fa} ({name}={lv}) فقط {gap / atr:.1f}×ATR جلوی {verb} است؛ "
+                           f"{verb} تا مشخص‌شدن واکنش به این سطح نگه داشته می‌شود")
+        # ب) واکنش رخ داده: رسیدن به سطح در چند کندل اخیر و برگشت از آن (هنوز در همسایگی سطح)
+        if gap >= room and gap < 2.0 * room and col in d.columns:
+            seg = d.iloc[max(0, idx - n + 1): idx + 1]
+            lvls = pd.to_numeric(seg[col], errors="coerce")
+            if sig == "SELL":
+                touched = bool((pd.to_numeric(seg["low"], errors="coerce") <= lvls + touch).any())
+            else:
+                touched = bool((pd.to_numeric(seg["high"], errors="coerce") >= lvls - touch).any())
+            if touched:
+                return False, (f"قیمت اخیراً به {fa} ({name}={lv}) رسیده و از آن برگشته؛ "
+                               f"{verb} خلاف واکنش قیمت است و نگه داشته می‌شود")
+        return True, ""
+    except Exception:
+        return True, ""
+
+
+def pd_level_guard_df(ind_df, sig, live_price, cfg):
+    """نسخه‌ی کار با دیتافریمِ اندیکاتوردار (برای مراحل آخر ورود در bot.py). ind_df = خروجی calculate_indicators روی کندل‌های کافی
+    (حداقل ~۱ روز کامل قبل از امروز). اگر داده کافی نبود (True, '') تا کار بات متوقف نشود."""
+    try:
+        d, _a, _b = _compute_prev_day_levels(ind_df)
+        if d is None:
+            return True, ""
+        return pd_level_guard(d, len(d) - 2, sig, live_price, cfg)
+    except Exception:
+        return True, ""
+
+
 def strategy_halving(df, strategy_config=None, live_price=None):
     """مدل مستقل سطوح نصف‌کردن. همان ۶ سناریوی PDH/PDL (برخورد/برگشت، شکست/ادامه، شکست کاذب)
     روی سلول‌های (سقف، کف) درخت اجرا می‌شود. خروجی: (sig, reason)."""
@@ -2348,6 +2426,7 @@ def strategy_halving(df, strategy_config=None, live_price=None):
     require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
     allow_cont = bool(cfg.get("sweep_enable_retest_continuation", True))
     max_depth_trade = int(cfg.get("halving_max_trade_depth", 0) or 0)
+    pd_blocked = None
 
     for cell in ctx["cells"]:
         hi, lo = float(cell["hi"]["price"]), float(cell["lo"]["price"])
@@ -2396,9 +2475,16 @@ def strategy_halving(df, strategy_config=None, live_price=None):
             _inv = atr * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)), float(cfg.get("halving_zone_atr", 0.30)))
             if (sig == "BUY" and lp < anchor - _inv) or (sig == "SELL" and lp > anchor + _inv):
                 continue
+        # V3.44.58: گارد PDH/PDL: سقف/کف دیروز جلوی معامله (یا واکنش اخیر به آن) = ورود نگه داشته می‌شود، سیگنال در اسکن بعدی دوباره سنجیده می‌شود.
+        _pd_ok, _pd_txt = pd_level_guard(d, idx, sig, lp, cfg)
+        if not _pd_ok:
+            pd_blocked = _pd_txt
+            continue
         extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}"
         return sig, tag_setup_reason("Halving", f"{reason}{extra}")
 
+    if pd_blocked:
+        return None, f"گارد سقف/کف دیروز: {pd_blocked}"
     return None, (f"مدل نصف‌کردن: ستاپی روی سطوح ثبت نشد (عمق درخت {ctx['depth']}، "
                   f"فاصله‌ی سطوح {ctx['step']:.6g})")
 

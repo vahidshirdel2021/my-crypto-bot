@@ -6,7 +6,7 @@
     python check_market_data.py            # BTC و SOL
     python check_market_data.py ETH XRP    # نمادهای دلخواه
 
-برای هر منبع *اسپات* (Binance / آینه‌ی Binance Vision / Bybit / KuCoin) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
+برای هر منبع (Bitunix فیوچرز / Binance اسپات / آینه‌ی Binance Vision) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
 و مقدار ATRx (نسبت ATR کندل آخرِ بسته‌شده به میانه‌ی ATRهای قبل؛ در حالت سالم حدود ۱ است) را چاپ می‌کند.
 """
 import sys
@@ -38,28 +38,20 @@ def binance_vision(base):
     return binance(base, "https://data-api.binance.vision")
 
 
-def bybit(base):
-    r = requests.get("https://api.bybit.com/v5/market/kline",
-                     params={"category": "spot", "symbol": f"{base}USDT", "interval": "5", "limit": 650}, timeout=TIMEOUT)
+def bitunix(base):
+    """Bitunix Futures: فقط کندل‌های بسته؛ حداکثر ۲۰۰ کندل در هر درخواست (ربات کندل در حال تشکیل را خودش اضافه می‌کند)."""
+    r = requests.get("https://fapi.bitunix.com/api/v1/futures/market/kline",
+                     params={"symbol": f"{base}USDT", "interval": "5m", "limit": 200}, timeout=TIMEOUT)
     j = r.json() if r.ok else {}
-    rows = (j.get("result") or {}).get("list") or []
-    return r.status_code, (_df(rows) if j.get("retCode") == 0 and rows else None), r.text[:120]
-
-
-def kucoin(base):
-    now = int(time.time())
-    r = requests.get("https://api.kucoin.com/api/v1/market/candles",
-                     params={"symbol": f"{base}-USDT", "type": "5min", "startAt": now - 300 * 510, "endAt": now}, timeout=TIMEOUT)
-    j = r.json() if r.ok else {}
-    # KuCoin Spot: [time(sec), open, close, high, low, volume, turnover]، جدید به قدیم
-    rows = [[int(float(x[0])) * 1000, x[1], x[3], x[4], x[2], x[5]] for x in (j.get("data") or []) if len(x) >= 6]
-    return r.status_code, (_df(rows) if j.get("code") == "200000" and rows else None), r.text[:120]
+    rows = [[k.get("time"), k.get("open"), k.get("high"), k.get("low"), k.get("close"), k.get("baseVol")]
+            for k in (j.get("data") or []) if isinstance(k, dict)]
+    return r.status_code, (_df(rows) if j.get("code") == 0 and rows else None), r.text[:120]
 
 
 def main(symbols):
     for base in symbols:
         print(f"\n===== {base} =====")
-        for name, fn in (("binance-spot", binance), ("binance-vision", binance_vision), ("bybit-spot", bybit), ("kucoin-spot", kucoin)):
+        for name, fn in (("bitunix-futures", bitunix), ("binance-spot", binance), ("binance-vision", binance_vision)):
             try:
                 status, df, body = fn(base)
             except Exception as exc:

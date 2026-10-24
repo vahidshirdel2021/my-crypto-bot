@@ -25,6 +25,8 @@ except Exception:
 import pandas as pd
 import ccxt
 import watchlist_tools  # اعتبارسنجی واچ‌لیست با فهرست اسپات صرافی‌ها (V20)
+from bitunix_client import BitunixExchange, BitunixError, BitunixOrderRejected     # V3.44.57: معامله‌ی REAL روی بیتیونیکس
+from credentials_store import CredentialsStore, CredentialsError                   # V3.44.57: ذخیره‌ی رمزشده‌ی کلید API کاربران
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -41,6 +43,7 @@ from strategy import (
     extract_setup_tag, extract_setup_level, tag_setup_reason, extract_adaptive_anchor,
     is_reversal_family_reason, build_quick_trade_plan, extract_scenario_tag, extract_p4_case, MIN_RR_FLOOR,
     _halving_cfg, _halving_context, _halving_cells_named, simple_touch_signal, _quick_opposing_levels,
+    pd_level_guard_df,
 )
 from halving_levels import depth_label_fa as _hv_depth_label
 from ui import (
@@ -165,8 +168,27 @@ FULL_CONFIRM_MIN_VOLUME_RATIO = max(0.0, float(os.environ.get('FULL_CONFIRM_MIN_
 # Platform fee: applied consistently to PAPER and REAL trades after a trade is realized.
 PLATFORM_FEE_RATE_PCT = min(100.0, max(0.0, float(os.environ.get('PLATFORM_FEE_RATE_PCT', '10.0'))))
 PLATFORM_FEE_MIN_PROFIT_USDT = max(0.0, float(os.environ.get('PLATFORM_FEE_MIN_PROFIT_USDT', '0.01')))
+# V3.44.61: کارمزد روزانه. daily = کارمزد از تک‌تک معاملات کم نمی‌شود؛ آخر روز از مجموع سود همان روز فاکتور ساخته می‌شود.
+# per_trade = رفتار قدیمی (کسر کارمزد موقع بسته‌شدن هر معامله‌ی سودده).
+PLATFORM_FEE_MODE = os.environ.get('PLATFORM_FEE_MODE', 'daily').strip().lower()
+if PLATFORM_FEE_MODE not in ('daily', 'per_trade'):
+    PLATFORM_FEE_MODE = 'daily'
+FEE_DAY_TZ = os.environ.get('FEE_DAY_TZ', DAILY_CLOSE_TZ)                       # مرز «پایان روز» برای فاکتور (پیش‌فرض تهران)
+FEE_DUE_HOUR = min(23, max(0, int(os.environ.get('FEE_DUE_HOUR', '12'))))       # مهلت پرداخت: این ساعت از روز بعد
+FEE_MIN_GRACE_HOURS = max(0.0, float(os.environ.get('FEE_MIN_GRACE_HOURS', '6')))  # اگر فاکتور دیر ساخته شد (ربات خاموش بود)
+FEE_INCLUDE_PAPER = os.environ.get('FEE_INCLUDE_PAPER', 'true').lower() not in ('0', 'false', 'no')
+FEE_PAYMENT_ACCOUNT_ENV = os.environ.get('FEE_PAYMENT_ACCOUNT', '').strip()      # حساب/آدرس ادمین؛ با /set_fee_account هم قابل تغییر است
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in ADMIN_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
+# V3.44.59: قفل نقش‌ها. کاربر عادی فقط بخش‌های لازم (access_policy.py) را می‌بیند؛ بقیه فقط ادمین.
+# قفل فقط وقتی فعال است که حداقل یک ادمین تعریف شده باشد (ADMIN_CHAT_IDS) تا مالک از ربات بیرون نماند.
+import access_policy as _ap
+import daily_fee as _df
+ROLE_LOCK_ENABLED = os.environ.get('ROLE_LOCK', 'true').lower() not in ('0', 'false', 'no')
+
+
+def is_restricted_user(chat_id):
+    return _ap.is_restricted(chat_id, ADMIN_CHAT_IDS, ROLE_LOCK_ENABLED)
 REAL_RESTART_LOCK = os.environ.get('REAL_RESTART_LOCK', 'true').lower() not in ('0', 'false', 'no')
 MARGIN_MODE = os.environ.get('MARGIN_MODE', 'isolated').lower()
 PROTECTION_TRIGGER = os.environ.get('PROTECTION_TRIGGER', 'mark_price').lower()
@@ -446,6 +468,11 @@ try:
 except Exception:
     BINANCE_ACCOUNTS = {}
 
+# V3.44.57: کاربر برای حالت REAL صرافی را انتخاب می‌کند (Binance یا Bitunix)، کلید API را در چت می‌دهد (رمزشده ذخیره می‌شود)،
+# ربات متصل می‌شود، موجودی را نشان می‌دهد و فقط با موجودی کافی ادامه (مارجین/اهرم/...) می‌دهد.
+REAL_VENUES = {'binance': 'Binance Futures', 'bitunix': 'Bitunix Futures'}
+REAL_MIN_BALANCE_USDT = max(0.0, float(os.environ.get('REAL_MIN_BALANCE_USDT', '5') or 0))
+
 ALLOWED_CHAT_IDS_RAW = os.environ.get('ALLOWED_CHAT_IDS', '').strip()
 ALLOWED_CHAT_IDS = {int(x.strip()) for x in ALLOWED_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
 
@@ -458,7 +485,7 @@ TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
 # V20: داده‌ی بازار از *اسپات* گرفته می‌شود. این لیست‌ها «نامزد» هستند: در هر بوت و سپس هر ۲۴ ساعت
-# refresh_watchlists_from_spot() نمادهای غیرموجود روی اسپات Binance/Bybit/KuCoin را حذف و با نمادهای
+# refresh_watchlists_from_spot() نمادهای غیرموجود روی بیتیونیکس (فیوچرز) و اسپات Binance را حذف و با نمادهای
 # برتر موجود (watchlist_tools.RESERVE_TOP_SYMBOLS) جایگزین می‌کند و گزارشش را در watchlist_report.json می‌نویسد.
 LONG_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC', 'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL', 'LIT', 'BAND', 'SUSHI', 'SNX', 'AVAX', 'ATOM', 'TRB', 'ETC', 'NEO', 'SFP', 'IOTA', 'AXS', 'RLC', 'GRT', 'RUNE', 'ONT', 'KAVA', '1INCH', 'KNC', 'HNT', 'ENJ', 'ICX', 'CRV', 'NEAR', 'LUNA', 'THETA', 'QTUM', 'MANA', 'SAND', 'ADA', 'RVN', 'MTL', 'STORJ', 'ZIL', 'SLP', 'XRP', 'BLZ', 'FET', 'ALGO', 'DODO', 'CHR', 'CVC', 'CELR', 'HBAR', 'SKL', 'RSR', 'CHZ', 'LINK', 'ALICE', 'ZRX', 'COTI', 'ONE', 'XTZ', 'ANKR', 'HOT', 'LRC', 'DOGE', 'DENT', 'DGB', 'WIN', 'IOST', 'TRX', 'BTT', 'BAT', 'VET', 'SHIB', 'ARPA', 'AR', 'C98', 'DYDX', 'TLM', 'GALA', 'MASK', 'OGN', 'RAY', 'ATA', 'GTC', 'CELO', 'CTSI', 'TON', 'APT', 'ARB', 'OP', 'SUI', 'INJ', 'TIA', 'SEI', 'PEPE', 'WIF', 'RENDER', 'JUP', 'WLD', 'ONDO', 'ENA', 'STRK', 'TAO', 'PYTH', 'JTO', 'FLOKI', 'BONK', 'NOT', 'W', 'EIGEN', 'ZK']
 # نکته: ۳۱ نماد قبلی (MKR, SRM, BEL, SXP, REN, ALPHA, TOMO, CTK, OCEAN, EOS, FTM,
@@ -482,30 +509,36 @@ WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1ho
 SHARED_LONG_WATCHLIST = LONG_WATCHLIST
 SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
 LEADER_SYMBOLS = ('BTC','ETH')
-KUCOIN_PUBLIC = os.environ.get('KUCOIN_SPOT_URL', 'https://api.kucoin.com/api/v1').rstrip('/')  # اسپات (V20)
-# منابع داده‌ی بازار (V20): *اسپات* عمومی. (CoinEx بسته شد؛ معاملات REAL از V3.44.0 روی فیوچرز USDⓈ-M باینانس است.)
+# منابع داده‌ی بازار: V3.44.56: بیتیونیکس (فیوچرز USDT، منبع اول) + باینانس اسپات و آینه‌ی Binance Vision (کمکی). Bybit و KuCoin حذف شدند.
+# (CoinEx بسته شد؛ معاملات REAL از V3.44.0 روی فیوچرز USDⓈ-M باینانس است.)
 BINANCE_SPOT = os.environ.get('BINANCE_SPOT_URL', 'https://api.binance.com').rstrip('/')
 BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')   # آینه‌ی فقط-داده‌ی عمومی باینانس
-BYBIT_PUBLIC = os.environ.get('BYBIT_PUBLIC_URL', 'https://api.bybit.com').rstrip('/')
-_ALL_DATA_SOURCES = ('binance', 'binancevision', 'bybit', 'kucoin')
-MARKET_DATA_SOURCES = [x.strip().lower() for x in os.environ.get('MARKET_DATA_SOURCES', ','.join(_ALL_DATA_SOURCES)).split(',') if x.strip().lower() in _ALL_DATA_SOURCES] or list(_ALL_DATA_SOURCES)
+BITUNIX_PUBLIC = os.environ.get('BITUNIX_PUBLIC_URL', 'https://fapi.bitunix.com').rstrip('/')   # فیوچرز USDT؛ داده‌ی عمومی بدون API key
+BITUNIX_MIN_GAP = max(0.05, float(os.environ.get('BITUNIX_MIN_REQUEST_GAP', '0.125') or 0.125))   # ≈۸ درخواست در ثانیه (سقف رسمی: ۱۰ در ثانیه برای هر IP)
+BITUNIX_SYMBOLS_TTL = 6 * 3600
+BITUNIX_TICKERS_TTL = 3.0
+_ALL_DATA_SOURCES = ('bitunix', 'binance', 'binancevision')
+_MDS_RAW = [x.strip().lower() for x in os.environ.get('MARKET_DATA_SOURCES', ','.join(_ALL_DATA_SOURCES)).split(',') if x.strip()]
+if ('bybit' in _MDS_RAW or 'kucoin' in _MDS_RAW) and 'bitunix' not in _MDS_RAW:
+    _MDS_RAW = []     # V3.44.56: مقدار قدیمی .env (binance,binancevision,bybit,kucoin) => ترتیب پیش‌فرض جدید (bitunix اول)
+MARKET_DATA_SOURCES = [x for x in _MDS_RAW if x in _ALL_DATA_SOURCES] or list(_ALL_DATA_SOURCES)
 SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOWN_SECONDS', '60')))   # مدت کنارگذاشتن منبعِ بلاک/rate-limit/خراب
 SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
 BINANCE_SYMBOLS_TTL = 6 * 3600
 WATCHLIST_AUTO_PRUNE = os.environ.get('WATCHLIST_AUTO_PRUNE', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 # لینک TradingView همیشه *اسپات* است (بدون .P). صرافی: همانی که داده‌ی آن نماد از آن آمده؛ با TRADINGVIEW_EXCHANGE می‌شود اجبارش کرد.
 TRADINGVIEW_EXCHANGE = os.environ.get('TRADINGVIEW_EXCHANGE', '').strip().upper()
-TV_EXCHANGE_MAP = {'binance': 'BINANCE', 'binancevision': 'BINANCE', 'bybit': 'BYBIT', 'kucoin': 'KUCOIN'}
+TV_EXCHANGE_MAP = {'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'}
 BINANCE_INTERVAL_MAP = {'1min':'1m','5min':'5m','15min':'15m','30min':'30m','1hour':'1h','4hour':'4h','1day':'1d','1week':'1w','1month':'1M'}
-BYBIT_INTERVAL_MAP = {'1min':'1','5min':'5','15min':'15','30min':'30','1hour':'60','4hour':'240','1day':'D','1week':'W','1month':'M'}
-KUCOIN_TYPE_MAP = {'1min':'1min','5min':'5min','15min':'15min','30min':'30min','1hour':'1hour','4hour':'4hour','1day':'1day','1week':'1week','1month':'1month'}
-KUCOIN_TF_SECONDS = {'1min':60,'5min':300,'15min':900,'30min':1800,'1hour':3600,'4hour':14400,'1day':86400,'1week':604800,'1month':2592000}
+BITUNIX_INTERVAL_MAP = {'1min':'1m','5min':'5m','15min':'15m','30min':'30m','1hour':'1h','4hour':'4h','1day':'1d','1week':'1w','1month':'1M'}
+BITUNIX_TF_SECONDS = {'1min':60,'5min':300,'15min':900,'30min':1800,'1hour':3600,'4hour':14400,'1day':86400,'1week':604800,'1month':2592000}
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s | %(levelname)s | %(threadName)s | %(message)s')
 logger = logging.getLogger('trader_bot')
 app = Flask(__name__)
 STATE_LOCK = RLock()
 DB_LOCK = RLock()
+CREDENTIALS = CredentialsStore(DB_PATH, lambda: sqlite3.connect(DB_PATH, timeout=15), DB_LOCK)   # V3.44.57
 DATA_LOCK = RLock()
 USER_SESSIONS: Dict[int, Dict[str, Any]] = {}
 ENTRY_DIAG_STATE: Dict[int, Dict[str, Any]] = {}
@@ -644,6 +677,22 @@ def init_db():
                 fee_rate_pct %s NOT NULL,
                 updated_at INTEGER NOT NULL
             )''' % real_type)
+            # V3.44.61: فاکتورهای کارمزد روزانه (یک ردیف به‌ازای هر کاربر در هر روز)
+            conn.execute('''CREATE TABLE IF NOT EXISTS fee_invoices(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                profit_usdt REAL NOT NULL DEFAULT 0,
+                fee_rate_pct REAL NOT NULL DEFAULT 0,
+                fee_usdt REAL NOT NULL DEFAULT 0,
+                trades INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at REAL NOT NULL,
+                due_ts REAL NOT NULL,
+                paid_at REAL,
+                msg_ids TEXT NOT NULL DEFAULT '',
+                UNIQUE(chat_id, day)
+            )''')
             # V3.42.14: لیست دسترسی پویا (مدیریت از پنل ادمین)
             conn.execute('''CREATE TABLE IF NOT EXISTS allowed_users(
                 chat_id INTEGER PRIMARY KEY,
@@ -665,6 +714,7 @@ def init_db():
         finally:
             conn.close()
     restore_db_from_latest_backup_if_empty()
+    CREDENTIALS.init_table()          # V3.44.57: کلیدهای API رمزشده‌ی کاربران
     logger.info('مسیر دیتابیس: %s', DB_PATH)
     if not db_existed_before:
         logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
@@ -721,7 +771,8 @@ def admin_users_report(limit=100):
         try:
             rows=conn.execute('''SELECT u.chat_id,u.username,u.first_name,u.last_name,u.first_seen,u.last_seen,u.is_active,
                     (SELECT COUNT(*) FROM fee_ledger f WHERE f.chat_id=u.chat_id) AS fee_trades,
-                    (SELECT COALESCE(SUM(f.platform_fee_usdt),0) FROM fee_ledger f WHERE f.chat_id=u.chat_id) AS fee_total
+                    (SELECT COALESCE(SUM(f.platform_fee_usdt),0) FROM fee_ledger f WHERE f.chat_id=u.chat_id)
+                    + (SELECT COALESCE(SUM(i.fee_usdt),0) FROM fee_invoices i WHERE i.chat_id=u.chat_id AND i.status!='WAIVED') AS fee_total
                 FROM users u ORDER BY u.last_seen DESC LIMIT ?''',(int(limit),)).fetchall()
         finally:
             conn.close()
@@ -743,6 +794,7 @@ def admin_user_detail(chat_id, target_id):
         try:
             row=conn.execute('SELECT chat_id,telegram_user_id,username,first_name,last_name,first_seen,last_seen,is_active FROM users WHERE chat_id=?',(int(target_id),)).fetchone()
             fee=conn.execute('SELECT COALESCE(SUM(platform_fee_usdt),0),COUNT(*) FROM fee_ledger WHERE chat_id=?',(int(target_id),)).fetchone()
+            inv=conn.execute("SELECT COALESCE(SUM(fee_usdt),0),COUNT(*),COALESCE(SUM(CASE WHEN status IN ('PENDING','OVERDUE') THEN fee_usdt ELSE 0 END),0) FROM fee_invoices WHERE chat_id=? AND status!='WAIVED'",(int(target_id),)).fetchone()
         finally:
             conn.close()
     if not row:
@@ -756,7 +808,8 @@ def admin_user_detail(chat_id, target_id):
             f'آخرین فعالیت: `{time.strftime("%Y-%m-%d %H:%M", time.localtime(last_seen))}`\n'
             f'وضعیت: `{"فعال" if is_active else "غیرفعال"}`\n'
             f'نرخ کارمزد فعلی: `{get_user_fee_rate(target_id):.2f}%`\n'
-            f'کارمزد ثبت‌شده: `{fee_total:.2f} USDT` در `{fee_count}` معامله')
+            f'کارمزد ثبت‌شده: `{fee_total:.2f} USDT` در `{fee_count}` معامله'
+            + (f'\nکارمزد روزانه: `{float(inv[0]):.2f} USDT` در `{int(inv[1])}` فاکتور (پرداخت‌نشده: `{float(inv[2]):.2f}`)' if inv and inv[1] else ''))
 
 
 def save_session(chat_id):
@@ -871,6 +924,7 @@ def default_session():
         'scan_generation': 0,
         'last_stop_reason': None,
         'trading_mode': 'PAPER',
+        'real_exchange': 'binance',        # V3.44.57: صرافی انتخابی کاربر برای REAL (binance | bitunix)
         'paper_balance': 1000.0,
         'paper_start_balance': None,   # V3.44.45: موجودی اولیه‌ای که کاربر انتخاب کرده؛ دکمه‌ی «ریست آمار» موجودی را به همین برمی‌گرداند (None = ثبت نشده)
         'daily_start_equity': 1000.0,
@@ -1168,36 +1222,82 @@ def get_session(chat_id):
     return s
 
 
-def account_credentials(chat_id):
-    raw = BINANCE_ACCOUNTS.get(str(chat_id)) or BINANCE_ACCOUNTS.get(chat_id)
-    if not isinstance(raw, dict): return None
-    key = (raw.get('apiKey') or raw.get('api_key') or '').strip()
-    secret = (raw.get('secret') or raw.get('apiSecret') or raw.get('api_secret') or '').strip()
-    if not key or not secret: return None
-    return key, secret
+_CRED_CACHE = {}          # {(chat_id, venue): (ts, creds|None)}؛ کش کوتاه تا هر بار sqlite+رمزگشایی نشود
+_CRED_CACHE_TTL = 30.0
+
+
+def _cred_cache_clear(chat_id=None):
+    for k in [k for k in list(_CRED_CACHE) if chat_id is None or k[0] == chat_id]:
+        _CRED_CACHE.pop(k, None)
+
+
+def real_venue(chat_id):
+    """صرافی انتخابی کاربر برای REAL: 'binance' (پیش‌فرض و سازگار با BINANCE_ACCOUNTS_JSON) یا 'bitunix'."""
+    with STATE_LOCK:
+        sess = USER_SESSIONS.get(chat_id)
+    v = (sess or {}).get('real_exchange')
+    return v if v in REAL_VENUES else 'binance'
+
+
+def real_venue_name(chat_id=None, venue=None):
+    return REAL_VENUES.get(venue or (real_venue(chat_id) if chat_id is not None else 'binance'), 'Binance Futures')
+
+
+def account_credentials(chat_id, venue=None):
+    """(key, secret) برای صرافی انتخابی: اول ذخیره‌ی رمزشده‌ی خود کاربر، برای Binance در نبودش BINANCE_ACCOUNTS_JSON."""
+    venue = venue or real_venue(chat_id); now = time.time()
+    hit = _CRED_CACHE.get((chat_id, venue))
+    if hit and now - hit[0] < _CRED_CACHE_TTL:
+        return hit[1]
+    creds = None
+    try:
+        creds = CREDENTIALS.load(chat_id, venue)
+    except CredentialsError as exc:
+        logger.warning('stored credentials unreadable chat=%s venue=%s: %s', chat_id, venue, exc)
+    except Exception:
+        logger.exception('credential store failure chat=%s', chat_id)
+    if not creds and venue == 'binance':
+        raw = BINANCE_ACCOUNTS.get(str(chat_id)) or BINANCE_ACCOUNTS.get(chat_id)
+        if isinstance(raw, dict):
+            key = (raw.get('apiKey') or raw.get('api_key') or '').strip()
+            secret = (raw.get('secret') or raw.get('apiSecret') or raw.get('api_secret') or '').strip()
+            if key and secret: creds = (key, secret)
+    _CRED_CACHE[(chat_id, venue)] = (now, creds)
+    return creds
+
+
+def build_exchange(venue, key, secret):
+    """شیء صرافی (بعد از load_markets) برای Binance (ccxt) یا Bitunix (لایه‌ی ccxt‌مانند). خطا را بالا می‌دهد."""
+    if venue == 'bitunix':
+        ex = BitunixExchange(key, secret, margin_mode=MARGIN_MODE, stop_type='MARK_PRICE' if PROTECTION_TRIGGER.startswith('mark') else 'LAST_PRICE')
+        ex.load_markets()
+        return ex
+    # فیوچرز USDⓈ-M باینانس (USDT-margined perpetual)
+    ex = ccxt.binanceusdm({'apiKey': key, 'secret': secret, 'enableRateLimit': True,
+                           'options': {'adjustForTimeDifference': True, 'recvWindow': 15000}})
+    # گرفتن لیست ارزها (SAPI) برای فیوچرز لازم نیست و به مجوز/دسترسی اسپات نیاز دارد
+    try: ex.has['fetchCurrencies'] = False
+    except Exception: pass
+    ex.load_markets()
+    return ex
 
 
 def get_exchange(chat_id):
-    creds = account_credentials(chat_id)
+    venue = real_venue(chat_id)
+    creds = account_credentials(chat_id, venue)
     if not creds: return None
-    fingerprint = hashlib.sha256((creds[0] + '|' + creds[1]).encode('utf-8')).hexdigest()
+    fingerprint = hashlib.sha256((venue + '|' + creds[0] + '|' + creds[1]).encode('utf-8')).hexdigest()
     cached = EXCHANGE_CACHE.get(chat_id)
     if cached and cached.get('fingerprint') == fingerprint:
         return cached.get('exchange')
     try:
-        # فیوچرز USDⓈ-M باینانس (USDT-margined perpetual)
-        ex = ccxt.binanceusdm({'apiKey':creds[0],'secret':creds[1],'enableRateLimit':True,
-                               'options':{'adjustForTimeDifference':True,'recvWindow':15000}})
-        # گرفتن لیست ارزها (SAPI) برای فیوچرز لازم نیست و به مجوز/دسترسی اسپات نیاز دارد
-        try: ex.has['fetchCurrencies'] = False
-        except Exception: pass
-        ex.load_markets()
+        ex = build_exchange(venue, creds[0], creds[1])
         EXCHANGE_CACHE[chat_id] = {'fingerprint': fingerprint, 'exchange': ex}
-        logger.info('Binance USDM connected/refreshed for chat_id=%s', chat_id)
+        logger.info('%s connected/refreshed for chat_id=%s', real_venue_name(venue=venue), chat_id)
         return ex
     except Exception as exc:
         EXCHANGE_CACHE.pop(chat_id, None)
-        logger.exception('Binance init failed for %s: %s', chat_id, exc)
+        logger.exception('%s init failed for %s: %s', real_venue_name(venue=venue), chat_id, exc)
         return None
 
 
@@ -1468,6 +1568,8 @@ def _message_protected(chat_id, message_id):
         with _KB_ANCHOR_LOCK:
             if _KB_ANCHOR.get(chat_id) == message_id:
                 return True
+        if message_id in fee_protected_ids(chat_id):      # V3.44.61: پیام فاکتور کارمزد تا تسویه حذف نشود
+            return True
         sess = USER_SESSIONS.get(chat_id)
         for _tr in ((sess or {}).get('touch_wait') or {}).values():      # V3.44.18: کارتِ مورد در انتظار تا وقتی منتظر است حذف نشود
             if _tr.get('msg_id') == message_id and _tr.get('status') == 'waiting':
@@ -1744,6 +1846,9 @@ def _day_cleanup_loop():
 def tg(method, payload=None, timeout=10):
     if not TELEGRAM_TOKEN: return None
     try:
+        # V3.44.59: دکمه‌های مخصوص ادمین هرگز در چت کاربر عادی نمایش داده نمی‌شوند (لایه‌ی دفاعی دوم؛ لایه‌ی اول قفل دستورهاست).
+        if payload and payload.get('reply_markup') and is_restricted_user(payload.get('chat_id')):
+            payload = dict(payload); payload['reply_markup'] = _ap.filter_markup(payload['reply_markup'])
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
         if r.status_code != 200: logger.warning('Telegram %s: %s', method, r.text[:300]); return None
         data = r.json()
@@ -2052,6 +2157,7 @@ def send_photo(chat_id, img, caption='', markup=None, keep=False):
     s = get_session(chat_id)
     if markup is None:
         markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
+    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)      # V3.44.59
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
         if r.status_code == 200:
@@ -2078,13 +2184,6 @@ def fmt(v):
 
 def market_name(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}USDT"
 def ccxt_symbol(symbol): return f"{symbol.upper().replace('USDT','').replace('/','')}/USDT:USDT"
-def kucoin_futures_symbol(symbol):
-    """نماد قرارداد پرپچوال USDT-margined کوکوین. BTC استثناست: کوکوین همیشه از XBT به‌جای BTC استفاده می‌کند."""
-    base=symbol.upper().replace('USDT','').replace('/','')
-    if base=='BTC': base='XBT'
-    return f'{base}USDTM'
-
-
 def normalize_klines(data):
     if not data: return pd.DataFrame()
     rows=[]
@@ -2101,9 +2200,9 @@ def _base_asset(symbol):
     return str(symbol).upper().replace('USDT', '').replace('/', '')
 
 
-# --- منابع داده‌ی بازار: *اسپات*، عمومی و بدون API key (V20) ---------------------------------
-# ترتیب پیش‌فرض: Binance Spot -> آینه‌ی data-api.binance.vision -> Bybit Spot -> KuCoin Spot.
-# با MARKET_DATA_SOURCES (مثلاً "bybit,kucoin") می‌شود ترتیب/لیست را عوض کرد.
+# --- منابع داده‌ی بازار: عمومی و بدون API key ---------------------------------
+# V3.44.56 ترتیب پیش‌فرض: Bitunix Futures (اول) -> Binance Spot -> آینه‌ی data-api.binance.vision (کمکی).
+# با MARKET_DATA_SOURCES (مثلاً "binance,bitunix") می‌شود ترتیب/لیست را عوض کرد.
 _SOURCE_DOWN_UNTIL = {}
 _SOURCE_FAILS = {}
 _SYMBOL_MISS_UNTIL = {}
@@ -2154,7 +2253,7 @@ def _mark_symbol_missing(source, base):
 
 
 def data_failure_notes(symbol):
-    """دلیل شکست دریافت داده‌ی آخرین تلاش برای این نماد، مثلاً: binance:not_listed | bybit:retCode=10001"""
+    """دلیل شکست دریافت داده‌ی آخرین تلاش برای این نماد، مثلاً: bitunix:not_listed | binance:http_451"""
     notes = _DATA_NOTES.get(_base_asset(symbol))
     return ' | '.join(notes) if notes else ''
 
@@ -2220,21 +2319,188 @@ def _binance_kline_df(payload):
     return _ohlcv_df([row[:6] for row in payload if isinstance(row, (list, tuple)) and len(row) >= 6])
 
 
-def _bybit_kline_df(payload):
-    if not isinstance(payload, dict) or payload.get('retCode') != 0: return pd.DataFrame()
-    rows = ((payload.get('result') or {}).get('list')) or []   # جدید به قدیم؛ در _ohlcv_df مرتب می‌شود
-    return _ohlcv_df([r[:6] for r in rows if isinstance(r, (list, tuple)) and len(r) >= 6])
+# ===================== Bitunix Futures: داده‌ی عمومی (V3.44.56) =====================
+# فقط کندل‌های «بسته» را می‌دهد (کندل در حال تشکیل نمی‌آید)؛ ربات یک ردیف «در حال تشکیل» با قیمت لحظه‌ای اضافه می‌کند
+# تا همه‌جا iloc[-2] همان آخرین کندل بسته بماند. سقف رسمی: ۱۰ درخواست در ثانیه برای هر IP و حداکثر ۲۰۰ کندل در هر درخواست.
+_BITUNIX_SYMBOLS = {'map': {}, 'info': {}, 'ts': 0.0, 'next_try': 0.0}
+_BITUNIX_TICKERS = {'ts': 0.0, 'map': {}}
+_BITUNIX_LOCK = RLock()
+_BITUNIX_RATE_LOCK = threading.Lock()
+_BITUNIX_LAST_CALL = [0.0]
+_BITUNIX_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='bitunix')   # استخر جدا: انتظارِ نرخ‌گیر استخر پیش‌فرض را نمی‌بندد
 
 
-def _kucoin_spot_kline_df(payload):
-    """KuCoin Spot: هر ردیف [time(ثانیه), open, close, high, low, volume, turnover] و جدید به قدیم است."""
-    if not isinstance(payload, dict) or payload.get('code') != '200000': return pd.DataFrame()
-    rows = []
-    for r in payload.get('data') or []:
-        if isinstance(r, (list, tuple)) and len(r) >= 6:
-            try: rows.append([int(float(r[0])) * 1000, r[1], r[3], r[4], r[2], r[5]])
-            except (TypeError, ValueError): continue
+def _bitunix_throttle():
+    with _BITUNIX_RATE_LOCK:
+        wait = _BITUNIX_LAST_CALL[0] + BITUNIX_MIN_GAP - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _BITUNIX_LAST_CALL[0] = time.time()
+
+
+def _bitunix_get(path, params=None, timeout=7):
+    _bitunix_throttle()
+    return requests.get(f'{BITUNIX_PUBLIC}{path}', params=params, timeout=timeout)
+
+
+def _parse_bitunix_pairs(payload):
+    """({نام پایه -> نماد}, {نام پایه -> اطلاعات}) فقط برای جفت‌های USDT با وضعیت OPEN."""
+    m, info = {}, {}
+    if not isinstance(payload, dict) or payload.get('code') != 0:
+        return m, info
+    for sdef in payload.get('data') or []:
+        if not isinstance(sdef, dict) or str(sdef.get('quote', '')).upper() != 'USDT':
+            continue
+        if str(sdef.get('symbolStatus', 'OPEN')).upper() != 'OPEN':
+            continue
+        base = str(sdef.get('base', '')).upper(); sym = sdef.get('symbol')
+        if base and sym:
+            m[base] = str(sym)
+            info[base] = {'min_volume': sdef.get('minTradeVolume'), 'base_precision': sdef.get('basePrecision'),
+                          'quote_precision': sdef.get('quotePrecision'), 'max_leverage': sdef.get('maxLeverage'),
+                          'api_supported': sdef.get('isApiSupported')}
+    return m, info
+
+
+def _bitunix_map_needs_refresh():
+    now = time.time(); m = _BITUNIX_SYMBOLS
+    return now >= m['next_try'] and (not m['map'] or now - m['ts'] >= BITUNIX_SYMBOLS_TTL)
+
+
+def _bitunix_refresh_symbol_map():
+    with _BITUNIX_LOCK:
+        if not _bitunix_map_needs_refresh():
+            return
+        try:
+            r = _bitunix_get('/api/v1/futures/market/trading_pairs', timeout=12)
+            if _status_trips_source(r.status_code):
+                _source_trip('bitunix')
+            elif r.ok:
+                m, info = _parse_bitunix_pairs(r.json())
+                if m:
+                    _BITUNIX_SYMBOLS.update(map=m, info=info, ts=time.time(), next_try=0.0)
+                    _source_ok('bitunix')
+                    return
+        except Exception as exc:
+            logger.debug('bitunix trading_pairs: %s', exc)
+            _source_fail('bitunix')
+        _BITUNIX_SYMBOLS['next_try'] = time.time() + 60
+
+
+def _bitunix_symbol_from_cache(base):
+    m = _BITUNIX_SYMBOLS['map']
+    if m:
+        return m.get(base)          # None = روی فیوچرز بیتیونیکس لیست نیست (یا OPEN نیست)
+    return f'{base}USDT'            # لیست نمادها در دسترس نبود: حدس ساده
+
+
+def _parse_bitunix_tickers(payload):
+    out = {}
+    if not isinstance(payload, dict) or payload.get('code') != 0:
+        return out
+    for t in payload.get('data') or []:
+        try:
+            px = float(t.get('lastPrice') or t.get('last') or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if px > 0 and t.get('symbol'):
+            out[str(t['symbol'])] = px
+    return out
+
+
+def _bitunix_prices():
+    """{نماد -> آخرین قیمت} برای همه‌ی نمادها با یک درخواست (کش ۳ ثانیه‌ای)."""
+    now = time.time()
+    with _BITUNIX_LOCK:
+        c = _BITUNIX_TICKERS
+        if c['map'] and now - c['ts'] < BITUNIX_TICKERS_TTL:
+            return c['map']
+        try:
+            r = _bitunix_get('/api/v1/futures/market/tickers')
+            if _status_trips_source(r.status_code):
+                _source_trip('bitunix')
+            elif r.ok:
+                m = _parse_bitunix_tickers(r.json())
+                if m:
+                    c.update(ts=now, map=m)
+                    return m
+        except Exception as exc:
+            logger.debug('bitunix tickers: %s', exc)
+            _source_fail('bitunix')
+        return c['map'] if c['map'] and now - c['ts'] < 30 else {}
+
+
+def _bitunix_price(base):
+    sym = _bitunix_symbol_from_cache(base)
+    if not sym:
+        return None
+    px = _bitunix_prices().get(sym)
+    if px:
+        return px
+    try:                                     # فهرست کلی خالی/ناقص بود: فقط همین نماد
+        r = _bitunix_get('/api/v1/futures/market/tickers', {'symbols': sym}, timeout=5)
+        if r.ok:
+            return _parse_bitunix_tickers(r.json()).get(sym)
+    except Exception as exc:
+        logger.debug('bitunix ticker %s: %s', sym, exc)
+    return None
+
+
+def _bitunix_kline_df(payload):
+    if not isinstance(payload, dict) or payload.get('code') != 0:
+        return pd.DataFrame()
+    rows = [[k.get('time'), k.get('open'), k.get('high'), k.get('low'), k.get('close'), k.get('baseVol')]
+            for k in (payload.get('data') or []) if isinstance(k, dict)]
     return _ohlcv_df(rows)
+
+
+def _bitunix_add_forming_candle(df, tf, price, now_ms=None):
+    """بیتیونیکس فقط کندل‌های بسته را برمی‌گرداند؛ یک کندل «در حال تشکیل» (باز شدن = کلوز آخرین کندل بسته،
+    بسته = قیمت لحظه‌ای) اضافه می‌شود تا ساختار با باینانس یکی باشد (آخرین ردیف = در حال تشکیل، iloc[-2] = آخرین بسته)."""
+    secs = BITUNIX_TF_SECONDS.get(tf)
+    if df is None or df.empty or not secs:
+        return df
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    last_t = int(df['timestamp'].iloc[-1])
+    if last_t + secs * 1000 > now_ms + 2000:        # اگر API (برخلاف مستندات) کندل در حال تشکیل را هم داده، دوباره اضافه نمی‌شود
+        return df
+    o = float(df['close'].iloc[-1])
+    p = float(price) if price and price > 0 else o
+    row = {'timestamp': last_t + secs * 1000, 'open': o, 'high': max(o, p), 'low': min(o, p), 'close': p, 'volume': 0.0}
+    return pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+
+
+def _bitunix_fetch_klines(symbol, tf, limit):
+    """(df, http_status, payload) یا None اگر این نماد/تایم‌فریم روی بیتیونیکس نیست. حداکثر ۲۰۰ کندل در هر درخواست؛
+    اگر بیشتر خواسته شود صفحه‌ی بعدی با endTime گرفته می‌شود (حداکثر ۵ صفحه)."""
+    base = _base_asset(symbol)
+    interval = BITUNIX_INTERVAL_MAP.get(tf); sym = _bitunix_symbol_from_cache(base)
+    if not interval or not sym:
+        return None
+    need = max(int(limit), 60); frames = []; end = None; payload = None; status = 200
+    for _ in range(5):
+        if need <= 0:
+            break
+        n = min(need, 200)
+        params = {'symbol': sym, 'interval': interval, 'limit': n}
+        if end:
+            params['endTime'] = end
+        r = _bitunix_get('/api/v1/futures/market/kline', params)
+        status = r.status_code
+        if not r.ok:
+            return pd.DataFrame(), status, None
+        payload = r.json()
+        df = _bitunix_kline_df(payload)
+        if df.empty:
+            break
+        frames.append(df); need -= len(df)
+        if len(df) < n:
+            break
+        end = int(df['timestamp'].iloc[0]) - 1
+    if not frames:
+        return pd.DataFrame(), status, payload
+    df = pd.concat(frames[::-1]).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    return _bitunix_add_forming_candle(df, tf, _bitunix_price(base)), status, payload
 
 
 def _klines_usable(df, min_rows=60):
@@ -2254,31 +2520,13 @@ def _kline_request(source, symbol, tf, limit):
         if not interval or not sym: return None
         return (f'{_binance_base_url(source)}/api/v3/klines',
                 {'symbol': sym, 'interval': interval, 'limit': min(max(int(limit), 60), 1000)}, _binance_kline_df)
-    if source == 'bybit':
-        interval = BYBIT_INTERVAL_MAP.get(tf)
-        if not interval: return None
-        return (f'{BYBIT_PUBLIC}/v5/market/kline',
-                {'category': 'spot', 'symbol': f'{base}USDT', 'interval': interval, 'limit': min(max(int(limit), 60), 1000)}, _bybit_kline_df)
-    if source == 'kucoin':
-        ktype = KUCOIN_TYPE_MAP.get(tf); secs = KUCOIN_TF_SECONDS.get(tf)
-        if not ktype or not secs: return None
-        end = int(time.time()); n = min(max(int(limit), 60) + 10, 1500)
-        return (f'{KUCOIN_PUBLIC}/market/candles',
-                {'symbol': f'{base}-USDT', 'type': ktype, 'startAt': end - secs * n, 'endAt': end}, _kucoin_spot_kline_df)
-    return None
+    return None            # بیتیونیکس مسیر جدا دارد (_bitunix_fetch_klines)
 
 
 def _price_from_payload(source, payload):
     try:
         if source in _BINANCE_SOURCES:
             return float(payload['price']) if isinstance(payload, dict) and 'price' in payload else None
-        if source == 'bybit':
-            if not isinstance(payload, dict) or payload.get('retCode') != 0: return None
-            lst = (payload.get('result') or {}).get('list') or []
-            return float(lst[0]['lastPrice']) if lst else None
-        if source == 'kucoin':
-            if not isinstance(payload, dict) or payload.get('code') != '200000': return None
-            return float((payload.get('data') or {}).get('price') or 0) or None
     except (KeyError, IndexError, TypeError, ValueError):
         return None
     return None
@@ -2289,11 +2537,7 @@ def _price_request(source, symbol):
     if source in _BINANCE_SOURCES:
         sym = _binance_symbol_from_cache(base)
         return (f'{_binance_base_url(source)}/api/v3/ticker/price', {'symbol': sym}) if sym else None
-    if source == 'bybit':
-        return (f'{BYBIT_PUBLIC}/v5/market/tickers', {'category': 'spot', 'symbol': f'{base}USDT'})
-    if source == 'kucoin':
-        return (f'{KUCOIN_PUBLIC}/market/orderbook/level1', {'symbol': f'{base}-USDT'})
-    return None
+    return None            # بیتیونیکس مسیر جدا دارد (_bitunix_price)
 
 
 def _fail_note(source, status, payload):
@@ -2306,7 +2550,7 @@ def _fail_note(source, status, payload):
 
 
 def get_klines(symbol, tf='5min', limit=200):
-    """کندل‌های اسپات را از اولین منبع سالم می‌گیرد (Binance -> Binance Vision -> Bybit -> KuCoin).
+    """کندل‌ها را از اولین منبع سالم می‌گیرد (Bitunix Futures -> Binance Spot -> Binance Vision).
     آخرین ردیف کندلِ در حال تشکیل است (استراتژی از iloc[-2] استفاده می‌کند)."""
     period = TIMEFRAME_MAP.get(tf, tf); key = f'{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
@@ -2317,24 +2561,38 @@ def get_klines(symbol, tf='5min', limit=200):
         if not _source_available(source): notes.append(f'{source}:down'); continue
         if _symbol_missing(source, base): notes.append(f'{source}:skipped_missing'); continue
         if source in _BINANCE_SOURCES and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
-        req = _kline_request(source, symbol, tf, limit)
-        if not req: notes.append(f'{source}:not_listed'); continue
-        url, params, parse = req
-        try:
-            r = requests.get(url, params=params, timeout=7)
-            if _status_trips_source(r.status_code):
-                _source_trip(source); notes.append(f'{source}:http_{r.status_code}'); continue
-            payload = r.json() if r.ok else None
-            df = parse(payload) if r.ok else pd.DataFrame()
+        payload = None
+        if source == 'bitunix':
+            if _bitunix_map_needs_refresh(): _bitunix_refresh_symbol_map()
+            try:
+                res = _bitunix_fetch_klines(symbol, tf, limit)
+            except Exception as exc:
+                logger.debug('bitunix kline %s: %s', symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+            if res is None: notes.append(f'{source}:not_listed'); continue
+            df, status, payload = res
+            if _status_trips_source(status):
+                _source_trip(source); notes.append(f'{source}:http_{status}'); continue
             _source_ok(source)
-        except Exception as exc:
-            logger.debug('%s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+        else:
+            req = _kline_request(source, symbol, tf, limit)
+            if not req: notes.append(f'{source}:not_listed'); continue
+            url, params, parse = req
+            try:
+                r = requests.get(url, params=params, timeout=7)
+                status = r.status_code
+                if _status_trips_source(status):
+                    _source_trip(source); notes.append(f'{source}:http_{status}'); continue
+                payload = r.json() if r.ok else None
+                df = parse(payload) if r.ok else pd.DataFrame()
+                _source_ok(source)
+            except Exception as exc:
+                logger.debug('%s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
         if _klines_usable(df):
             df = df.tail(max(int(limit), 60)).reset_index(drop=True)
             with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
             _DATA_NOTES.pop(base, None); _DATA_SOURCE_USED[base] = source
             return df
-        notes.append(_fail_note(source, r.status_code, payload) if len(df) < 60 or df.empty else f'{source}:bad_data')
+        notes.append(_fail_note(source, status, payload) if len(df) < 60 or df.empty else f'{source}:bad_data')
         _mark_symbol_missing(source, base)
     _DATA_NOTES[base] = notes
     return pd.DataFrame()
@@ -2347,27 +2605,43 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
         c = DATA_CACHE.get(key)
         if c and now - c['ts'] < DATA_CACHE_SECONDS: return c['df'].copy()
     base = _base_asset(symbol); notes = []
+    loop = asyncio.get_running_loop()
     if any(s in MARKET_DATA_SOURCES and _source_available(s) for s in _BINANCE_SOURCES) and _binance_map_needs_refresh():
         try: await asyncio.to_thread(_binance_refresh_symbol_map)   # درخواست sync را از event loop دور نگه می‌دارد
         except Exception as exc: logger.debug('binance symbol map refresh: %s', exc)
+    if 'bitunix' in MARKET_DATA_SOURCES and _source_available('bitunix') and _bitunix_map_needs_refresh():
+        try: await loop.run_in_executor(_BITUNIX_POOL, _bitunix_refresh_symbol_map)
+        except Exception as exc: logger.debug('bitunix symbol map refresh: %s', exc)
     await ASYNC_SEMAPHORE.acquire()
     try:
         for source in MARKET_DATA_SOURCES:
             if not _source_available(source): notes.append(f'{source}:down'); continue
             if _symbol_missing(source, base): notes.append(f'{source}:skipped_missing'); continue
-            req = _kline_request(source, symbol, tf, limit)
-            if not req: notes.append(f'{source}:not_listed'); continue
-            url, params, parse = req
-            try:
-                async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=7)) as r:
-                    status = r.status
-                    if _status_trips_source(status):
-                        _source_trip(source); notes.append(f'{source}:http_{status}'); continue
-                    payload = await r.json(content_type=None) if status == 200 else None
-                    df = parse(payload) if status == 200 else pd.DataFrame()
+            payload = None
+            if source == 'bitunix':
+                try:
+                    res = await loop.run_in_executor(_BITUNIX_POOL, _bitunix_fetch_klines, symbol, tf, limit)
+                except Exception as exc:
+                    logger.debug('async bitunix kline %s: %s', symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+                if res is None: notes.append(f'{source}:not_listed'); continue
+                df, status, payload = res
+                if _status_trips_source(status):
+                    _source_trip(source); notes.append(f'{source}:http_{status}'); continue
                 _source_ok(source)
-            except Exception as exc:
-                logger.debug('async %s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+            else:
+                req = _kline_request(source, symbol, tf, limit)
+                if not req: notes.append(f'{source}:not_listed'); continue
+                url, params, parse = req
+                try:
+                    async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=7)) as r:
+                        status = r.status
+                        if _status_trips_source(status):
+                            _source_trip(source); notes.append(f'{source}:http_{status}'); continue
+                        payload = await r.json(content_type=None) if status == 200 else None
+                        df = parse(payload) if status == 200 else pd.DataFrame()
+                    _source_ok(source)
+                except Exception as exc:
+                    logger.debug('async %s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
             if _klines_usable(df):
                 df = df.tail(max(int(limit), 60)).reset_index(drop=True)
                 with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
@@ -2378,10 +2652,8 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
     finally: ASYNC_SEMAPHORE.release()
     _DATA_NOTES[base] = notes
     return pd.DataFrame()
-
-
 def latest_price(symbol):
-    """قیمت لحظه‌ای اسپات برای PAPER (از همان زنجیره‌ی منابعِ کندل‌ها)."""
+    """قیمت لحظه‌ای برای PAPER (از همان زنجیره‌ی منابعِ کندل‌ها: Bitunix -> Binance)."""
     key = symbol.upper(); now = time.time()
     with DATA_LOCK:
         c = PRICE_CACHE.get(key)
@@ -2390,6 +2662,16 @@ def latest_price(symbol):
     for source in MARKET_DATA_SOURCES:
         if not _source_available(source) or _symbol_missing(source, base): continue
         if source in _BINANCE_SOURCES and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
+        if source == 'bitunix':
+            if _bitunix_map_needs_refresh(): _bitunix_refresh_symbol_map()
+            try:
+                price = _bitunix_price(base)
+            except Exception as exc:
+                logger.debug('price bitunix %s: %s', symbol, exc); _source_fail(source); continue
+            if price and price > 0:
+                with DATA_LOCK: PRICE_CACHE[key] = {'ts': now, 'price': price}
+                return price
+            continue
         req = _price_request(source, symbol)
         if not req: continue
         url, params = req
@@ -2440,7 +2722,7 @@ def futures_market(ex, symbol):
 
 def _fsym(ex, symbol):
     m,scale=futures_market(ex,symbol)
-    if not m: raise ExchangeStateError(f'نماد {symbol} روی فیوچرز USDⓈ-M باینانس وجود ندارد')
+    if not m: raise ExchangeStateError(f"نماد {symbol} روی {'Bitunix Futures' if getattr(ex,'is_bitunix',False) else 'فیوچرز USDⓈ-M باینانس'} وجود ندارد")
     return m['symbol'],scale,m
 
 
@@ -2569,12 +2851,13 @@ def _halt_real_trading(chat_id, reason):
     s['trading_halted_reason']=str(reason)[:500]
     s['scan_generation']=int(s.get('scan_generation',0))+1
     save_session(chat_id)
-    send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت حساب Binance، معامله جدید مجاز نیست.")
+    send_message(chat_id,f"🚨 *توقف ایمنی REAL فعال شد.*\n\n{reason}\n\nتا بررسی وضعیت حساب {real_venue_name(chat_id)}، معامله جدید مجاز نیست.")
 
 
 # ---- Binance: حالت پوزیشن / مارجین / اهرم --------------------------------
 def _ensure_one_way_mode(ex):
     """ربات با حالت One-way کار می‌کند (نه Hedge)."""
+    if getattr(ex,'is_bitunix',False): return ex.ensure_one_way()          # V3.44.57
     if getattr(ex,'_one_way_ok',False): return
     try:
         r=_binance_call(ex,'GET','positionSide/dual')
@@ -2648,14 +2931,39 @@ def cancel_all_protection(chat_id, symbol):
         ex=get_exchange(chat_id)
         if not ex: return
         _fsym_,_scale,m=_fsym(ex,symbol)
+        if getattr(ex,'is_bitunix',False): ex.cancel_position_tpsl(m['symbol']); return     # V3.44.57
         _cancel_algo(ex,m['id'])
     except Exception as exc:
         logger.debug('cancel protection %s: %s',symbol,exc)
 
 
+def _bitunix_set_protection(chat_id, ex, symbol, sl, tp, only_sl=False):
+    """TP/SL «پوزیشن» بیتیونیکس: کل حجمِ لحظه‌ی فعال‌شدن را با مارکت می‌بندد (معادل closePosition باینانس).
+    only_sl=True (جابه‌جایی استاپ): TP موجود حفظ می‌شود. بعد از ثبت، مقدار روی صرافی خوانده و با مقدار خواسته‌شده تطبیق داده می‌شود."""
+    try:
+        fsym,scale,m=_fsym(ex,symbol)
+        n=find_position(chat_id,symbol)
+        if not n or not n.get('position_id'): return False,'position not found'
+        trig={}
+        if sl: trig['sl']=ex.price_to_precision(fsym,float(sl)*scale)
+        if tp and not only_sl: trig['tp']=ex.price_to_precision(fsym,float(tp)*scale)
+        if not trig: return False,'no SL/TP given'
+        ex.set_position_tpsl(fsym,n['position_id'],sl=trig.get('sl'),tp=trig.get('tp'),keep_existing=bool(only_sl))
+        try:
+            got=ex.get_position_tpsl(m['id'],n['position_id'])
+            for key,val in trig.items():
+                if not _price_matches(got.get(key),val): return False,f'{key.upper()} verification mismatch: expected {val}'
+        except Exception as exc:
+            logger.warning('bitunix protection verification query failed for %s: %s',symbol,exc)
+        return True,'OK'
+    except Exception as exc:
+        return False,f'protection setup failed: {exc}'
+
+
 def set_protection(chat_id, symbol, sl, tp):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
+    if getattr(ex,'is_bitunix',False): return _bitunix_set_protection(chat_id,ex,symbol,sl,tp)       # V3.44.57
     try:
         fsym,scale,m=_fsym(ex,symbol)
         n=find_position(chat_id,symbol)
@@ -2688,6 +2996,7 @@ def set_protection(chat_id, symbol, sl, tp):
 def move_stop_loss(chat_id, symbol, sl):
     ex=get_exchange(chat_id)
     if not ex: return False,'exchange unavailable'
+    if getattr(ex,'is_bitunix',False): return _bitunix_set_protection(chat_id,ex,symbol,sl,None,only_sl=True)    # V3.44.57: ویرایش اتمی؛ شکست یعنی استاپ قبلی سر جایش است
     old=[]; mid=None; close_side=None
     try:
         fsym,scale,m=_fsym(ex,symbol)
@@ -2824,7 +3133,7 @@ def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rat
     if margin and leverage:
         est = estimate_trade_pnl(entry, sl, tp, side, margin, leverage)
         platform_txt = None
-        if platform_rate and platform_rate > 0 and est['tp_net'] > PLATFORM_FEE_MIN_PROFIT_USDT:
+        if PLATFORM_FEE_MODE == 'per_trade' and platform_rate and platform_rate > 0 and est['tp_net'] > PLATFORM_FEE_MIN_PROFIT_USDT:
             platform_txt = f"{est['tp_net'] * (1 - platform_rate / 100.0):+.2f}"
         if compact:
             lines.append(f"• 💰 TP: `{est['tp_net']:+.2f}` USDT")
@@ -2834,6 +3143,8 @@ def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rat
         lines.append(f"• 🛑 زیان در صورت SL: `{est['sl_net']:+.2f} USDT` (ناخالص `{est['sl_gross']:+.2f}` − کارمزد `{est['fee']:.2f}`)")
         if platform_txt is not None:
             lines.append(f"• سود خالص پس از سهم پلتفرم ({platform_rate:g}%): `{platform_txt} USDT`")
+        elif PLATFORM_FEE_MODE == 'daily' and platform_rate and platform_rate > 0:
+            lines.append(f"• سهم پلتفرم ({platform_rate:g}%) از این معامله کم نمی‌شود؛ آخر روز از مجموع سود روز حساب می‌شود.")
         lines.append(f"• حجم محاسبه‌شده: مارجین `{margin:.2f}` × اهرم `{leverage}`")
     if compact:
         lines.append(f"• خالص R: TP `{tp_r:+.2f}R` / SL `{sl_r:+.2f}R`")
@@ -2903,7 +3214,7 @@ def risk_guard(chat_id):
         equity=exchange_balance(chat_id) if s['trading_mode']=='REAL' else current_paper_equity(s)
     except ExchangeStateError as exc:
         if s['trading_mode']=='REAL':
-            _halt_real_trading(chat_id,f'اطلاعات حساب Binance قابل اعتماد نیست: {exc}')
+            _halt_real_trading(chat_id,f'اطلاعات حساب {real_venue_name(chat_id)} قابل اعتماد نیست: {exc}')
         return False
     reset_daily_if_needed(chat_id,equity)
     start=float(s['daily_start_equity'])
@@ -3011,11 +3322,13 @@ _TV_INTERVALS = {'1min': '1', '3min': '3', '5min': '5', '15min': '15', '30min': 
 
 
 def tradingview_symbol(symbol):
-    """نماد *اسپات* برای TradingView، مثلاً BINANCE:FILUSDT (بدون .P پرپچوال).
-    صرافی = منبعی که داده‌ی همین نماد از آن آمده (Binance/Bybit/KuCoin)؛ پیش‌فرض BINANCE."""
+    """نماد برای TradingView، مثلاً BINANCE:FILUSDT (اسپات، بدون .P).
+    صرافی = منبعی که داده‌ی همین نماد از آن آمده؛ برای بیتیونیکس (فیوچرز) BITUNIX:FILUSDT.P؛ پیش‌فرض BINANCE اسپات."""
     base = _base_asset(symbol)
-    exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(_DATA_SOURCE_USED.get(base, ''), 'BINANCE')
-    return f'{exchange}:{base}USDT'
+    src = _DATA_SOURCE_USED.get(base, '')
+    exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(src, 'BINANCE')
+    suffix = '.P' if (not TRADINGVIEW_EXCHANGE and src == 'bitunix') else ''
+    return f'{exchange}:{base}USDT{suffix}'
 
 
 def tradingview_chart_url(symbol, timeframe='5min'):
@@ -5473,6 +5786,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         pass
     s=get_session(chat_id)
+    # V3.44.61: کارمزد روزانه پرداخت‌نشده → ورود جدید (حتی دستی/دستیار/معلق) ممنوع؛ پوزیشن‌های باز همچنان مدیریت می‌شوند
+    if is_fee_blocked(chat_id):
+        return _blk(chat_id, '⛔ حساب به‌دلیل کارمزد پرداخت‌نشده مسدود است؛ ورود جدید ممکن نیست')
     # V3.43.15: ۳۰ دقیقه‌ی آخر کندل ۴ ساعته - هیچ معامله‌ای باز نمی‌شود (حتی force/دستی/دستیار)
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
@@ -5696,10 +6012,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if s['trading_mode']=='REAL':
         ex=get_exchange(chat_id)
         if not ex:
-            send_message(chat_id,'❌ حساب Binance این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
+            send_message(chat_id,f'❌ حساب {real_venue_name(chat_id)} این کاربر پیکربندی نشده یا اتصال برقرار نیست.'); return False
         market,scale=futures_market(ex,symbol)
         if not market:
-            send_message(chat_id,f'❌ نماد `{symbol}` روی فیوچرز USDⓈ-M باینانس وجود ندارد (یا غیرفعال است).'); return False
+            send_message(chat_id,f"❌ نماد `{symbol}` روی {'Bitunix Futures' if getattr(ex,'is_bitunix',False) else 'فیوچرز USDⓈ-M باینانس'} وجود ندارد (یا غیرفعال است)."); return False
         sym=market['symbol']
         try:
             leverage=_binance_prepare_symbol(ex,sym,int(leverage)); trade['leverage']=leverage
@@ -5712,7 +6028,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         min_amt=float((_lim.get('amount') or {}).get('min') or 0)
         min_cost=float((_lim.get('cost') or {}).get('min') or 0)
         if amount<=0 or (min_amt and contracts<min_amt) or (min_cost and amount*price<min_cost):
-            send_message(chat_id,f'❌ حجم/ارزش معامله `{symbol}` از حداقل مجاز باینانس کمتر است (حداقل ارزش سفارش: `{min_cost or "-"}` USDT).'); return False
+            send_message(chat_id,f'❌ حجم/ارزش معامله `{symbol}` از حداقل مجاز صرافی کمتر است (حداقل ارزش سفارش: `{min_cost or "-"}` USDT).'); return False
         try:
             norm_price = normalize_price(chat_id, symbol, price)
             _side_ex='buy' if side_long(side) else 'sell'
@@ -5794,6 +6110,10 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 except Exception as close_exc:
                     _halt_real_trading(chat_id, f'توقف هنگام ورود رخ داد ولی بستن {symbol} ناموفق بود: {close_exc}')
                 return False
+        except BitunixOrderRejected as exc:
+            # V3.44.57: بیتیونیکس صریحاً سفارش را رد کرد (سفارشی ساخته نشد، مثلاً موجودی/حداقل حجم) → ربات متوقف نمی‌شود
+            send_message(chat_id, f'❌ سفارش REAL `{symbol}` توسط {real_venue_name(chat_id)} رد شد: `{exc.msg or exc.code}`', parse_mode=None)
+            return False
         except Exception as exc:
             _halt_real_trading(chat_id, f'وضعیت سفارش REAL {symbol} قابل تأیید نیست: {exc}')
             send_message(chat_id, f'❌ سفارش REAL `{symbol}` به‌طور قطعی تأیید نشد؛ ربات متوقف شد.', parse_mode=None)
@@ -6226,7 +6546,8 @@ def is_admin(chat_id):
 ADMIN_TESTS_TIMEOUT_SEC = 180
 ADMIN_TESTS_CORE = ('touch_vote_selftest.py', 'touch_fixed_dir_selftest.py', 'ylevel_vote_selftest.py', 'preset_selftest.py',
                     'entry_menu_selftest.py', 'touch_card_order_selftest.py', 'fav_confirm_selftest.py', 'fav_max_selftest.py',
-                    'keep_closed_cards_selftest.py', 'btc_guard_selftest.py')
+                    'keep_closed_cards_selftest.py', 'btc_guard_selftest.py', 'pd_level_guard_selftest.py', 'role_lock_selftest.py',
+                    'daily_fee_selftest.py')
 _ADMIN_TESTS_STATE = {'running': False}
 
 
@@ -6351,6 +6672,8 @@ def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
     REAL mode records the payable fee in the ledger; actual wallet transfer is intentionally
     separate and requires an explicitly configured exchange settlement mechanism.
     '''
+    if PLATFORM_FEE_MODE != 'per_trade':
+        return 0.0      # V3.44.61: حالت روزانه - از تک‌تک معاملات کارمزد کم نمی‌شود (فاکتور آخر روز: fee_daily_tick)
     try:
         trade_id = str(pos.get('trade_id') or '')
         profit = float(net_profit_before_platform_fee or 0.0)
@@ -6390,6 +6713,8 @@ def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
 
 
 def fee_report(chat_id, period='all'):
+    if PLATFORM_FEE_MODE == 'daily':
+        return _fee_report_daily(chat_id, period)      # V3.44.61
     now=time.time()
     since=0
     if period=='day': since=now-86400
@@ -6405,6 +6730,8 @@ def fee_report(chat_id, period='all'):
 
 
 def admin_fee_report(period='all'):
+    if PLATFORM_FEE_MODE == 'daily':
+        return _admin_fee_report_daily(period)      # V3.44.61
     now=time.time(); since=0
     if period=='day': since=now-86400
     elif period=='week': since=now-7*86400
@@ -6433,6 +6760,488 @@ def admin_set_fee_command(chat_id, text):
         send_message(chat_id,f'✅ نرخ کارمزد کاربر `{uid}` روی `{rate:.2f}%` تنظیم شد.',parse_mode='Markdown')
     except Exception as exc:
         send_message(chat_id,f'❌ خطا: `{exc}`',parse_mode='Markdown')
+
+
+# ===== V3.44.61: کارمزد روزانه (فاکتور آخر روز + مهلت پرداخت + مسدودسازی) =====
+# منطق محاسبه و متن پیام‌ها در daily_fee.py است؛ اینجا فقط دیتابیس، تلگرام و حلقه‌ی زمانی.
+_FEE_STATE_LOCK = RLock()
+_FEE_BLOCKED = set()             # chat_id کاربرانی که فاکتور OVERDUE دارند
+_FEE_PROT = {}                   # chat_id -> {message_id} پیام‌های فاکتور پرداخت‌نشده (از پاک‌سازی ۳ دقیقه‌ای/روزانه مستثنا)
+_FEE_ADMIN_MSG = {}              # inv_id -> [(admin_chat_id, message_id)] پیام «اعلام واریز» تا تایید/رد
+_FEE_CLAIM_TS = {}
+_FEE_BLOCK_NOTICE_TS = {}
+_FEE_OPEN = ('PENDING', 'OVERDUE')
+_FEE_STATUS_FA = {'PENDING': 'در انتظار پرداخت', 'OVERDUE': 'مهلت گذشته (مسدود)', 'PAID': 'پرداخت‌شده', 'WAIVED': 'بخشوده'}
+# حساب مسدود: فقط دیدن/بستن پوزیشن‌ها و بخش کارمزد باز است (ورود جدید در _execute_trade_unlocked بسته می‌شود).
+_FEE_BLOCK_ALLOW_PREFIXES = ('/fee_', '/my_fee', '/open_positions', '/positions', '/close_', '/confirm_close', '/emergency_close',
+                             '/confirm_emergency', '/pclose_', '/manage_', '/cfm_', '/cfmno_', '/show_chart_', '/view_chart_',
+                             '/edit_sl_', '/edit_tp_')
+
+
+def _fee_tz():
+    return _df.get_tz(FEE_DAY_TZ)
+
+
+def _fee_meta_get(key):
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            row = conn.execute('SELECT value FROM bot_meta WHERE key=?', (key,)).fetchone()
+        finally:
+            conn.close()
+    return str(row[0]) if row and row[0] is not None else ''
+
+
+def _fee_meta_set(key, value):
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('PRAGMA busy_timeout=15000')
+            conn.execute('INSERT INTO bot_meta(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at',
+                         (key, str(value), int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def fee_payment_account():
+    try:
+        v = _fee_meta_get('fee_payment_account')
+    except Exception:
+        logger.exception('fee account read failed')
+        v = ''
+    return v or FEE_PAYMENT_ACCOUNT_ENV
+
+
+def fee_reload_state():
+    """مجموعه‌ی کاربران مسدود و پیام‌های محافظت‌شده را از دیتابیس دوباره می‌سازد (شروع برنامه و هر تغییر وضعیت فاکتور)."""
+    blocked = set(); prot = {}
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                rows = conn.execute("SELECT chat_id,status,msg_ids FROM fee_invoices WHERE status IN ('PENDING','OVERDUE')").fetchall()
+            finally:
+                conn.close()
+        for cid, st, mids in rows:
+            if st == 'OVERDUE':
+                blocked.add(int(cid))
+            for m in str(mids or '').split(','):
+                if m.strip().isdigit():
+                    prot.setdefault(int(cid), set()).add(int(m))
+    except Exception:
+        logger.exception('fee state reload failed')
+        return
+    with _FEE_STATE_LOCK:
+        _FEE_BLOCKED.clear(); _FEE_BLOCKED.update(blocked)
+        _FEE_PROT.clear(); _FEE_PROT.update(prot)
+
+
+def is_fee_blocked(chat_id):
+    if PLATFORM_FEE_MODE != 'daily':
+        return False
+    try:
+        cid = int(chat_id)
+    except Exception:
+        return False
+    if cid in ADMIN_CHAT_IDS:
+        return False
+    with _FEE_STATE_LOCK:
+        return cid in _FEE_BLOCKED
+
+
+def fee_protected_ids(chat_id):
+    try:
+        cid = int(chat_id)
+    except Exception:
+        return set()
+    with _FEE_STATE_LOCK:
+        out = set(_FEE_PROT.get(cid, ()))
+        for lst in _FEE_ADMIN_MSG.values():
+            for aid, mid in lst:
+                if aid == cid:
+                    out.add(mid)
+    return out
+
+
+def fee_block_allows(data):
+    d = str(data or '').strip()
+    if not d:
+        return False
+    if d.startswith(_FEE_BLOCK_ALLOW_PREFIXES):
+        return True
+    dl = d.replace('\u200c', '')
+    return any(w in dl for w in ('پوزیشن', 'بستن', 'اضطراری'))      # دکمه‌های کیبورد ثابت: پوزیشن‌ها / بستن همه / بستن اضطراری
+
+
+def _fee_claim_keyboard(inv_id):
+    return {'inline_keyboard': [[{'text': '✅ واریز کردم', 'callback_data': f'/fee_claim_{int(inv_id)}'}]]}
+
+
+def _fee_add_msg(inv_id, chat_id, mid):
+    if not mid:
+        return
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('PRAGMA busy_timeout=15000')
+            row = conn.execute('SELECT msg_ids FROM fee_invoices WHERE id=?', (int(inv_id),)).fetchone()
+            new = (str(row[0] or '') + ',' + str(int(mid))).strip(',') if row else str(int(mid))
+            conn.execute('UPDATE fee_invoices SET msg_ids=? WHERE id=?', (new, int(inv_id)))
+            conn.commit()
+        finally:
+            conn.close()
+    with _FEE_STATE_LOCK:
+        _FEE_PROT.setdefault(int(chat_id), set()).add(int(mid))
+
+
+def _fee_send(chat_id, text, markup=None, inv_id=None):
+    """پیام کارمزد را به کاربر می‌فرستد و (اگر inv_id داده شد) شناسه‌اش را محافظت می‌کند تا تا تسویه حذف نشود."""
+    try:
+        _LAST_SENT.mid = None
+        ok = send_message(chat_id, text, markup, keep=True)
+        mid = getattr(_LAST_SENT, 'mid', None)
+        if inv_id and mid:
+            _fee_add_msg(inv_id, chat_id, mid)
+        return ok
+    except Exception:
+        logger.exception('fee message send failed chat=%s', chat_id)
+        return False
+
+
+def _fee_notify_admins(text, markup=None, inv_id=None):
+    for aid in list(ADMIN_CHAT_IDS):
+        try:
+            _LAST_SENT.mid = None
+            send_message(aid, text, markup, keep=True)
+            mid = getattr(_LAST_SENT, 'mid', None)
+            if inv_id and mid:
+                with _FEE_STATE_LOCK:
+                    _FEE_ADMIN_MSG.setdefault(int(inv_id), []).append((int(aid), int(mid)))
+        except Exception:
+            logger.exception('fee admin notice failed admin=%s', aid)
+
+
+def fee_issue_for_day(day):
+    """فاکتور روز `day` را برای همه‌ی کاربران (غیرادمین) می‌سازد و پیام می‌فرستد. خروجی: [(chat_id, day, profit, fee)]"""
+    tz = _fee_tz(); start, end = _df.day_bounds(day, tz)
+    account = fee_payment_account()
+    made = []
+    for cid, s in list(USER_SESSIONS.items()):
+        try:
+            if int(cid) in ADMIN_CHAT_IDS:
+                continue
+            profit, n = _df.day_profit(list(s.get('closed_positions') or []), start, end, FEE_INCLUDE_PAPER)
+            if n <= 0:
+                continue
+            rate = get_user_fee_rate(cid)
+            fee = _df.compute_fee(profit, rate, PLATFORM_FEE_MIN_PROFIT_USDT)
+            if fee <= 0:
+                continue
+            now = time.time()
+            due = _df.due_timestamp(now, tz, FEE_DUE_HOUR, FEE_MIN_GRACE_HOURS)
+            with DB_LOCK:
+                conn = db_connect()
+                try:
+                    conn.execute('PRAGMA busy_timeout=15000')
+                    cur = conn.execute('INSERT OR IGNORE INTO fee_invoices(chat_id,day,profit_usdt,fee_rate_pct,fee_usdt,trades,status,created_at,due_ts) VALUES(?,?,?,?,?,?,?,?,?)',
+                                       (int(cid), day, float(profit), float(rate), float(fee), int(n), 'PENDING', now, due))
+                    is_new = cur.rowcount > 0
+                    row = conn.execute('SELECT id FROM fee_invoices WHERE chat_id=? AND day=?', (int(cid), day)).fetchone()
+                    conn.commit()
+                finally:
+                    conn.close()
+            if not is_new or not row:
+                continue
+            inv_id = int(row[0])
+            made.append((int(cid), day, float(profit), float(fee)))
+            _fee_send(cid, _df.invoice_message(day, profit, rate, fee, due, tz, account, FEE_DAY_TZ), _fee_claim_keyboard(inv_id), inv_id)
+            audit_event(cid, f'fee-{day}', 'fee_invoice_issued', {'day': day, 'profit_usdt': profit, 'fee_usdt': fee, 'rate_pct': rate, 'trades': n, 'due_ts': due})
+        except Exception:
+            logger.exception('fee invoice failed chat=%s day=%s', cid, day)
+    return made
+
+
+def fee_process_overdue():
+    """فاکتورهای PENDING که مهلتشان گذشته → OVERDUE و مسدودسازی کاربر."""
+    now = time.time()
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute("SELECT id,chat_id,day,fee_usdt FROM fee_invoices WHERE status='PENDING' AND due_ts<=?", (now,)).fetchall()
+        finally:
+            conn.close()
+    if not rows:
+        return
+    changed = []
+    for inv_id, cid, day, fee in rows:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                conn.execute('PRAGMA busy_timeout=15000')
+                cur = conn.execute("UPDATE fee_invoices SET status='OVERDUE' WHERE id=? AND status='PENDING'", (int(inv_id),))
+                conn.commit()
+                if cur.rowcount > 0:
+                    changed.append((int(inv_id), int(cid), day, float(fee)))
+            finally:
+                conn.close()
+    if not changed:
+        return
+    fee_reload_state()
+    account = fee_payment_account()
+    for inv_id, cid, day, fee in changed:
+        _fee_send(cid, _df.blocked_message(day, fee, account), _fee_claim_keyboard(inv_id), inv_id)
+        audit_event(cid, f'fee-{day}', 'fee_user_blocked', {'day': day, 'fee_usdt': fee})
+    lines = ['⛔ *کاربران مسدودشده به‌خاطر کارمزد پرداخت‌نشده:*'] + [f'• `{cid}` — روز {day} — `{fee:.2f} USDT`' for _i, cid, day, fee in changed]
+    _fee_notify_admins('\n'.join(lines))
+
+
+def fee_daily_tick():
+    tz = _fee_tz()
+    today = _df.day_key(time.time(), tz)
+    yesterday = _df.shift_day(today, -1)
+    last = _fee_meta_get('fee_invoiced_through')
+    if not last:
+        # اولین اجرا: از روزهای قبل فاکتور نمی‌سازیم؛ از «دیروز» به بعد حساب می‌شود.
+        _fee_meta_set('fee_invoiced_through', yesterday); last = yesterday
+    if last < yesterday:
+        for day in _df.days_after(last, yesterday, 7):
+            made = fee_issue_for_day(day)
+            _fee_meta_set('fee_invoiced_through', day)
+            if made:
+                total = sum(m[3] for m in made)
+                warn = '' if fee_payment_account() else '\n⚠️ حساب پرداخت تنظیم نشده است: `/set_fee_account متن_حساب`'
+                _fee_notify_admins(f'🧾 *فاکتور کارمزد روز {day}*\n• تعداد کاربر: `{len(made)}`\n• جمع کارمزد: `{total:.2f} USDT`\n• مهلت پرداخت: ساعت `{FEE_DUE_HOUR:02d}:00` ({FEE_DAY_TZ}){warn}')
+        _fee_meta_set('fee_invoiced_through', yesterday)
+    fee_process_overdue()
+
+
+def _fee_daily_loop():
+    if PLATFORM_FEE_MODE != 'daily':
+        logger.info('PLATFORM_FEE_MODE=%s - فاکتور روزانه‌ی کارمزد خاموش است.', PLATFORM_FEE_MODE)
+        return
+    logger.info('کارمزد روزانه فعال: مرز روز=%s، مهلت پرداخت=%02d:00', FEE_DAY_TZ, FEE_DUE_HOUR)
+    while True:
+        try:
+            fee_daily_tick()
+        except Exception:
+            logger.exception('fee daily tick failed')
+        time.sleep(30)
+
+
+def fee_settle_invoices(target, status='PAID', day=None, inv_id=None, notify_user=True):
+    """فاکتورهای باز کاربر را PAID/WAIVED می‌کند. خروجی: [(id, day, fee)]"""
+    sel = "SELECT id,day,fee_usdt FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE')"
+    args = [int(target)]
+    if day:
+        sel += ' AND day=?'; args.append(day)
+    if inv_id:
+        sel += ' AND id=?'; args.append(int(inv_id))
+    done = []
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('PRAGMA busy_timeout=15000')
+            rows = conn.execute(sel, tuple(args)).fetchall()
+            for r_id, r_day, r_fee in rows:
+                cur = conn.execute("UPDATE fee_invoices SET status=?, paid_at=? WHERE id=? AND status IN ('PENDING','OVERDUE')", (status, time.time(), int(r_id)))
+                if cur.rowcount > 0:
+                    done.append((int(r_id), r_day, float(r_fee)))
+            conn.commit()
+        finally:
+            conn.close()
+    if not done:
+        return done
+    with _FEE_STATE_LOCK:
+        for r_id, _d, _f in done:
+            _FEE_ADMIN_MSG.pop(r_id, None)
+    fee_reload_state()
+    for r_id, r_day, r_fee in done:
+        audit_event(target, f'fee-{r_day}', 'fee_invoice_' + status.lower(), {'day': r_day, 'fee_usdt': r_fee})
+    if notify_user:
+        still = is_fee_blocked(target)
+        for r_id, r_day, r_fee in done:
+            if status == 'PAID':
+                send_message(target, _df.paid_message(r_day, r_fee, still))
+            else:
+                send_message(target, f'ℹ️ کارمزد روز {r_day} توسط ادمین بخشیده شد.' + ('' if still else '\n✅ حساب شما فعال است.'))
+    return done
+
+
+def fee_claim(chat_id, inv_id):
+    """دکمه‌ی «✅ واریز کردم» کاربر: برای ادمین درخواست تایید می‌فرستد."""
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            row = conn.execute('SELECT chat_id,day,fee_usdt,status FROM fee_invoices WHERE id=?', (int(inv_id),)).fetchone()
+            urow = conn.execute('SELECT username,first_name FROM users WHERE chat_id=?', (int(chat_id),)).fetchone()
+        finally:
+            conn.close()
+    if not row or int(row[0]) != int(chat_id):
+        send_message(chat_id, '❌ این فاکتور پیدا نشد.'); return
+    _cid, day, fee, status = row
+    if status not in _FEE_OPEN:
+        send_message(chat_id, 'ℹ️ این فاکتور قبلاً تسویه شده است.'); return
+    now = time.time()
+    if now - _FEE_CLAIM_TS.get(int(inv_id), 0) < 300:
+        send_message(chat_id, '⏳ درخواست شما قبلاً برای ادمین ارسال شده؛ لطفاً منتظر تایید بمانید.'); return
+    _FEE_CLAIM_TS[int(inv_id)] = now
+    name = ' '.join(x for x in ((urow or (None, None))[1],) if x) or 'بدون نام'
+    uname = f'@{urow[0]}' if urow and urow[0] else '—'
+    text = (f'🧾 *اعلام واریز کارمزد*\n\nکاربر: `{name}` — `{uname}`\nChat ID: `{chat_id}`\nروز: `{day}`\nمبلغ: `{float(fee):.2f} USDT`\n'
+            f'وضعیت: `{_FEE_STATUS_FA.get(status, status)}`\n\nبعد از بررسی حساب خودتان، تایید را بزنید.')
+    markup = {'inline_keyboard': [[{'text': f'✅ تایید دریافت #{int(inv_id)}', 'callback_data': f'/fee_ok_{int(inv_id)}'}]]}
+    _fee_notify_admins(text, markup, inv_id=int(inv_id))
+    send_message(chat_id, '✅ اعلام واریز شما برای ادمین ارسال شد؛ بعد از تایید ادمین، پیام فعال‌سازی می‌گیرید.')
+
+
+def fee_notify_blocked(chat_id):
+    """وقتی کاربر مسدود دکمه/دستور غیرمجاز می‌زند: یادآوری بدهی (حداکثر هر ۲۰ ثانیه)."""
+    now = time.time()
+    if now - _FEE_BLOCK_NOTICE_TS.get(int(chat_id), 0) < 20:
+        return
+    _FEE_BLOCK_NOTICE_TS[int(chat_id)] = now
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute("SELECT id,day,fee_usdt,status FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE') ORDER BY day LIMIT 5", (int(chat_id),)).fetchall()
+        finally:
+            conn.close()
+    acct = fee_payment_account()
+    lines = ['⛔ *حساب شما به‌دلیل کارمزد پرداخت‌نشده مسدود است.*', '']
+    lines += [f'• روز `{d}` — `{float(f):.2f} USDT` — {_FEE_STATUS_FA.get(st, st)}' for _i, d, f, st in rows]
+    if acct:
+        lines += ['', 'حساب ادمین:', f'`{acct.replace(chr(96), chr(39))}`']
+    lines += ['', 'بعد از واریز، دکمه‌ی زیر را بزنید. (دیدن و بستن پوزیشن‌ها همچنان آزاد است.)']
+    send_message(chat_id, '\n'.join(lines), _fee_claim_keyboard(rows[0][0]) if rows else None)
+
+
+def fee_debts(limit=8):
+    """(متن، کیبورد) فاکتورهای پرداخت‌نشده برای ادمین."""
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            rows = conn.execute('''SELECT i.id,i.chat_id,i.day,i.fee_usdt,i.status,i.due_ts,u.username FROM fee_invoices i
+                                   LEFT JOIN users u ON u.chat_id=i.chat_id WHERE i.status IN ('PENDING','OVERDUE')
+                                   ORDER BY i.due_ts LIMIT 30''').fetchall()
+        finally:
+            conn.close()
+    tz = _fee_tz()
+    total = sum(float(r[3]) for r in rows)
+    lines = ['📋 *کارمزدهای پرداخت‌نشده*', '', f'• تعداد: `{len(rows)}` | جمع: `{total:.2f} USDT`', '']
+    for i_id, cid, day, fee, st, due, uname in rows:
+        due_txt = datetime.fromtimestamp(float(due), tz).strftime('%m-%d %H:%M')
+        lines.append(f"• #{i_id} `{cid}`{(' @' + uname) if uname else ''} — {day} — `{float(fee):.2f}` — {_FEE_STATUS_FA.get(st, st)} (مهلت {due_txt})")
+    if not rows:
+        lines.append('هیچ بدهی بازی وجود ندارد ✅')
+    acct = fee_payment_account()
+    lines += ['', f"حساب پرداخت: `{acct}`" if acct else '⚠️ حساب پرداخت تنظیم نشده: `/set_fee_account متن_حساب`',
+              'دستورها: `/fee_paid USER_ID [YYYY-MM-DD]` | `/fee_waive USER_ID [YYYY-MM-DD]`']
+    rows_kb = [[{'text': f'✅ تایید #{r[0]} ({r[1]})', 'callback_data': f'/fee_ok_{r[0]}'}] for r in rows[:limit]]
+    rows_kb.append([{'text': '👑 بازگشت به کارمزد', 'callback_data': '/admin_fee_menu'}])
+    return '\n'.join(lines), {'inline_keyboard': rows_kb}
+
+
+def fee_handle_command(cmd, chat_id, message_id=None):
+    """دستورهای کارمزد روزانه. True = دستور مال این بخش بود و اجرا شد."""
+    c = str(cmd or '').strip()
+    m = re.match(r'^/fee_claim_(\d+)$', c)
+    if m:
+        fee_claim(chat_id, int(m.group(1))); return True
+    is_ok = re.match(r'^/fee_ok_(\d+)$', c)
+    first = c.split(None, 1)[0] if c else ''
+    if not (is_ok or c == '/fee_debts' or first in ('/fee_paid', '/fee_waive', '/set_fee_account')):
+        return False
+    if not is_admin(chat_id):
+        send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return True
+    if is_ok:
+        inv_id = int(is_ok.group(1))
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT chat_id FROM fee_invoices WHERE id=?', (inv_id,)).fetchone()
+            finally:
+                conn.close()
+        if not row:
+            send_message(chat_id, '❌ فاکتور پیدا نشد.'); return True
+        done = fee_settle_invoices(int(row[0]), 'PAID', inv_id=inv_id)
+        send_message(chat_id, f'✅ فاکتور #{inv_id} تایید شد (کاربر `{row[0]}`).' if done else f'ℹ️ فاکتور #{inv_id} قبلاً تسویه شده بود.')
+        return True
+    if c == '/fee_debts':
+        text, mk = fee_debts()
+        edit_page(chat_id, text, mk, message_id); return True
+    if first == '/set_fee_account':
+        acct = c[len('/set_fee_account'):].strip()
+        if not acct:
+            cur = fee_payment_account()
+            send_message(chat_id, ('حساب فعلی: `' + cur.replace(chr(96), chr(39)) + '`\n' if cur else 'حسابی تنظیم نشده.\n') + 'فرمت: `/set_fee_account متن_حساب_یا_آدرس`')
+            return True
+        _fee_meta_set('fee_payment_account', acct)
+        send_message(chat_id, '✅ حساب پرداخت ذخیره شد و در پیام‌های فاکتور بعدی نمایش داده می‌شود.')
+        return True
+    parts = c.split()
+    status = 'PAID' if first == '/fee_paid' else 'WAIVED'
+    if len(parts) not in (2, 3) or not parts[1].lstrip('-').isdigit():
+        send_message(chat_id, f'فرمت: `{first} USER_CHAT_ID [YYYY-MM-DD]`\nبدون تاریخ = همه‌ی فاکتورهای باز آن کاربر.')
+        return True
+    day = parts[2] if len(parts) == 3 else None
+    if day:
+        try:
+            datetime.strptime(day, '%Y-%m-%d')
+        except Exception:
+            send_message(chat_id, '❌ تاریخ باید به شکل `YYYY-MM-DD` باشد.'); return True
+    done = fee_settle_invoices(int(parts[1]), status, day=day)
+    word = 'تایید پرداخت' if status == 'PAID' else 'بخشیده'
+    send_message(chat_id, f'✅ {len(done)} فاکتور {word} شد (کاربر `{parts[1]}`).' if done else 'ℹ️ فاکتور بازی برای این کاربر/روز پیدا نشد.')
+    return True
+
+
+def _fee_since(period):
+    now = time.time()
+    return {'day': now - 86400, 'week': now - 7 * 86400, 'month': now - 30 * 86400}.get(period, 0)
+
+
+def _fee_report_daily(chat_id, period):
+    since = _fee_since(period)
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            tot = conn.execute("SELECT COALESCE(SUM(profit_usdt),0),COALESCE(SUM(fee_usdt),0),COUNT(*) FROM fee_invoices WHERE chat_id=? AND created_at>=? AND status!='WAIVED'", (int(chat_id), since)).fetchone()
+            unpaid = conn.execute("SELECT COALESCE(SUM(fee_usdt),0) FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE')", (int(chat_id),)).fetchone()
+            rows = conn.execute('SELECT day,profit_usdt,fee_usdt,status FROM fee_invoices WHERE chat_id=? AND created_at>=? ORDER BY day DESC LIMIT 5', (int(chat_id), since)).fetchall()
+        finally:
+            conn.close()
+    profit, fee, count = tot or (0, 0, 0)
+    lines = ['💰 *کارمزد پلتفرم (روزانه)*', '', f'• بازه: `{period}`', f'• روزهای فاکتورشده: `{count}`',
+             f'• سود روزهای فاکتورشده: `{profit:.2f} USDT`', f'• کارمزد این بازه: `{fee:.2f} USDT`',
+             f'• ⚠️ پرداخت‌نشده: `{float((unpaid or (0,))[0]):.2f} USDT`', f'• نرخ فعلی: `{get_user_fee_rate(chat_id):.2f}%`']
+    if rows:
+        lines += ['', '*آخرین فاکتورها:*'] + [f'• {d}: سود `{float(p):+.2f}` → کارمزد `{float(f):.2f}` — {_FEE_STATUS_FA.get(st, st)}' for d, p, f, st in rows]
+    return '\n'.join(lines)
+
+
+def _admin_fee_report_daily(period):
+    since = _fee_since(period)
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            tot = conn.execute("SELECT COALESCE(SUM(fee_usdt),0),COUNT(*),COUNT(DISTINCT chat_id) FROM fee_invoices WHERE created_at>=? AND status!='WAIVED'", (since,)).fetchone()
+            paid = conn.execute("SELECT COALESCE(SUM(fee_usdt),0) FROM fee_invoices WHERE created_at>=? AND status='PAID'", (since,)).fetchone()
+            unpaid = conn.execute("SELECT COALESCE(SUM(fee_usdt),0),COUNT(*) FROM fee_invoices WHERE status IN ('PENDING','OVERDUE')").fetchone()
+            rows = conn.execute("SELECT chat_id,COALESCE(SUM(fee_usdt),0),COUNT(*) FROM fee_invoices WHERE created_at>=? AND status!='WAIVED' GROUP BY chat_id ORDER BY SUM(fee_usdt) DESC LIMIT 20", (since,)).fetchall()
+        finally:
+            conn.close()
+    fee, count, users = tot or (0, 0, 0)
+    with _FEE_STATE_LOCK:
+        nblocked = len(_FEE_BLOCKED)
+    lines = [f'👑 *گزارش درآمد پلتفرم (روزانه) — {period}*', '', f'• کارمزد فاکتورشده: `{fee:.2f} USDT` ({count} فاکتور)',
+             f'• دریافت‌شده: `{float((paid or (0,))[0]):.2f} USDT`',
+             f'• پرداخت‌نشده (کل): `{float((unpaid or (0, 0))[0]):.2f} USDT` در `{int((unpaid or (0, 0))[1])}` فاکتور',
+             f'• کاربران مسدود: `{nblocked}`', f'• کاربران دارای فاکتور: `{users}`', '', '*برترین کاربران:*']
+    lines += [f'• `{uid}` → `{float(amt):.2f} USDT` ({cnt} فاکتور)' for uid, amt, cnt in rows] or ['• هنوز فاکتوری ثبت نشده است.']
+    lines += ['', 'لیست بدهکاران: /fee_debts']
+    return '\n'.join(lines)
+# ===== END کارمزد روزانه =====
 
 
 def partial_close_position(chat_id,pos,price,frac_orig,label=''):
@@ -6705,17 +7514,44 @@ def _daily_pnl_day_start_ts():
     return datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
+def _user_first_seen_ts(chat_id):
+    """زمان اولین فعالیت کاربر (جدول users)؛ اگر نبود None."""
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT first_seen FROM users WHERE chat_id=?', (int(chat_id),)).fetchone()
+            finally:
+                conn.close()
+        return float(row[0]) if row and row[0] else None
+    except Exception:
+        logger.exception('first_seen lookup failed chat=%s', chat_id)
+        return None
+
+
 def daily_pnl_text(chat_id):
-    """فقط سود/زیان خالص امروز (جمع PnL پوزیشن‌های بسته‌شده‌ی امروز؛ بعد از کارمزدها و خروج‌های پله‌ای)."""
+    """سود/زیان خالص امروز (جمع PnL پوزیشن‌های بسته‌شده‌ی امروز؛ بعد از کارمزدها و خروج‌های پله‌ای) +
+    تعداد روزهای استفاده از ربات + مجموع سود/زیان کلی تمام معاملات بسته‌شده."""
     s = get_session(chat_id)
     start = _daily_pnl_day_start_ts()
-    total = sum(float(p.get('pnl_usdt') or 0.0) for p in (s.get('closed_positions') or [])
+    closed = s.get('closed_positions') or []
+    total = sum(float(p.get('pnl_usdt') or 0.0) for p in closed
                 if float(p.get('close_timestamp', 0) or 0) >= start)
     if total > 0.005:
-        return f"💰 سود امروز: `{total:+.2f} USDT`"
-    if total < -0.005:
-        return f"📉 زیان امروز: `{total:+.2f} USDT`"
-    return "⚖️ سود/زیان امروز: `0.00 USDT`"
+        head = f"💰 سود امروز: `{total:+.2f} USDT`"
+    elif total < -0.005:
+        head = f"📉 زیان امروز: `{total:+.2f} USDT`"
+    else:
+        head = "⚖️ سود/زیان امروز: `0.00 USDT`"
+    first = _user_first_seen_ts(chat_id)
+    days = max(1, int((time.time() - first) // 86400) + 1) if first else 1
+    overall = sum(float(p.get('pnl_usdt') or 0.0) for p in closed)
+    if abs(overall) <= 0.005:
+        overall = 0.0
+    word = 'سود' if overall > 0 else ('زیان' if overall < 0 else 'سود/زیان')
+    return (f"{head}\n\n"
+            f"📅 شما `{days}` روز است از ربات استفاده می‌کنید.\n"
+            f"📊 مجموع {word} کلی شما: `{('%+.2f' % overall) if overall else '0.00'} USDT` است.")
 
 
 def close_position(chat_id,pos,price=None,reason='manual'):
@@ -6735,7 +7571,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
         _raw_close_price=None
         if pos.get('is_real'):
             ex=get_exchange(chat_id)
-            if not ex: send_message(chat_id,'❌ اتصال Binance در دسترس نیست.'); return False
+            if not ex: send_message(chat_id,f'❌ اتصال {real_venue_name(chat_id)} در دسترس نیست.'); return False
             try:
                 fsym,scale,_m=_fsym(ex,pos['symbol']); amount=float(pos.get('amount') or 0)
                 live=find_position(chat_id,pos['symbol']); amount=float(live['amount']) if live else amount
@@ -7838,7 +8674,7 @@ def _btc_guard_act(chat_id, s, p, frac, vote, det):
                           f"• معامله در سود `{mv:+.2f}R` بود\n"
                           + (f"• `{int(frac * 100)}٪` از حجم بسته شد\n" if partial_ok else "• بستن بخشی ممکن نبود (حجم باقی‌مانده کم یا قبلاً پله‌ای بسته شده)\n")
                           + (f"• استاپ باقی‌مانده روی `{fmt(new_sl)}` (سر به سر + پوشش کارمزد)" if moved else
-                             ("• ⚠️ جابه‌جایی استاپ روی صرافی ناموفق بود؛ استاپ قبلی سر جایش است. لطفاً در Binance چک کنید" if sl_failed else "• استاپ فعلی از سر به سر بهتر است؛ دست‌نخورده ماند")))
+                             (f"• ⚠️ جابه‌جایی استاپ روی صرافی ناموفق بود؛ استاپ قبلی سر جایش است. لطفاً در {real_venue_name(chat_id)} چک کنید" if sl_failed else "• استاپ فعلی از سر به سر بهتر است؛ دست‌نخورده ماند")))
     return True
 
 
@@ -8488,6 +9324,7 @@ def _send_photo_get_id(chat_id, img_bytes, caption, markup):
     """ارسال عکس با کپشن و دکمه‌ها؛ message_id را برمی‌گرداند (None اگر ناموفق)."""
     if not TELEGRAM_TOKEN:
         return None
+    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)      # V3.44.59
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto',
                           data={'chat_id': chat_id, 'caption': caption[:1000], 'parse_mode': 'Markdown',
@@ -9468,6 +10305,34 @@ def _final_regime_check(tf, sig):
     return _final_regime_verdict(gate, sig)
 
 
+def _pd_level_gate(s, symbol, sig, tf, live=None):
+    """V3.44.58: کلید «سقف/کف دیروز جلوی معامله» (gate_pd_level_enabled)، فقط در مدل نصف‌کردن. (ok, توضیح).
+    فروشِ نزدیکِ PDL (یا خریدِ نزدیکِ PDH) یا ورود درست بعد از برگشت قیمت از همین سطح نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در بررسی بعدی
+    دوباره سنجیده می‌شود. اگر داده‌ی کافی نبود ورود را نمی‌بندد (این کلید فقط یک محافظ اضافه است)."""
+    try:
+        if not gate_on(s, 'gate_pd_level_enabled'):
+            return True, ''
+        cfg = {**STRATEGY_DEFAULTS, **(s.get('strategy_config') or {})}
+        if not cfg.get('halving_model_enabled'):
+            return True, ''
+        d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        if d is None or d.empty:
+            return True, ''
+        ind = calculate_indicators(d)
+        if ind is None or len(ind) < 100:
+            return True, ''
+        if live is None:
+            try:
+                live = latest_price(symbol)
+                live = float(live) if live else None
+            except Exception:
+                live = None
+        return pd_level_guard_df(ind, sig, live, cfg)
+    except Exception:
+        logger.exception('pd level gate failed symbol=%s', symbol)
+        return True, ''
+
+
 def _fav_confirm_active(chat_id):
     return bool(get_session(chat_id).get('fav_confirm_enabled', False))
 
@@ -9511,7 +10376,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout')))) if status == 'expired' else status
+    rec['why'] = ('btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     save_session(chat_id)
     _fav_update_card(chat_id, rec, force=True)          # V3.44.26: کارت مستقل این سیگنال درجا «پایان» می‌شود و دکمه‌هایش برداشته می‌شود
@@ -9622,6 +10487,17 @@ def _fav_process_one(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('regime_blocked', None); rec.pop('regime_hold', None)
+        if gate_on(s, 'gate_pd_level_enabled'):
+            # V3.44.58: آخرین مرحله‌ی خروج از صف: سقف/کف دیروز (PDH/PDL) نباید جلوی معامله باشد و قیمت نباید تازه از آن برگشته باشد؛ وگرنه سیگنال در صف می‌ماند.
+            pd_ok, pd_txt = _pd_level_gate(s, symbol, sig, tf, live)
+            if not pd_ok:
+                rec['pd_blocked'] = True; rec['pd_hold'] = pd_txt
+                if now >= float(rec.get('expires_at', 0)):
+                    return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {pd_txt}؛ بدون ورود.")
+                rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+                save_session(chat_id)
+                return
+            rec.pop('pd_blocked', None); rec.pop('pd_hold', None)
         _ff, _fc = _btc_front_flags(s)
         if _ff or _fc:
             # V3.44.44: آخرین مرحله‌ی خروج از صف: فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید و سیگنال (رد نمی‌شود) در صف می‌ماند.
@@ -9681,9 +10557,9 @@ def _fav_process_one(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('front_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = ('کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+        why_txt = ('کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
                    ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -10148,7 +11024,7 @@ def fav_stats_text(s):
     if o_imm:
         w = sum(1 for r in o_imm if r['imm']['outcome'] == 'tp')
         lines.append(f"• تعیین‌تکلیف: `{len(o_imm)}` | می‌برد: `{w / len(o_imm) * 100:.0f}%` | میانگین R فرضی: `{avg([r['imm']['r'] for r in o_imm]):+.2f}`")
-        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'btc': 'کندل BTC هم‌جهت معامله نشد', 'front': 'فاصله‌ی BTC تا سطح جلویی معقول نشد', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
+        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'btc': 'کندل BTC هم‌جهت معامله نشد', 'front': 'فاصله‌ی BTC تا سطح جلویی معقول نشد', 'pdlevel': 'سقف/کف دیروز جلوی معامله بود', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
         for why, nm in names.items():
             g = [r for r in o_imm if r.get('why') == why]
             if g:
@@ -11030,6 +11906,16 @@ def _touch_auto_enter(chat_id, rec):
             _rg_ok, _rg_txt = False, 'خطا در بررسی رژیم بازار'
         if not _rg_ok:
             rec['block_note'] = _rg_txt[:120]
+            return False
+    if gate_on(s, 'gate_pd_level_enabled'):
+        # V3.44.58: لیست انتظار: سقف/کف دیروز (PDH/PDL) نباید جلوی معامله باشد و قیمت نباید تازه از آن برگشته باشد؛ وگرنه مورد در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+        try:
+            _pd_ok, _pd_txt = _pd_level_gate(s, symbol, side, tf, live)
+        except Exception:
+            logger.exception('touch: pd level check failed symbol=%s', symbol)
+            _pd_ok, _pd_txt = True, ''
+        if not _pd_ok:
+            rec['block_note'] = _pd_txt[:120]
             return False
     _ff, _fc = _btc_front_flags(s)
     if _ff or _fc:
@@ -12266,6 +13152,7 @@ GATE_REGISTRY = {
     'gate_btc_candle_enabled': ('₿ کندل BTC هم‌جهت با معامله', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'entry_rules', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'entry_rules', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
+    'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'entry_rules', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'entry_filter', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'entry_filter', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'entry_filter', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
@@ -12912,6 +13799,181 @@ def analyze(chat_id,symbol):
     return text, keyboard
 
 
+# ===================== V3.44.57: انتخاب صرافی و اتصال حساب REAL =====================
+# جریان: «حساب واقعی» → انتخاب صرافی (Binance/Bitunix) → (کلید ذخیره‌شده یا ثبت کلید جدید) → API Key → Secret
+# → اتصال و نمایش موجودی → اگر موجودی قابل‌استفاده کافی بود: ادامه (مارجین/اهرم/...)، وگرنه پیام «موجودی خود را شارژ کنید».
+# امنیت: پیام حاوی کلید/Secret بلافاصله از چت پاک می‌شود؛ API Key فقط در حافظه (نه در session) نگه داشته می‌شود و بعد از
+# اتصال موفق هر دو رمزشده در دیتابیس ذخیره می‌شوند (credentials_store). هیچ‌وقت چیزی از آن‌ها لاگ نمی‌شود.
+_REAL_PENDING_KEYS = {}          # {chat_id: (venue, api_key, ts)}  فقط حافظه
+_REAL_PENDING_TTL = 600.0
+
+
+def _real_has_saved(chat_id, venue):
+    return account_credentials(chat_id, venue) is not None
+
+
+def _real_saved_label(chat_id, venue):
+    try:
+        h = CREDENTIALS.hint(chat_id, venue)
+    except Exception:
+        h = None
+    if h: return f'…{h}'
+    return 'تنظیم‌شده توسط ادمین' if (venue == 'binance' and _real_has_saved(chat_id, venue)) else '-'
+
+
+def real_exchange_keyboard(chat_id):
+    rows = [[{'text': f"{'✅ ' if _real_has_saved(chat_id, v) else ''}{name}", 'callback_data': f'/real_pick_{v}'}] for v, name in REAL_VENUES.items()]
+    rows.append([{'text': '↩️ بازگشت', 'callback_data': '/menu'}])
+    return {'inline_keyboard': rows}
+
+
+def real_start_picker(chat_id, message_id=None):
+    s = get_session(chat_id); s['user_state'] = None; save_session(chat_id)
+    _REAL_PENDING_KEYS.pop(chat_id, None)
+    edit_page(chat_id, '🔴 *حساب واقعی*\n\nصرافی‌ای که می‌خواهید روی آن معامله کنید را انتخاب کنید.\n(✅ یعنی کلید API این صرافی قبلاً ذخیره شده است.)',
+              real_exchange_keyboard(chat_id), message_id)
+
+
+def real_pick_exchange(chat_id, venue, message_id=None):
+    if venue not in REAL_VENUES: return
+    if PAPER_ONLY:
+        send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.'); return
+    name = REAL_VENUES[venue]
+    if _real_has_saved(chat_id, venue):
+        rows = [[{'text': '✅ استفاده از کلید ذخیره‌شده', 'callback_data': f'/real_use_{venue}'}],
+                [{'text': '🔑 ثبت کلید جدید', 'callback_data': f'/real_new_{venue}'}]]
+        try:
+            if CREDENTIALS.has(chat_id, venue): rows.append([{'text': '🗑 حذف کلید ذخیره‌شده', 'callback_data': f'/real_del_{venue}'}])
+        except Exception: pass
+        rows.append([{'text': '↩️ انتخاب صرافی دیگر', 'callback_data': '/mode_real'}])
+        edit_page(chat_id, f'🔑 برای *{name}* یک کلید API ذخیره شده است (`{_real_saved_label(chat_id, venue)}`).\nکدام را می‌خواهید؟',
+                  {'inline_keyboard': rows}, message_id)
+        return
+    real_prompt_api_key(chat_id, venue)
+
+
+def real_prompt_api_key(chat_id, venue):
+    if PAPER_ONLY:
+        send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.'); return
+    s = get_session(chat_id); name = REAL_VENUES[venue]
+    s['user_state'] = 'WAIT_REAL_API_KEY'; s['_real_tmp'] = {'venue': venue}; save_session(chat_id)
+    _REAL_PENDING_KEYS.pop(chat_id, None)
+    send_message(chat_id,
+                 f'🔑 *اتصال {name}*\n\n'
+                 f'۱) در {name.split()[0]} یک کلید API بسازید.\n'
+                 '۲) فقط دسترسی *Futures / Trade (خواندن + معامله)* را روشن کنید.\n'
+                 '۳) دسترسی *برداشت (Withdraw) را حتماً خاموش* بگذارید.\n'
+                 '۴) اگر امکان دارد، IP سرور ربات را در لیست مجاز کلید وارد کنید.\n\n'
+                 '👇 حالا *API Key* را همین‌جا بفرستید. پیام شما بلافاصله پاک می‌شود.\n'
+                 'برای انصراف: /cancel')
+
+
+def _real_delete_user_message(chat_id, message_id):
+    if not message_id: return
+    try: tg('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, 10)
+    except Exception: pass
+
+
+def real_handle_credentials_text(chat_id, raw, message_id=None):
+    """مرحله‌های WAIT_REAL_API_KEY / WAIT_REAL_API_SECRET. هیچ استثنایی بیرون نمی‌دهد (تا متن حاوی Secret لاگ نشود)."""
+    try:
+        _real_delete_user_message(chat_id, message_id)
+        s = get_session(chat_id); state = str(s.get('user_state') or '')
+        text = (raw or '').strip(); venue = (s.get('_real_tmp') or {}).get('venue')
+        if venue not in REAL_VENUES:
+            s['user_state'] = None; save_session(chat_id); return
+        if text.lower() in ('/cancel', 'لغو', 'انصراف') or text.startswith('/'):
+            s['user_state'] = None; s.pop('_real_tmp', None); save_session(chat_id); _REAL_PENDING_KEYS.pop(chat_id, None)
+            send_message(chat_id, '❌ اتصال حساب لغو شد.'); return
+        if not (8 <= len(text) <= 256) or any(ch.isspace() for ch in text):
+            send_message(chat_id, '⚠️ مقدار نامعتبر است (باید یک رشته‌ی بدون فاصله باشد). دوباره بفرستید یا /cancel را بزنید.'); return
+        if state == 'WAIT_REAL_API_KEY':
+            _REAL_PENDING_KEYS[chat_id] = (venue, text, time.time())
+            s['user_state'] = 'WAIT_REAL_API_SECRET'; save_session(chat_id)
+            send_message(chat_id, '✅ API Key دریافت شد (و از چت پاک شد).\n\n👇 حالا *Secret* را بفرستید (آن هم بلافاصله پاک می‌شود).'); return
+        if state == 'WAIT_REAL_API_SECRET':
+            pend = _REAL_PENDING_KEYS.pop(chat_id, None)
+            s['user_state'] = None; s.pop('_real_tmp', None); save_session(chat_id)
+            if not pend or pend[0] != venue or time.time() - pend[2] > _REAL_PENDING_TTL:
+                send_message(chat_id, '⌛ مهلت ثبت کلید تمام شد. از «حساب واقعی» دوباره شروع کنید.'); return
+            real_try_connect(chat_id, venue, pend[1], text)
+    except Exception:
+        logger.error('real credential step failed chat=%s (details suppressed)', chat_id)
+        try: send_message(chat_id, '❌ خطای داخلی در ثبت کلید. دوباره از «حساب واقعی» شروع کنید.')
+        except Exception: pass
+
+
+def _real_balance_numbers(ex):
+    b = ex.fetch_balance()
+    total = float(((b or {}).get('total') or {}).get('USDT') or 0.0)
+    free = ((b or {}).get('free') or {}).get('USDT')
+    avail = float(free) if free is not None else total
+    if not (math.isfinite(total) and math.isfinite(avail)): raise ExchangeStateError('invalid balance')
+    return max(0.0, total), max(0.0, avail)
+
+
+def _real_connect_error_text(venue, exc, secrets=()):
+    msg = str(exc)
+    for sec in secrets:
+        if sec: msg = msg.replace(sec, '***')
+    msg = ' '.join(msg.split())[:240]
+    return (f'❌ اتصال به {REAL_VENUES[venue]} ناموفق بود.\n\nدلیل: {msg}\n\n'
+            '• API Key و Secret را درست و کامل کپی کرده‌اید؟\n'
+            '• برای کلید، دسترسی Futures / Trade فعال است؟\n'
+            '• اگر محدودیت IP دارد، IP سرور ربات مجاز است؟\n'
+            '• معاملات فیوچرز روی حساب شما فعال است؟')
+
+
+def real_try_connect(chat_id, venue, key=None, secret=None, message_id=None):
+    """key/secret خالی = استفاده از کلید ذخیره‌شده. حالت REAL فقط با موجودی کافی فعال می‌شود."""
+    if venue not in REAL_VENUES: return
+    s = get_session(chat_id); name = REAL_VENUES[venue]
+    if PAPER_ONLY:
+        send_message(chat_id, '🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.'); return
+    if s['paper_positions']:
+        send_message(chat_id, '❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
+    using_saved = key is None
+    if using_saved:
+        creds = account_credentials(chat_id, venue)
+        if not creds:
+            send_message(chat_id, f'❌ برای {name} کلیدی ذخیره نشده است.', real_exchange_keyboard(chat_id)); return
+        key, secret = creds
+    send_message(chat_id, f'⏳ در حال اتصال به {name} ...', parse_mode=None)
+    try:
+        ex = build_exchange(venue, key, secret)
+        equity, avail = _real_balance_numbers(ex)
+    except Exception as exc:
+        logger.warning('real connect failed chat=%s venue=%s: %s', chat_id, venue, type(exc).__name__)
+        send_message(chat_id, _real_connect_error_text(venue, exc, (key, secret)),
+                     {'inline_keyboard': [[{'text': '🔑 ثبت کلید دیگر', 'callback_data': f'/real_new_{venue}'}], [{'text': '↩️ انتخاب صرافی', 'callback_data': '/mode_real'}]]}, parse_mode=None)
+        return
+    if not using_saved:
+        try:
+            CREDENTIALS.save(chat_id, venue, key, secret); _cred_cache_clear(chat_id)
+        except Exception as exc:
+            logger.error('saving credentials failed chat=%s: %s', chat_id, type(exc).__name__)
+            send_message(chat_id, f'⚠️ اتصال برقرار شد ولی ذخیره‌ی امن کلید ممکن نشد ({exc}). برای ادامه کلید باید ذخیره شود؛ مدیر سرور را مطلع کنید.', parse_mode=None); return
+    real_enter_or_charge(chat_id, venue, equity, avail, message_id)
+
+
+def real_enter_or_charge(chat_id, venue, equity, avail, message_id=None):
+    s = get_session(chat_id); name = REAL_VENUES[venue]
+    if avail >= max(REAL_MIN_BALANCE_USDT, 1e-9):
+        s['real_exchange'] = venue; EXCHANGE_CACHE.pop(chat_id, None); _cred_cache_clear(chat_id)
+        s['trading_mode'] = 'REAL'; s['is_bot_active'] = False; s['daily_start_equity'] = equity
+        s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime()); s['daily_stopped'] = False; save_session(chat_id)
+        send_message(chat_id, f'✅ به *{name}* متصل شدید.\n\n💰 موجودی کل: `{equity:.2f}` USDT\n✅ قابل استفاده: `{avail:.2f}` USDT\n\n⚙️ مارجین هر معامله:', get_margin_keyboard())
+        return
+    send_message(chat_id,
+                 f'✅ اتصال به *{name}* برقرار شد، اما موجودی فیوچرز شما برای شروع کافی نیست.\n\n'
+                 f'💰 موجودی کل: `{equity:.2f}` USDT\n💳 قابل استفاده: `{avail:.2f}` USDT\n'
+                 f'📌 حداقل لازم: `{REAL_MIN_BALANCE_USDT:g}` USDT\n\n'
+                 f'لطفاً *موجودی خود را شارژ کنید* (به حساب *Futures* در {name.split()[0]} منتقل کنید) و بعد «🔄 بررسی مجدد موجودی» را بزنید.',
+                 {'inline_keyboard': [[{'text': '🔄 بررسی مجدد موجودی', 'callback_data': f'/real_use_{venue}'}],
+                                      [{'text': '↩️ انتخاب صرافی دیگر', 'callback_data': '/mode_real'}],
+                                      [{'text': '📄 ادامه با حساب کاغذی', 'callback_data': '/mode_paper'}]]})
+
+
 def menu(chat_id,message_id=None):
     s=get_session(chat_id)
     bal=exchange_balance(chat_id) if s['trading_mode']=='REAL' else s['paper_balance']
@@ -12920,7 +13982,13 @@ def menu(chat_id,message_id=None):
     max_same_disp = max_same if max_same>0 else '∞'
     dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{'واقعی' if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    if is_restricted_user(chat_id):
+        # V3.44.59: پنل کاربر عادی بدون جزئیات استراتژی (تایم‌فریم، نوع استراتژی، لاگ ورود، قوانین هم‌جهت).
+        text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
+                f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`\n"
+                f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n"
+                f"📌 حداکثر پوزیشن باز: `{maxp}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
 
 
@@ -12944,7 +14012,7 @@ def start_scan(chat_id,message_id=None):
         s['daily_start_equity']=equity
     if s['trading_mode']=='REAL':
         if not get_exchange(chat_id):
-            send_message(chat_id,'❌ حساب Binance برای این کاربر تنظیم نشده است.')
+            send_message(chat_id,f'❌ حساب {real_venue_name(chat_id)} برای این کاربر تنظیم نشده است. از «حساب واقعی» صرافی و کلید API را ثبت کنید.')
             return
         if not reconcile_real(chat_id):
             return
@@ -13090,9 +14158,9 @@ def market_report(chat_id):
 
 
 # --- داشبورد بازار روی همه‌ی تایم‌فریم‌ها (دکمه‌ی «وضعیت بازار») -------------------------
-# ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به منابع داده (Binance/Bybit/KuCoin) پاس داده می‌شود
+# ماهانه/هفتگی به‌صورت مستقیم period='1month'/'1week' به منابع داده (Bitunix/Binance) پاس داده می‌شود
 # (چون در TIMEFRAME_MAP نیستند، get_klines آن‌ها را دست‌نخورده رد می‌کند؛ اگر منبع داده این
-# پریودها را پشتیبانی نکند، همان fallback موجود به KuCoin کار را انجام می‌دهد).
+# پریودها را پشتیبانی نکند، همان fallback موجود به منبع بعدی کار را انجام می‌دهد).
 # عمداً sync (ThreadPoolExecutor + get_klines/_market_snapshot) است، نه async: نسخه‌ی اولیه
 # از get_klines_async استفاده می‌کرد که به ASYNC_SEMAPHORE سراسری نیاز دارد؛ آن سمافور توسط
 # scan_loop() در ترد و event-loop جداگانه‌ی خودش ساخته می‌شود، و acquire زدن رویش از
@@ -13359,7 +14427,7 @@ def check_entry_now(chat_id, symbol):
         future = asyncio.run_coroutine_threadsafe(_check_entry_coro(chat_id, symbol), SCANNER_LOOP)
         # بررسی کامل یک نماد شامل چند درخواست شبکه‌ای پشت‌سرهم است (کندل اصلی + تایم‌فریم
         # بالاتر + سطوح گرید + همبستگی با BTC/ETH)؛ هرکدام تا ۷ ثانیه مهلت دارند و در صورت
-        # کندی صرافی اصلی به KuCoin هم fallback می‌کنند. سقف قبلی (۲۵ ثانیه) در شرایط کندی
+        # کندی صرافی اصلی به منبع بعدی هم fallback می‌کنند. سقف قبلی (۲۵ ثانیه) در شرایط کندی
         # صرافی به‌راحتی رد می‌شد و باعث خطای بی‌ربط «TimeoutError» (با متن خالی) می‌شد.
         result = future.result(timeout=55)
     except Exception as exc:
@@ -13394,7 +14462,20 @@ def check_entry_now(chat_id, symbol):
     send_message(chat_id, text, keyboard)
 
 
+def _deny_restricted(chat_id, message_id=None):
+    try:
+        send_message(chat_id, '⛔ این بخش برای حساب شما در دسترس نیست.',
+                     {'inline_keyboard': [[{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}, message_id)
+    except Exception:
+        logger.exception('deny message failed chat=%s', chat_id)
+
+
 def process_command(cmd,chat_id,message_id=None):
+    # V3.44.59: پیش‌فرض ممنوع برای کاربر عادی؛ فقط دستورهای لیست مجاز (access_policy.USER_*) اجرا می‌شوند.
+    if is_restricted_user(chat_id) and not _ap.user_command_allowed(cmd):
+        logger.info('role-lock: blocked chat=%s cmd=%s', chat_id, str(cmd)[:60])
+        _deny_restricted(chat_id, message_id)
+        return
     if str(cmd).startswith('/back:'):
         # بازگشت از پرامپت‌ها: وضعیت انتظار ورودی را پاک کن و منوی والد را روی همان پیام باز کن.
         try:
@@ -13407,6 +14488,9 @@ def process_command(cmd,chat_id,message_id=None):
     if cmd == '/scan_signal_start':
         s=get_session(chat_id); s['user_state']='WAIT_SCAN_SYMBOL'; save_session(chat_id)
         send_message(chat_id,'🔍 لطفاً نماد مورد نظر برای بررسی با استراتژی فعال را وارد کنید.\nمثال: BTC یا ETH')
+        return
+    # V3.44.61: کارمزد روزانه - دستورهای کاربر و ادمین
+    if fee_handle_command(cmd, chat_id, message_id):
         return
     # Admin revenue / fee management commands.
     if str(cmd).startswith('/set_fee '):
@@ -13660,9 +14744,22 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.')
             return
         if s['paper_positions']: send_message(chat_id,'❌ ابتدا تمام پوزیشن‌های فعلی را ببندید.'); return
-        if not get_exchange(chat_id): send_message(chat_id,'❌ حساب Binance این کاربر در `BINANCE_ACCOUNTS_JSON` تنظیم نشده است.'); return
-        bal=exchange_balance(chat_id)
-        s['trading_mode']='REAL'; s['is_bot_active']=False; s['daily_start_equity']=bal; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,f'🔴 موجودی REAL: `{bal:.2f} USDT`\n\n⚙️ مارجین هر معامله:',get_margin_keyboard(),message_id); return
+        real_start_picker(chat_id,message_id); return      # V3.44.57: انتخاب صرافی (Binance / Bitunix)
+    if cl.startswith('/real_pick_'): real_pick_exchange(chat_id, cl[len('/real_pick_'):], message_id); return
+    if cl.startswith('/real_use_'): real_try_connect(chat_id, cl[len('/real_use_'):], None, None, message_id); return
+    if cl.startswith('/real_new_'):
+        v=cl[len('/real_new_'):]
+        if v in REAL_VENUES: real_prompt_api_key(chat_id, v)
+        return
+    if cl.startswith('/real_del_'):
+        v=cl[len('/real_del_'):]
+        if v in REAL_VENUES:
+            if s['paper_positions'] and s.get('trading_mode')=='REAL' and real_venue(chat_id)==v: send_message(chat_id,'❌ با پوزیشن باز نمی‌توان کلید همین صرافی را حذف کرد.'); return
+            try: CREDENTIALS.delete(chat_id, v)
+            except Exception: logger.exception('delete credentials failed')
+            _cred_cache_clear(chat_id); EXCHANGE_CACHE.pop(chat_id, None)
+            send_message(chat_id,f'🗑 کلید ذخیره‌شده‌ی {REAL_VENUES[v]} حذف شد.', real_exchange_keyboard(chat_id))
+        return
     if cl.startswith('/set_bal_'):
         v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
@@ -14618,7 +15715,7 @@ def run_user_backtest(chat_id):
         save_session(chat_id)
 
 
-def handle_text(chat_id,text):
+def handle_text(chat_id,text,message_id=None):
     raw=(text or '').strip()
     fixed_buttons={
         '🏠 منوی اصلی':'/menu', 'منوی اصلی':'/menu', '🏠 منو':'/menu',
@@ -14650,6 +15747,18 @@ def handle_text(chat_id,text):
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')
+    if is_restricted_user(chat_id) and current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET'):
+        # V3.44.59: کاربر عادی فقط ورودی کلید API را می‌تواند تایپ کند؛ نام نماد (تحلیل)، بک‌تست، واچ‌لیست،
+        # اوردر دستی و ... همه ممنوع. هر وضعیت انتظارِ باقی‌مانده هم پاک می‌شود.
+        if current_state:
+            s['user_state'] = None; save_session(chat_id)
+        if raw.startswith('/'):
+            process_command(text, chat_id)          # از قفل دستورها رد می‌شود
+        else:
+            _deny_restricted(chat_id)
+        return
+    if current_state in ('WAIT_REAL_API_KEY','WAIT_REAL_API_SECRET'):      # V3.44.57: کلید/Secret صرافی (پیام بلافاصله پاک می‌شود)
+        real_handle_credentials_text(chat_id, raw, message_id); return
 
     if current_state in ('/ADD_LONG_SYMBOL','/REMOVE_LONG_SYMBOL','/ADD_SHORT_SYMBOL','/REMOVE_SHORT_SYMBOL'):
         sym=raw.upper().replace('USDT','')
@@ -15007,6 +16116,13 @@ def telegram_listener():
                     else:
                         message_id_for_reply = msg.get('message_id')
                     if not chat: continue
+                    if (callback.get('id') and is_restricted_user(chat)
+                            and (str(callback.get('data') or '') in ('/chlist', '/chlist_buy', '/chlist_sell', '/chreg')
+                                 or str(callback.get('data') or '').startswith(('/chind_', '/assist_ind_', '/fq_flt_')))):
+                        # V3.44.59: پنجره‌های بازشوی اطلاعاتی (اندیکاتور/رژیم/فیلتر/لیست بررسی) فقط برای ادمین؛
+                        # این مسیرها از process_command رد نمی‌شوند، پس اینجا جداگانه قفل شده‌اند.
+                        answer_callback(callback['id'], text='⛔ این بخش برای حساب شما در دسترس نیست.', show_alert=False)
+                        continue
                     if callback.get('id') and str(callback.get('data') or '') in ('/chlist', '/chlist_buy', '/chlist_sell', '/chreg'):
                         # V3.43: دکمه‌های ثابت کانال - پنجره‌ی بازشو (لیست بررسی‌های آتی / رژیم BTC و ETH روی تایم‌فریم فعال ادمین)
                         try:
@@ -15051,6 +16167,9 @@ def telegram_listener():
                     if not is_allowed(chat):
                         _notify_not_allowed(chat)
                         continue
+                    if is_fee_blocked(chat) and not fee_block_allows(callback.get('data') or (u.get('message') or {}).get('text')):
+                        fee_notify_blocked(chat)      # V3.44.61: حساب مسدود (کارمزد پرداخت‌نشده)
+                        continue
                     data=callback.get('data') or (u.get('message') or {}).get('text')
                     if callback and str(data or '').startswith(('/cfm_', '/cfmno_')):
                         try:
@@ -15079,7 +16198,7 @@ def telegram_listener():
                         if (AUTO_DELETE_USER_MESSAGES and (_um.get('chat') or {}).get('type') == 'private'
                                 and _um.get('message_id')):
                             schedule_auto_delete(chat, _um['message_id'])
-                        handle_text(chat,data)
+                        handle_text(chat,data,_um.get('message_id'))
                 except Exception:
                     logger.exception('Telegram update %s processing failed',upd)
                 finally:
@@ -15126,6 +16245,7 @@ async def scan_loop():
                 for cid,s in list(USER_SESSIONS.items()):
                     try:
                         if not s['is_bot_active'] or s['daily_stopped']: continue
+                        if is_fee_blocked(cid): continue      # V3.44.61: کارمزد پرداخت‌نشده - اسکن ورود جدید متوقف
                         if not risk_guard(cid): continue
                         if s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
                             _entry_diag_batch_update(cid, [{'status':'blocked','reason':f"ظرفیت پوزیشن‌های باز پر است ({len(s['paper_positions'])}/{s['max_open_positions']})"}])
@@ -15178,7 +16298,7 @@ async def scan_loop():
 
 
 @app.get('/')
-def home(): return f"OK - Sessions: {len(USER_SESSIONS)} | Active: {sum(1 for s in USER_SESSIONS.values() if s.get('is_bot_active'))}",200
+def home(): return 'OK',200
 @app.get('/health')
 def health(): return 'OK',200
 @app.get('/status')
@@ -15380,6 +16500,11 @@ def miniapp_api_data():
                 position['setup_tag'] = position.get('setup_tag') or 'Halving'
         except Exception:
             logger.exception('miniapp halving levels failed symbol=%s', symbol)
+    if is_restricted_user(chat_id):
+        # V3.44.59: کاربر عادی فقط خطوط ورود/SL/TP را می‌بیند؛ سطوح نام‌دار و تگ ستاپ لو نمی‌رود.
+        levels = []
+        if position:
+            position.pop('setup_tag', None)
     return {'symbol': symbol, 'candles': candles, 'position': position, 'levels': levels}, 200
 
 
@@ -15454,7 +16579,7 @@ WATCHLIST_REPORT_PATH = os.environ.get('WATCHLIST_REPORT_PATH', 'watchlist_repor
 
 
 def refresh_watchlists_from_spot():
-    """نمادهای غیرموجود روی اسپات را از LONG/SHORT حذف و با نمادهای برتر موجود جایگزین می‌کند (in-place؛
+    """نمادهای غیرموجود روی بیتیونیکس و باینانس (هر دو) را از LONG/SHORT حذف و با نمادهای برتر موجود جایگزین می‌کند (in-place؛
     همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند). اگر فهرست صرافی‌ها قابل‌اعتماد نباشد چیزی حذف نمی‌شود."""
     if not WATCHLIST_AUTO_PRUNE:
         return None
@@ -15475,6 +16600,10 @@ def refresh_watchlists_from_spot():
                 report[name] = {'removed': plans[name]['removed'], 'added': plans[name]['added'], 'final_count': len(plans[name]['final'])}
             logger.info('Watchlist spot-check: long removed=%s added=%s | sources=%s',
                         report['long']['removed'], report['long']['added'], report['sources_ok'])
+    if 'bitunix' in per:
+        # V3.44.56: نمادهای واچ‌لیست که فیوچرز بیتیونیکس ندارد (داده‌ی آن‌ها از باینانس می‌آید)
+        report['not_on_bitunix'] = {name: [x for x in lst if x not in per['bitunix']] for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}
+        logger.info('Watchlist vs Bitunix: long missing=%s', report['not_on_bitunix']['long'])
     try:
         with open(WATCHLIST_REPORT_PATH, 'w', encoding='utf-8') as fh:
             json.dump(report, fh, ensure_ascii=False, indent=2)
@@ -15495,6 +16624,7 @@ def _watchlist_refresh_loop():
 def main():
     init_db()
     load_access_control()
+    fee_reload_state()
     if not ADMIN_CHAT_IDS:
         logger.warning('هیچ ادمینی تعریف نشده: ADMIN_CHAT_IDS (یا ALLOWED_CHAT_IDS) خالی است؛ پنل مدیریت و تایید کاربران کار نمی‌کند.')
     load_telegram_offset()
@@ -15513,6 +16643,7 @@ def main():
     Thread(target=lambda: (time.sleep(14), _touch_wait_loop()), daemon=True, name='touch-vote-wait').start()
     Thread(target=lambda: (time.sleep(15), _auto_delete_loop()), daemon=True, name='auto-delete').start()
     Thread(target=lambda: (time.sleep(17), _day_cleanup_loop()), daemon=True, name='day-cleanup').start()
+    Thread(target=lambda: (time.sleep(19), _fee_daily_loop()), daemon=True, name='fee-daily').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 

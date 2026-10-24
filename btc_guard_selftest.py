@@ -16,7 +16,7 @@ def partial(chat_id, p, price, frac, label=''):
     partials.append((p['symbol'], frac, label)); p['margin'] = p['margin'] * (1 - frac); return True
 def vote_fn(tf, cfg=None):
     state['vote_calls'] += 1; return state['vote']
-g = {'os': os, 'time': time, 'RLock': RLock, 'logger': logging.getLogger('t'), 'TAKER_FEE_PCT': 0.05, 'side_long': side_long,
+g = {'os': os, 'time': time, 'RLock': RLock, 'logger': logging.getLogger('t'), 'TAKER_FEE_PCT': 0.05, 'side_long': side_long, 'real_venue_name': lambda chat_id=None, venue=None: 'Binance Futures',
      'USER_SESSIONS': S, 'fmt': lambda x: f'{float(x):g}', '_be_state': _be_state, 'partial_close_position': partial,
      'get_entry_lock': lambda c: RLock(), 'save_session': lambda c: None, '_btc_pattern_vote': vote_fn,
      'send_message': lambda c, tx, *a, **k: sent.append(tx), 'latest_price': lambda sym: state['price'].get(sym),

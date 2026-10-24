@@ -327,6 +327,7 @@ def get_admin_fee_menu_keyboard():
     return {"inline_keyboard": [
         [{"text": "📅 امروز", "callback_data": "/admin_fee_day"}, {"text": "📆 ۷ روز", "callback_data": "/admin_fee_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/admin_fee_month"}, {"text": "📊 کل سابقه", "callback_data": "/admin_fee_report"}],
+        [{"text": "📋 کارمزدهای پرداخت‌نشده", "callback_data": "/fee_debts"}],
         [{"text": "⚙️ تنظیم نرخ کارمزد کاربر", "callback_data": "/admin_set_fee_prompt"}],
         [{"text": "👑 بازگشت به پنل مدیریت", "callback_data": "/admin_panel"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
