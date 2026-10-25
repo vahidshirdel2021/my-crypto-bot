@@ -12907,11 +12907,11 @@ def _assist_pending_list_plain(chat_id, message_id, recs, t_all):
         return '🟢 خرید' if d == 'BUY' else ('🔴 فروش' if d == 'SELL' else '⏳ جهت نامشخص')
 
     shown = items[:PENDING_PLAIN_MAX_SYMBOLS]
-    lines = [f"📋 *سیگنال‌های در انتظار ({len(items)})*", ""]
+    # V3.44.81: لیست متنیِ بالا حذف شد؛ جهت خرید/فروش روی خود دکمه‌ی هر نماد نوشته می‌شود (پیام فقط یک تیتر کوتاه دارد).
+    lines = [f"📋 *سیگنال‌های در انتظار ({len(items)})*"]
     rows = []
-    for i, (sym, tf, d) in enumerate(shown, 1):
-        lines.append(f"{i}) `{sym}` {_side(d)}")
-        rows.append([{'text': f"📈 {sym} — TradingView", 'url': tradingview_chart_url(sym, tf)}])
+    for sym, tf, d in shown:
+        rows.append([{'text': f"📈 {sym} {_side(d)} — TradingView", 'url': tradingview_chart_url(sym, tf)}])
     if len(items) > len(shown):
         lines.append(f"… و {len(items) - len(shown)} نماد دیگر")
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)

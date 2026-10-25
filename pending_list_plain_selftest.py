@@ -35,10 +35,9 @@ for cid in (222, 111):
             assert bad not in text, ('leak in text', bad)
         btns = [b for row in markup['inline_keyboard'] for b in row]
         assert btns and all('url' in b and 'callback_data' not in b and 'tradingview.com' in b['url'] for b in btns), btns
-        assert [b['text'] for b in btns] == ['📈 INJ — TradingView', '📈 CRV — TradingView', '📈 SAND — TradingView'], [b['text'] for b in btns]
-        assert '`INJ` 🔴 فروش' in text and '`CRV` 🟢 خرید' in text, text            # جهت مشخص
-        assert text.count('`INJ`') == 1, 'dedupe'
-        assert '`SAND` ⏳ جهت نامشخص' in text, text
+        assert [b['text'] for b in btns] == ['📈 INJ 🔴 فروش — TradingView', '📈 CRV 🟢 خرید — TradingView', '📈 SAND ⏳ جهت نامشخص — TradingView'], [b['text'] for b in btns]
+        assert '`' not in text and 'INJ' not in text, text                             # لیست متنی حذف شده
+        assert text.strip().startswith('📋'), text
     else:
         assert 'رأی' in text and 'فشار' in text, 'admin lost detail'
 print('PENDING LIST PLAIN OK')
