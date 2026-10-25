@@ -206,7 +206,7 @@ em_src = src[src.index("def execute_manual_trade("):src.index("def _log_grid_lev
 assert "_btc_front_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True)" in et_src
 assert "_btc_front_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force))" in em_src      # ⚡ ورود سریع/تایید کارت از همین مسیر می‌گذرند
 assert "str(err).startswith(_BTC_FRONT_PREFIX)" in src                                         # اوردر معلق حذف نمی‌شود
-assert re.search(r"BOT_VERSION = '3\.44\.45'", src)
+assert re.search(r"BOT_VERSION = '3\.44\.\d+'", src)
 
 # ---------------------------------------------------------------- ۸) پیش‌بررسی روی همه‌ی مسیرها (ورود سریع/تایید کارت هم بسته) ----------
 a3 = src.index("def _btc_candle_precheck("); b3 = src.index("def _log_grid_levels_sync(")
@@ -273,7 +273,7 @@ SR = {}
 def fresh(mode='PAPER', **kw):
     SR.clear()
     SR.update({'trading_mode': mode, 'paper_balance': 742.5, 'paper_start_balance': 5000.0, 'paper_positions': [],
-               'closed_positions': [{'pnl_usdt': 3}] * 4, 'trade_audit': [1], 'trade_pipeline_audit': [1], 'assist_log': [1],
+               'closed_positions': [{'pnl_usdt': 3, 'is_real': mode == 'REAL'}] * 4, 'trade_audit': [1], 'trade_pipeline_audit': [1], 'assist_log': [1],
                'scan_stats': {'scans': 9, 'symbols': 9, 'signals': 9, 'entries': 9, 'blocked': 9, 'data_errors': 9, 'reason_counts': {'x': 1}},
                'platform_fee_total_usdt': 4.2, 'platform_fee_trade_count': 3, 'daily_stopped': True, 'daily_start_equity': 700.0,
                'fav_wait': {'f1': {'status': 'waiting'}, 'f2': {'status': 'opened'}, 'f3': {'status': 'expired'}},
@@ -281,7 +281,8 @@ def fresh(mode='PAPER', **kw):
     SR.update(kw)
 gr = dict(os=os, json=_json, time=time, math=math, logger=log, get_session=lambda c: SR, save_session=lambda c: None,
           exchange_balance=lambda c: 321.0, default_session=lambda: {'paper_balance': 1000.0},
-          _journal_path=lambda: jpath, _JOURNAL_LOCK=threading.RLock())
+          _journal_path=lambda: jpath, _JOURNAL_LOCK=threading.RLock(),
+          closed_for_mode=lambda s, real=None: [p for p in s.get('closed_positions', []) if bool(p.get('is_real')) == bool(real)])
 exec(src[a6:b6], gr)
 rs, rp = gr['reset_stats'], gr['reset_stats_prompt_text']
 fresh(); p = rp(1); assert '5000.00' in p and 'اولیه' in p and 'پوزیشن باز' in p

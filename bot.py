@@ -5352,7 +5352,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.69'
+BOT_VERSION = '3.44.71'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6605,7 +6605,7 @@ ADMIN_TESTS_TIMEOUT_SEC = 180
 ADMIN_TESTS_CORE = ('touch_vote_selftest.py', 'touch_fixed_dir_selftest.py', 'ylevel_vote_selftest.py', 'preset_selftest.py',
                     'entry_menu_selftest.py', 'touch_card_order_selftest.py', 'fav_confirm_selftest.py', 'fav_max_selftest.py',
                     'keep_closed_cards_selftest.py', 'btc_guard_selftest.py', 'pd_level_guard_selftest.py', 'role_lock_selftest.py',
-                    'daily_fee_selftest.py')
+                    'daily_fee_selftest.py', 'preset_custom_selftest.py', 'preset_sync_selftest.py')
 _ADMIN_TESTS_STATE = {'running': False}
 
 
@@ -7546,6 +7546,31 @@ DAILY_PNL_TZ = os.environ.get('DAILY_PNL_TZ', '').strip()      # خالی = هم
 def _journal_path():
     p = os.environ.get('TRADE_JOURNAL_PATH', '').strip()
     return p or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'trade_journal.json')
+
+
+presets_mod.set_custom_path(os.environ.get('PRESETS_CUSTOM_PATH', '').strip() or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'presets_custom.json'))   # V3.44.70: کلیدهای ذخیره‌شده‌ی ادمین، کنار دیتابیس
+
+
+def _sync_preset_users(name, skip_chat_id=None):
+    """V3.44.70: بعد از ذخیره/بازگشت یک کلید، همه‌ی کاربران عادی که الان روی همین کلید (حالت) هستند نسخه‌ی جدیدش را
+    خودکار می‌گیرند؛ لازم نیست دوباره انتخاب کنند. ادمین‌ها دست‌نخورده می‌مانند (تنظیمشان دست خودشان است).
+    فقط معامله‌های بعدی اثر می‌گیرند. تعداد کاربران همگام‌شده را برمی‌گرداند."""
+    with STATE_LOCK:
+        targets = [cid for cid, ss in USER_SESSIONS.items()
+                   if cid != skip_chat_id and ss.get('active_preset') == name and not is_admin(cid)]
+    n = 0
+    for cid in targets:
+        try:
+            with STATE_LOCK:
+                ss = USER_SESSIONS.get(cid)
+                if ss is None or ss.get('active_preset') != name:
+                    continue
+                presets_mod.apply_preset(ss, name)
+            save_session(cid)
+            n += 1
+        except Exception:
+            logger.exception('preset sync failed chat=%s preset=%s', cid, name)
+    return n
 
 
 def _snap_dir_fa(is_with):
@@ -15673,6 +15698,32 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         _pp = presets_mod.PRESETS[_pn]
         send_message(chat_id, f"✅ کلید {presets_mod._fa(_pn)} اعمال شد: {_pp['label']}\n\n{_pp['desc']}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.", presets_mod.keyboard(s))
+        return
+    if cl.startswith('/preset_save_') or cl.startswith('/preset_reset_'):      # V3.44.70: ذخیره/بازگشت هر کلید جداگانه (فقط ادمین)
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ ذخیره‌ی کلیدها فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        _is_save = cl.startswith('/preset_save_')
+        _pn = cl[len('/preset_save_' if _is_save else '/preset_reset_'):]
+        if _pn not in presets_mod.PRESETS:
+            send_message(chat_id, '⚠️ این کلید شناخته نشد.', presets_mod.keyboard(s)); return
+        if _is_save:
+            _n = presets_mod.save_custom(s, _pn)
+            if _n is None:
+                send_message(chat_id, '⚠️ ذخیره نشد (مسیر فایل یا دسترسی نوشتن را بررسی کن).', presets_mod.keyboard(s)); return
+            save_session(chat_id)
+            _ns = _sync_preset_users(_pn, chat_id)
+            send_message(chat_id, f"💾 تنظیمات فعلی در کلید {presets_mod._fa(_pn)} ذخیره شد ({presets_mod._fa(_n)} مورد) و این کلید فعال است. "
+                                  f"کاربرانی که الان روی این کلید هستند ({presets_mod._fa(_ns)} نفر) خودکار نسخه‌ی جدید را گرفتند؛ روی معامله‌های بعدی اثر می‌کند.", presets_mod.keyboard(s)); return
+        if presets_mod.reset_custom(_pn):
+            _ns = _sync_preset_users(_pn)
+            _own = ''
+            if s.get('active_preset') == _pn:
+                presets_mod.apply_preset(s, _pn); save_session(chat_id)
+                _own = ' تنظیمات خودت هم به پیش‌فرض برگشت.'
+            send_message(chat_id, f"↩️ نسخه‌ی ذخیره‌شده‌ی کلید {presets_mod._fa(_pn)} پاک شد و پیش‌فرض کد برگشت؛ "
+                                  f"{presets_mod._fa(_ns)} کاربر روی این کلید خودکار به‌روز شدند.{_own}", presets_mod.keyboard(s))
+        else:
+            send_message(chat_id, 'این کلید نسخه‌ی ذخیره‌شده ندارد.', presets_mod.keyboard(s))
         return
     if cl == '/preset_stats':
         send_message(chat_id, preset_stats_text(chat_id), presets_mod.keyboard(s))

@@ -10,6 +10,10 @@
 
 برای عوض‌کردن محتوا فقط دیکشنری‌های بالای همین فایل را ویرایش کن.
 """
+import copy
+import json
+import os
+import threading
 import time
 
 # ---------------------------------------------------------------- پایه (کلید ۱) ----------
@@ -129,9 +133,96 @@ PRESETS = {
 }
 
 
-def _full(name):
+# ---------------------------------------------------------------- V3.44.70: ذخیره‌ی دلخواه هر کلید ----------
+# ادمین می‌تواند تنظیمات فعلی خودش را در «هر کلید جداگانه» ذخیره کند. نسخه‌ی ذخیره‌شده روی پیش‌فرضِ کد می‌نشیند
+# (کلیدهایی که بعداً به کد اضافه شوند همچنان پیش‌فرض می‌گیرند) و با «بازگشت به پیش‌فرض» پاک می‌شود.
+_CUSTOM_LOCK = threading.RLock()
+_CUSTOM_PATH = None
+
+
+def set_custom_path(path):
+    global _CUSTOM_PATH
+    _CUSTOM_PATH = path
+
+
+def _custom_path():
+    return os.environ.get('PRESETS_CUSTOM_PATH', '').strip() or _CUSTOM_PATH
+
+
+def _load_custom():
+    path = _custom_path()
+    if not path:
+        return {}
+    with _CUSTOM_LOCK:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if k in PRESETS and isinstance(v, dict)
+            and isinstance(v.get('cfg'), dict) and isinstance(v.get('session'), dict)}
+
+
+def _write_custom(data):
+    path = _custom_path()
+    if not path:
+        return False
+    with _CUSTOM_LOCK:
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or '.', exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    return True
+
+
+def has_custom(name):
+    return name in _load_custom()
+
+
+def _default_full(name):
     p = PRESETS[name]
     return {**BASE_CFG, **p['cfg']}, {**BASE_SESSION, **p['session']}
+
+
+def _full(name):
+    cfg, ses = _default_full(name)
+    c = _load_custom().get(name)
+    if c:
+        cfg = {**cfg, **c['cfg']}
+        ses = {**ses, **c['session']}
+    return cfg, ses
+
+
+def save_custom(s, name):
+    """تنظیمات فعلی سشن را در همین کلید ذخیره می‌کند و آن را کلید فعال می‌کند. تعداد کلیدهای ذخیره‌شده یا None."""
+    if name not in PRESETS or not _custom_path():
+        return None
+    dcfg, dses = _default_full(name)
+    cur = s.get('strategy_config') or {}
+    cfg = {k: copy.deepcopy(cur[k]) if k in cur else dcfg[k] for k in BASE_CFG}
+    # انتخاب دستی k/عمق هر تایم‌فریم (halving_tf) هم جزو کلید است تا بعد از اعمال پاک نشود
+    if isinstance(cur.get('halving_tf'), dict) and cur['halving_tf']:
+        cfg['halving_tf'] = copy.deepcopy(cur['halving_tf'])
+    ses = {k: copy.deepcopy(s[k]) if k in s else dses[k] for k in BASE_SESSION}
+    data = _load_custom()
+    data[name] = {'cfg': cfg, 'session': ses, 'saved_at': time.time()}
+    if not _write_custom(data):
+        return None
+    s['active_preset'] = name
+    s['active_preset_at'] = time.time()
+    return len(cfg) + len(ses)
+
+
+def reset_custom(name):
+    """نسخه‌ی ذخیره‌شده‌ی این کلید را پاک می‌کند (برگشت به پیش‌فرض کد). True اگر چیزی پاک شد."""
+    data = _load_custom()
+    if name not in data:
+        return False
+    del data[name]
+    return _write_custom(data)
 
 
 def managed_keys():
@@ -155,6 +246,8 @@ def apply_preset(s, name):
     cfg = s.setdefault('strategy_config', {})
     cfg.update(cfg_vals)
     cfg.pop('halving_tf', None)       # انتخاب‌های دستی k/عمق هر تایم‌فریم پاک می‌شود؛ پیش‌فرض ربات (۱۵ دقیقه: ATR ۴، عمق ۱۰) برقرار می‌شود
+    if 'halving_tf' in cfg_vals:      # مگر اینکه نسخه‌ی ذخیره‌شده‌ی ادمین خودش آن را داشته باشد
+        cfg['halving_tf'] = copy.deepcopy(cfg_vals['halving_tf'])
     s.update(ses_vals)
     s['setup_legacy_view'] = False
     s['active_preset'] = name
@@ -200,9 +293,11 @@ def menu_text(s):
     lines = ['🎚 *پریست‌های آماده*', '',
              'این کلید یک مجموعه‌ی کامل از تنظیمات است. با لمس آن همه‌ی تنظیماتِ مربوطه یک‌جا عوض می‌شود. '
              'هر معامله با نام پریستِ فعال برچسب می‌خورد.', '']
+    _custom_keys = _load_custom()
     for n, p in PRESETS.items():
         mark = '✅ ' if n == act else ''
-        lines.append(f"{mark}کلید {_fa(n)} — {p['label']}\n{p['desc']}")
+        cust = ' ✏️ (نسخه‌ی ذخیره‌شده‌ی ادمین)' if n in _custom_keys else ''
+        lines.append(f"{mark}کلید {_fa(n)} — {p['label']}{cust}\n{p['desc']}")
         lines.append('')
     if act in PRESETS:
         diff = preset_diff(s, act)
@@ -212,6 +307,9 @@ def menu_text(s):
                          "برای تمیز ماندن آمار، دوباره همان کلید را بزن.")
     else:
         lines.append('هنوز هیچ پریستی اعمال نشده؛ معامله‌ها بدون برچسب ثبت می‌شوند.')
+    lines.append('')
+    lines.append('💾 «ذخیره» تنظیمات فعلی خودت را در همان کلید می‌نویسد (توضیح بالا دیگر کامل نیست و فقط پیش‌فرض را نشان می‌دهد)؛ '
+                 '«↩️ پیش‌فرض» نسخه‌ی ذخیره‌شده را پاک می‌کند. کلیدهای ۳ تا ۵ همان حالت‌های معاملهٔ کاربران‌اند و تغییرشان برای همه اثر دارد.')
     lines.append('')
     lines.append('در پریست نیست و دست‌نخورده می‌ماند: ریسک هر معامله، تایم‌فریم، نمادها، حالت دستیار و تشخیص رژیم دقیق‌تر. '
                  'هشدارهای «بله، وارد شو / نه» خاموش‌اند.')
@@ -248,8 +346,15 @@ def mode_keyboard(s):
 
 def keyboard(s):
     act = s.get('active_preset')
-    rows = [[{'text': f"{'✅' if n == act else '⚪'} کلید {_fa(n)} — {p['label']}", 'callback_data': f'/preset_apply_{n}'}]
-            for n, p in PRESETS.items()]
+    rows = []
+    custom = _load_custom()
+    for n, p in PRESETS.items():
+        rows.append([{'text': f"{'✅' if n == act else '⚪'} کلید {_fa(n)} — {p['label']}" + (' ✏️' if n in custom else ''),
+                      'callback_data': f'/preset_apply_{n}'}])
+        row = [{'text': f'💾 ذخیره‌ی تنظیمات فعلی در کلید {_fa(n)}', 'callback_data': f'/preset_save_{n}'}]
+        if n in custom:
+            row.append({'text': '↩️ پیش‌فرض', 'callback_data': f'/preset_reset_{n}'})
+        rows.append(row)
     rows.append([{'text': '📊 نتیجه‌ی هر کلید', 'callback_data': '/preset_stats'}])
     rows.append([{'text': '📤 ارسال فایل ژورنال معاملات', 'callback_data': '/preset_export'}])
     rows.append([{'text': '🔙 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}])
