@@ -25,11 +25,16 @@ sent.clear(); bot.send_detail_message(ADMIN, 'full reason: X', simple_text='🛑
 
 # 2) پیام‌های مربوطه هنوز با send_message خام فرستاده نمی‌شوند (محافظ در برابر بازگشت)
 src = open(os.path.join(here, 'bot.py'), encoding='utf-8').read()
-for marker in ('🛡 *محافظ BTC', '🛑 ورود انجام نشد.\\nدلیل', 'به ورود رسید ولی ورود انجام نشد', 'رسید ولی باز نشد', 'به قیمت رسید ولی وارد نشد',
+for marker in ('· سیگنال {side_fa}', '🛡 *محافظ BTC', '🛑 ورود انجام نشد.\\nدلیل', 'به ورود رسید ولی ورود انجام نشد', 'رسید ولی باز نشد', 'به قیمت رسید ولی وارد نشد',
                'ستاپ دیگر معتبر نیست', '❌ ورود `{symbol}` باز نشد: {detail}', 'ورود سریع `{symbol}` باز نشد: {err}'):
     hits = [m.start() for m in re.finditer(re.escape(marker), src)]
     assert hits, ('marker missing', marker)
     for h in hits:
         line = src[src.rfind('\n', 0, h) + 1: src.find('\n', h)]
         assert 'send_detail_message' in line, ('raw send_message still used', marker, line[:100])
+# 3) هشدار «⚠️ هشدار ورود: کلوز BTC ... لطفاً صبور باشید» دقیقاً همان است که کاربر عادی نباید ببیند
+warn_txt = '⚠️ هشدار ورود: کلوز آخرین کندل بسته‌شده‌ی BTC (15م) زیر سطح است؛ لطفاً صبور باشید'
+sent.clear(); bot._btc_front_warn(USER, 'CRV', 'BUY', '15min', warn_txt, {'front_price': 81200.7, 'warn_price': 81200.7}); assert sent == [], sent
+sent.clear(); bot._btc_front_warn(ADMIN, 'CRV', 'BUY', '15min', warn_txt, {'front_price': 81200.7, 'warn_price': 81200.7})
+assert len(sent) == 1 and sent[0][0] == ADMIN and 'صبور باشید' in sent[0][1] and 'CRV' in sent[0][1], sent
 print('DETAIL MESSAGES PLAIN OK')

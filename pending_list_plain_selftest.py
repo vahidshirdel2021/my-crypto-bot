@@ -23,18 +23,22 @@ for cid in (222, 111):
     s['touch_wait'] = {'t1': {'id': 't1', 'status': 'waiting', 'symbol': 'CRV', 'dir': 'BUY', 'tf': '5min', 'agree': 6, 'total': 8,
                               'expires_at': now + 1700, 'created_at': now - 20},
                        't2': {'id': 't2', 'status': 'waiting', 'symbol': 'INJ', 'dir': None, 'tf': '5min', 'agree': 0, 'total': 3,
-                              'expires_at': now + 1700, 'created_at': now - 30}}
+                              'expires_at': now + 1700, 'created_at': now - 30},
+                       't3': {'id': 't3', 'status': 'waiting', 'symbol': 'SAND', 'dir': None, 'tf': '5min', 'agree': 0, 'total': 3,
+                              'expires_at': now + 1700, 'created_at': now - 40}}
     sent.clear(); bot.assist_pending_list(cid)
     c, text, markup = sent[0]
     print(f'--- chat {cid} ---\n{text}\nBUTTONS: {json.dumps(markup, ensure_ascii=False)}\n')
     if cid == 222:
-        for bad in ('رأی', 'خرید', 'فروش', 'فشار', 'فیلتر', 'دقیقه', 'ورود', 'R)', '🟢', '🔴', '🎯', '🤖'):
+        # فقط نام + جهت + دکمه‌ی TradingView؛ هیچ دکمه‌ی callback (قابل‌لمس برای کارت/ورود) نیست
+        for bad in ('رأی', 'فشار', 'فیلتر', 'دقیقه', 'ورود', 'R)', '🎯', '🤖', 'بزنید', 'بروزرسانی'):
             assert bad not in text, ('leak in text', bad)
         btns = [b for row in markup['inline_keyboard'] for b in row]
-        assert any('url' in b and 'tradingview.com' in b['url'] for b in btns)
-        for b in btns:
-            assert 'رأی' not in b['text'] and '/pending_vote_filter' != b.get('callback_data') and '/fav_queue' != b.get('callback_data'), b
-        assert text.count('`INJ`') == 1 and '`CRV`' in text, 'dedupe/symbols'
+        assert btns and all('url' in b and 'callback_data' not in b and 'tradingview.com' in b['url'] for b in btns), btns
+        assert [b['text'] for b in btns] == ['📈 INJ — TradingView', '📈 CRV — TradingView', '📈 SAND — TradingView'], [b['text'] for b in btns]
+        assert '`INJ` 🔴 فروش' in text and '`CRV` 🟢 خرید' in text, text            # جهت مشخص
+        assert text.count('`INJ`') == 1, 'dedupe'
+        assert '`SAND` ⏳ جهت نامشخص' in text, text
     else:
         assert 'رأی' in text and 'فشار' in text, 'admin lost detail'
 print('PENDING LIST PLAIN OK')

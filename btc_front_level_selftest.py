@@ -46,7 +46,7 @@ g = dict(os=os, time=time, math=math, threading=threading, logger=log,
          get_halving_range_sync=lambda sym: st['range'],
          _with_halving_cfg=lambda cfg, rng: ({**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])} if (cfg or {}).get('halving_model_enabled') and rng else cfg),
          _log_grid_levels_sync=lambda sym: [],
-         send_message=lambda c, t, *a, **k: st['sent'].append((c, t)),
+         send_message=lambda c, t, *a, **k: st['sent'].append((c, t)), send_detail_message=lambda c, t, *a, **k: st['sent'].append((c, t)),
          gate_on=lambda s, k: bool((s.get('cfg') or {}).get(k, False)))
 exec(HELPERS, g)
 _real_info = g['btc_front_level_info']
@@ -355,7 +355,7 @@ ok, t, _i = sv(S(sc={'btc_front_min_atr': 1e6, 'btc_chop_flips': 0}), '5min', 'S
 # هشدار ورود: یک‌بار برای هر سطح مرجع در سمت نادرست، با جهت درست در متن
 g9 = side_env(up=801.30, down=162.62); st['sent'].clear()
 G9 = g9['_btc_front_gate']; sent9 = []
-g9['send_message'] = lambda c, t, *a, **k: sent9.append((c, t))
+g9['send_message'] = g9['send_detail_message'] = lambda c, t, *a, **k: sent9.append((c, t))
 for _ in range(3):
     ok, t = G9(5, S(sc=SC0), 'XYZ', 'SELL', '5min'); assert not ok
 assert len(sent9) == 1 and 'فروش' in sent9[0][1] and 'XYZ' in sent9[0][1], sent9
@@ -414,7 +414,7 @@ g10 = chop_env(tight); i10 = g10['btc_front_level_info'](S0, '5min', False); ass
 clean = [L + 300] * 5 + [L - 200, L - 260, L - 300, L - 320, L - 350, L - 360, L - 380, L - 400, L - 420, L - 430, L - 440]
 g10 = chop_env(clean); i10 = g10['btc_front_level_info'](S0, '5min', False); assert not i10['chop'] and i10['chop_flips'] == 1, i10
 # هشدار کلاف: یک‌بار برای هر سطح/جهت (پیام تکراری نمی‌سازد)
-g10 = chop_env(choppy); sent10 = []; g10['send_message'] = lambda c, t, *a, **k: sent10.append((c, t))
+g10 = chop_env(choppy); sent10 = []; g10['send_message'] = g10['send_detail_message'] = lambda c, t, *a, **k: sent10.append((c, t))
 G10 = g10['_btc_front_gate']
 for _ in range(3):
     ok, t = G10(9, S(sc={'btc_front_min_atr': 0}, gate_btc_front_level_enabled=True), 'KLF', 'BUY', '5min'); assert not ok

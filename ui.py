@@ -247,7 +247,7 @@ def get_my_profile_keyboard(session=None):
     return {"inline_keyboard": rows}
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False):
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER'):
     rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},
          {"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
@@ -259,7 +259,13 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False)
          {"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"}],
         [{"text": "📋 بررسی‌های آتی", "callback_data": "/review_list"},
          {"text": "🧭 رژیم BTC/ETH", "callback_data": "/btc_eth_regime"}],
+        [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
     ]
+    # V3.44.63: کلید تغییر حساب کاغذی ⇄ واقعی برای همه‌ی کاربران (متن بر اساس حالت فعلی)
+    if str(trading_mode).upper() == 'REAL':
+        rows.append([{"text": "📄 تغییر به حساب کاغذی (PAPER)", "callback_data": "/mode_paper"}])
+    else:
+        rows.append([{"text": "💳 تغییر به معاملات واقعی (REAL)", "callback_data": "/mode_real"}])
     if is_admin_user:
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
     return {"inline_keyboard": rows}

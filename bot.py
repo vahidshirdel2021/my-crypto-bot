@@ -859,6 +859,7 @@ def new_trade_id(chat_id, symbol):
 
 def audit_trade_record(p):
     return {
+        'mode': 'REAL' if p.get('is_real') else 'PAPER',
         'trade_id': p.get('trade_id'), 'symbol': p.get('symbol'), 'side': p.get('side'),
         'timeframe': p.get('timeframe'), 'strategy': p.get('strategy'),
         'opened_at': p.get('opened_at'), 'closed_at': p.get('close_timestamp'),
@@ -1851,14 +1852,20 @@ def _day_cleanup_loop():
         time.sleep(15)
 
 
+_TG_ERR = threading.local()      # V3.44.64: آخرین خطای HTTP تلگرام در همین ترد (برای تشخیص «can't parse entities»)
+
+
 def tg(method, payload=None, timeout=10):
+    _TG_ERR.last = None
     if not TELEGRAM_TOKEN: return None
     try:
         # V3.44.59: دکمه‌های مخصوص ادمین هرگز در چت کاربر عادی نمایش داده نمی‌شوند (لایه‌ی دفاعی دوم؛ لایه‌ی اول قفل دستورهاست).
         if payload and payload.get('reply_markup') and is_restricted_user(payload.get('chat_id')):
             payload = dict(payload); payload['reply_markup'] = _ap.filter_markup(payload['reply_markup'])
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
-        if r.status_code != 200: logger.warning('Telegram %s: %s', method, r.text[:300]); return None
+        if r.status_code != 200:
+            _TG_ERR.last = (r.status_code, r.text[:300])
+            logger.warning('Telegram %s: %s', method, r.text[:300]); return None
         data = r.json()
         if method in _DAY_LOG_METHODS:
             try:
@@ -2135,6 +2142,15 @@ def send_message(chat_id, text, markup=None, message_id=None, parse_mode='Markdo
     if parse_mode: body['parse_mode'] = parse_mode
     res = tg('sendMessage', body, 10)
     ok = bool(res and res.get('ok'))
+    if not ok and parse_mode:
+        # V3.44.64: Markdown خراب (مثلاً «_» یا «*» بدون جفت) = تلگرام کل پیام را رد می‌کند و کاربر هیچ چیز نمی‌بیند.
+        # فقط برای خطای parse (HTTP 400)، همان متن یک‌بار بدون Markdown فرستاده می‌شود.
+        _err = getattr(_TG_ERR, 'last', None)
+        if _err and _err[0] == 400 and 'parse' in str(_err[1]).lower():
+            logger.warning('send_message: markdown parse failed chat=%s; resending as plain text', chat_id)
+            body = {'chat_id': chat_id, 'text': str(text).replace('*', '').replace('`', ''), 'reply_markup': markup}
+            res = tg('sendMessage', body, 10)
+            ok = bool(res and res.get('ok'))
     if ok:
         _mid = (res.get('result') or {}).get('message_id')
         _LAST_SENT.mid = _mid
@@ -3983,7 +3999,7 @@ def _btc_front_warn(chat_id, symbol, sig, tf, txt, info):
                 _BTC_FRONT_WARNED.pop(k_, None)
     side_fa = 'خرید' if sig == 'BUY' else 'فروش'
     try:
-        send_message(chat_id, f"{txt}\n\n`{symbol}` · سیگنال {side_fa}")
+        send_detail_message(chat_id, f"{txt}\n\n`{symbol}` · سیگنال {side_fa}")      # V3.44.63: هشدار فنی؛ فقط ادمین
     except Exception:
         logger.exception('btc front: warning send failed chat=%s symbol=%s', chat_id, symbol)
 
@@ -5328,7 +5344,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.45'
+BOT_VERSION = '3.44.65'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6747,8 +6763,7 @@ def settle_platform_fee(chat_id, pos, net_profit_before_platform_fee):
 
 
 def fee_report(chat_id, period='all'):
-    if PLATFORM_FEE_MODE == 'daily':
-        return _fee_report_daily(chat_id, period)      # V3.44.61
+    return _fee_report_by_day(chat_id, period)          # V3.44.63: «کارمزد من» با تفکیک روز + جمع کل (هر دو حالت کارمزد)
     now=time.time()
     since=0
     if period=='day': since=now-86400
@@ -6807,7 +6822,7 @@ _FEE_BLOCK_NOTICE_TS = {}
 _FEE_OPEN = ('PENDING', 'OVERDUE')
 _FEE_STATUS_FA = {'PENDING': 'در انتظار پرداخت', 'OVERDUE': 'مهلت گذشته (مسدود)', 'PAID': 'پرداخت‌شده', 'WAIVED': 'بخشوده'}
 # حساب مسدود: فقط دیدن/بستن پوزیشن‌ها و بخش کارمزد باز است (ورود جدید در _execute_trade_unlocked بسته می‌شود).
-_FEE_BLOCK_ALLOW_PREFIXES = ('/fee_', '/my_fee', '/open_positions', '/positions', '/close_', '/confirm_close', '/emergency_close',
+_FEE_BLOCK_ALLOW_PREFIXES = ('/fee_', '/my_fee', '/stop_scan', '/open_positions', '/positions', '/close_', '/confirm_close', '/emergency_close',
                              '/confirm_emergency', '/pclose_', '/manage_', '/cfm_', '/cfmno_', '/show_chart_', '/view_chart_',
                              '/edit_sl_', '/edit_tp_')
 
@@ -6905,7 +6920,8 @@ def fee_block_allows(data):
     if d.startswith(_FEE_BLOCK_ALLOW_PREFIXES):
         return True
     dl = d.replace('\u200c', '')
-    return any(w in dl for w in ('پوزیشن', 'بستن', 'اضطراری'))      # دکمه‌های کیبورد ثابت: پوزیشن‌ها / بستن همه / بستن اضطراری
+    # دکمه‌های کیبورد ثابت: پوزیشن‌ها / بستن همه / بستن اضطراری / V3.44.63: «🔴 توقف اسکن» (توقف هیچ‌وقت نباید بسته باشد؛ فقط «شروع اسکن» و ورود جدید برای حساب مسدود بسته می‌ماند)
+    return any(w in dl for w in ('پوزیشن', 'بستن', 'اضطراری', 'توقف اسکن', '🔴 توقف'))
 
 
 def _fee_claim_keyboard(inv_id):
@@ -7254,6 +7270,74 @@ def _fee_report_daily(chat_id, period):
     return '\n'.join(lines)
 
 
+_FEE_PERIOD_DAYS = {'day': 1, 'week': 7, 'month': 30}
+_FEE_PERIOD_FA = {'day': 'امروز', 'week': '۷ روز اخیر', 'month': '۳۰ روز اخیر'}
+FEE_REPORT_MAX_DAYS = 31
+
+
+def _fee_report_by_day(chat_id, period='all'):
+    """V3.44.63: گزارش «💰 کارمزد من» برای کاربر: لیست کارمزد هر روز (جدیدترین اول) + جمع کل کارمزد.
+    حالت روزانه: فاکتورهای ثبت‌شده + کارمزد «امروز» به‌صورت تخمینی (هنوز فاکتور نشده).
+    حالت هر معامله: کارمزدهای کسرشده، گروه‌بندی بر اساس روز. روزهای زیان‌ده کارمزد ندارند و در لیست نمی‌آیند."""
+    tz = _fee_tz()
+    now = time.time()
+    today = _df.day_key(now, tz)
+    n_days = _FEE_PERIOD_DAYS.get(period)
+    cutoff = _df.shift_day(today, -(n_days - 1)) if n_days else None        # روز تقویمی، نه ۲۴ ساعت متحرک
+    rows = []            # (day, profit, fee, status_fa, counted)
+    unpaid = None
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            if PLATFORM_FEE_MODE == 'daily':
+                for d, p, f, st in conn.execute('SELECT day,profit_usdt,fee_usdt,status FROM fee_invoices WHERE chat_id=? ORDER BY day DESC', (int(chat_id),)).fetchall():
+                    if cutoff is None or d >= cutoff:
+                        rows.append((d, float(p), float(f), _FEE_STATUS_FA.get(st, st), st != 'WAIVED', st))
+                unpaid = float(conn.execute("SELECT COALESCE(SUM(fee_usdt),0) FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE')", (int(chat_id),)).fetchone()[0] or 0)
+            else:
+                per_day = {}
+                for ts, p, f in conn.execute('SELECT created_at,net_profit_before_platform_fee_usdt,platform_fee_usdt FROM fee_ledger WHERE chat_id=?', (int(chat_id),)).fetchall():
+                    d = _df.day_key(float(ts), tz)
+                    if cutoff is None or d >= cutoff:
+                        a = per_day.setdefault(d, [0.0, 0.0]); a[0] += float(p or 0); a[1] += float(f or 0)
+                for d in sorted(per_day, reverse=True):
+                    rows.append((d, per_day[d][0], per_day[d][1], 'کسر‌شده از سود', True, 'SETTLED'))
+        finally:
+            conn.close()
+    if PLATFORM_FEE_MODE == 'daily' and not any(r[0] == today for r in rows):
+        try:
+            s = get_session(chat_id)
+            st_ts, en_ts = _df.day_bounds(today, tz)
+            tp, tn = _df.day_profit(list(s.get('closed_positions') or []), st_ts, en_ts, FEE_INCLUDE_PAPER)
+            tf = _df.compute_fee(tp, get_user_fee_rate(chat_id), PLATFORM_FEE_MIN_PROFIT_USDT) if tn > 0 else 0.0
+            if tf > 0:
+                rows.insert(0, (today, float(tp), float(tf), 'تخمینی تا این لحظه (هنوز فاکتور نشده)', True, 'LIVE'))
+        except Exception:
+            logger.exception('fee report: today estimate failed chat=%s', chat_id)
+    counted = [r for r in rows if r[4]]
+    total_fee = sum(r[2] for r in counted)
+    total_profit = sum(r[1] for r in counted)
+    paid_fee = sum(r[2] for r in counted if r[5] == 'PAID')
+    shown, rest = rows[:FEE_REPORT_MAX_DAYS], rows[FEE_REPORT_MAX_DAYS:]
+    lines = ['💰 *کارمزد من*', '', f"بازه: {_FEE_PERIOD_FA.get(period, 'کل سابقه')}", '', '*📅 تفکیک روزانه:*']
+    if shown:
+        for d, p, f, st_fa, ok, st in shown:
+            lines.append(f"• `{d}` — سود `{p:+.2f}` ← کارمزد `{f:.2f}` — {st_fa}")
+        if rest:
+            rc = [r for r in rest if r[4]]
+            lines.append(f"• … و `{len(rest)}` روز قدیمی‌تر — کارمزد `{sum(r[2] for r in rc):.2f}`")
+    else:
+        lines.append('• در این بازه هنوز کارمزدی ثبت نشده است.')
+    lines += ['', '*جمع کل:*',
+              f'• تعداد روزهای دارای کارمزد: `{len(counted)}`',
+              f'• جمع سود این روزها: `{total_profit:+.2f} USDT`',
+              f'• 💰 *جمع کل کارمزد: `{total_fee:.2f} USDT`*']
+    if unpaid is not None:
+        lines += [f'• پرداخت‌شده: `{paid_fee:.2f} USDT`', f'• ⚠️ پرداخت‌نشده (کل): `{unpaid:.2f} USDT`']
+    lines += [f'• نرخ فعلی: `{get_user_fee_rate(chat_id):.2f}%`', '', '_فقط روزهای سودده کارمزد دارند._']
+    return '\n'.join(lines)
+
+
 def _admin_fee_report_daily(period):
     since = _fee_since(period)
     with DB_LOCK:
@@ -7273,7 +7357,7 @@ def _admin_fee_report_daily(period):
              f'• پرداخت‌نشده (کل): `{float((unpaid or (0, 0))[0]):.2f} USDT` در `{int((unpaid or (0, 0))[1])}` فاکتور',
              f'• کاربران مسدود: `{nblocked}`', f'• کاربران دارای فاکتور: `{users}`', '', '*برترین کاربران:*']
     lines += [f'• `{uid}` → `{float(amt):.2f} USDT` ({cnt} فاکتور)' for uid, amt, cnt in rows] or ['• هنوز فاکتوری ثبت نشده است.']
-    lines += ['', 'لیست بدهکاران: /fee_debts']
+    lines += ['', 'لیست بدهکاران: `/fee_debts`']
     return '\n'.join(lines)
 # ===== END کارمزد روزانه =====
 
@@ -7563,12 +7647,34 @@ def _user_first_seen_ts(chat_id):
         return None
 
 
+def _mode_is_real(s):
+    return (s or {}).get('trading_mode') == 'REAL'
+
+
+def closed_for_mode(s, real=None):
+    """V3.44.65: معاملات بسته‌شده فقط برای مود فعلی کاربر (real=None) یا مود مشخص؛ کاغذی و واقعی هرگز قاطی نمی‌شوند."""
+    if real is None:
+        real = _mode_is_real(s)
+    return [p for p in (s.get('closed_positions') or []) if bool(p.get('is_real')) == bool(real)]
+
+
+def open_for_mode(s, real=None):
+    if real is None:
+        real = _mode_is_real(s)
+    return [p for p in (s.get('paper_positions') or []) if bool(p.get('is_real')) == bool(real)]
+
+
+def mode_label_fa(s_or_real):
+    real = _mode_is_real(s_or_real) if isinstance(s_or_real, dict) else bool(s_or_real)
+    return '🔴 واقعی' if real else '📝 کاغذی'
+
+
 def daily_pnl_text(chat_id):
     """سود/زیان خالص امروز (جمع PnL پوزیشن‌های بسته‌شده‌ی امروز؛ بعد از کارمزدها و خروج‌های پله‌ای) +
     تعداد روزهای استفاده از ربات + مجموع سود/زیان کلی تمام معاملات بسته‌شده."""
     s = get_session(chat_id)
     start = _daily_pnl_day_start_ts()
-    closed = s.get('closed_positions') or []
+    closed = closed_for_mode(s)
     total = sum(float(p.get('pnl_usdt') or 0.0) for p in closed
                 if float(p.get('close_timestamp', 0) or 0) >= start)
     if total > 0.005:
@@ -7583,7 +7689,7 @@ def daily_pnl_text(chat_id):
     if abs(overall) <= 0.005:
         overall = 0.0
     word = 'سود' if overall > 0 else ('زیان' if overall < 0 else 'سود/زیان')
-    return (f"{head}\n\n"
+    return (f"💳 حساب: {mode_label_fa(s)}\n{head}\n\n"
             f"📅 شما `{days}` روز است از ربات استفاده می‌کنید.\n"
             f"📊 مجموع {word} کلی شما: `{('%+.2f' % overall) if overall else '0.00'} USDT` است.")
 
@@ -12254,29 +12360,29 @@ PENDING_PLAIN_MAX_SYMBOLS = 30
 
 
 def _assist_pending_list_plain(chat_id, message_id, recs, t_all):
-    """V3.44.62: نسخه‌ی کاربر عادی «📋 سیگنال‌های در انتظار»: فقط نام نمادها + دکمه‌ی چارت TradingView
-    (بدون رأی‌گیری، جهت، تعداد رأی، مهلت، فشار بازار، فیلتر نمایش یا هر اطلاعات فنی).
-    لمس نام نماد همان کارت قبلی را پایین چت می‌آورد (تا کاربر همچنان بتواند تصمیم بگیرد)."""
+    """V3.44.63: نسخه‌ی کاربر عادی «📋 سیگنال‌های در انتظار»: فقط نام نماد + جهت معامله + دکمه‌ی چارت TradingView.
+    هیچ دکمه‌ی قابل‌لمسی برای باز کردن کارت/ورود وجود ندارد (فقط لینک TradingView)؛ بدون رأی‌گیری، مهلت، قیمت و اطلاعات فنی."""
     items, seen = [], set()
-    for r in recs:                                   # کارت‌های دستیار
+    for r in recs:                                   # کارت‌های دستیار: جهت = sig
         sym = r.get('symbol')
         if sym and sym not in seen:
-            seen.add(sym); items.append((sym, r.get('tf') or '5min', f"/assist_open_{r['id']}"))
-    for r in t_all:                                  # برخورد با سطح
+            seen.add(sym); items.append((sym, r.get('tf') or '5min', r.get('sig')))
+    for r in t_all:                                  # برخورد با سطح: جهت = dir (ممکن است هنوز مشخص نباشد)
         sym = r.get('symbol')
         if sym and sym not in seen:
-            seen.add(sym); items.append((sym, r.get('tf') or '5min', f"/tw_open_{r['id']}"))
+            seen.add(sym); items.append((sym, r.get('tf') or '5min', r.get('dir')))
+
+    def _side(d):
+        return '🟢 خرید' if d == 'BUY' else ('🔴 فروش' if d == 'SELL' else '⏳ جهت نامشخص')
+
     shown = items[:PENDING_PLAIN_MAX_SYMBOLS]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(items)})*", ""]
     rows = []
-    for i, (sym, tf, cb) in enumerate(shown, 1):
-        lines.append(f"{i}) `{sym}`")
-        rows.append([{'text': f"🔎 {sym}", 'callback_data': cb},
-                     {'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}])
+    for i, (sym, tf, d) in enumerate(shown, 1):
+        lines.append(f"{i}) `{sym}` {_side(d)}")
+        rows.append([{'text': f"📈 {sym} — TradingView", 'url': tradingview_chart_url(sym, tf)}])
     if len(items) > len(shown):
         lines.append(f"… و {len(items) - len(shown)} نماد دیگر")
-    lines += ["", "روی نام نماد بزنید تا کارتش پایین چت بیاید."]
-    rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
 
 
@@ -12717,8 +12823,8 @@ def assist_stats_text(s):
     lines = ['📊 *آمار حالت دستیار*',
              f"• کل سیگنال‌ها: `{len(log)}` | تاییدشده: `{c.get('approved', 0)}` | ردشده: `{c.get('rejected', 0)}` | منقضی: `{c.get('expired', 0)}` | در انتظار: `{c.get('pending', 0)}`"]
     ids = {r['id'] for r in log if r.get('status') == 'approved'}
-    trades = [p for p in (s.get('closed_positions') or []) if p.get('assist_id') in ids]
-    open_n = sum(1 for p in (s.get('paper_positions') or []) if p.get('assist_id') in ids)
+    trades = [p for p in closed_for_mode(s) if p.get('assist_id') in ids]
+    open_n = sum(1 for p in open_for_mode(s) if p.get('assist_id') in ids)
     lines.append('\n*معاملات تاییدشده (نتیجه‌ی واقعی):*')
     if trades:
         wins = sum(1 for p in trades if float(p.get('pnl_usdt') or 0) > 0)
@@ -12966,7 +13072,7 @@ async def scan_symbol(http,chat_id,symbol):
 
 def performance_period_report(chat_id, period='all'):
     s=get_session(chat_id)
-    closed=list(s.get('closed_positions') or [])
+    closed=closed_for_mode(s)
     now=time.time()
     seconds={'day':86400,'week':7*86400,'month':30*86400}.get(period)
     if seconds: closed=[p for p in closed if now-float(p.get('close_timestamp',p.get('opened_at',0)) or 0)<=seconds]
@@ -12988,7 +13094,7 @@ def performance_period_report(chat_id, period='all'):
     long_net=sum(float(p.get('pnl_usdt',0) or 0) for p in longs)
     short_net=sum(float(p.get('pnl_usdt',0) or 0) for p in shorts)
 
-    lines=['📊 *گزارش عملکرد '+label+'*','━━━━━━━━━━━━━━━━━━━━',f'معاملات بسته‌شده: `{n}`',f'موفق: `{len(wins)}` | ناموفق: `{len(losses)}`',f'نرخ موفقیت: `{(len(wins)/n*100 if n else 0):.1f}%`',f'سود/زیان خالص: `{net:+.2f} USDT`',f'Profit Factor: `{("∞" if pf==float("inf") else f"{pf:.2f}")}`']
+    lines=['📊 *گزارش عملکرد '+label+'*','💳 حساب: '+mode_label_fa(s),'━━━━━━━━━━━━━━━━━━━━',f'معاملات بسته‌شده: `{n}`',f'موفق: `{len(wins)}` | ناموفق: `{len(losses)}`',f'نرخ موفقیت: `{(len(wins)/n*100 if n else 0):.1f}%`',f'سود/زیان خالص: `{net:+.2f} USDT`',f'Profit Factor: `{("∞" if pf==float("inf") else f"{pf:.2f}")}`']
     lines.append('━━━━━━━━━━━━━━━━━━━━')
     lines.append(f"🟢 خرید (Long): `{len(longs)}` معامله | موفق: `{long_wins}` | ناموفق: `{len(longs)-long_wins}` | نرخ موفقیت: `{(long_wins/len(longs)*100 if longs else 0):.1f}%` | سود/زیان: `{long_net:+.2f} USDT`")
     lines.append(f"🔴 فروش (Short): `{len(shorts)}` معامله | موفق: `{short_wins}` | ناموفق: `{len(shorts)-short_wins}` | نرخ موفقیت: `{(short_wins/len(shorts)*100 if shorts else 0):.1f}%` | سود/زیان: `{short_net:+.2f} USDT`")
@@ -13037,14 +13143,14 @@ def quality_breakdown_report(chat_id, period='all'):
     امتیاز) بر اساس داده باشد، نه حدس.
     """
     s = get_session(chat_id)
-    closed = list(s.get('closed_positions') or [])
+    closed = closed_for_mode(s)
     now = time.time()
     seconds = {'day': 86400, 'week': 7*86400, 'month': 30*86400}.get(period)
     if seconds:
         closed = [p for p in closed if now-float(p.get('close_timestamp', p.get('opened_at', 0)) or 0) <= seconds]
     label = {'day': 'امروز', 'week': '۷ روز اخیر', 'month': '۳۰ روز اخیر', 'all': 'کل سابقه'}.get(period, 'کل سابقه')
     n = len(closed)
-    lines = [f'🎯 *گزارش تفکیکی کیفیت سیگنال — {label}*', '━━━━━━━━━━━━━━━━━━━━']
+    lines = [f'🎯 *گزارش تفکیکی کیفیت سیگنال — {label}*', f'💳 حساب: {mode_label_fa(s)}', '━━━━━━━━━━━━━━━━━━━━']
     if n == 0:
         lines.append('هنوز معامله‌ی بسته‌شده‌ای برای این بازه ثبت نشده.')
         return '\n'.join(lines)
@@ -13124,7 +13230,7 @@ def quality_breakdown_report(chat_id, period='all'):
 def today_trades_report(chat_id):
     """Detailed list of trades closed on the current calendar day."""
     s = get_session(chat_id)
-    closed = list(s.get('closed_positions') or [])
+    closed = closed_for_mode(s)
 
     now_local = _crypto_now()
     day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -13145,6 +13251,7 @@ def today_trades_report(chat_id):
 
     lines = [
         f'📋 *معاملات امروز* — `{len(trades)}` معامله',
+        f'💳 حساب: {mode_label_fa(s)}',
         '━━━━━━━━━━━━━━━━━━━━'
     ]
 
@@ -13626,13 +13733,14 @@ def export_trade_pipeline(chat_id):
         return False
     s = get_session(chat_id)
     pipeline = list(s.get('trade_pipeline_audit') or [])
-    opens = [audit_trade_record(p) for p in s.get('paper_positions', [])]
-    closes = [audit_trade_record(p) for p in s.get('closed_positions', [])]
+    opens = [audit_trade_record(p) for p in open_for_mode(s)]
+    closes = [audit_trade_record(p) for p in closed_for_mode(s)]
     payload = {
         'report_metadata': {
             'report_type': 'trade_pipeline_audit',
             'generated_at': time.time(),
             'chat_id': chat_id,
+            'account_mode': 'REAL' if _mode_is_real(s) else 'PAPER',
             'timeframe': s.get('timeframe'),
             'audit_enabled': bool(s.get('trade_pipeline_enabled', False)),
         },
@@ -13673,7 +13781,7 @@ def full_reset(chat_id):
 
 
 def trade_audit_report(chat_id):
-    s=get_session(chat_id); positions=list(s.get('paper_positions') or []); closed=list(s.get('closed_positions') or [])
+    s=get_session(chat_id); positions=open_for_mode(s); closed=closed_for_mode(s)
     allp=closed+positions
     if not allp: return '🔎 *ممیزی معامله*\n\nهنوز معامله‌ای برای بررسی ثبت نشده است.'
     p=max(allp,key=lambda x: float(x.get('opened_at',0) or 0)); tid=p.get('trade_id','—')
@@ -13683,7 +13791,10 @@ def trade_audit_report(chat_id):
     return '\n'.join(lines)
 
 
-def _journal_trades_for(chat_id):
+def _journal_trades_for(chat_id, real=None):
+    """V3.44.65: ژورنال همین چت، فقط مود فعلی (real=None) / مود مشخص؛ real='all' = هر دو."""
+    if real is None:
+        real = _mode_is_real(get_session(chat_id))
     try:
         path = _journal_path()
         if not os.path.exists(path):
@@ -13691,7 +13802,7 @@ def _journal_trades_for(chat_id):
         with _JOURNAL_LOCK:
             with open(path, 'r', encoding='utf-8') as fh:
                 data = json.load(fh)
-        return [t for t in (data.get('trades') or []) if str(t.get('chat_id')) == str(chat_id)]
+        return [t for t in (data.get('trades') or []) if str(t.get('chat_id')) == str(chat_id) and (real == 'all' or bool(t.get('is_real')) == bool(real))]
     except Exception:
         logger.exception('journal read failed')
         return []
@@ -13712,7 +13823,7 @@ def export_trade_journal(chat_id):
                      ensure_ascii=False, indent=1, default=str).encode('utf-8')
     try:
         resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
-                             data={'chat_id': chat_id, 'caption': f'📤 ژورنال معاملات ({len(trades)} معامله)'},
+                             data={'chat_id': chat_id, 'caption': f'📤 ژورنال معاملات حساب {"واقعی" if _mode_is_real(get_session(chat_id)) else "کاغذی"} ({len(trades)} معامله)'},
                              files={'document': ('trade_journal.json', io.BytesIO(raw), 'application/json')}, timeout=30)
         if not resp.ok or not (resp.json() or {}).get('ok', False):
             logger.warning('journal export send failed: %s', resp.text[:500])
@@ -13728,10 +13839,10 @@ def export_trade_journal(chat_id):
 def export_trade_data(chat_id):
     if not is_allowed(chat_id) or not TELEGRAM_TOKEN: return False
     s=get_session(chat_id)
-    payload={'generated_at':time.time(),'chat_id':chat_id,'open_positions':[audit_trade_record(p) for p in s.get('paper_positions',[])],'closed_positions':[audit_trade_record(p) for p in s.get('closed_positions',[])],'trade_audit':s.get('trade_audit',[])}
+    payload={'generated_at':time.time(),'chat_id':chat_id,'account_mode':'REAL' if _mode_is_real(s) else 'PAPER','open_positions':[audit_trade_record(p) for p in open_for_mode(s)],'closed_positions':[audit_trade_record(p) for p in closed_for_mode(s)],'trade_audit':s.get('trade_audit',[])}
     raw=json.dumps(payload,ensure_ascii=False,indent=2,default=str).encode('utf-8')
     try:
-        resp=requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات'},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
+        resp=requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',data={'chat_id':chat_id,'caption':'📦 خروجی کامل داده‌های معاملات — حساب '+('واقعی' if _mode_is_real(s) else 'کاغذی')},files={'document':('trade_audit.json',io.BytesIO(raw),'application/json')},timeout=30)
         try: schedule_auto_delete(chat_id, (((resp.json() or {}).get('result') or {}).get('message_id')))
         except Exception: pass
         if not resp.ok or not (resp.json() or {}).get('ok', False):
@@ -13756,7 +13867,7 @@ def _reset_start_balance(s):
     return float(default_session()['paper_balance']), False
 
 
-def _journal_reset_chat(chat_id):
+def _journal_reset_chat(chat_id, real=None):
     """ژورنال معاملات این چت را (بدون حذف) به یک فایل پشتیبان منتقل می‌کند و از ژورنال زنده برمی‌دارد.
     (تعداد، مسیر پشتیبان) برمی‌گرداند؛ خطا = (None, None) و ژورنال دست‌نخورده می‌ماند."""
     path = _journal_path()
@@ -13769,13 +13880,14 @@ def _journal_reset_chat(chat_id):
             trades = data.get('trades') if isinstance(data, dict) else None
             if not isinstance(trades, list):
                 return 0, None
-            mine = [t for t in trades if str(t.get('chat_id')) == str(chat_id)]
+            _sel = lambda t: str(t.get('chat_id')) == str(chat_id) and (real is None or bool(t.get('is_real')) == bool(real))
+            mine = [t for t in trades if _sel(t)]
             if not mine:
                 return 0, None
             bak = f'{path}.reset-{chat_id}-{int(time.time())}.json'
             with open(bak, 'w', encoding='utf-8') as fh:
                 json.dump({'version': 1, 'chat_id': chat_id, 'archived_at': time.time(), 'trades': mine}, fh, ensure_ascii=False, indent=1, default=str)
-            data['trades'] = [t for t in trades if str(t.get('chat_id')) != str(chat_id)]
+            data['trades'] = [t for t in trades if not _sel(t)]
             data['updated_at'] = time.time()
             tmp = f'{path}.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
@@ -13796,7 +13908,7 @@ def reset_stats_prompt_text(chat_id):
         bal = f"موجودی به `{start:.2f} USDT` برمی‌گردد" + (' (موجودی اولیه‌ای که انتخاب کرده بودید)' if known else ' (موجودی اولیه ثبت نشده؛ مقدار پیش‌فرض ربات)')
     return ('⚠️ *ریست آمار و موجودی*\n\n'
             f'• {bal}\n'
-            '• پاک می‌شود: تاریخچه معاملات بسته‌شده، ممیزی و مسیر معاملات، آمار اسکن، آمار صف تایید حرکت و لیست انتظار، آمار کارمزد، لاگ دستیار، '
+            '• پاک می‌شود: تاریخچه معاملات بسته‌شده‌ی همین حساب (' + ('واقعی' if s.get('trading_mode') == 'REAL' else 'کاغذی') + '؛ تاریخچه‌ی حساب دیگر دست‌نخورده می‌ماند)، ممیزی و مسیر معاملات، آمار اسکن، آمار صف تایید حرکت و لیست انتظار، آمار کارمزد، لاگ دستیار، '
             'ژورنال معاملات و آمار پریست‌ها (نسخه‌ی پشتیبان ژورنال در پوشه‌ی داده می‌ماند)\n'
             '• تنظیمات، فیلترها و سیگنال‌های در حال انتظار دست‌نخورده می‌مانند\n'
             '• تا وقتی پوزیشن باز دارید ریست انجام نمی‌شود\n\nمطمئن هستید؟')
@@ -13808,8 +13920,8 @@ def reset_stats(chat_id):
         return False, '❌ تا وقتی پوزیشن باز دارید، ریست آمار مجاز نیست. ابتدا پوزیشن‌ها را ببندید.'
     real = s.get('trading_mode') == 'REAL'
     start, known = _reset_start_balance(s)
-    n_closed = len(s.get('closed_positions') or [])
-    s['closed_positions'] = []
+    n_closed = len(closed_for_mode(s, real))
+    s['closed_positions'] = closed_for_mode(s, not real)       # V3.44.65: فقط تاریخچه‌ی مود فعلی پاک می‌شود؛ مود دیگر دست‌نخورده می‌ماند
     s['trade_audit'] = []
     s['trade_pipeline_audit'] = []
     s['assist_log'] = []
@@ -13829,7 +13941,7 @@ def reset_stats(chat_id):
         equity = float(start)
     s['daily_start_equity'] = float(equity)
     s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime())
-    n_j, bak = _journal_reset_chat(chat_id)
+    n_j, bak = _journal_reset_chat(chat_id, real)
     save_session(chat_id)
     lines = ['✅ *آمار و موجودی ریست شد*', '']
     lines.append(f"موجودی: `{equity:.2f} USDT`" + (' (حساب واقعی؛ تغییر نکرد)' if real else (' (موجودی اولیه)' if known else ' (پیش‌فرض ربات؛ موجودی اولیه ثبت نشده بود)')))
@@ -14084,7 +14196,7 @@ def menu(chat_id,message_id=None):
                 f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`\n"
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id)),message_id)
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER')),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
