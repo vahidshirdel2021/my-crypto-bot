@@ -58,6 +58,102 @@ def days_after(last_day, upto_day, max_days=7):
     return out[-int(max_days):] if max_days else out
 
 
+PERIODS = ('daily', 'weekly', 'monthly')
+PERIOD_FA = {'daily': 'روزانه', 'weekly': 'هفتگی', 'monthly': 'ماهانه'}
+
+
+_G_DAYS = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+_J_DAYS = (31, 31, 31, 31, 31, 31, 30, 30, 30, 30, 30, 29)
+
+
+def gregorian_to_jalali(gy, gm, gd):
+    """تبدیل میلادی → شمسی (الگوریتم حسابیِ استاندارد؛ برای سال‌های جاری درست است)."""
+    gy2 = gy - 1600; gm2 = gm - 1; gd2 = gd - 1
+    g_day_no = 365 * gy2 + (gy2 + 3) // 4 - (gy2 + 99) // 100 + (gy2 + 399) // 400
+    for i in range(gm2):
+        g_day_no += _G_DAYS[i]
+    if gm2 > 1 and ((gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0):
+        g_day_no += 1
+    g_day_no += gd2
+    j_day_no = g_day_no - 79
+    j_np = j_day_no // 12053
+    j_day_no %= 12053
+    jy = 979 + 33 * j_np + 4 * (j_day_no // 1461)
+    j_day_no %= 1461
+    if j_day_no >= 366:
+        jy += (j_day_no - 1) // 365
+        j_day_no = (j_day_no - 1) % 365
+    i = 0
+    while i < 11 and j_day_no >= _J_DAYS[i]:
+        j_day_no -= _J_DAYS[i]; i += 1
+    return jy, i + 1, j_day_no + 1
+
+
+def jalali_to_gregorian(jy, jm, jd):
+    jy2 = jy - 979; jm2 = jm - 1; jd2 = jd - 1
+    j_day_no = 365 * jy2 + (jy2 // 33) * 8 + (jy2 % 33 + 3) // 4
+    for i in range(jm2):
+        j_day_no += _J_DAYS[i]
+    j_day_no += jd2
+    g_day_no = j_day_no + 79
+    gy = 1600 + 400 * (g_day_no // 146097)
+    g_day_no %= 146097
+    leap = True
+    if g_day_no >= 36525:
+        g_day_no -= 1
+        gy += 100 * (g_day_no // 36524)
+        g_day_no %= 36524
+        if g_day_no >= 365:
+            g_day_no += 1
+        else:
+            leap = False
+    gy += 4 * (g_day_no // 1461)
+    g_day_no %= 1461
+    if g_day_no >= 366:
+        leap = False
+        g_day_no -= 1
+        gy += g_day_no // 365
+        g_day_no %= 365
+    i = 0
+    while g_day_no >= _G_DAYS[i] + (1 if (i == 1 and leap) else 0):
+        g_day_no -= _G_DAYS[i] + (1 if (i == 1 and leap) else 0); i += 1
+    return gy, i + 1, g_day_no + 1
+
+
+def to_jalali_str(day):
+    """'YYYY-MM-DD' میلادی → 'YYYY/MM/DD' شمسی."""
+    d0 = datetime.strptime(day, DAY_FMT)
+    jy, jm, jd = gregorian_to_jalali(d0.year, d0.month, d0.day)
+    return f'{jy:04d}/{jm:02d}/{jd:02d}'
+
+
+def period_end_excl(day, period='daily', week_start=5):
+    """اولین روزِ «بعد از» بازه‌ای که از `day` شروع می‌شود. روزانه: فردا؛ هفتگی: اولین روز شروع هفته‌ی بعد
+    (week_start = weekday پایتون؛ ۵ = شنبه)؛ ماهانه: اول ماه بعد. بازه‌ی ناقص (وسط هفته/ماه) هم درست کار می‌کند."""
+    d0 = datetime.strptime(day, DAY_FMT)
+    if period == 'weekly':
+        d1 = d0 + timedelta(days=1)
+        while d1.weekday() != int(week_start) % 7:
+            d1 += timedelta(days=1)
+        return d1.strftime(DAY_FMT)
+    if period == 'monthly':          # ماه شمسی: مرز = اول ماه شمسیِ بعد
+        jy, jm, _jd = gregorian_to_jalali(d0.year, d0.month, d0.day)
+        jy, jm = (jy + 1, 1) if jm == 12 else (jy, jm + 1)
+        gy, gm, gd = jalali_to_gregorian(jy, jm, 1)
+        return datetime(gy, gm, gd).strftime(DAY_FMT)
+    return (d0 + timedelta(days=1)).strftime(DAY_FMT)
+
+
+def period_label(day, end_day=None, period='daily'):
+    """متن نمایشی بازه: روزانه = خودِ روز؛ بقیه «شروع تا پایان»."""
+    if period in ('weekly', 'monthly'):              # بازه‌های هفتگی/ماهانه با تاریخ شمسی نمایش داده می‌شوند
+        a = to_jalali_str(day)
+        if end_day and end_day != day:
+            return f'{a} تا {to_jalali_str(end_day)}'
+        return a
+    return str(day)
+
+
 def day_profit(closed_positions, start_ts, end_ts, include_paper=True):
     """(جمع PnL خالص، تعداد معامله) معاملات بسته‌شده در [start_ts, end_ts).
 
@@ -114,12 +210,17 @@ def _clean(text):
     return str(text or '').replace('`', "'").strip()
 
 
-def invoice_message(day, profit, rate_pct, fee, due_ts, tz, account, tz_label=''):
+def invoice_message(day, profit, rate_pct, fee, due_ts, tz, account, tz_label='', period='daily', end_day=None):
     acct = _clean(account)
     acct_line = (f'`{acct}`' if acct else '⚠️ حساب پرداخت هنوز توسط ادمین تنظیم نشده؛ لطفاً با ادمین هماهنگ کنید.')
     tzl = f' ({tz_label})' if tz_label else ''
-    return (f'💰 *کارمزد روزانه*\n\n'
-            f'دیروز ({day}) سود خالص شما `{profit:+.2f} USDT` بود.\n'
+    if period in ('weekly', 'monthly'):
+        head = f'💰 *کارمزد {PERIOD_FA[period]}*\n\n'
+        span = f'در بازه‌ی {period_label(day, end_day, period)} سود خالص شما `{profit:+.2f} USDT` بود.\n'
+    else:
+        head = '💰 *کارمزد روزانه*\n\n'
+        span = f'دیروز ({day}) سود خالص شما `{profit:+.2f} USDT` بود.\n'
+    return (head + span +
             f'کارمزد پلتفرم ({rate_pct:g}٪): `{fee:.2f} USDT`\n\n'
             f'⏰ تا ساعت `{fmt_due(due_ts, tz)}`{tzl} امروز فرصت دارید کارمزد معاملاتتان را به حساب ادمین واریز کنید:\n'
             f'{acct_line}\n\n'
@@ -127,17 +228,17 @@ def invoice_message(day, profit, rate_pct, fee, due_ts, tz, account, tz_label=''
             f'بعد از واریز، دکمه‌ی «✅ واریز کردم» را بزنید تا ادمین بررسی و تایید کند.')
 
 
-def blocked_message(day, fee, account):
+def blocked_message(day, fee, account, period='daily', end_day=None):
     acct = _clean(account)
     acct_line = f'\n{chr(96)}{acct}{chr(96)}' if acct else ''
     return (f'⛔ *حساب شما مسدود شد*\n\n'
-            f'مهلت پرداخت کارمزد روز {day} (`{fee:.2f} USDT`) تمام شد و واریز تایید نشده است.\n'
+            f'مهلت پرداخت کارمزد {"روز" if period == "daily" else "بازه‌ی"} {period_label(day, end_day, period)} (`{fee:.2f} USDT`) تمام شد و واریز تایید نشده است.\n'
             f'ورود معامله‌ی جدید غیرفعال است؛ پوزیشن‌های باز همچنان توسط ربات مدیریت می‌شوند.'
             f'{acct_line}\n\n'
             f'بعد از واریز، دکمه‌ی «✅ واریز کردم» را بزنید؛ با تایید ادمین حساب فوراً باز می‌شود.')
 
 
-def paid_message(day, fee, still_blocked=False):
+def paid_message(day, fee, still_blocked=False, period='daily', end_day=None):
     tail = '\n⚠️ هنوز فاکتور پرداخت‌نشده‌ی دیگری دارید؛ حساب شما تا تسویه‌ی آن مسدود می‌ماند.' if still_blocked \
         else '\n✅ حساب شما فعال است.'
-    return f'✅ پرداخت کارمزد روز {day} (`{fee:.2f} USDT`) تایید شد.{tail}'
+    return f'✅ پرداخت کارمزد {"روز" if period == "daily" else "بازه‌ی"} {period_label(day, end_day, period)} (`{fee:.2f} USDT`) تایید شد.{tail}'

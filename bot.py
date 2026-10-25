@@ -57,7 +57,7 @@ from ui import (
     get_pending_side_keyboard, get_pending_confirm_keyboard,
     get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
-    get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_tests_keyboard, get_admin_fee_menu_keyboard,
+    get_fee_menu_keyboard, get_admin_panel_keyboard, get_admin_tests_keyboard, get_admin_fee_menu_keyboard as _ui_admin_fee_menu_keyboard,
     get_setup_management_keyboard, get_scenario_management_keyboard, get_my_profile_keyboard,
 )
 
@@ -175,6 +175,8 @@ if PLATFORM_FEE_MODE not in ('daily', 'per_trade'):
     PLATFORM_FEE_MODE = 'daily'
 FEE_DAY_TZ = os.environ.get('FEE_DAY_TZ', DAILY_CLOSE_TZ)                       # مرز «پایان روز» برای فاکتور (پیش‌فرض تهران)
 FEE_DUE_HOUR = min(23, max(0, int(os.environ.get('FEE_DUE_HOUR', '12'))))       # مهلت پرداخت: این ساعت از روز بعد
+FEE_PERIOD_ENV = os.environ.get('FEE_PERIOD', 'daily').strip().lower()      # V3.44.68/69: دوره‌ی صدور فاکتور (daily/weekly/monthly؛ ماهانه = ماه شمسی)؛ از پنل ادمین هم قابل تغییر است
+FEE_WEEK_START = int(os.environ.get('FEE_WEEK_START', '5')) % 7             # شروع هفته‌ی فاکتور: weekday پایتون (۵ = شنبه)
 FEE_MIN_GRACE_HOURS = max(0.0, float(os.environ.get('FEE_MIN_GRACE_HOURS', '6')))  # اگر فاکتور دیر ساخته شد (ربات خاموش بود)
 FEE_INCLUDE_PAPER = os.environ.get('FEE_INCLUDE_PAPER', 'true').lower() not in ('0', 'false', 'no')
 FEE_PAYMENT_ACCOUNT_ENV = os.environ.get('FEE_PAYMENT_ACCOUNT', '').strip()      # حساب/آدرس ادمین؛ با /set_fee_account هم قابل تغییر است
@@ -702,6 +704,11 @@ def init_db():
                 msg_ids TEXT NOT NULL DEFAULT '',
                 UNIQUE(chat_id, day)
             )''')
+            for _c, _ddl in (('period', "TEXT NOT NULL DEFAULT 'daily'"), ('end_day', 'TEXT')):      # V3.44.68: بازه‌ی هفتگی/ماهانه
+                try:
+                    conn.execute(f'ALTER TABLE fee_invoices ADD COLUMN {_c} {_ddl}')
+                except Exception:
+                    pass
             # V3.42.14: لیست دسترسی پویا (مدیریت از پنل ادمین)
             conn.execute('''CREATE TABLE IF NOT EXISTS allowed_users(
                 chat_id INTEGER PRIMARY KEY,
@@ -1934,7 +1941,7 @@ _BACK_PARENT = {
     '/backtest_start': '/manage_watchlist', '/scan_signal_start': '/manage_watchlist',
     '/pending_order_start': '/menu_trading', '/market_report': '/menu_reports',
     '/export_trade_data': '/performance', '/export_trade_pipeline': '/trade_tracking_menu',
-    '/admin_set_fee_prompt': '/admin_fee_report', '/admin_access_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
+    '/admin_set_fee_prompt': '/admin_fee_report', '/admin_fee_account_prompt': '/admin_fee_menu', '/admin_access_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
     '/pending_side_sell': '/menu_trading', '/confirm_pending_order': '/menu_trading',
     '/cancel_pending_all': '/menu_trading', '/close_longs_prompt': '/open_positions',
     '/close_shorts_prompt': '/open_positions', '/confirm_close_longs': '/open_positions',
@@ -5345,7 +5352,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.67'
+BOT_VERSION = '3.44.69'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6863,6 +6870,38 @@ def fee_payment_account():
     return v or FEE_PAYMENT_ACCOUNT_ENV
 
 
+def fee_period():
+    """دوره‌ی فعلی صدور فاکتور: 'daily' | 'weekly' | 'monthly' (تنظیم ادمین در دیتابیس، وگرنه env، وگرنه روزانه)."""
+    try:
+        v = _fee_meta_get('fee_period')
+    except Exception:
+        logger.exception('fee period read failed'); v = ''
+    v = (v or FEE_PERIOD_ENV or 'daily').strip().lower()
+    return v if v in _df.PERIODS else 'daily'
+
+
+def fee_set_period(period):
+    if period not in _df.PERIODS:
+        return False
+    _fee_meta_set('fee_period', period)
+    return True
+
+
+def _fee_lbl(day, period, end_day):
+    return _df.period_label(day, end_day, period or 'daily')
+
+
+def fee_admin_header():
+    acct = fee_payment_account()
+    return (f"🔁 دوره‌ی پرداخت کاربران: `{_df.PERIOD_FA[fee_period()]}`\n"
+            + (f"🏦 حساب واریز: `{acct.replace(chr(96), chr(39))}`" if acct else '🏦 حساب واریز: ⚠️ تنظیم نشده'))
+
+
+def get_admin_fee_menu_keyboard():
+    """V3.44.68: منوی کارمزد ادمین با کلید دوره‌ی پرداخت و حساب واریز (نسخه‌ی ui فقط ظاهر را می‌سازد)."""
+    return _ui_admin_fee_menu_keyboard(fee_period(), bool(fee_payment_account()))
+
+
 def fee_reload_state():
     """مجموعه‌ی کاربران مسدود و پیام‌های محافظت‌شده را از دیتابیس دوباره می‌سازد (شروع برنامه و هر تغییر وضعیت فاکتور)."""
     blocked = set(); prot = {}
@@ -6974,8 +7013,14 @@ def _fee_notify_admins(text, markup=None, inv_id=None):
 
 
 def fee_issue_for_day(day):
-    """فاکتور روز `day` را برای همه‌ی کاربران (غیرادمین) می‌سازد و پیام می‌فرستد. خروجی: [(chat_id, day, profit, fee)]"""
-    tz = _fee_tz(); start, end = _df.day_bounds(day, tz)
+    return fee_issue_for_range(day, _df.shift_day(day, 1), 'daily')
+
+
+def fee_issue_for_range(day, end_excl, period='daily'):
+    """فاکتور بازه‌ی [day, end_excl) را برای همه‌ی کاربران (غیرادمین) می‌سازد و پیام می‌فرستد. روزانه: یک روز.
+    کلید فاکتور (`day`) = روز شروع بازه. خروجی: [(chat_id, day, profit, fee)]"""
+    tz = _fee_tz(); start, _x = _df.day_bounds(day, tz); end, _y = _df.day_bounds(end_excl, tz)
+    end_day = _df.shift_day(end_excl, -1)
     account = fee_payment_account()
     made = []
     for cid, s in list(USER_SESSIONS.items()):
@@ -6995,8 +7040,8 @@ def fee_issue_for_day(day):
                 conn = db_connect()
                 try:
                     conn.execute('PRAGMA busy_timeout=15000')
-                    cur = conn.execute('INSERT OR IGNORE INTO fee_invoices(chat_id,day,profit_usdt,fee_rate_pct,fee_usdt,trades,status,created_at,due_ts) VALUES(?,?,?,?,?,?,?,?,?)',
-                                       (int(cid), day, float(profit), float(rate), float(fee), int(n), 'PENDING', now, due))
+                    cur = conn.execute('INSERT OR IGNORE INTO fee_invoices(chat_id,day,profit_usdt,fee_rate_pct,fee_usdt,trades,status,created_at,due_ts,period,end_day) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                                       (int(cid), day, float(profit), float(rate), float(fee), int(n), 'PENDING', now, due, period, end_day))
                     is_new = cur.rowcount > 0
                     row = conn.execute('SELECT id FROM fee_invoices WHERE chat_id=? AND day=?', (int(cid), day)).fetchone()
                     conn.commit()
@@ -7006,8 +7051,8 @@ def fee_issue_for_day(day):
                 continue
             inv_id = int(row[0])
             made.append((int(cid), day, float(profit), float(fee)))
-            _fee_send(cid, _df.invoice_message(day, profit, rate, fee, due, tz, account, FEE_DAY_TZ), _fee_claim_keyboard(inv_id), inv_id)
-            audit_event(cid, f'fee-{day}', 'fee_invoice_issued', {'day': day, 'profit_usdt': profit, 'fee_usdt': fee, 'rate_pct': rate, 'trades': n, 'due_ts': due})
+            _fee_send(cid, _df.invoice_message(day, profit, rate, fee, due, tz, account, FEE_DAY_TZ, period, end_day), _fee_claim_keyboard(inv_id), inv_id)
+            audit_event(cid, f'fee-{day}', 'fee_invoice_issued', {'day': day, 'end_day': end_day, 'period': period, 'profit_usdt': profit, 'fee_usdt': fee, 'rate_pct': rate, 'trades': n, 'due_ts': due})
         except Exception:
             logger.exception('fee invoice failed chat=%s day=%s', cid, day)
     return made
@@ -7019,13 +7064,13 @@ def fee_process_overdue():
     with DB_LOCK:
         conn = db_connect()
         try:
-            rows = conn.execute("SELECT id,chat_id,day,fee_usdt FROM fee_invoices WHERE status='PENDING' AND due_ts<=?", (now,)).fetchall()
+            rows = conn.execute("SELECT id,chat_id,day,fee_usdt,period,end_day FROM fee_invoices WHERE status='PENDING' AND due_ts<=?", (now,)).fetchall()
         finally:
             conn.close()
     if not rows:
         return
     changed = []
-    for inv_id, cid, day, fee in rows:
+    for inv_id, cid, day, fee, _per, _end in rows:
         with DB_LOCK:
             conn = db_connect()
             try:
@@ -7033,37 +7078,44 @@ def fee_process_overdue():
                 cur = conn.execute("UPDATE fee_invoices SET status='OVERDUE' WHERE id=? AND status='PENDING'", (int(inv_id),))
                 conn.commit()
                 if cur.rowcount > 0:
-                    changed.append((int(inv_id), int(cid), day, float(fee)))
+                    changed.append((int(inv_id), int(cid), day, float(fee), _per, _end))
             finally:
                 conn.close()
     if not changed:
         return
     fee_reload_state()
     account = fee_payment_account()
-    for inv_id, cid, day, fee in changed:
-        _fee_send(cid, _df.blocked_message(day, fee, account), _fee_claim_keyboard(inv_id), inv_id)
+    for inv_id, cid, day, fee, _per, _end in changed:
+        _fee_send(cid, _df.blocked_message(day, fee, account, _per or 'daily', _end), _fee_claim_keyboard(inv_id), inv_id)
         audit_event(cid, f'fee-{day}', 'fee_user_blocked', {'day': day, 'fee_usdt': fee})
-    lines = ['⛔ *کاربران مسدودشده به‌خاطر کارمزد پرداخت‌نشده:*'] + [f'• `{cid}` — روز {day} — `{fee:.2f} USDT`' for _i, cid, day, fee in changed]
+    lines = ['⛔ *کاربران مسدودشده به‌خاطر کارمزد پرداخت‌نشده:*'] + [f'• `{cid}` — {_fee_lbl(day, _per, _end)} — `{fee:.2f} USDT`' for _i, cid, day, fee, _per, _end in changed]
     _fee_notify_admins('\n'.join(lines))
 
 
 def fee_daily_tick():
-    tz = _fee_tz()
+    tz = _fee_tz(); period = fee_period()
     today = _df.day_key(time.time(), tz)
-    yesterday = _df.shift_day(today, -1)
+    complete = _df.shift_day(today, -1)          # آخرین روزِ کاملِ گذشته
     last = _fee_meta_get('fee_invoiced_through')
     if not last:
         # اولین اجرا: از روزهای قبل فاکتور نمی‌سازیم؛ از «دیروز» به بعد حساب می‌شود.
-        _fee_meta_set('fee_invoiced_through', yesterday); last = yesterday
-    if last < yesterday:
-        for day in _df.days_after(last, yesterday, 7):
-            made = fee_issue_for_day(day)
-            _fee_meta_set('fee_invoiced_through', day)
-            if made:
-                total = sum(m[3] for m in made)
-                warn = '' if fee_payment_account() else '\n⚠️ حساب پرداخت تنظیم نشده است: `/set_fee_account متن_حساب`'
-                _fee_notify_admins(f'🧾 *فاکتور کارمزد روز {day}*\n• تعداد کاربر: `{len(made)}`\n• جمع کارمزد: `{total:.2f} USDT`\n• مهلت پرداخت: ساعت `{FEE_DUE_HOUR:02d}:00` ({FEE_DAY_TZ}){warn}')
-        _fee_meta_set('fee_invoiced_through', yesterday)
+        _fee_meta_set('fee_invoiced_through', complete); last = complete
+    if period == 'daily':
+        last = max(last, _df.shift_day(complete, -7))     # مثل قبل: حداکثر ۷ روز عقب‌افتاده
+    cursor = _df.shift_day(last, 1)
+    for _ in range(24):
+        end_excl = _df.period_end_excl(cursor, period, FEE_WEEK_START)
+        end_incl = _df.shift_day(end_excl, -1)
+        if end_incl > complete:                    # این بازه هنوز تمام نشده
+            break
+        # تغییر دوره وسط راه: بازه از «روز بعد از آخرین فاکتور» شروع می‌شود، پس هیچ روزی دوبار حساب نمی‌شود
+        made = fee_issue_for_range(cursor, end_excl, period)
+        _fee_meta_set('fee_invoiced_through', end_incl)
+        if made:
+            total = sum(m[3] for m in made)
+            warn = '' if fee_payment_account() else '\n⚠️ حساب پرداخت تنظیم نشده است: دکمه‌ی «🏦 حساب واریز» در منوی کارمزد'
+            _fee_notify_admins(f'🧾 *فاکتور کارمزد {_df.PERIOD_FA[period]} — {_fee_lbl(cursor, period, end_incl)}*\n• تعداد کاربر: `{len(made)}`\n• جمع کارمزد: `{total:.2f} USDT`\n• مهلت پرداخت: ساعت `{FEE_DUE_HOUR:02d}:00` ({FEE_DAY_TZ}){warn}')
+        cursor = end_excl
     fee_process_overdue()
 
 
@@ -7082,22 +7134,23 @@ def _fee_daily_loop():
 
 def fee_settle_invoices(target, status='PAID', day=None, inv_id=None, notify_user=True):
     """فاکتورهای باز کاربر را PAID/WAIVED می‌کند. خروجی: [(id, day, fee)]"""
-    sel = "SELECT id,day,fee_usdt FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE')"
+    sel = "SELECT id,day,fee_usdt,period,end_day FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE')"
     args = [int(target)]
     if day:
         sel += ' AND day=?'; args.append(day)
     if inv_id:
         sel += ' AND id=?'; args.append(int(inv_id))
-    done = []
+    done = []; _fee_done_meta = {}
     with DB_LOCK:
         conn = db_connect()
         try:
             conn.execute('PRAGMA busy_timeout=15000')
             rows = conn.execute(sel, tuple(args)).fetchall()
-            for r_id, r_day, r_fee in rows:
+            for r_id, r_day, r_fee, _per, _end in rows:
                 cur = conn.execute("UPDATE fee_invoices SET status=?, paid_at=? WHERE id=? AND status IN ('PENDING','OVERDUE')", (status, time.time(), int(r_id)))
                 if cur.rowcount > 0:
                     done.append((int(r_id), r_day, float(r_fee)))
+                    _fee_done_meta[int(r_id)] = (_per or 'daily', _end)
             conn.commit()
         finally:
             conn.close()
@@ -7113,9 +7166,9 @@ def fee_settle_invoices(target, status='PAID', day=None, inv_id=None, notify_use
         still = is_fee_blocked(target)
         for r_id, r_day, r_fee in done:
             if status == 'PAID':
-                send_message(target, _df.paid_message(r_day, r_fee, still))
+                send_message(target, _df.paid_message(r_day, r_fee, still, *_fee_done_meta.get(r_id, ('daily', None))))
             else:
-                send_message(target, f'ℹ️ کارمزد روز {r_day} توسط ادمین بخشیده شد.' + ('' if still else '\n✅ حساب شما فعال است.'))
+                send_message(target, f'ℹ️ کارمزد {_fee_lbl(r_day, *_fee_done_meta.get(r_id, ("daily", None)))} توسط ادمین بخشیده شد.' + ('' if still else '\n✅ حساب شما فعال است.'))
     return done
 
 
@@ -7124,13 +7177,14 @@ def fee_claim(chat_id, inv_id):
     with DB_LOCK:
         conn = db_connect()
         try:
-            row = conn.execute('SELECT chat_id,day,fee_usdt,status FROM fee_invoices WHERE id=?', (int(inv_id),)).fetchone()
+            row = conn.execute('SELECT chat_id,day,fee_usdt,status,period,end_day FROM fee_invoices WHERE id=?', (int(inv_id),)).fetchone()
             urow = conn.execute('SELECT username,first_name FROM users WHERE chat_id=?', (int(chat_id),)).fetchone()
         finally:
             conn.close()
     if not row or int(row[0]) != int(chat_id):
         send_message(chat_id, '❌ این فاکتور پیدا نشد.'); return
-    _cid, day, fee, status = row
+    _cid, day, fee, status, _per, _end = row
+    day = _fee_lbl(day, _per, _end)
     if status not in _FEE_OPEN:
         send_message(chat_id, 'ℹ️ این فاکتور قبلاً تسویه شده است.'); return
     now = time.time()
@@ -7139,7 +7193,7 @@ def fee_claim(chat_id, inv_id):
     _FEE_CLAIM_TS[int(inv_id)] = now
     name = ' '.join(x for x in ((urow or (None, None))[1],) if x) or 'بدون نام'
     uname = f'@{urow[0]}' if urow and urow[0] else '—'
-    text = (f'🧾 *اعلام واریز کارمزد*\n\nکاربر: `{name}` — `{uname}`\nChat ID: `{chat_id}`\nروز: `{day}`\nمبلغ: `{float(fee):.2f} USDT`\n'
+    text = (f'🧾 *اعلام واریز کارمزد*\n\nکاربر: `{name}` — `{uname}`\nChat ID: `{chat_id}`\n{'روز' if (_per or 'daily') == 'daily' else 'بازه'}: `{day}`\nمبلغ: `{float(fee):.2f} USDT`\n'
             f'وضعیت: `{_FEE_STATUS_FA.get(status, status)}`\n\nبعد از بررسی حساب خودتان، تایید را بزنید.')
     markup = {'inline_keyboard': [[{'text': f'✅ تایید دریافت #{int(inv_id)}', 'callback_data': f'/fee_ok_{int(inv_id)}'}]]}
     _fee_notify_admins(text, markup, inv_id=int(inv_id))
@@ -7155,12 +7209,12 @@ def fee_notify_blocked(chat_id):
     with DB_LOCK:
         conn = db_connect()
         try:
-            rows = conn.execute("SELECT id,day,fee_usdt,status FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE') ORDER BY day LIMIT 5", (int(chat_id),)).fetchall()
+            rows = conn.execute("SELECT id,day,fee_usdt,status,period,end_day FROM fee_invoices WHERE chat_id=? AND status IN ('PENDING','OVERDUE') ORDER BY day LIMIT 5", (int(chat_id),)).fetchall()
         finally:
             conn.close()
     acct = fee_payment_account()
     lines = ['⛔ *حساب شما به‌دلیل کارمزد پرداخت‌نشده مسدود است.*', '']
-    lines += [f'• روز `{d}` — `{float(f):.2f} USDT` — {_FEE_STATUS_FA.get(st, st)}' for _i, d, f, st in rows]
+    lines += [f'• {"روز" if (_p or "daily") == "daily" else "بازه"} `{_fee_lbl(d, _p, _e)}` — `{float(f):.2f} USDT` — {_FEE_STATUS_FA.get(st, st)}' for _i, d, f, st, _p, _e in rows]
     if acct:
         lines += ['', 'حساب ادمین:', f'`{acct.replace(chr(96), chr(39))}`']
     lines += ['', 'بعد از واریز، دکمه‌ی زیر را بزنید. (دیدن و بستن پوزیشن‌ها همچنان آزاد است.)']
@@ -7172,7 +7226,7 @@ def fee_debts(limit=8):
     with DB_LOCK:
         conn = db_connect()
         try:
-            rows = conn.execute('''SELECT i.id,i.chat_id,i.day,i.fee_usdt,i.status,i.due_ts,u.username FROM fee_invoices i
+            rows = conn.execute('''SELECT i.id,i.chat_id,i.day,i.fee_usdt,i.status,i.due_ts,u.username,i.period,i.end_day FROM fee_invoices i
                                    LEFT JOIN users u ON u.chat_id=i.chat_id WHERE i.status IN ('PENDING','OVERDUE')
                                    ORDER BY i.due_ts LIMIT 30''').fetchall()
         finally:
@@ -7180,13 +7234,14 @@ def fee_debts(limit=8):
     tz = _fee_tz()
     total = sum(float(r[3]) for r in rows)
     lines = ['📋 *کارمزدهای پرداخت‌نشده*', '', f'• تعداد: `{len(rows)}` | جمع: `{total:.2f} USDT`', '']
-    for i_id, cid, day, fee, st, due, uname in rows:
+    for i_id, cid, day, fee, st, due, uname, _per, _end in rows:
+        day = _fee_lbl(day, _per, _end)
         due_txt = datetime.fromtimestamp(float(due), tz).strftime('%m-%d %H:%M')
         lines.append(f"• #{i_id} `{cid}`{(' @' + uname) if uname else ''} — {day} — `{float(fee):.2f}` — {_FEE_STATUS_FA.get(st, st)} (مهلت {due_txt})")
     if not rows:
         lines.append('هیچ بدهی بازی وجود ندارد ✅')
     acct = fee_payment_account()
-    lines += ['', f"حساب پرداخت: `{acct}`" if acct else '⚠️ حساب پرداخت تنظیم نشده: `/set_fee_account متن_حساب`',
+    lines += ['', f"حساب پرداخت: `{acct}`" if acct else '⚠️ حساب پرداخت تنظیم نشده (کلید «🏦 حساب واریز» در منوی کارمزد)',
               'دستورها: `/fee_paid USER_ID [YYYY-MM-DD]` | `/fee_waive USER_ID [YYYY-MM-DD]`']
     rows_kb = [[{'text': f'✅ تایید #{r[0]} ({r[1]})', 'callback_data': f'/fee_ok_{r[0]}'}] for r in rows[:limit]]
     rows_kb.append([{'text': '👑 بازگشت به کارمزد', 'callback_data': '/admin_fee_menu'}])
@@ -7201,7 +7256,8 @@ def fee_handle_command(cmd, chat_id, message_id=None):
         fee_claim(chat_id, int(m.group(1))); return True
     is_ok = re.match(r'^/fee_ok_(\d+)$', c)
     first = c.split(None, 1)[0] if c else ''
-    if not (is_ok or c == '/fee_debts' or first in ('/fee_paid', '/fee_waive', '/set_fee_account')):
+    if not (is_ok or c == '/fee_debts' or first in ('/fee_paid', '/fee_waive', '/set_fee_account')
+            or c.startswith('/admin_fee_period_') or c == '/admin_fee_account_prompt'):
         return False
     if not is_admin(chat_id):
         send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return True
@@ -7217,6 +7273,20 @@ def fee_handle_command(cmd, chat_id, message_id=None):
             send_message(chat_id, '❌ فاکتور پیدا نشد.'); return True
         done = fee_settle_invoices(int(row[0]), 'PAID', inv_id=inv_id)
         send_message(chat_id, f'✅ فاکتور #{inv_id} تایید شد (کاربر `{row[0]}`).' if done else f'ℹ️ فاکتور #{inv_id} قبلاً تسویه شده بود.')
+        return True
+    if c.startswith('/admin_fee_period_'):
+        per = c[len('/admin_fee_period_'):]
+        if not fee_set_period(per):
+            send_message(chat_id, '⚠️ دوره‌ی نامعتبر.'); return True
+        note = ('\n\nℹ️ از فاکتور بعدی اعمال می‌شود. روزهای قبلاً فاکتورشده دوباره حساب نمی‌شوند؛ '
+                'فاکتور بعدی از روز بعد از آخرین فاکتور تا پایان دوره‌ی جدید را شامل می‌شود.')
+        edit_page(chat_id, fee_admin_header() + note + '\n\n' + admin_fee_report('all'), get_admin_fee_menu_keyboard(), message_id)
+        return True
+    if c == '/admin_fee_account_prompt':
+        s = get_session(chat_id); s['user_state'] = 'WAIT_ADMIN_FEE_ACCOUNT'; save_session(chat_id)
+        cur = fee_payment_account()
+        send_message(chat_id, '🏦 *حساب واریز کارمزد*\n\n' + (f"حساب فعلی: `{cur.replace(chr(96), chr(39))}`\n\n" if cur else 'حسابی تنظیم نشده.\n\n')
+                     + 'آدرس/شماره‌ی حسابی که کاربران باید کارمزد را به آن واریز کنند را بفرستید (مثلاً آدرس کیف پول + شبکه).\nبرای حذف حساب بنویسید: `حذف`')
         return True
     if c == '/fee_debts':
         text, mk = fee_debts()
@@ -7263,7 +7333,7 @@ def _fee_report_daily(chat_id, period):
         finally:
             conn.close()
     profit, fee, count = tot or (0, 0, 0)
-    lines = ['💰 *کارمزد پلتفرم (روزانه)*', '', f'• بازه: `{period}`', f'• روزهای فاکتورشده: `{count}`',
+    lines = [f'💰 *کارمزد پلتفرم ({_df.PERIOD_FA[fee_period()]})*', '', f'• بازه: `{period}`', f'• فاکتورهای صادرشده: `{count}`',
              f'• سود روزهای فاکتورشده: `{profit:.2f} USDT`', f'• کارمزد این بازه: `{fee:.2f} USDT`',
              f'• ⚠️ پرداخت‌نشده: `{float((unpaid or (0,))[0]):.2f} USDT`', f'• نرخ فعلی: `{get_user_fee_rate(chat_id):.2f}%`']
     if rows:
@@ -14713,7 +14783,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cmd == '/admin_fee_menu':
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
-        edit_page(chat_id, admin_fee_report('all'), get_admin_fee_menu_keyboard(), message_id)
+        edit_page(chat_id, fee_admin_header() + '\n\n' + admin_fee_report('all'), get_admin_fee_menu_keyboard(), message_id)
         return
     if cmd == '/admin_panel':
         if not is_admin(chat_id):
@@ -16036,6 +16106,20 @@ def handle_text(chat_id,text,message_id=None):
         access_add_user(target, chat_id, parts[1] if len(parts) > 1 else '')
         send_message(chat_id, f'✅ کاربر `{target}` اضافه شد و می‌تواند از ربات استفاده کند.\n\n' + access_panel_text(), access_panel_keyboard())
         return
+
+    if current_state == 'WAIT_ADMIN_FEE_ACCOUNT':
+        s['user_state'] = None; save_session(chat_id)
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return
+        acct = raw.strip()
+        if len(acct) > 300:
+            send_message(chat_id, '⚠️ متن حساب خیلی طولانی است (حداکثر ۳۰۰ کاراکتر).', get_admin_fee_menu_keyboard()); return
+        if acct in ('حذف', '-', 'delete'):
+            _fee_meta_set('fee_payment_account', ''); acct = ''
+        else:
+            _fee_meta_set('fee_payment_account', acct)
+        send_message(chat_id, ('✅ حساب واریز ذخیره شد و در فاکتورها و یادآوری‌های بعدی کاربران نمایش داده می‌شود.' if acct else '🗑 حساب واریز حذف شد.')
+                     + '\n\n' + fee_admin_header(), get_admin_fee_menu_keyboard()); return
 
     if current_state == 'WAIT_ADMIN_SET_FEE':
         s['user_state'] = None

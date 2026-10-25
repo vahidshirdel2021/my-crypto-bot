@@ -330,11 +330,17 @@ def get_admin_tests_keyboard():
     ]}
 
 
-def get_admin_fee_menu_keyboard():
+def get_admin_fee_menu_keyboard(period='daily', has_account=False):
+    """V3.44.68: دکمه‌های دوره‌ی پرداخت (روزانه/هفتگی/ماهانه، گزینه‌ی فعلی با ✅) و حساب واریز ادمین."""
+    def _p(key, label):
+        return {"text": ("✅ " if period == key else "") + label, "callback_data": f"/admin_fee_period_{key}"}
     return {"inline_keyboard": [
         [{"text": "📅 امروز", "callback_data": "/admin_fee_day"}, {"text": "📆 ۷ روز", "callback_data": "/admin_fee_week"}],
         [{"text": "🗓 ۳۰ روز", "callback_data": "/admin_fee_month"}, {"text": "📊 کل سابقه", "callback_data": "/admin_fee_report"}],
         [{"text": "📋 کارمزدهای پرداخت‌نشده", "callback_data": "/fee_debts"}],
+        [{"text": "🔁 دوره‌ی پرداخت کاربران:", "callback_data": "/dummy"}],
+        [_p("daily", "روزانه"), _p("weekly", "هفتگی"), _p("monthly", "ماهانه")],
+        [{"text": ("🏦 حساب واریز (تنظیم شده) — تغییر" if has_account else "🏦 تعریف حساب واریز ادمین ⚠️"), "callback_data": "/admin_fee_account_prompt"}],
         [{"text": "⚙️ تنظیم نرخ کارمزد کاربر", "callback_data": "/admin_set_fee_prompt"}],
         [{"text": "👑 بازگشت به پنل مدیریت", "callback_data": "/admin_panel"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
