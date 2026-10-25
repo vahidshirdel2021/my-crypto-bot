@@ -292,7 +292,8 @@ def _save_signal_channel_level_tags(tags):
         with open(_SIGNAL_CHANNEL_SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump({'level_tags': tags, 'patterns': list(_SIGNAL_CHANNEL_PATTERNS),
                        'paused': bool(_SIGNAL_CHANNEL_FLAGS.get('paused', False)), 'all3': bool(_SIGNAL_CHANNEL_FLAGS.get('all3', True)),
-                       'align4': bool(_SIGNAL_CHANNEL_FLAGS.get('align4', True))}, f)
+                       'align4': bool(_SIGNAL_CHANNEL_FLAGS.get('align4', True)),
+                       'admin_post': bool(_SIGNAL_CHANNEL_FLAGS.get('admin_post', True))}, f)
     except Exception:
         logger.exception('failed to persist signal channel settings')
 
@@ -318,7 +319,9 @@ def _load_signal_channel_flag(name, default):
 #   all3   : فقط وقتی هر سه اندیکاتور (RSI، MACD، ADX) رأی داده‌اند و هم‌رنگ‌اند (هر سه سبز یا هر سه قرمز) سیگنال ارسال می‌شود
 #   align4 : هم‌جهتی کامل: رژیم بازار + رژیم نماد + هر ۳ اندیکاتور + جهت سیگنال باید یکی باشند (همه صعودی => خرید، همه نزولی => فروش)
 _SIGNAL_CHANNEL_FLAGS = {'paused': _load_signal_channel_flag('paused', False), 'all3': _load_signal_channel_flag('all3', True),
-                         'align4': _load_signal_channel_flag('align4', True)}
+                         'align4': _load_signal_channel_flag('align4', True),
+                         # V3.44.77: پیام‌هایی که ادمین در چت ربات تایپ می‌کند عیناً در کانال هم منتشر شود
+                         'admin_post': _load_signal_channel_flag('admin_post', True)}
 
 
 def _signal_channel_align4_ok(direction, symbol_regime, market_regime, buy_votes, sell_votes):
@@ -734,6 +737,47 @@ def init_db():
     logger.info('مسیر دیتابیس: %s', DB_PATH)
     if not db_existed_before:
         logger.warning('فایل دیتابیس (%s) از صفر ساخته شد.', DB_PATH)
+
+
+# V3.44.76: پیام خوش‌آمدگویی و پشتیبان ربات
+SUPPORT_NAME = os.environ.get('SUPPORT_NAME', 'وحید شیردل')
+SUPPORT_TITLE = os.environ.get('SUPPORT_TITLE', 'تحلیلگر بازارهای مالی')
+SUPPORT_PHONE = os.environ.get('SUPPORT_PHONE', '09905493828')
+BOT_SLOGAN = os.environ.get('BOT_SLOGAN', 'حفظ سرمایه اولین اولویت ماست')
+
+
+def _md_safe(t):
+    return re.sub(r'[*_`\[\]]', '', str(t or '')).strip()
+
+
+def user_display_name(chat_id):
+    """نام کوچک تلگرامیِ کاربر (برای خوش‌آمدگویی)؛ اگر نبود رشته‌ی خالی."""
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                row = conn.execute('SELECT first_name FROM users WHERE chat_id=?', (int(chat_id),)).fetchone()
+            finally:
+                conn.close()
+        return _md_safe(row[0]) if row and row[0] else ''
+    except Exception:
+        return ''
+
+
+def welcome_text(chat_id):
+    nm = user_display_name(chat_id)
+    hello = f'👋 سلام {nm} عزیز، خوش آمدی!' if nm else '👋 سلام، خوش آمدی!'
+    return f'{hello}\n🛡 *{BOT_SLOGAN}*\n\n'
+
+
+def support_text():
+    return (f'👨\u200d💻 *پشتیبان ربات*\n\n*{SUPPORT_NAME}*\n{SUPPORT_TITLE}\n\n'
+            f'📞 {SUPPORT_PHONE}\n\nبرای تماس روی شماره یا کارت مخاطب زیر بزن.')
+
+
+def support_phone_intl():
+    p = re.sub(r'\D', '', SUPPORT_PHONE)
+    return '+98' + p[1:] if p.startswith('0') else ('+' + p if not p.startswith('98') else '+' + p)
 
 
 def upsert_telegram_user(user, chat_id=None):
@@ -3496,9 +3540,9 @@ def check_pending_orders(chat_id):
                 remaining.append(o)
                 if not o.get('btc_wait_notified'):
                     o['btc_wait_notified'] = True
-                    send_detail_message(chat_id, f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی وارد نشد و منتظر می‌ماند:\n{err}")
+                    send_detail_message(chat_id, f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی وارد نشد و منتظر می‌ماند:\n{err}", simple_text=f"⏳ اوردر `{o['symbol']}` به قیمت رسید ولی فعلاً وارد نشد و منتظر می‌ماند.\n{block_simple_text(err, _BLOCK_SIMPLE_GENERIC)}")
             else:
-                send_detail_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}", simple_text=f"❌ اوردر `{o['symbol']}` باز نشد.")
+                send_detail_message(chat_id, f"❌ اوردر `{o['symbol']}` رسید ولی باز نشد: {err}", simple_text=f"❌ اوردر `{o['symbol']}` باز نشد." + (f"\n{block_simple_text(err)}" if block_simple_text(err) else ''))
         except Exception:
             logger.exception('pending order check failed chat_id=%s order=%s', chat_id, o.get('order_id'))
             remaining.append(o)
@@ -3826,12 +3870,16 @@ def btc_candle_verdict(tf, sig):
     tf_fa = TF_DISPLAY.get(tf, tf)
     state, c = btc_candle_state(tf)
     if state is None:
-        return False, f'{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در دسترس نیست؛ ورود تا دریافت داده‌ی BTC انجام نمی‌شود'
+        _t = f'{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در دسترس نیست؛ ورود تا دریافت داده‌ی BTC انجام نمی‌شود' + _btc_gate_key_line('gate_btc_candle_enabled')
+        _block_simple_register(_t, 'اطلاعات بیتکوین فعلاً کامل نیست؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.')
+        return False, _t
     if state == want:
         return True, ''
-    return False, (f"{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در حال تشکیل {_BTC_CANDLE_FA[state]} است "
-                   f"(باز شدن {fmt(c['open'])} ← الان {fmt(c['price'])}، {c['pct']:+.2f}٪) و با {side_fa} نمی‌خواند؛ "
-                   f"ورود تا هم‌جهت شدن کندل BTC با معامله انجام نمی‌شود")
+    _t = (f"{_BTC_CANDLE_BLOCK_PREFIX} ({tf_fa}) در حال تشکیل {_BTC_CANDLE_FA[state]} است "
+          f"(باز شدن {fmt(c['open'])} ← الان {fmt(c['price'])}، {c['pct']:+.2f}٪) و با {side_fa} نمی‌خواند؛ "
+          f"ورود تا هم‌جهت شدن کندل BTC با معامله انجام نمی‌شود" + _btc_gate_key_line('gate_btc_candle_enabled'))
+    _block_simple_register(_t, 'بیتکوین الان خلاف جهت این معامله حرکت می‌کند؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.')
+    return False, _t
 
 
 # ===================== V3.44.44: کلید «فاصله تا سطح جلویی BTC» =====================
@@ -3966,6 +4014,67 @@ def btc_front_level_info(s, tf, is_long):
     return info
 
 
+def _gate_label(key):
+    """نام دقیق دکمه‌ی یک کلید در منوی فیلترها (GATE_REGISTRY یا دکمه‌های «قوانین معامله»)."""
+    try:
+        return GATE_REGISTRY[key][0]
+    except Exception:
+        pass
+    try:
+        return _filter_info(key)[0]
+    except Exception:
+        return key
+
+
+# V3.44.74: متن ساده‌ی هر «دلیل رد ورود» برای کاربر عادی (بدون هیچ حرفی از کلید/فیلتر/اصطلاح تخصصی).
+# هر دلیل (متن کامل ادمین) هنگام ثبت با متن سادهٔ خودش جفت می‌شود؛ مسیرهای پیام با block_simple_text آن را پیدا می‌کنند.
+_BLOCK_SIMPLE = {}
+_BLOCK_SIMPLE_GENERIC = 'در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.'
+
+
+def _block_simple_register(reason, simple):
+    if not reason or not simple:
+        return
+    if len(_BLOCK_SIMPLE) > 400:
+        _BLOCK_SIMPLE.clear()
+    _BLOCK_SIMPLE[str(reason)] = simple
+
+
+def block_simple_text(text, default=None):
+    """متن ساده‌ی کاربر عادی برای یک دلیل رد ورود؛ اگر ثبت نشده بود default."""
+    if not text:
+        return default
+    t = str(text)
+    hit = _BLOCK_SIMPLE.get(t)
+    if hit:
+        return hit
+    for k_, v_ in _BLOCK_SIMPLE.items():
+        if k_ and k_ in t:
+            return v_
+    return default
+
+
+def _btc_gate_key_line(*keys):
+    """V3.44.73: خط «کلید مانع» برای ادمین: نام دقیقِ دکمه‌ی همان کلید در منوی فیلترها (از GATE_REGISTRY)."""
+    names = []
+    for k in keys:
+        nm = _gate_label(k)
+        if nm not in names:
+            names.append(nm)
+    if not names:
+        return ''
+    return '\n🔑 کلید مانع: ' + ' + '.join(f'«{n}»' for n in names)
+
+
+# V3.44.73: متن ساده‌ی هشدار ورود برای کاربر عادی (بدون هیچ اصطلاح تخصصی)؛ کلید = info['block'] (chop/side/near) یا nodata.
+_BTC_FRONT_SIMPLE = {
+    'chop': 'بیتکوین الان در یک کلاف قیمتی است و هنوز مسیرش مشخص نیست؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.',
+    'side': 'بیتکوین هنوز با این معامله هم‌سو نشده؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.',
+    'near': 'بیتکوین به یک قیمت مهم نزدیک است و هنوز معلوم نیست از آن برمی‌گردد یا رد می‌شود؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.',
+    'nodata': 'اطلاعات بیتکوین فعلاً کامل نیست؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.',
+}
+
+
 def btc_front_level_verdict(s, tf, sig, front=True, chop=True):
     """(ok, توضیح، info). sig = 'BUY'/'SELL' (جهت نهایی معامله). ok وقتی فاصله‌ی BTC تا سطح جلویی معقول (یا سطحی روبه‌رو نیست) باشد.
     front: چک «سمت سطح + فاصله» (کلید gate_btc_front_level_enabled)؛ chop: چک «کلاف دور سطح» (کلید مستقل gate_btc_chop_enabled)."""
@@ -3973,29 +4082,36 @@ def btc_front_level_verdict(s, tf, sig, front=True, chop=True):
     info = btc_front_level_info(s, tf, sig == 'BUY')
     if info is None:
         return False, (f'{_BTC_FRONT_PREFIX}: داده‌ی BTC برای سنجش فاصله تا سطح جلویی ({tf_fa}) در دسترس نیست؛ '
-                       f'منتظر ورود می‌مانیم، لطفاً صبور باشید'), None
+                       f'منتظر ورود می‌مانیم، لطفاً صبور باشید'
+                       + _btc_gate_key_line(*(([ 'gate_btc_front_level_enabled'] if front else []) + (['gate_btc_chop_enabled'] if chop else [])))), None
     if chop and info.get('chop'):
         # V3.44.55: BTC دور سطح کلاف است (رد و برگشت‌های پیاپی) → ورود هر دو جهت بسته است تا BTC تصمیم بگیرد.
         info['warn_price'] = info.get('ref_price')
+        info['block'] = 'chop'
         return False, (f"{_BTC_FRONT_PREFIX}: بیتکوین (BTC) دور سطح {info['ref_label']} {fmt(info['ref_price'])} در حالت نامشخص است "
                        f"({info['chop_flips']} بار رد و برگشت کلوز از سطح در {info['chop_window']} کندل بسته‌شده‌ی اخیر · {tf_fa})؛ "
-                       f"تا تصمیم‌گیری BTC و بسته شدن چند کندل پشت‌سرهم یک طرف سطح، ورود انجام نمی‌شود. سیگنال رد نمی‌شود و منتظر می‌مانیم، لطفاً صبور باشید"), info
+                       f"تا تصمیم‌گیری BTC و بسته شدن چند کندل پشت‌سرهم یک طرف سطح، ورود انجام نمی‌شود. سیگنال رد نمی‌شود و منتظر می‌مانیم، لطفاً صبور باشید"
+                       + _btc_gate_key_line('gate_btc_chop_enabled')), info
     if not front:
         return True, '', info          # V3.44.55: فقط کلید «کلاف» روشن است؛ چک سمت سطح و فاصله اعمال نمی‌شود
     if not info.get('side_ok', True):
         # V3.44.54: کلوز کندل بسته‌شده‌ی BTC سمت درستِ سطح نیست (خرید: باید بالای سطح؛ فروش: باید پایین سطح) → ورود بسته است.
         info['warn_price'] = info.get('ref_price')
+        info['block'] = 'side'
         pos_fa = 'بالای' if info.get('ref_above') is False else 'زیر'
         need_fa = 'بالای' if sig == 'BUY' else 'زیر'
         side_fa = 'خرید' if sig == 'BUY' else 'فروش'
         return False, (f"{_BTC_FRONT_PREFIX}: کلوز آخرین کندل بسته‌شده‌ی BTC ({tf_fa}) {pos_fa} سطح {info['ref_label']} {fmt(info['ref_price'])} است "
                        f"(کلوز {fmt(info['close'])}) و با {side_fa} نمی‌خواند؛ ورود فقط وقتی انجام می‌شود که BTC {need_fa} سطح ببندد. "
-                       f"سیگنال رد نمی‌شود و منتظر می‌مانیم، لطفاً صبور باشید"), info
+                       f"سیگنال رد نمی‌شود و منتظر می‌مانیم، لطفاً صبور باشید"
+                       + _btc_gate_key_line('gate_btc_front_level_enabled')), info
     if info['ok']:
         return True, '', info
     kind = 'مقاومتی' if sig == 'BUY' else 'حمایتی'
+    info['block'] = 'near'
     return False, (f"{_BTC_FRONT_PREFIX}: بیتکوین (BTC) به سطح {kind} نزدیک است و تا واکنش به سطح منتظر ورود می‌مانیم؛ لطفاً صبور باشید "
-                   f"({info['front_label']} {fmt(info['front_price'])} · فاصله {info['dist_atr']:.2f}×ATR · {tf_fa})"), info
+                   f"({info['front_label']} {fmt(info['front_price'])} · فاصله {info['dist_atr']:.2f}×ATR · {tf_fa})"
+                   + _btc_gate_key_line('gate_btc_front_level_enabled')), info
 
 
 def _btc_front_warn(chat_id, symbol, sig, tf, txt, info):
@@ -4013,7 +4129,9 @@ def _btc_front_warn(chat_id, symbol, sig, tf, txt, info):
                 _BTC_FRONT_WARNED.pop(k_, None)
     side_fa = 'خرید' if sig == 'BUY' else 'فروش'
     try:
-        send_detail_message(chat_id, f"{txt}\n\n`{symbol}` · سیگنال {side_fa}")      # V3.44.63: هشدار فنی؛ فقط ادمین
+        _simple = _BTC_FRONT_SIMPLE.get((info or {}).get('block') or 'nodata', _BTC_FRONT_SIMPLE['nodata'])
+        # V3.44.73: ادمین متن کامل + نام دقیق کلید مانع؛ کاربر عادی یک جمله‌ی ساده (بدون اصطلاح تخصصی)
+        send_detail_message(chat_id, f"{txt}\n\n`{symbol}` · سیگنال {side_fa}", simple_text=f"⚠️ {_simple}\n\n`{symbol}` · سیگنال {side_fa}")
     except Exception:
         logger.exception('btc front: warning send failed chat=%s symbol=%s', chat_id, symbol)
 
@@ -4029,7 +4147,10 @@ def _btc_front_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True, 
         ok, txt, info = btc_front_level_verdict(s, tf, eff, front=front, chop=chop)
     except Exception:
         logger.exception('btc front gate failed symbol=%s', symbol)
-        ok, txt, info = False, f'{_BTC_FRONT_PREFIX}: خطا در سنجش فاصله تا سطح جلویی BTC؛ منتظر ورود می‌مانیم، لطفاً صبور باشید', None
+        ok, txt, info = False, (f'{_BTC_FRONT_PREFIX}: خطا در سنجش فاصله تا سطح جلویی BTC؛ منتظر ورود می‌مانیم، لطفاً صبور باشید'
+                                + _btc_gate_key_line(*(([ 'gate_btc_front_level_enabled'] if front else []) + (['gate_btc_chop_enabled'] if chop else [])))), None
+    if not ok:
+        _block_simple_register(txt, _BTC_FRONT_SIMPLE.get((info or {}).get('block') or 'nodata', _BTC_FRONT_SIMPLE['nodata']))
     if not ok and warn:
         _btc_front_warn(chat_id, symbol, sig, tf, txt, info)
     return ok, txt
@@ -4975,6 +5096,7 @@ def signal_channel_settings_keyboard():
     rows.append([{'text': ('▶️ ادامه‌ی ارسال سیگنال کانال' if paused else '⏸ توقف ارسال سیگنال کانال'), 'callback_data': '/toggle_signal_pause'}])
     rows.append([{'text': f"{'🟢' if _SIGNAL_CHANNEL_FLAGS.get('align4') else '🔴'} هم‌جهتی کامل: رژیم بازار + رژیم نماد + ۳ اندیکاتور + سیگنال", 'callback_data': '/toggle_signal_align4'}])
     rows.append([{'text': f"{'🟢' if _SIGNAL_CHANNEL_FLAGS.get('all3') else '🔴'} فقط وقتی هر ۳ اندیکاتور هم‌رنگ باشند", 'callback_data': '/toggle_signal_all3'}])
+    rows.append([{'text': f"{'🟢' if _SIGNAL_CHANNEL_FLAGS.get('admin_post', True) else '🔴'} ارسال پیام‌های ادمین به کانال", 'callback_data': '/toggle_signal_adminpost'}])
     for tag in _ALL_SIGNAL_CHANNEL_TAGS:
         on = tag in _SIGNAL_CHANNEL_LEVEL_TAGS
         rows.append([{'text': f"{'🟢' if on else '🔴'} {tag}", 'callback_data': f'/toggle_signal_tag_{tag}'}])
@@ -4995,6 +5117,7 @@ def signal_channel_settings_report():
         f"ارسال سیگنال: {'⏸ متوقف' if _SIGNAL_CHANNEL_FLAGS.get('paused') else '▶️ فعال'}\n"
         f"شرط هم‌جهتی کامل (رژیم بازار + رژیم نماد + ۳ اندیکاتور + سیگنال): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('align4') else '🔴 خاموش'}\n"
         f"شرط هم‌رنگی ۳ اندیکاتور (RSI/MACD/ADX): {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('all3') else '🔴 خاموش'}\n"
+        f"ارسال پیام‌های تایپ‌شده‌ی ادمین به کانال: {'🟢 روشن' if _SIGNAL_CHANNEL_FLAGS.get('admin_post', True) else '🔴 خاموش'}\n"
         f"تایم‌فریم بررسی: `{_signal_channel_timeframe()}` (همان تایم‌فریم فعال ادمین)\n"
         f"سطوح فعال برای ارسال: {('🪜 فقط سطوح نصف‌کردن (طبق کلید مدل نصف‌کردنِ ادمین؛ سطوح قدیمی زیر فعلاً استفاده نمی‌شوند)') if _signal_channel_halving_enabled() else tags_txt}\n"
         f"الگوهای فعال: {pats_txt}\n\n"
@@ -5358,7 +5481,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.72'
+BOT_VERSION = '3.44.78'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -5834,8 +5957,13 @@ def _reject_tail(chat_id, n=500):
         return []
 
 
-def _blk(chat_id, reason):
-    """دلیل رد شدن ورود را نگه می‌دارد (برای نمایش در حالت دستیار) و False برمی‌گرداند."""
+def _blk(chat_id, reason, key=None, simple=None):
+    """دلیل رد شدن ورود را نگه می‌دارد (برای نمایش در حالت دستیار) و False برمی‌گرداند.
+    V3.44.74: key = کلید(های) مانع (برای ادمین نام دقیق دکمه به متن اضافه می‌شود)؛ simple = متن ساده برای کاربر عادی."""
+    if key:
+        reason = reason + _btc_gate_key_line(*((key,) if isinstance(key, str) else tuple(key)))
+    if simple:
+        _block_simple_register(reason, simple)
     _LAST_BLOCK_REASON[chat_id] = reason
     _reject_record(chat_id, reason)
     return False
@@ -5852,11 +5980,11 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     s=get_session(chat_id)
     # V3.44.61: کارمزد روزانه پرداخت‌نشده → ورود جدید (حتی دستی/دستیار/معلق) ممنوع؛ پوزیشن‌های باز همچنان مدیریت می‌شوند
     if is_fee_blocked(chat_id):
-        return _blk(chat_id, '⛔ حساب به‌دلیل کارمزد پرداخت‌نشده مسدود است؛ ورود جدید ممکن نیست')
+        return _blk(chat_id, '⛔ حساب به‌دلیل کارمزد پرداخت‌نشده مسدود است؛ ورود جدید ممکن نیست', key=None, simple='حساب شما فعلاً به\u200cخاطر کارمزد پرداخت\u200cنشده بسته است؛ تا تسویه، ورود جدید ممکن نیست.')
     # V3.43.15: ۳۰ دقیقه‌ی آخر کندل ۴ ساعته - هیچ معامله‌ای باز نمی‌شود (حتی force/دستی/دستیار)
     _blocked_4h, _rem_4h = four_h_close_block_active(s)
     if _blocked_4h:
-        return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است')
+        return _blk(chat_id, f'⏳ در ۳۰ دقیقه‌ی پایانی کندل ۴ ساعته هستیم ({_rem_4h:.0f} دقیقه تا بسته شدن)؛ ورود جدید تا شروع کندل بعدی ممنوع است', key='gate_4h_close_block_enabled', simple='الان در چند دقیقه\u200cی آخر یک بازه\u200cی چهارساعته\u200cی بازار هستیم؛ ورود به معامله تا شروع بازه\u200cی بعدی مجاز نیست. لطفاً صبور باشید.')
     # V3.44.9: معاملات معکوس (آزمایشی، پیش‌فرض خاموش) - فقط «جهت» برعکس می‌شود و معامله آینه‌ی قیمتیِ سیگنال است:
     # فاصله‌ی حد ضرر و فاصله‌ی حد سود دقیقاً همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)،
     # پس نسبت پاداش به ریسک هم همان سیگنال اصلی (حداقل مقدار تنظیم‌شده) می‌ماند و ضرر از سود کمتر است.
@@ -5918,30 +6046,30 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     setup_source = f"{symbol}|{side}|{s.get('timeframe')}|{signal_price:.12g}|{sl:.12g}|{tp:.12g}|{reason}"
     setup_id = hashlib.sha256(setup_source.encode('utf-8')).hexdigest()[:24]
     if any(str(p.get('setup_id') or '') == setup_id for p in s.get('paper_positions', [])):
-        return _blk(chat_id, 'همین ستاپ همین الان به‌صورت پوزیشن باز وجود دارد')
+        return _blk(chat_id, 'همین ستاپ همین الان به‌صورت پوزیشن باز وجود دارد', key=None, simple='این معامله همین الان باز است.')
     if setup_id in set(s.get('consumed_setups') or []) and not force:
-        return _blk(chat_id, 'روی همین ستاپ قبلاً معامله انجام شده (ستاپ مصرف‌شده)')
+        return _blk(chat_id, 'روی همین ستاپ قبلاً معامله انجام شده (ستاپ مصرف‌شده)', key=None, simple='روی همین فرصت قبلاً معامله شده و دوباره وارد نمی\u200cشویم.')
     if require_active and not force and not s['is_bot_active']:
-        return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
+        return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)', key=None, simple='ربات الان غیرفعال است.')
     if s['daily_stopped'] and not force and gate_on(s, 'gate_risk_guard_enabled'):
-        return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
+        return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است', key='gate_risk_guard_enabled', simple='به\u200cخاطر ضرر امروز، ورود جدید فعلاً متوقف است.')
     if not force and gate_on(s, 'gate_risk_guard_enabled') and not risk_guard(chat_id):
-        return _blk(chat_id, 'محافظ ریسک (حد ضرر/ضرر پیاپی/حد روزانه) اجازه‌ی ورود نمی‌دهد')
+        return _blk(chat_id, 'محافظ ریسک (حد ضرر/ضرر پیاپی/حد روزانه) اجازه‌ی ورود نمی‌دهد', key='gate_risk_guard_enabled', simple='به\u200cخاطر چند ضرر اخیر، برای حفظ سرمایه ورود جدید فعلاً متوقف است. لطفاً صبور باشید.')
     now=time.time(); cd=float(s['cooldowns'].get(symbol,0))
     if now<cd and not force and gate_on(s, 'gate_cooldown_enabled'):
-        return _blk(chat_id, f'کول‌داون نماد {symbol} بعد از معامله‌ی قبلی هنوز {int(cd-now)} ثانیه مانده')
+        return _blk(chat_id, f'کول‌داون نماد {symbol} بعد از معامله‌ی قبلی هنوز {int(cd-now)} ثانیه مانده', key='gate_cooldown_enabled', simple='روی این ارز تازه معامله بسته شده؛ کمی صبر می\u200cکنیم تا دوباره وارد شویم.')
     s['cooldowns'].pop(symbol,None)
     if level_key and level_key in s.get('traded_levels', {}) and not force and gate_on(s, 'gate_traded_level_enabled'):
-        return _blk(chat_id, 'روی همین سطح قبلاً معامله شده و سطح هنوز آزاد نشده')
+        return _blk(chat_id, 'روی همین سطح قبلاً معامله شده و سطح هنوز آزاد نشده', key='gate_traded_level_enabled', simple='روی همین محدوده\u200cی قیمتی قبلاً معامله شده و دوباره وارد نمی\u200cشویم.')
     is_dynamic_strategy = s.get('active_strategy') == 'dynamic'
     if not force and not is_dynamic_strategy and s['filters'].get('no_short_filter') and 'SELL' in side:
-        return _blk(chat_id, 'فیلتر ممنوعیت فروش فعال است')
+        return _blk(chat_id, 'فیلتر ممنوعیت فروش فعال است', key='block_sell', simple='ورود به معامله\u200cی فروش در حال حاضر مجاز نیست.')
     if not force and not is_dynamic_strategy and s['filters'].get('no_buy_filter') and 'BUY' in side:
-        return _blk(chat_id, 'فیلتر ممنوعیت خرید فعال است')
+        return _blk(chat_id, 'فیلتر ممنوعیت خرید فعال است', key='block_buy', simple='ورود به معامله\u200cی خرید در حال حاضر مجاز نیست.')
     if not force and s['max_open_positions']>0 and len(s['paper_positions'])>=s['max_open_positions']:
-        return _blk(chat_id, f"سقف تعداد پوزیشن باز ({s['max_open_positions']}) پر است")
+        return _blk(chat_id, f"سقف تعداد پوزیشن باز ({s['max_open_positions']}) پر است", key=None, simple='تعداد معامله\u200cهای باز به سقف مجاز رسیده؛ تا بسته شدن یکی از آن\u200cها ورود جدید ممکن نیست.')
     if any(p['symbol']==symbol for p in s['paper_positions']):
-        return _blk(chat_id, f'روی {symbol} همین الان پوزیشن باز داریم')
+        return _blk(chat_id, f'روی {symbol} همین الان پوزیشن باز داریم', key=None, simple='روی این ارز همین الان معامله باز داریم.')
     # Correlated-exposure guard: cap how many positions can be open in the SAME
     # direction at once (e.g. all Long on different alts), and throttle back-to-back
     # same-direction entries opened seconds apart in one scan burst. This prevents a
@@ -5954,12 +6082,12 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     if max_same_dir > 0:
         same_dir_open = sum(1 for p in s['paper_positions'] if side_long(p.get('side', '')) == side_long(side))
         if same_dir_open >= max_same_dir:
-            return _blk(chat_id, f"سقف پوزیشن هم‌جهت ({max_same_dir}) پر است؛ {same_dir_open} پوزیشن {'Long' if dir_key=='BUY' else 'Short'} باز است")
+            return _blk(chat_id, f"سقف پوزیشن هم‌جهت ({max_same_dir}) پر است؛ {same_dir_open} پوزیشن {'Long' if dir_key=='BUY' else 'Short'} باز است", key='same_dir', simple='تعداد معامله\u200cهای هم\u200cجهت به سقف مجاز رسیده؛ تا بسته شدن یکی از آن\u200cها ورود جدید ممکن نیست.')
     same_dir_cooldown = float(s.get('same_direction_entry_cooldown_seconds', 0) or 0)
     if same_dir_cooldown > 0 and not bypass_burst_cooldown and not force:
         last_dir_ts = float((s.get('last_direction_entry_ts') or {}).get(dir_key, 0))
         if time.time() - last_dir_ts < same_dir_cooldown:
-            return _blk(chat_id, f'فاصله‌ی زمانی بین دو ورود هم‌جهت ({int(same_dir_cooldown)} ثانیه) رعایت نشده')
+            return _blk(chat_id, f'فاصله‌ی زمانی بین دو ورود هم‌جهت ({int(same_dir_cooldown)} ثانیه) رعایت نشده', key=None, simple='چند لحظه پیش وارد معامله\u200cای هم\u200cجهت شدیم؛ کمی صبر می\u200cکنیم.')
     audit_event(chat_id, trade_id, 'signal_and_plan', {
         'symbol': symbol, 'side': side, 'signal_price': signal_price, 'sl': sl, 'tp': tp,
         'reason': reason, 'setup_id': setup_id, 'timeframe': s.get('timeframe'),
@@ -6018,13 +6146,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force,risk_mult=_tier_mult)
     s.pop('_symbol_tmp',None)
     if margin<=0:
-        return _blk(chat_id, f'محاسبه‌ی حجم/مارجین ناموفق: {amount_or_reason}')
+        return _blk(chat_id, f'محاسبه‌ی حجم/مارجین ناموفق: {amount_or_reason}', key=None, simple='حجم معامله با موجودی و شرایط فعلی قابل محاسبه نبود.')
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
     fee_estimate=round_trip_fee_usdt(margin,leverage)
     if not force and gate_on(s, 'gate_open_fee_ratio_enabled') and MIN_RISK_TO_FEE_RATIO>0 and risk_usdt < fee_estimate*MIN_RISK_TO_FEE_RATIO:
-        return _blk(chat_id, f'ریسک دلاری ({risk_usdt:.2f}$) نسبت به کارمزد رفت‌وبرگشت ({fee_estimate:.2f}$) کمتر از {MIN_RISK_TO_FEE_RATIO:g} برابر است')
+        return _blk(chat_id, f'ریسک دلاری ({risk_usdt:.2f}$) نسبت به کارمزد رفت‌وبرگشت ({fee_estimate:.2f}$) کمتر از {MIN_RISK_TO_FEE_RATIO:g} برابر است', key='gate_open_fee_ratio_enabled', simple='سود احتمالی این معامله نسبت به کارمزدش کم است؛ برای همین وارد نمی\u200cشویم.')
     # سقف مجموع ریسک باز: جمع ریسک دلاری همهٔ پوزیشن‌های باز (صرف‌نظر از جهت) به‌علاوهٔ
     # این معاملهٔ جدید نباید از درصد مشخصی از سرمایه بگذرد. با تنظیمات پیش‌فرض عملاً
     # هیچ‌وقت فعال نمی‌شود؛ فقط وقتی سقف پوزیشن یا درصد ریسک بالا برود اثر می‌کند.
@@ -6034,7 +6162,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             equity = exchange_balance(chat_id) if s['trading_mode'] == 'REAL' else current_paper_equity(s)
             open_risk = sum(float(p.get('risk_usdt') or 0.0) for p in s.get('paper_positions', []))
             if gate_on(s, 'gate_total_risk_cap_enabled') and equity > 0 and (open_risk + risk_usdt) > equity * (max_total_risk_pct / 100.0):
-                return _blk(chat_id, f'سقف مجموع ریسک باز ({max_total_risk_pct:g}% سرمایه) رد می‌شود')
+                return _blk(chat_id, f'سقف مجموع ریسک باز ({max_total_risk_pct:g}% سرمایه) رد می‌شود', key='gate_total_risk_cap_enabled', simple='مجموع ریسک معامله\u200cهای باز به سقف مجاز رسیده؛ ورود جدید فعلاً ممکن نیست.')
         except Exception:
             pass
     _regime_snap = _regime_alignment_snapshot(symbol, s['timeframe'])
@@ -6184,7 +6312,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             return False
     else:
         if float(s['paper_balance']) - reserved_margin(s) < margin:
-            return _blk(chat_id, 'موجودی آزاد پیپر برای مارجین این معامله کافی نیست')
+            return _blk(chat_id, 'موجودی آزاد پیپر برای مارجین این معامله کافی نیست', key=None, simple='موجودی آزاد برای این معامله کافی نیست.')
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
@@ -6360,9 +6488,9 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
     _LAST_BLOCK_REASON.pop(chat_id, None)
     if not force:
         if not s['is_bot_active']:
-            return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)')
+            return _blk(chat_id, 'ربات غیرفعال است (دکمه‌ی شروع/توقف را چک کنید)', key=None, simple='ربات الان غیرفعال است.')
         if s['daily_stopped']:
-            return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است')
+            return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است', key='gate_risk_guard_enabled', simple='به\u200cخاطر ضرر امروز، ورود جدید فعلاً متوقف است.')
     if not _btc_candle_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
         return False
     if not _btc_front_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
@@ -6372,9 +6500,9 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         s=get_session(chat_id)
         if not force:
             if not s['is_bot_active'] or s['daily_stopped']:
-                return _blk(chat_id, 'ربات غیرفعال یا متوقف شد')
+                return _blk(chat_id, 'ربات غیرفعال یا متوقف شد', key=None, simple='ربات الان غیرفعال است.')
             if int(s.get('scan_generation',0)) != generation:
-                return _blk(chat_id, 'تنظیمات ربات همین لحظه تغییر کرد؛ دوباره تایید کنید')
+                return _blk(chat_id, 'تنظیمات ربات همین لحظه تغییر کرد؛ دوباره تایید کنید', key=None, simple='تنظیمات همین لحظه تغییر کرد؛ لطفاً دوباره تایید کنید.')
         return _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason,generation,require_active=not force,structural_tp=structural_tp,plan_score=plan_score,plan_rr=plan_rr,plan_quality_label=plan_quality_label,bypass_burst_cooldown=bypass_burst_cooldown,force=force,tp_level_name=tp_level_name,tp_stages=tp_stages,keep_levels=keep_levels)
 
 
@@ -6573,7 +6701,7 @@ def quick_channel_trade(chat_id, symbol, side, skip_trend=False):
         tp_level_name=plan.get('tp_level_name'),
     )
     if not ok:
-        send_detail_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}', simple_text=f'❌ ورود سریع `{symbol}` باز نشد.'); return
+        send_detail_message(chat_id, f'❌ ورود سریع `{symbol}` باز نشد: {err}', simple_text=f'❌ ورود سریع `{symbol}` باز نشد.' + (f"\n{block_simple_text(err)}" if block_simple_text(err) else '')); return
     s = get_session(chat_id)
     pos = next((p for p in reversed(s['paper_positions']) if p['symbol'] == symbol), None)
     if pos:
@@ -10794,7 +10922,11 @@ def _pd_level_gate(s, symbol, sig, tf, live=None):
                 live = float(live) if live else None
             except Exception:
                 live = None
-        return pd_level_guard_df(ind, sig, live, cfg)
+        _ok, _t = pd_level_guard_df(ind, sig, live, cfg)
+        if not _ok and _t:
+            _t = str(_t) + _btc_gate_key_line('gate_pd_level_enabled')
+            _block_simple_register(_t, 'قیمت الان نزدیک یک نقطه‌ی مهم دیروز است و هنوز واکنشش مشخص نیست؛ در این شرایط ورود به معامله مجاز نیست. لطفاً صبور باشید.')
+        return _ok, _t
     except Exception:
         logger.exception('pd level gate failed symbol=%s', symbol)
         return True, ''
@@ -11675,7 +11807,7 @@ def auto_trend_decide(chat_id, rid, approve):
         rec['status'] = 'approved'; _auto_gate_mark(s, rid, 'approved'); save_session(chat_id)
     else:
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
-        send_detail_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}", simple_text=f"❌ ورود `{symbol}` باز نشد.")
+        send_detail_message(chat_id, f"❌ ورود `{symbol}` باز نشد: {detail}", simple_text=f"❌ ورود `{symbol}` باز نشد." + (f"\n{block_simple_text(detail)}" if block_simple_text(detail) else ''))
 
 
 def _strip_all_buttons(chat_id, message_id):
@@ -11757,7 +11889,7 @@ def assist_approve(chat_id, aid, skip_trend=False, skip_far=False):
     if not ok:
         _saved_note = ("\n💾 سیگنال همچنان در «📋 سیگنال‌های در انتظار» می‌ماند." if rec.get('saved') else '')
         send_detail_message(chat_id, f"🛑 ورود انجام نشد.\nدلیل: {block_reason or 'نامشخص (لاگ ربات را ببینید)'}" + _saved_note,
-                            simple_text="🛑 ورود انجام نشد." + _saved_note)
+                            simple_text="🛑 ورود انجام نشد." + (f"\n{block_simple_text(block_reason)}" if block_simple_text(block_reason) else '') + _saved_note)
     elif warn:
         send_message(chat_id, warn)
 
@@ -11961,7 +12093,7 @@ def assist_saved_touch_once():
                         px = f" | ورود `{fmt(float(pos[-1]['entry_price']))}` · SL `{fmt(float(pos[-1]['sl']))}` · TP `{fmt(float(pos[-1]['tp']))}`" if pos else ''
                         send_message(chat_id, f"✅ قیمت `{sym}` به ورود رسید؛ با قیمت بازار وارد شدم{px}.")
                     else:
-                        send_detail_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}")
+                        send_detail_message(chat_id, f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد.\nدلیل: {err or 'نامشخص'}", simple_text=f"🛑 قیمت `{sym}` به ورود رسید ولی ورود انجام نشد." + (f"\n{block_simple_text(err)}" if block_simple_text(err) else ''))
                 except Exception:
                     logger.exception('assist saved touch failed aid=%s', rec.get('id'))
         except Exception:
@@ -14594,8 +14726,9 @@ def menu(chat_id,message_id=None):
         text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
                 f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`\n"
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n"
-                f"📌 حداکثر پوزیشن باز: `{maxp}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER')),message_id)
+                f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
+                f"🤝 حالت دستیار: `{'روشن (ورود فقط با تایید شما)' if s.get('assist_mode_enabled') else 'خاموش (ورود خودکار)'}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER'), bool(s.get('assist_mode_enabled', False))),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
@@ -15143,11 +15276,23 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
-    if cmd in ('/toggle_signal_pause', '/toggle_signal_all3', '/toggle_signal_align4'):
+    if cmd.startswith('/admin_chpost_del_'):
+        # V3.44.77: حذف پیامی که همین الان از طرف ادمین در کانال منتشر شده بود
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
-        _fk = {'/toggle_signal_pause': 'paused', '/toggle_signal_all3': 'all3', '/toggle_signal_align4': 'align4'}[cmd]
-        _SIGNAL_CHANNEL_FLAGS[_fk] = not bool(_SIGNAL_CHANNEL_FLAGS.get(_fk))
+        try:
+            _dmid = int(cmd[len('/admin_chpost_del_'):])
+            _dres = tg('deleteMessage', {'chat_id': SIGNAL_CHANNEL_ID, 'message_id': _dmid}, 10)
+            send_message(chat_id, '🗑 پیام از کانال حذف شد.' if (_dres and _dres.get('ok')) else '⚠️ حذف از کانال ناموفق بود (شاید قبلاً حذف شده یا بیش از ۴۸ ساعت گذشته).')
+        except Exception:
+            logger.exception('admin channel post delete failed')
+            send_message(chat_id, '⚠️ حذف از کانال ناموفق بود.')
+        return
+    if cmd in ('/toggle_signal_pause', '/toggle_signal_all3', '/toggle_signal_align4', '/toggle_signal_adminpost'):
+        if not is_admin(chat_id):
+            send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
+        _fk = {'/toggle_signal_pause': 'paused', '/toggle_signal_all3': 'all3', '/toggle_signal_align4': 'align4', '/toggle_signal_adminpost': 'admin_post'}[cmd]
+        _SIGNAL_CHANNEL_FLAGS[_fk] = not bool(_SIGNAL_CHANNEL_FLAGS.get(_fk, True if _fk == 'admin_post' else False))
         _persist_signal_channel_settings()
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
@@ -15323,10 +15468,18 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🎯 *تغییر حد سود (TP)* برای `{sym}`\n\nورود: `{fmt(pos['entry_price'])}`\nحد سود فعلی: `{fmt(pos['tp'])}`\n\nلطفاً مقدار عددی جدید TP را ارسال کنید:")
         return
 
+    if cl=='/support':
+        send_message(chat_id, support_text(), {'inline_keyboard': [[{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]})
+        try:
+            _nm = SUPPORT_NAME.split(' ', 1)
+            tg('sendContact', {'chat_id': chat_id, 'phone_number': support_phone_intl(), 'first_name': _nm[0], 'last_name': (_nm[1] if len(_nm) > 1 else '')})
+        except Exception:
+            logger.exception('support contact card failed')
+        return
     if cl=='/start':
         if s.get('is_bot_active'): stop_scan(chat_id, 'start-reset')
         s['user_state']=None; save_session(chat_id)
-        send_message(chat_id,'🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.',get_start_keyboard())
+        send_message(chat_id, welcome_text(chat_id) + '🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.', get_start_keyboard())
         sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
         return
     if cl in ('/menu','☰ منو','🏠 منوی اصلی'): s['user_state']=None; menu(chat_id,message_id); return
@@ -16168,6 +16321,12 @@ def process_command(cmd,chat_id,message_id=None):
         st = 'روشن 🟢' if s.get('assist_mode_enabled') else 'خاموش 🔴'
         send_message(chat_id, f"🤝 *حالت دستیار معاملاتی*\n\nوضعیت: {st}\n\nوقتی روشن باشد، ربات همه‌چیز را مثل قبل اسکن و تحلیل می‌کند ولی به‌جای ورود خودکار، هر سیگنال را با دکمه‌ی ✅ ورود / ❌ رد برای شما می‌فرستد. ورود بعد از تایید با قیمت لحظه‌ای انجام می‌شود. سیگنال‌های ردشده هم پیگیری می‌شوند تا معلوم شود تشخیص شما ارزش افزوده دارد یا نه.", assist_keyboard(chat_id))
         return
+    if cl=='/assist_main_toggle':
+        # V3.44.75: کلید حالت دستیار در منوی اصلی؛ تغییر روی همان پیام نمایش داده می‌شود (منوی اصلی در جا بازسازی می‌شود)
+        s['assist_mode_enabled'] = not bool(s.get('assist_mode_enabled', False))
+        save_session(chat_id)
+        menu(chat_id, message_id)
+        return
     if cl=='/toggle_assist_mode':
         s['assist_mode_enabled'] = not bool(s.get('assist_mode_enabled', False))
         save_session(chat_id)
@@ -16384,6 +16543,54 @@ def run_user_backtest(chat_id):
     finally:
         s['user_state']=None
         save_session(chat_id)
+
+
+_ADMIN_POST_SYMBOL_RE = re.compile(r'^[A-Za-z0-9]{2,12}$')
+ADMIN_CHANNEL_POST_MAX_CHARS = 4096
+
+
+def admin_channel_post_applies(chat_id, raw, current_state, is_admin_fn=None, restricted_fn=None):
+    """V3.44.77: آیا این پیام تایپ‌شده باید عیناً به کانال برود؟
+    فقط برای ادمینِ چت خصوصی، وقتی کلید روشن است، کانال تنظیم شده، ربات منتظر ورودی دیگری نیست،
+    متن دستور (/...) نیست و یک نمادِ تنها (مثل BTC) هم نیست (آن همچنان تحلیل نماد می‌شود)."""
+    is_admin_fn = is_admin_fn or is_admin
+    restricted_fn = restricted_fn or is_restricted_user
+    raw = (raw or '').strip()
+    if not raw or raw.startswith('/'):
+        return False
+    if current_state:
+        return False
+    if not SIGNAL_CHANNEL_ID or not _SIGNAL_CHANNEL_FLAGS.get('admin_post', True):
+        return False
+    try:
+        if not is_admin_fn(chat_id) or restricted_fn(chat_id):
+            return False
+    except Exception:
+        return False
+    if _ADMIN_POST_SYMBOL_RE.match(raw):
+        return False
+    return True
+
+
+def admin_post_to_channel(chat_id, raw):
+    """متن ادمین را بدون parse_mode (تا * و _ خطا ندهند) و بدون حذف خودکار در کانال منتشر می‌کند و
+    به ادمین تأیید + دکمه‌ی حذف می‌دهد. خروجی: message_id یا None."""
+    raw = (raw or '').strip()
+    if len(raw) > ADMIN_CHANNEL_POST_MAX_CHARS:
+        send_message(chat_id, f'⚠️ پیام برای کانال خیلی طولانی است ({len(raw)} کاراکتر؛ حداکثر {ADMIN_CHANNEL_POST_MAX_CHARS}). کوتاه‌تر بفرستید.')
+        return None
+    try:
+        res = tg('sendMessage', {'chat_id': SIGNAL_CHANNEL_ID, 'text': raw}, 10)
+    except Exception:
+        logger.exception('admin channel post failed')
+        res = None
+    if not res or not res.get('ok'):
+        send_message(chat_id, '⚠️ ارسال به کانال ناموفق بود. مطمئن شوید ربات در کانال ادمین است و SIGNAL_CHANNEL_ID درست تنظیم شده.')
+        return None
+    mid = (res.get('result') or {}).get('message_id')
+    markup = {'inline_keyboard': [[{'text': '🗑 حذف از کانال', 'callback_data': f'/admin_chpost_del_{mid}'}]]} if mid else None
+    send_message(chat_id, '✅ پیام شما در کانال منتشر شد.', markup)
+    return mid
 
 
 def handle_text(chat_id,text,message_id=None):
@@ -16685,6 +16892,8 @@ def handle_text(chat_id,text,message_id=None):
             f"تایید می‌کنید؟"
         )
         send_message(chat_id, summary, get_pending_confirm_keyboard()); return
+    if admin_channel_post_applies(chat_id, raw, current_state):
+        admin_post_to_channel(chat_id, raw); return    # V3.44.77
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()):
         atext, akeyboard = analyze(chat_id,val)
         send_message(chat_id,atext,akeyboard)

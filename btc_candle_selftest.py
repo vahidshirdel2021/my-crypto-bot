@@ -33,7 +33,8 @@ g = dict(os=os, time=time, logger=log, _TF_SECONDS={'5min': 300, '15min': 900, '
          TIMEFRAME_MAP={'5min': '5min', '15min': '15min', '1hour': '1hour', '4hour': '4hour'},
          TF_DISPLAY={'5min': '5م', '15min': '15م', '1hour': '1س', '4hour': '4س'},
          DATA_LOCK=threading.RLock(), DATA_CACHE=CACHE, get_klines=fake_klines,
-         latest_price=lambda s: st['price'], fmt=lambda v: f'{float(v):.2f}')
+         latest_price=lambda s: st['price'], fmt=lambda v: f'{float(v):.2f}',
+         _btc_gate_key_line=lambda *k: '\n🔑 کلید مانع: ' + ' + '.join(k), _block_simple_register=lambda *a: None)      # V3.44.74
 exec(HELPERS, g)
 v = g['btc_candle_verdict']
 P = g['_BTC_CANDLE_BLOCK_PREFIX']
@@ -188,7 +189,8 @@ SP = {'pending_orders': [{'symbol': 'AAA', 'side': 'SELL', 'trigger_price': None
 sent = []; res = {'v': (False, f'{P} (5م) در حال تشکیل صعودی است')}
 gp = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent.append(t), send_detail_message=lambda c, t, *a, **k: sent.append(t),
           side_long=g3['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX=P, _BTC_FRONT_PREFIX='⚠️ هشدار ورود',
-          execute_manual_trade=lambda *a, **k: res['v'])
+          execute_manual_trade=lambda *a, **k: res['v'],
+          block_simple_text=lambda t, d=None: d, _BLOCK_SIMPLE_GENERIC='x')      # V3.44.74
 exec(src[a:b], gp)
 gp['check_pending_orders'](1)
 assert len(SP['pending_orders']) == 1 and len(sent) == 1 and 'منتظر' in sent[0], (SP, sent)

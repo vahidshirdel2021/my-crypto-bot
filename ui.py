@@ -1,3 +1,4 @@
+import os
 from strategy import STRATEGY_DEFAULTS, MIN_RR_FLOOR
 
 CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
@@ -247,7 +248,7 @@ def get_my_profile_keyboard(session=None):
     return {"inline_keyboard": rows}
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER'):
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER', assist_on=False):
     rows = [
         [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},
          {"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
@@ -260,7 +261,15 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         [{"text": "📋 بررسی‌های آتی", "callback_data": "/review_list"},
          {"text": "🧭 رژیم BTC/ETH", "callback_data": "/btc_eth_regime"}],
         [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
+        # V3.44.75: حالت دستیار برای همه‌ی کاربران (روشن = ورود فقط با تایید خود کاربر)
+        [{"text": ("🟢" if assist_on else "🔴") + " حالت دستیار (ورود فقط با تایید من)", "callback_data": "/assist_main_toggle"}],
+        # V3.44.76: پشتیبان ربات
+        [{"text": "👨‍💻 پشتیبان ربات", "callback_data": "/support"}],
     ]
+    # V3.44.78: دکمه‌ی کانال تلگرام (لینک مستقیم؛ فقط وقتی لینک کانال مشخص باشد)
+    _ch_link = channel_link()
+    if _ch_link:
+        rows.append([{"text": "📢 کانال تلگرام", "url": _ch_link}])
     # V3.44.63: کلید تغییر حساب کاغذی ⇄ واقعی برای همه‌ی کاربران (متن بر اساس حالت فعلی)
     if str(trading_mode).upper() == 'REAL':
         rows.append([{"text": "📄 تغییر به حساب کاغذی (PAPER)", "callback_data": "/mode_paper"}])
@@ -269,6 +278,23 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
     if is_admin_user:
         rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
     return {"inline_keyboard": rows}
+
+
+def channel_link():
+    """V3.44.78: لینک کانال برای دکمه‌ی منو. اولویت: CHANNEL_LINK (مثلاً https://t.me/mychannel)؛
+    وگرنه اگر SIGNAL_CHANNEL_ID به‌شکل @نام باشد از آن ساخته می‌شود. کانال خصوصی با آیدی عددی لینک ندارد
+    (برای آن CHANNEL_LINK را با لینک دعوت بگذارید). خروجی: لینک یا رشته‌ی خالی."""
+    link = os.environ.get('CHANNEL_LINK', '').strip()
+    if link:
+        if link.startswith('@'):
+            link = 'https://t.me/' + link[1:]
+        elif link.startswith(('t.me/', 'telegram.me/')):
+            link = 'https://' + link
+        return link if link.startswith(('https://', 'http://')) else ''
+    cid = os.environ.get('SIGNAL_CHANNEL_ID', '').strip()
+    if cid.startswith('@') and len(cid) > 1:
+        return 'https://t.me/' + cid[1:]
+    return ''
 
 
 def get_trading_menu_keyboard():

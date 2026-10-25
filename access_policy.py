@@ -35,6 +35,10 @@ USER_EXACT = frozenset({
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
     '/assist_pending',
+    # V3.44.75: کلید حالت دستیار در منوی اصلی
+    '/assist_main_toggle',
+    # V3.44.76: پشتیبان ربات
+    '/support',
 })
 
 # --- الگوهای مجاز (regex کامل‌منطبق) -------------------------------------------------------------

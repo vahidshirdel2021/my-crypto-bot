@@ -259,7 +259,8 @@ SP = {'pending_orders': [{'symbol': 'AAA', 'side': 'BUY', 'trigger_price': None,
 sent2 = []
 gp2 = dict(logger=log, get_session=lambda c: SP, latest_price=lambda s: 100.0, fmt=lambda v: str(v), send_message=lambda c, t, *a, **k: sent2.append(t), send_detail_message=lambda c, t, *a, **k: sent2.append(t),
            side_long=g4['side_long'], save_session=lambda c: None, time=time, _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC', _BTC_FRONT_PREFIX=PFX,
-           execute_manual_trade=lambda *a, **k: (False, f'{PFX}: بیتکوین (BTC) به سطح مقاومتی نزدیک است'))
+           execute_manual_trade=lambda *a, **k: (False, f'{PFX}: بیتکوین (BTC) به سطح مقاومتی نزدیک است'),
+           block_simple_text=lambda t, d=None: d, _BLOCK_SIMPLE_GENERIC='x')      # V3.44.74
 exec(src[a5:b5], gp2)
 gp2['check_pending_orders'](1); assert len(SP['pending_orders']) == 1 and len(sent2) == 1 and 'منتظر' in sent2[0]
 gp2['check_pending_orders'](1); assert len(SP['pending_orders']) == 1 and len(sent2) == 1
