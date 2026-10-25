@@ -205,7 +205,8 @@ ENTRY_ORDER_TYPE = os.environ.get('ENTRY_ORDER_TYPE', 'market').lower()
 ORDER_CONFIRM_RETRIES = max(1, int(os.environ.get('ORDER_CONFIRM_RETRIES', '6')))
 ORDER_CONFIRM_DELAY = max(0.25, float(os.environ.get('ORDER_CONFIRM_DELAY', '1.0')))
 PAPER_CONSERVATIVE_OHLC = os.environ.get('PAPER_CONSERVATIVE_OHLC', 'true').lower() not in ('0', 'false', 'no')
-PAPER_ONLY = os.environ.get('PAPER_ONLY', 'true').lower() not in ('0', 'false', 'no')
+PAPER_ONLY = os.environ.get('PAPER_ONLY', 'false').lower() not in ('0', 'false', 'no')      # V3.44.66: پیش‌فرض false = تغییر مود کاغذی/واقعی آزاد (برای قفل‌کردن: PAPER_ONLY=true)
+PAPER_FORCE_SYMBOLS = os.environ.get('PAPER_FORCE_SYMBOLS', 'true').lower() not in ('0', 'false', 'no')   # لیست نمادهای پایدارِ PAPER_SYMBOLS مستقل از قفل مود
 PAPER_SLIPPAGE_BPS = max(0.0, float(os.environ.get('PAPER_SLIPPAGE_BPS', '2.0')))
 # --- بستهٔ A: حفظ سرمایه (بدون تغییر منطق سیگنال) -----------------------------
 # وقتی کندل PAPER با فاصلهٔ زیاد از حد ضرر رد می‌شود (ویک شدید، مخصوصاً روی
@@ -1003,7 +1004,7 @@ def default_session():
         'cooldowns': {},
         'traded_levels': {},
         'user_state': None,
-        'active_symbols': (PAPER_SYMBOLS[:] if PAPER_ONLY else DEFAULT_ACTIVE_SYMBOLS[:]),
+        'active_symbols': (PAPER_SYMBOLS[:] if PAPER_FORCE_SYMBOLS else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
         'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
                             'halving_model_enabled': True, 'halving_k_atr': 3.0, 'halving_max_depth': 12, 'halving_tf': {}},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
@@ -1133,7 +1134,7 @@ def normalize_session(data):
     s['same_direction_entry_cooldown_seconds'] = float(s.get('same_direction_entry_cooldown_seconds', default_session()['same_direction_entry_cooldown_seconds']) or 0)
     s['max_total_open_risk_pct'] = max(0.0, float(s.get('max_total_open_risk_pct', MAX_TOTAL_OPEN_RISK_PCT) or 0.0))
     stored_symbols = list(data.get('active_symbols') or [])
-    if PAPER_ONLY:
+    if PAPER_FORCE_SYMBOLS:
         # Paper validation should use a stable, liquid universe by default.
         s['active_symbols'] = PAPER_SYMBOLS[:]
     elif not stored_symbols or set(stored_symbols) == set(LEGACY_DEFAULT_ACTIVE_SYMBOLS):
@@ -5344,7 +5345,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.65'
+BOT_VERSION = '3.44.66'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -5468,7 +5469,7 @@ def _be_finalize(pos):
         if not isinstance(bt, dict): return ''
         margin = float(pos.get('margin') or 0.0); lev = float(pos.get('leverage') or 1.0); risk = float(pos.get('risk_usdt') or 0.0)
         if margin <= 0 or risk <= 0: return ''
-        slip_usdt = margin * lev * ((PAPER_SLIPPAGE_BPS / 10000.0) if (PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0) else 0.0)
+        slip_usdt = margin * lev * ((PAPER_SLIPPAGE_BPS / 10000.0) if (not pos.get('is_real') and PAPER_SLIPPAGE_BPS > 0) else 0.0)
         cost_r = (float(round_trip_fee_usdt(margin, lev)) + slip_usdt) / risk
         actual_r = pos.get('realized_r')
         if actual_r is None: return ''
@@ -5533,7 +5534,7 @@ def _shadow_finalize(pos, ref_price=None, actual_pnl=None):
         status = sh.get('status')
         if status in ('tp', 'sl'):
             exit_p = float(sh['exit_price'])
-            if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+            if not pos.get('is_real') and PAPER_SLIPPAGE_BPS > 0:
                 slip = PAPER_SLIPPAGE_BPS / 10000.0
                 exit_p = exit_p * (1.0 - slip) if is_long else exit_p * (1.0 + slip)
             end_ts = float(sh.get('closed_at') or time.time())
@@ -5956,7 +5957,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     price=latest_price(symbol) or float(signal_price)
     _raw_entry_price = float(price)
     # Conservative paper execution: adverse entry slippage only.
-    if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+    if s.get('trading_mode') != 'REAL' and PAPER_SLIPPAGE_BPS > 0:
         slip = PAPER_SLIPPAGE_BPS / 10000.0
         price = price * (1.0 + slip) if side_long(side) else price * (1.0 - slip)
     # خروج پله‌ای (مدل PDH/PDL+P4): plan['tp_stages'] سطوح مسیر را از نزدیک به دور دارد.
@@ -6029,13 +6030,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS if PAPER_ONLY else 0.0,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H if PAPER_ONLY else 0.0,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
     if inverse_applied and _shadow_spec:
         try:
             _sh_long = side_long(_shadow_spec['side'])
-            _sh_slip = (PAPER_SLIPPAGE_BPS / 10000.0) if (PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0) else 0.0
+            _sh_slip = (PAPER_SLIPPAGE_BPS / 10000.0) if (s.get('trading_mode') != 'REAL' and PAPER_SLIPPAGE_BPS > 0) else 0.0
             _sh_entry = _raw_entry_price * (1.0 + _sh_slip) if _sh_long else _raw_entry_price * (1.0 - _sh_slip)
             if _sh_long:
                 _sh_sl = _sh_entry - _shadow_spec['gap_sl']
@@ -7377,7 +7378,7 @@ def partial_close_position(chat_id,pos,price,frac_orig,label=''):
         if close_margin<=0 or close_margin>=cur_margin*0.999: return False
         lev=float(pos['leverage']); entry=float(pos['entry_price'])
         px=float(price)
-        if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+        if PAPER_SLIPPAGE_BPS > 0:
             slip = PAPER_SLIPPAGE_BPS / 10000.0
             px = px * (1.0 - slip) if side_long(pos['side']) else px * (1.0 + slip)
         frac=((px-entry)/entry) if side_long(pos['side']) else ((entry-px)/entry)
@@ -7746,7 +7747,7 @@ def close_position(chat_id,pos,price=None,reason='manual'):
             if price is None: price=latest_price(pos['symbol']) or pos['entry_price']
             _raw_close_price=float(price)
             # Conservative paper exit slippage.
-            if PAPER_ONLY and PAPER_SLIPPAGE_BPS > 0:
+            if PAPER_SLIPPAGE_BPS > 0:
                 slip = PAPER_SLIPPAGE_BPS / 10000.0
                 price = float(price) * (1.0 - slip) if side_long(pos['side']) else float(price) * (1.0 + slip)
             entry=float(pos['entry_price']); frac=((price-entry)/entry) if side_long(pos['side']) else ((entry-price)/entry)
