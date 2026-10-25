@@ -9,11 +9,10 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
     scan_button = {"text": "🔴 توقف اسکن"} if is_active else {"text": "🟢 شروع اسکن"}
     return {
         "keyboard": [
-            [{"text": "📋 سیگنال‌های در انتظار"}],
+            [{"text": "📋 سیگنال‌های در انتظار"}, {"text": "💰 سود و زیان امروز"}],
             [{"text": "🏠 منوی اصلی"}, scan_button],
             [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
             [{"text": "⏳ سیگنال‌های در حال تایید"}, {"text": "🧭 رژیم BTC/ETH"}],
-            [{"text": "💰 سود و زیان امروز"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -248,36 +247,48 @@ def get_my_profile_keyboard(session=None):
     return {"inline_keyboard": rows}
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER', assist_on=False):
-    rows = [
-        [{"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},
-         {"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"}],
-        [{"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
-         {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"}],
-        [{"text": "🖐 معامله دستی", "callback_data": "/manual_trade"},
-         {"text": "💹 معاملات و اوردرها", "callback_data": "/menu_trading"}],
-        [{"text": "🎛 تنظیمات و مدیریت", "callback_data": "/menu_settings"},
-         {"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"}],
-        [{"text": "📋 بررسی‌های آتی", "callback_data": "/review_list"},
-         {"text": "🧭 رژیم BTC/ETH", "callback_data": "/btc_eth_regime"}],
-        [{"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
+def _pair_buttons(buttons):
+    """V3.44.80: دکمه‌ها را دوتا‌دوتا در یک ردیف می‌چیند (آخرین ردیف اگر فرد بود تک می‌ماند)."""
+    return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+
+
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER', assist_on=False, restricted=None):
+    # V3.44.80: همه‌ی دکمه‌های منوی اصلی دوتا‌دوتا کنار هم‌اند. برای کاربر عادی اول دکمه‌های ممنوع کنار گذاشته می‌شوند
+    # (همان فیلتر قفل نقش‌ها) و بعد چیده می‌شوند تا ردیفِ تک‌دکمه‌ایِ ناخواسته درست نشود.
+    if restricted is None:
+        restricted = not is_admin_user
+    buttons = [
+        {"text": "🔴 توقف اسکن" if active else "🟢 شروع اسکن", "callback_data": "/stop_scan" if active else "/start_scan"},
+        {"text": "🔄 بارگذاری مجدد و شروع اسکن", "callback_data": "/reload_and_start"},
+        {"text": "🔄 پوزیشن‌ها", "callback_data": "/open_positions"},
+        {"text": "📈 عملکرد و گزارش‌ها", "callback_data": "/performance"},
+        {"text": "🖐 معامله دستی", "callback_data": "/manual_trade"},
+        {"text": "💹 معاملات و اوردرها", "callback_data": "/menu_trading"},
+        {"text": "🎛 تنظیمات و مدیریت", "callback_data": "/menu_settings"},
+        {"text": "📊 گزارش‌ها و آمار", "callback_data": "/menu_reports"},
+        {"text": "📋 بررسی‌های آتی", "callback_data": "/review_list"},
+        {"text": "🧭 رژیم BTC/ETH", "callback_data": "/btc_eth_regime"},
+        {"text": "💰 کارمزد من", "callback_data": "/fee_menu"},
         # V3.44.75: حالت دستیار برای همه‌ی کاربران (روشن = ورود فقط با تایید خود کاربر)
-        [{"text": ("🟢" if assist_on else "🔴") + " حالت دستیار (ورود فقط با تایید من)", "callback_data": "/assist_main_toggle"}],
+        {"text": ("🟢" if assist_on else "🔴") + " حالت دستیار", "callback_data": "/assist_main_toggle"},
         # V3.44.76: پشتیبان ربات
-        [{"text": "👨‍💻 پشتیبان ربات", "callback_data": "/support"}],
+        {"text": "👨‍💻 پشتیبان ربات", "callback_data": "/support"},
     ]
     # V3.44.78: دکمه‌ی کانال تلگرام (لینک مستقیم؛ فقط وقتی لینک کانال مشخص باشد)
     _ch_link = channel_link()
     if _ch_link:
-        rows.append([{"text": "📢 کانال تلگرام", "url": _ch_link}])
+        buttons.append({"text": "📢 کانال تلگرام", "url": _ch_link})
     # V3.44.63: کلید تغییر حساب کاغذی ⇄ واقعی برای همه‌ی کاربران (متن بر اساس حالت فعلی)
     if str(trading_mode).upper() == 'REAL':
-        rows.append([{"text": "📄 تغییر به حساب کاغذی (PAPER)", "callback_data": "/mode_paper"}])
+        buttons.append({"text": "📄 حساب کاغذی (PAPER)", "callback_data": "/mode_paper"})
     else:
-        rows.append([{"text": "💳 تغییر به معاملات واقعی (REAL)", "callback_data": "/mode_real"}])
+        buttons.append({"text": "💳 حساب واقعی (REAL)", "callback_data": "/mode_real"})
     if is_admin_user:
-        rows.append([{"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"}])
-    return {"inline_keyboard": rows}
+        buttons.append({"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"})
+    if restricted:
+        import access_policy as _ap
+        buttons = [b for b in buttons if "callback_data" not in b or _ap.user_command_allowed(b["callback_data"])]
+    return {"inline_keyboard": _pair_buttons(buttons)}
 
 
 def channel_link():

@@ -25,4 +25,8 @@ for adm in (False, True):
     check(f'main menu has URL button (admin={adm})', len(b) == 1 and b[0]['url'] == 'https://t.me/mychan' and 'کانال' in b[0]['text'])
 os.environ.pop('CHANNEL_LINK'); os.environ.pop('SIGNAL_CHANNEL_ID')
 check('no link -> no URL button', not [x for x in btns(ui.get_main_menu_keyboard(True, True, False)) if 'url' in x])
+for adm in (False, True):
+    kb = ui.get_main_menu_keyboard(True, True, adm)['inline_keyboard']
+    check(f'rows have at most 2 buttons (admin={adm})', all(1 <= len(r) <= 2 for r in kb))
+    check(f'only the last row may be single (admin={adm})', all(len(r) == 2 for r in kb[:-1]))
 print('ALL PASS' if ok else 'SOME FAILED'); sys.exit(0 if ok else 1)
