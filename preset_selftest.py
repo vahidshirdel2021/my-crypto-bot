@@ -53,7 +53,7 @@ a = st['کلید ۱']
 check("آمار کلید ۱", a['n'] == 2 and a['wins'] == 1 and abs(a['pnl'] - 1.0) < 1e-9 and abs(a['profit_factor'] - 2.0) < 1e-9)
 txt = P.format_stats(st)
 check("متن آمار و هشدار نمونه‌ی کم", 'نمونه کم' in txt and len(txt) < 4000)
-check("منو و کیبورد", len(P.menu_text(s)) < 4000 and len(P.keyboard(s)['inline_keyboard']) == 4 + 2 * len(P.PRESETS))
+check("منو و کیبورد", len(P.menu_text(s)) < 4000 and len(P.keyboard(s)['inline_keyboard']) == 5 + 2 * len(P.PRESETS))
 
 # V3.44.47: چهار پریست مقایسه
 def _apply(n):

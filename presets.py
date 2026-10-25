@@ -357,6 +357,7 @@ def keyboard(s):
         rows.append(row)
     rows.append([{'text': '📊 نتیجه‌ی هر کلید', 'callback_data': '/preset_stats'}])
     rows.append([{'text': '📤 ارسال فایل ژورنال معاملات', 'callback_data': '/preset_export'}])
+    rows.append([{'text': '🧬 گزارش قیف کلیدها', 'callback_data': '/funnel_report'}, {'text': '📦 داده‌ی قیف', 'callback_data': '/funnel_export'}])
     rows.append([{'text': '🔙 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}])
     rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
     return {'inline_keyboard': rows}

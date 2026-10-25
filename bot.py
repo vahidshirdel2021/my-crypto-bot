@@ -854,6 +854,11 @@ def audit_event(chat_id, trade_id, stage, data=None):
         s.setdefault('trade_audit', []).append(event)
         s['trade_audit'] = s['trade_audit'][-2000:]
         save_session(chat_id)
+        if stage in ('position_opened', 'position_closed'):
+            try:
+                _fn_trade_event(chat_id, trade_id, stage, data or {})
+            except Exception:
+                pass
         return event
     except Exception:
         logger.exception('trade audit event failed chat=%s trade=%s stage=%s', chat_id, trade_id, stage)
@@ -933,6 +938,7 @@ def save_telegram_offset(offset):
 
 
 import presets as presets_mod
+import funnel_log
 
 
 def default_session():
@@ -5352,7 +5358,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.71'
+BOT_VERSION = '3.44.72'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6605,7 +6611,7 @@ ADMIN_TESTS_TIMEOUT_SEC = 180
 ADMIN_TESTS_CORE = ('touch_vote_selftest.py', 'touch_fixed_dir_selftest.py', 'ylevel_vote_selftest.py', 'preset_selftest.py',
                     'entry_menu_selftest.py', 'touch_card_order_selftest.py', 'fav_confirm_selftest.py', 'fav_max_selftest.py',
                     'keep_closed_cards_selftest.py', 'btc_guard_selftest.py', 'pd_level_guard_selftest.py', 'role_lock_selftest.py',
-                    'daily_fee_selftest.py', 'preset_custom_selftest.py', 'preset_sync_selftest.py')
+                    'daily_fee_selftest.py', 'preset_custom_selftest.py', 'preset_sync_selftest.py', 'funnel_selftest.py')
 _ADMIN_TESTS_STATE = {'running': False}
 
 
@@ -7571,6 +7577,224 @@ def _sync_preset_users(name, skip_chat_id=None):
         except Exception:
             logger.exception('preset sync failed chat=%s preset=%s', cid, name)
     return n
+
+
+# ============================== V3.44.72: ثبت کامل قیف ورود برای مقایسه‌ی کلیدهای ۳/۴/۵ ==============================
+funnel_log.configure(os.environ.get('FUNNEL_DIR', '').strip() or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'funnel'))
+_FN_TLS = _threading.local()
+_FN_GATE_RULES = (
+    (r'R:R', 'min_rr'), (r'از لحظه.?ی برخورد دور', 'drift'), (r'از حد ضرر/سود طرح گذشته', 'price_crossed'),
+    (r'سقف|کف دیروز|PDH|PDL', 'pd_level'), (r'کندل BTC|کندل در حال تشکیل', 'btc_candle'),
+    (r'رژیم', 'final_regime'), (r'کلوز BTC|سطح جلویی|فاصله.*BTC|BTC.*فاصله', 'btc_front'),
+    (r'بلاک دستی', 'manual_block'), (r'ریسک|ظرفیت|سقف پوزیشن|کول|cooldown|دوره انتظار', 'risk_limits'),
+)
+
+
+def _fn_gate_class(note):
+    t = str(note or '')
+    for pat, name in _FN_GATE_RULES:
+        if re.search(pat, t, flags=re.I):
+            return name
+    return 'other'
+
+
+def _fn_current_tid():
+    return getattr(_FN_TLS, 'tid', None)
+
+
+def _fn_ctx(chat_id):
+    s = get_session(chat_id)
+    name = s.get('active_preset')
+    try:
+        pmod = bool(presets_mod.preset_diff(s, name)) if name else None
+    except Exception:
+        pmod = None
+    return {'chat': chat_id, 'preset': name, 'pmod': pmod, 'v': BOT_VERSION, 'tf': s.get('timeframe'),
+            'mode': 'REAL' if _mode_is_real(s) else 'PAPER'}
+
+
+def _fn_emit(chat_id, kind, **kw):
+    if not funnel_log.ENABLED:
+        return
+    try:
+        funnel_log.emit(kind, **{**_fn_ctx(chat_id), **kw})
+    except Exception:
+        pass
+
+
+def _fn_count(chat_id, key, n=1):
+    if not funnel_log.ENABLED:
+        return
+    try:
+        c = _fn_ctx(chat_id)
+        funnel_log.count(chat_id, c['preset'], c['tf'], c['mode'], key, n)
+    except Exception:
+        pass
+
+
+_FN_SCAN_NOISE = ('ستاپی روی سطوح ثبت نشد',)
+
+
+def _fn_scan_hook(chat_id, symbol, stage, status, reason, signal):
+    """از _pipeline_record صدا زده می‌شود: شمارنده‌ی بررسی‌ها + ثبت رویدادهای مهم (نه نویز «ستاپی روی سطوح نیست»)."""
+    st, r = str(stage or ''), str(reason or '')
+    if st == 'watchlist_review':
+        _fn_count(chat_id, 'scans')
+        return
+    if st == 'signal' and status == 'no_signal':
+        if any(n in r for n in _FN_SCAN_NOISE):
+            _fn_count(chat_id, 'no_setup')
+            return
+        if 'سقف/کف دیروز' in r:
+            _fn_count(chat_id, 'guard_pd')
+        else:
+            _fn_count(chat_id, 'nosig:' + re.sub(r'[\d\.\-]+(e-?\d+)?', '#', r)[:55])
+        _fn_emit(chat_id, 'scan', symbol=symbol, stage=st, status=status, reason=r[:260])
+        return
+    _fn_count(chat_id, f'{st}:{status}')
+    if st == 'touch_vote' and status in ('touch_wait', 'fav_wait', 'entry_opened', 'assist_card'):
+        return      # خودِ برخورد و نتیجه‌اش با رویدادهای touch/vote/pass_vote ثبت می‌شود
+    _fn_emit(chat_id, 'scan', symbol=symbol, stage=st, status=status, signal=signal, reason=r[:260])
+
+
+def _fn_cf(touch_sig, votes_all):
+    """«کلید ۳/۴/۵ روی همین برخورد با همین رأی‌ها چه تصمیمی می‌گرفتند»؛ بدون فراخوانی داده‌ی اضافه."""
+    out = {}
+    for n in ('3', '4', '5'):
+        try:
+            cfg_n, ses_n = presets_mod._full(n)
+
+            def on(k, _c=cfg_n):
+                key = f'gate_fc_{k}_enabled'
+                return bool(_c.get(key, _gate_default(key)))
+            keys_n = [k for k in _TOUCH_KEYS if on(k)]
+            fixed = touch_sig if (bool(cfg_n.get('gate_touch_dir_fixed_enabled', _gate_default('gate_touch_dir_fixed_enabled')))
+                                  and touch_sig in ('BUY', 'SELL')) else None
+            vs = [dict(v) for v in votes_all if v['key'] in keys_n]
+            if (not fixed) and bool(cfg_n.get('gate_touch_pattern_vote_enabled', _gate_default('gate_touch_pattern_vote_enabled'))) \
+                    and touch_sig in ('BUY', 'SELL'):
+                vs.insert(0, {'key': 'pattern', 'label': 'الگو', 'vote': touch_sig, 'detail': ''})
+            sm = _touch_summarize(vs, ses_n.get('touch_auto_mode', 'all'), fixed_dir=fixed)
+            out[n] = {'d': sm['dir'], 'a': sm['agree'], 't': sm['total'], 'ok': bool(sm['auto_ok'])}
+        except Exception:
+            out[n] = None
+    return out
+
+
+def _fn_after_eval(chat_id, s, rec, votes, votes_all, summ):
+    if not funnel_log.ENABLED:
+        return
+    st = {v['key']: {'ok': 'Y', 'against': 'N'}.get(v.get('status'), '-') for v in votes}
+    raw = {v['key']: ({'BUY': 'B', 'SELL': 'S', 'OK': 'O'}.get(v.get('vote'), '-')) for v in (votes_all or [])}
+    cf = _fn_cf(rec.get('touch_sig'), votes_all) if votes_all else {}
+    rec['_fn_n'] = int(rec.get('_fn_n', 0) or 0) + 1
+    sig = json.dumps([summ.get('dir'), summ.get('agree'), summ.get('total'), st, cf], sort_keys=True, default=str)
+    if sig == rec.get('_fn_sig'):
+        return
+    rec['_fn_sig'] = sig
+    _fn_emit(chat_id, 'vote', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), n=rec['_fn_n'],
+             age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1),
+             dir=summ.get('dir'), agree=summ.get('agree'), total=summ.get('total'), mode=s.get('touch_auto_mode'),
+             auto_ok=bool(summ.get('auto_ok')), st=st, raw=raw, cf=cf, groups=summ.get('groups'))
+
+
+def _fn_touch_created(chat_id, s, rec, plan, flip_from):
+    if not funnel_log.ENABLED:
+        return
+    tf = rec.get('tf') or s.get('timeframe', '5min')
+    pl = plan or {}
+    _fn_emit(chat_id, 'touch', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), scn=rec.get('scn'),
+             level_token=rec.get('level_token'), level_value=rec.get('level_value'), touch_price=rec.get('touch_price'),
+             plan_entry=pl.get('entry'), plan_sl=pl.get('sl'), plan_tp=pl.get('tp'), plan_rr=pl.get('rr'), plan_score=pl.get('score'),
+             flip_from=flip_from, reason=str(rec.get('reason') or '')[:300],
+             waiting_now=sum(1 for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting'))
+    _fn_count(chat_id, 'touches')
+    entry, sl, tp = pl.get('entry') or rec.get('touch_price'), pl.get('sl'), pl.get('tp')
+    side = rec.get('touch_sig')
+    if not (sl and tp) and rec.get('touch_price') and side in ('BUY', 'SELL'):
+        try:
+            qp, _ = build_quick_plan_with_fallback(rec['symbol'], side, s.get('strategy_config'), float(rec['touch_price']), tf)
+            sl, tp, entry = float(qp['sl']), float(qp['tp']), float(rec['touch_price'])
+        except Exception:
+            sl = tp = None
+    if entry and sl and tp:
+        funnel_log.shadow_register(rec.get('id'), 'touch', _fn_ctx(chat_id), rec['symbol'], side, entry, sl, tp, tf,
+                                   _TF_SECONDS.get(tf, 900), start_ts=rec.get('created_at'))
+
+
+def _fn_after_enter(chat_id, rec, res):
+    if res in ('queued', 'opened', 'card_sent'):
+        if not rec.get('_fn_passed'):
+            rec['_fn_passed'] = res
+            _fn_count(chat_id, f'pass_vote:{res}')
+            _fn_emit(chat_id, 'pass_vote', tid=rec.get('id'), symbol=rec.get('symbol'), result=res, dir=rec.get('dir'),
+                     agree=rec.get('agree'), total=rec.get('total'),
+                     age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
+        return
+    note = rec.get('block_note')
+    if note and note != rec.get('_fn_block'):
+        rec['_fn_block'] = note
+        gate = _fn_gate_class(note)
+        _fn_count(chat_id, f'block:{gate}')
+        _fn_emit(chat_id, 'block', tid=rec.get('id'), symbol=rec.get('symbol'), dir=rec.get('dir'), gate=gate, note=str(note)[:200],
+                 age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
+
+
+def _fn_touch_final(chat_id, rec):
+    if rec.get('_fn_final'):
+        return
+    rec['_fn_final'] = True
+    _fn_count(chat_id, f"touch_final:{rec.get('status')}")
+    _fn_emit(chat_id, 'touch_final', tid=rec.get('id'), symbol=rec.get('symbol'), status=rec.get('status'),
+             passed=rec.get('_fn_passed'), last_block=rec.get('block_note') or rec.get('_fn_block'), dir=rec.get('dir'),
+             agree=rec.get('agree'), total=rec.get('total'),
+             age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
+
+
+def _fn_fav_queued(chat_id, rec):
+    _fn_count(chat_id, 'fav_queue')
+    _fn_emit(chat_id, 'fav_queue', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'),
+             entry=rec.get('entry'), sl=rec.get('sl'), tp=rec.get('tp'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
+             max_mode=rec.get('max_mode'), wait_s=round(float(rec.get('expires_at', 0) or 0) - float(rec.get('created_at', 0) or 0)))
+    tf = rec.get('tf') or '5min'
+    funnel_log.shadow_register(rec.get('tid') or rec.get('id'), 'fav', _fn_ctx(chat_id), rec['symbol'], rec['sig'], rec['entry'],
+                               rec['sl'], rec['tp'], tf, _TF_SECONDS.get(tf, 300), start_ts=rec.get('created_at'))
+
+
+def _fn_fav_final(chat_id, rec, status):
+    _fn_count(chat_id, f'fav_final:{status}' + (f":{rec.get('why')}" if rec.get('why') else ''))
+    _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
+             why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
+             age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
+
+
+def _fn_trade_event(chat_id, trade_id, stage, data):
+    s = get_session(chat_id)
+    if stage == 'position_opened':
+        votes = ''
+        m = re.search(r'\|VOTES=([^|]*)\|', str(data.get('entry_reason') or ''))
+        if m:
+            votes = m.group(1)
+        _fn_count(chat_id, 'entry')
+        _fn_emit(chat_id, 'entry', trade_id=trade_id, tid=getattr(_FN_TLS, 'tid', None), symbol=data.get('symbol'), side=data.get('side'),
+                 entry=data.get('entry_price'), sl=data.get('sl'), tp=data.get('tp'), planned_rr=data.get('planned_rr'),
+                 trade_preset=data.get('preset'), votes=votes)
+        return
+    pos = None
+    for lst in (s.get('closed_positions') or [], s.get('paper_positions') or []):
+        for p in reversed(lst):
+            if p.get('trade_id') == trade_id:
+                pos = p
+                break
+        if pos:
+            break
+    pos = pos or {}
+    _fn_count(chat_id, 'trade_close')
+    _fn_emit(chat_id, 'trade_close', trade_id=trade_id, symbol=pos.get('symbol') or data.get('symbol'), side=pos.get('side'),
+             r=pos.get('realized_r'), pnl=data.get('pnl_usdt'), reason=str(data.get('reason') or pos.get('close_reason') or '')[:120],
+             dur_s=data.get('duration_seconds') or pos.get('duration_seconds'), mfe_r=pos.get('mfe_r'), mae_r=pos.get('mae_r'),
+             planned_rr=pos.get('planned_rr'), trade_preset=pos.get('preset'))
+# ============================== پایان V3.44.72 (قیف) ==============================
 
 
 def _snap_dir_fa(is_with):
@@ -9158,6 +9382,10 @@ def _pipeline_record(chat_id, symbol, stage, status='', reason='', signal=None, 
     ساختار استراتژی هماهنگ باشد.
     """
     try:
+        try:
+            _fn_scan_hook(chat_id, symbol, stage, status, reason, signal)
+        except Exception:
+            pass
         s = get_session(chat_id)
         if not s.get('trade_pipeline_enabled', False):
             return
@@ -10585,6 +10813,10 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     _tag, level_token, level_value = extract_setup_level(full_reason)
     seen_key = f"{symbol}|{sig}|{level_token}|{level_value}"
     waits = s.setdefault('fav_wait', {})
+    try:
+        _tid_now = _fn_current_tid()
+    except Exception:
+        _tid_now = None
     for r in waits.values():
         if r.get('symbol') == symbol and r.get('sig') == sig and r.get('status') == 'waiting':
             return True
@@ -10600,8 +10832,13 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
                   'structural_tp': bool(plan.get('structural_target', False)), 'score': plan.get('score'), 'rr': plan.get('rr'),
                   'quality_label': plan.get('quality_label'), 'tp_level_name': plan.get('tp_level_name'),
                   'tp_stages': plan.get('tp_stages'), 'min_r': mn, 'max_r': mx, 'max_mode': _fav_max_mode(s),
-                  'created_at': now, 'expires_at': now + wt, 'last_eval_ts': 0.0, 'status': 'waiting'}
+                  'created_at': now, 'expires_at': now + wt, 'last_eval_ts': 0.0, 'status': 'waiting',
+                  'tid': _tid_now}
     seen[seen_key] = now
+    try:
+        _fn_fav_queued(chat_id, waits[rid])
+    except Exception:
+        logger.debug('funnel fav_queued failed', exc_info=True)
     for k in sorted(waits.keys(), key=lambda kk: float(waits[kk].get('created_at', 0) or 0)):   # سقف ۳۰۰ رکورد؛ قدیمی‌های تعیین‌تکلیف‌شده اول حذف می‌شوند
         if len(waits) <= 300:
             break
@@ -10617,6 +10854,10 @@ def _fav_finish(chat_id, s, rec, status, text):
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
     rec['why'] = ('btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
+    try:
+        _fn_fav_final(chat_id, rec, status)
+    except Exception:
+        pass
     save_session(chat_id)
     _fav_update_card(chat_id, rec, force=True)          # V3.44.26: کارت مستقل این سیگنال درجا «پایان» می‌شود و دکمه‌هایش برداشته می‌شود
     logger.info('fav confirm: %s %s -> %s | %s', rec.get('symbol'), rec.get('sig'), status, text)      # بی‌صدا: فقط لاگ
@@ -10659,6 +10900,21 @@ def _fav_flip_to_touch(chat_id, s, rec, px=None, require_adverse=True):
 
 
 def _fav_process_one(chat_id, s, rec):
+    """V3.44.72: پوشش ثبت قیف؛ tid صف به معاملهٔ بازشده وصل می‌شود."""
+    try:
+        _FN_TLS.tid = rec.get('tid') or rec.get('id')
+    except Exception:
+        pass
+    try:
+        return _fav_process_one_core(chat_id, s, rec)
+    finally:
+        try:
+            _FN_TLS.tid = None
+        except Exception:
+            pass
+
+
+def _fav_process_one_core(chat_id, s, rec):
     symbol, sig = rec['symbol'], rec['sig']
     now = time.time()
     side_txt = 'خرید' if sig == 'BUY' else 'فروش'
@@ -11994,7 +12250,15 @@ def _touch_eval_one(chat_id, rec):
     s = get_session(chat_id)
     keys = _touch_enabled_keys(s)
     tf = rec.get('tf') or s.get('timeframe', '5min')
-    votes = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', keys, cfg=s.get('strategy_config')) if keys else []
+    votes_all = None
+    try:
+        if not funnel_log.ENABLED or os.environ.get('FUNNEL_CF', '1') == '0':
+            raise ValueError('funnel off')
+        votes_all = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', list(_TOUCH_KEYS), cfg=s.get('strategy_config'))      # V3.44.72: همه‌ی رأی‌ها یک‌بار؛ کلیدهای روشن همین فیلتر می‌شوند
+        votes = [dict(v) for v in votes_all if v['key'] in keys]
+    except Exception:
+        votes_all = None
+        votes = _touch_votes(rec['symbol'], tf, rec.get('reason') or '', keys, cfg=s.get('strategy_config')) if keys else []
     fixed_dir = rec.get('touch_sig') if (gate_on(s, 'gate_touch_dir_fixed_enabled') and rec.get('touch_sig') in ('BUY', 'SELL')) else None
     if (not fixed_dir) and gate_on(s, 'gate_touch_pattern_vote_enabled') and rec.get('touch_sig') in ('BUY', 'SELL'):
         # V3.44.15: جهتِ پیشنهادیِ خودِ الگوی برخورد (برگشت بدون نفوذ / شکست کاذب / پولبک و ادامه) هم یک رأی است
@@ -12005,6 +12269,10 @@ def _touch_eval_one(chat_id, rec):
         rec['votes'] = votes
         rec.update(summ)
         rec['last_eval'] = time.time()
+    try:
+        _fn_after_eval(chat_id, s, rec, votes, votes_all, summ)
+    except Exception:
+        logger.debug('funnel after_eval failed', exc_info=True)
 
 
 def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from=None):
@@ -12047,6 +12315,10 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
                     break
                 if waits[k].get('status') != 'waiting':
                     waits.pop(k, None)
+    try:
+        _fn_touch_created(chat_id, s, rec, plan, flip_from)
+    except Exception:
+        logger.debug('funnel touch_created failed', exc_info=True)
     _touch_eval_one(chat_id, rec)
     outcome = False
     if rec.get('auto_ok') and gate_on(s, 'gate_touch_vote_enabled'):
@@ -12061,7 +12333,7 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
 
 
 @_from_signal_origin
-def _touch_auto_enter(chat_id, rec):
+def _touch_auto_enter_core(chat_id, rec):
     """ورود خودکار بعد از تایید فیلترها (با قیمت لحظه‌ای؛ محدودیت‌های عادی ریسک/کول‌داون/سقف پوزیشن اعمال می‌شود).
     خروجی: 'opened' (پوزیشن باز شد) | 'queued' (رفت به «صف تایید حرکت») | 'card_sent' (کارت حالت دستیار) | False.
     V3.44.20: بعد از تایید فیلترها، همان مراحل پایانیِ مسیر عادی اجرا می‌شود: اگر «صبر برای تایید حرکت» روشن باشد سیگنال از لیست انتظار
@@ -12129,6 +12401,11 @@ def _touch_auto_enter(chat_id, rec):
     def _finish(status):
         with _TOUCH_LOCK:
             rec['status'] = status; rec['finished_at'] = time.time()
+        try:
+            _fn_after_enter(chat_id, rec, status)
+            _fn_touch_final(chat_id, rec)
+        except Exception:
+            pass
         _touch_update_card(chat_id, rec, force=True)
         return status
     # 1) صبر برای تایید حرکت: سیگنال از لیست انتظار به صف تایید می‌رود؛ ورود نهایی بعد از تایید حرکتِ قیمت به نفع معامله (و بررسی دوباره‌ی محدوده/R:R) انجام می‌شود.
@@ -12191,6 +12468,26 @@ def _touch_auto_enter(chat_id, rec):
     return False
 
 
+def _touch_auto_enter(chat_id, rec):
+    """V3.44.72: پوشش برای ثبت قیف: tid برخورد در thread ثبت می‌شود تا صف تایید حرکت و معامله به همین برخورد وصل شوند."""
+    try:
+        _FN_TLS.tid = rec.get('id')
+    except Exception:
+        pass
+    try:
+        res = _touch_auto_enter_core(chat_id, rec)
+    finally:
+        try:
+            _FN_TLS.tid = None
+        except Exception:
+            pass
+    try:
+        _fn_after_enter(chat_id, rec, res)
+    except Exception:
+        pass
+    return res
+
+
 def touch_quick_entry(chat_id, tid, side):
     """دکمه‌ی ⚡ ورود سریع زیر هر مورد لیست انتظار."""
     s = get_session(chat_id)
@@ -12204,6 +12501,8 @@ def touch_quick_entry(chat_id, tid, side):
     if not had and any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
         with _TOUCH_LOCK:
             rec['status'] = 'entered_manual'; rec['manual_side'] = side; rec['finished_at'] = time.time()
+            try: _fn_touch_final(chat_id, rec)
+            except Exception: pass
         _touch_update_card(chat_id, rec, force=True)
         save_session(chat_id)
 
@@ -12351,9 +12650,13 @@ def _touch_tick(chat_id):
         try:
             if any(p.get('symbol') == r['symbol'] for p in s.get('paper_positions', [])):
                 r['status'] = 'skipped'; r['finished_at'] = now; changed = True
+                try: _fn_touch_final(chat_id, r)
+                except Exception: pass
                 _touch_update_card(chat_id, r, force=True); continue
             if now >= float(r.get('expires_at', 0) or 0):
                 r['status'] = 'expired'; r['finished_at'] = now; changed = True
+                try: _fn_touch_final(chat_id, r)
+                except Exception: pass
                 _touch_update_card(chat_id, r, force=True); continue
             if now - float(r.get('last_eval', 0) or 0) < TOUCH_EVAL_INTERVAL_SECONDS:
                 continue
@@ -15725,6 +16028,32 @@ def process_command(cmd,chat_id,message_id=None):
         else:
             send_message(chat_id, 'این کلید نسخه‌ی ذخیره‌شده ندارد.', presets_mod.keyboard(s))
         return
+    if cl in ('/funnel_report', '/funnel_export') or cl.startswith('/funnel_report_'):      # V3.44.72
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        try:
+            import funnel_report
+            _fdir = funnel_log._dir()
+            if cl == '/funnel_export':
+                _zp = funnel_report.export_zip(_fdir, days=14)
+                if not _zp:
+                    send_message(chat_id, 'هنوز داده‌ای ثبت نشده است.', presets_mod.keyboard(s)); return
+                with open(_zp, 'rb') as _zf:
+                    requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument', data={'chat_id': chat_id, 'caption': '📦 داده‌ی قیف ۱۴ روز اخیر (JSONL)'},
+                                  files={'document': (os.path.basename(_zp), _zf, 'application/zip')}, timeout=60)
+                try: os.remove(_zp)
+                except OSError: pass
+                return
+            _days = 7
+            _m = re.match(r'/funnel_report_(\d+)$', cl)
+            if _m:
+                _days = max(1, min(60, int(_m.group(1))))
+            for _chunk in funnel_report.split_text(funnel_report.build_report(_fdir, days=_days), 3500):
+                send_message(chat_id, _chunk, presets_mod.keyboard(s))
+        except Exception as _e:
+            logger.exception('funnel report failed')
+            send_message(chat_id, f'❌ خطا در ساخت گزارش قیف: {_e}', presets_mod.keyboard(s))
+        return
     if cl == '/preset_stats':
         send_message(chat_id, preset_stats_text(chat_id), presets_mod.keyboard(s))
         return
@@ -17000,6 +17329,7 @@ def main():
     Thread(target=lambda: (time.sleep(13), _assist_loop()), daemon=True, name='assist').start()
     Thread(target=lambda: (time.sleep(12), _fav_wait_loop()), daemon=True, name='fav-confirm-wait').start()
     Thread(target=lambda: (time.sleep(14), _touch_wait_loop()), daemon=True, name='touch-vote-wait').start()
+    funnel_log.start_background(get_klines)      # V3.44.72: شمارنده‌ی قیف + ردیاب سایه
     Thread(target=lambda: (time.sleep(15), _auto_delete_loop()), daemon=True, name='auto-delete').start()
     Thread(target=lambda: (time.sleep(17), _day_cleanup_loop()), daemon=True, name='day-cleanup').start()
     Thread(target=lambda: (time.sleep(19), _fee_daily_loop()), daemon=True, name='fee-daily').start()
