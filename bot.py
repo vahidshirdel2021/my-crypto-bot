@@ -5345,7 +5345,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.66'
+BOT_VERSION = '3.44.67'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -15954,6 +15954,9 @@ def handle_text(chat_id,text,message_id=None):
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
         '💰 سود و زیان امروز':'/daily_pnl', 'سود و زیان امروز':'/daily_pnl',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
+        # V3.44.67: دکمه‌های ثابت شروع/توقف اسکن؛ قبلاً برای کاربر عادی به شاخه‌ی «ممنوع» می‌افتادند
+        '🟢 شروع اسکن':'/start_scan', 'شروع اسکن':'/start_scan', '🟢 اسکن':'/start_scan',
+        '🔴 توقف اسکن':'/stop_scan', 'توقف اسکن':'/stop_scan', '🔴 توقف':'/stop_scan',
     }
     if raw in fixed_buttons:
         process_command(fixed_buttons[raw],chat_id); return
