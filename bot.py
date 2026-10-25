@@ -7893,6 +7893,9 @@ def _fn_fav_final(chat_id, rec, status):
     _fn_count(chat_id, f'fav_final:{status}' + (f":{rec.get('why')}" if rec.get('why') else ''))
     _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
              why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
+             # V3.44.82: برای تشخیص «چرا باز نشد»: متن دقیق مانعِ بعد از تایید، تعداد کلوزهای سنجیده‌شده و حرکت آخرین کلوز (R)
+             hold=str(rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
+             eval_n=rec.get('eval_n', 0), last_x=rec.get('last_x'),
              age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
 
 
@@ -11080,6 +11083,12 @@ def _fav_process_one_core(chat_id, s, rec):
                 rec['last_eval_ts'] = ts
                 close_px = float(row['close'])
                 decision = _fav_decide(sig, rec['entry'], rec['sl'], rec['tp'], close_px, rec['min_r'], rec['max_r'])
+                try:                                    # V3.44.82: فقط برای ثبت قیف (تاثیری روی تصمیم ندارد)
+                    rec['eval_n'] = int(rec.get('eval_n', 0) or 0) + 1
+                    _lx = _fav_move_r(sig, rec['entry'], rec['sl'], close_px)
+                    rec['last_x'] = None if _lx is None else round(float(_lx), 3)
+                except Exception:
+                    pass
                 if decision == 'overrun':
                     rec['overran'] = True       # از سقف گذشت؛ سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند
                     continue
