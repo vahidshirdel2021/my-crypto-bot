@@ -5511,7 +5511,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.88'
+BOT_VERSION = '3.44.89'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6600,6 +6600,48 @@ def _halving_range_from_df(d):
     return None
 
 
+def _binance_hist_range_sync(symbol):
+    """سقف/کف تاریخیِ واقعی نماد از Binance Spot (سایه‌ها: high/low) یا None.
+    کندل هفتگی تا ۱۰۰۰ عدد (≈۱۹ سال، یعنی کل تاریخچه‌ی Binance) در یک درخواست؛ اگر نماد خیلی تازه بود
+    (کمتر از ۸ هفته) کندل روزانه. اول api.binance.com و بعد آینه‌ی data-api.binance.vision.
+    اگر نماد روی اسپات Binance نبود (مثلاً نام‌های ×۱۰۰۰ فیوچرز) None برمی‌گردد تا مقیاس قیمت
+    با منبع معاملاتی یکی بماند و تابع صدا‌زننده به منبع قبلی برگردد."""
+    base = _base_asset(symbol)
+    if _binance_map_needs_refresh():
+        try:
+            _binance_refresh_symbol_map()
+        except Exception as exc:
+            logger.debug('binance symbol map refresh: %s', exc)
+    sym = _binance_symbol_from_cache(base)
+    if not sym:
+        return None
+    for source in _BINANCE_SOURCES:
+        if not _source_available(source):
+            continue
+        for interval in ('1w', '1d'):
+            try:
+                r = requests.get(f'{_binance_base_url(source)}/api/v3/klines',
+                                 params={'symbol': sym, 'interval': interval, 'limit': 1000}, timeout=10)
+            except Exception as exc:
+                logger.debug('%s hist range %s: %s', source, symbol, exc)
+                _source_fail(source)
+                break
+            if _status_trips_source(r.status_code):
+                _source_trip(source)
+                break
+            if not r.ok:
+                continue
+            _source_ok(source)
+            try:
+                rng = _halving_range_from_df(_binance_kline_df(r.json()))
+            except Exception:
+                rng = None
+            if rng:
+                logger.info('halving range %s from %s/%s: high=%s low=%s', symbol, source, interval, rng[0], rng[1])
+                return rng
+    return None
+
+
 async def get_halving_range(http, symbol):
     """سقف/کف تاریخی نماد برای مدل نصف‌کردن (کش‌شده). از کندل هفتگیِ کل تاریخچه‌ی در دسترس
     می‌گیرد؛ اگر نشد روزانه. سایه‌ها (high/low) ملاک‌اند. خروجی (high, low) یا None."""
@@ -6608,14 +6650,22 @@ async def get_halving_range(http, symbol):
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
     rng = None
-    for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
-        try:
-            d = await get_klines_async(http, symbol, tf_, lim)
-        except Exception:
-            d = None
-        rng = _halving_range_from_df(d)
-        if rng:
-            break
+    try:
+        # V3.44.89: منبع اصلیِ سقف/کف تاریخی = Binance (کل تاریخچه‌ی نماد از روز لیست‌شدن)
+        rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)
+    except Exception as exc:
+        logger.debug('binance hist range %s: %s', symbol, exc)
+        rng = None
+    if not rng:
+        # فقط وقتی Binance جواب نداد/نماد را ندارد: منبع عمومی کندل (Bitunix -> ...)
+        for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
+            try:
+                d = await get_klines_async(http, symbol, tf_, lim)
+            except Exception:
+                d = None
+            rng = _halving_range_from_df(d)
+            if rng:
+                break
     if rng:
         HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
@@ -6629,13 +6679,19 @@ def get_halving_range_sync(symbol):
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
     rng = None
-    for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
-        try:
-            rng = _halving_range_from_df(get_klines(symbol, tf_, lim))
-        except Exception:
-            rng = None
-        if rng:
-            break
+    try:
+        rng = _binance_hist_range_sync(symbol)     # V3.44.89: منبع اصلی = Binance
+    except Exception as exc:
+        logger.debug('binance hist range %s: %s', symbol, exc)
+        rng = None
+    if not rng:
+        for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
+            try:
+                rng = _halving_range_from_df(get_klines(symbol, tf_, lim))
+            except Exception:
+                rng = None
+            if rng:
+                break
     if rng:
         HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
