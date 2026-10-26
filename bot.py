@@ -53,7 +53,7 @@ from ui import (
     get_params_menu_keyboard, get_positions_keyboard,
     get_bottom_menu_keyboard, get_confirm_close_all_keyboard, get_learn_menu_keyboard,
     get_confirm_emergency_close_keyboard,
-    get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
+    get_performance_keyboard as _ui_get_performance_keyboard, get_entry_diag_keyboard, get_manual_side_keyboard,
     get_pending_side_keyboard, get_pending_confirm_keyboard,
     get_trading_menu_keyboard, get_settings_menu_keyboard, get_reports_menu_keyboard,
     get_confirm_close_longs_keyboard, get_confirm_close_shorts_keyboard,
@@ -191,6 +191,26 @@ ROLE_LOCK_ENABLED = os.environ.get('ROLE_LOCK', 'true').lower() not in ('0', 'fa
 
 def is_restricted_user(chat_id):
     return _ap.is_restricted(chat_id, ADMIN_CHAT_IDS, ROLE_LOCK_ENABLED)
+
+
+def _paper_account(chat_id):
+    """V3.44.83: آیا حساب فعلی این چت کاغذی است؟ (ریست‌ها فقط برای کاغذی)"""
+    try:
+        return (get_session(chat_id) or {}).get('trading_mode') != 'REAL'
+    except Exception:
+        return False
+
+_RESET_CBS = ('/reset_stats_prompt', '/full_reset_prompt')
+
+
+def get_performance_keyboard(chat_id=None):
+    """V3.44.83: دکمه‌های «ریست آمار و موجودی» و «ریست کامل ربات» فقط در حساب کاغذی نمایش داده می‌شوند."""
+    kb = _ui_get_performance_keyboard()
+    if chat_id is None or not _paper_account(chat_id):
+        rows = [r for r in kb['inline_keyboard'] if not any(b.get('callback_data') in _RESET_CBS for b in r)]
+        kb = {"inline_keyboard": rows}
+    return kb
+
 
 
 def send_detail_message(chat_id, full_text, *args, simple_text=None, **kwargs):
@@ -1919,7 +1939,7 @@ def tg(method, payload=None, timeout=10):
     try:
         # V3.44.59: دکمه‌های مخصوص ادمین هرگز در چت کاربر عادی نمایش داده نمی‌شوند (لایه‌ی دفاعی دوم؛ لایه‌ی اول قفل دستورهاست).
         if payload and payload.get('reply_markup') and is_restricted_user(payload.get('chat_id')):
-            payload = dict(payload); payload['reply_markup'] = _ap.filter_markup(payload['reply_markup'])
+            payload = dict(payload); payload['reply_markup'] = _ap.filter_markup(payload['reply_markup'], paper=_paper_account(payload.get('chat_id')))
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}', json=payload or {}, timeout=timeout)
         if r.status_code != 200:
             _TG_ERR.last = (r.status_code, r.text[:300])
@@ -2239,7 +2259,7 @@ def send_photo(chat_id, img, caption='', markup=None, keep=False):
     s = get_session(chat_id)
     if markup is None:
         markup = get_bottom_menu_keyboard(s['is_bot_active'], s.get('bottom_menu_open', True))
-    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)      # V3.44.59
+    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))      # V3.44.59
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto', data={'chat_id':chat_id,'caption':caption,'parse_mode':'Markdown','reply_markup':json.dumps(markup, ensure_ascii=False)}, files={'photo':('chart.png',img,'image/png')}, timeout=20)
         if r.status_code == 200:
@@ -9922,7 +9942,7 @@ def _send_photo_get_id(chat_id, img_bytes, caption, markup):
     """ارسال عکس با کپشن و دکمه‌ها؛ message_id را برمی‌گرداند (None اگر ناموفق)."""
     if not TELEGRAM_TOKEN:
         return None
-    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)      # V3.44.59
+    if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))      # V3.44.59
     try:
         r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto',
                           data={'chat_id': chat_id, 'caption': caption[:1000], 'parse_mode': 'Markdown',
@@ -13828,7 +13848,7 @@ def trade_tracking_keyboard(chat_id):
             [{'text': '📦 خروجی JSON کامل مسیر معاملات', 'callback_data': '/export_trade_pipeline'}],
             [{'text': '🧰 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}],
             [{'text': '📈 عملکرد و گزارش‌ها', 'callback_data': '/performance'}],
-            [{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}],
+            *([[{'text': '🗑 ریست کامل ربات (شروع از صفر)', 'callback_data': '/full_reset_prompt'}]] if _paper_account(chat_id) else []),
             [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
         ]
     }
@@ -15220,7 +15240,7 @@ def _deny_restricted(chat_id, message_id=None):
 
 def process_command(cmd,chat_id,message_id=None):
     # V3.44.59: پیش‌فرض ممنوع برای کاربر عادی؛ فقط دستورهای لیست مجاز (access_policy.USER_*) اجرا می‌شوند.
-    if is_restricted_user(chat_id) and not _ap.user_command_allowed(cmd):
+    if is_restricted_user(chat_id) and not _ap.user_command_allowed(cmd, paper=_paper_account(chat_id)):
         logger.info('role-lock: blocked chat=%s cmd=%s', chat_id, str(cmd)[:60])
         _deny_restricted(chat_id, message_id)
         return
@@ -15403,7 +15423,7 @@ def process_command(cmd,chat_id,message_id=None):
         edit_page(chat_id, fee_report(chat_id,period), get_fee_menu_keyboard(), message_id)
         return
     if cmd in ('performance','report','📈 گزارش عملکرد کلی'):
-        send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard()); return
+        send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard(chat_id)); return
     if cmd in ('/audit','audit','🧪 ممیزی ربات'):
         send_message(chat_id, runtime_audit(chat_id), get_bottom_menu_keyboard(get_session(chat_id)['is_bot_active'])); return
     s=get_session(chat_id); c=(cmd or '').strip(); cl=c.lower()
@@ -15889,20 +15909,22 @@ def process_command(cmd,chat_id,message_id=None):
             if not side_long(p['side']): close_position(chat_id,p,reason='manual_shorts'); _n += 1
         send_message(chat_id, f'✅ {_n} پوزیشن فروش بسته شد.', message_id=message_id); return
     if cl in ('/performance_today','/performance_week','/performance_month','/performance','/trade_audit','/export_trade_data','/reset_stats_prompt','/reset_stats_confirm','/quality_report'):
-        if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard())
-        elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard())
-        elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard())
-        elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard())
-        elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard())
-        elif cl=='/quality_report': send_message(chat_id, quality_breakdown_report(chat_id, 'all'), get_performance_keyboard())
+        if cl=='/performance_today': send_message(chat_id, performance_period_report(chat_id, 'day'), get_performance_keyboard(chat_id))
+        elif cl=='/performance_week': send_message(chat_id, performance_period_report(chat_id, 'week'), get_performance_keyboard(chat_id))
+        elif cl=='/performance_month': send_message(chat_id, performance_period_report(chat_id, 'month'), get_performance_keyboard(chat_id))
+        elif cl=='/performance': send_message(chat_id, performance_period_report(chat_id, 'all'), get_performance_keyboard(chat_id))
+        elif cl=='/trade_audit': send_message(chat_id, trade_audit_report(chat_id), get_performance_keyboard(chat_id))
+        elif cl=='/quality_report': send_message(chat_id, quality_breakdown_report(chat_id, 'all'), get_performance_keyboard(chat_id))
         elif cl=='/export_trade_data': export_trade_data(chat_id)
+        elif cl in ('/reset_stats_prompt', '/reset_stats_confirm') and not _paper_account(chat_id):
+            send_message(chat_id, '❌ ریست آمار فقط برای حساب کاغذی فعال است.', get_performance_keyboard(chat_id))
         elif cl=='/reset_stats_prompt':
             send_message(chat_id, reset_stats_prompt_text(chat_id), {"inline_keyboard": [[{"text":"🔄 بله، ریست کن","callback_data":"/reset_stats_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
         elif cl=='/reset_stats_confirm':
-            ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard() if ok else None)
+            ok,msg=reset_stats(chat_id); send_message(chat_id,msg,get_performance_keyboard(chat_id) if ok else None)
         return
     if cl=='/today_trades':
-        send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard())
+        send_message(chat_id, today_trades_report(chat_id), get_performance_keyboard(chat_id))
         return
     if cl in ('/trade_pipeline', '/trade_tracking_menu'):
         s2 = get_session(chat_id)
@@ -16519,6 +16541,9 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/export_trade_pipeline':
         export_trade_pipeline(chat_id)
         return
+    if cl in ('/full_reset_prompt', '/full_reset_confirm') and not _paper_account(chat_id):
+        send_message(chat_id, '❌ ریست کامل ربات فقط برای حساب کاغذی فعال است.', get_performance_keyboard(chat_id))
+        return
     if cl=='/full_reset_prompt':
         send_message(chat_id, '⚠️ *ریست کامل ربات*\n\nاین کار همه‌چیز را برای همیشه پاک می‌کند: پوزیشن‌ها، تاریخچه معاملات، آمار، فیلترها و تمام تنظیمات شما (تایم‌فریم، حالت حساب، مارجین، اهرم و...).\nبعد از تأیید، دوباره از صفر و قدم‌به‌قدم تنظیمات را از شما می‌پرسیم.\n\nآیا مطمئن هستید؟', {"inline_keyboard": [[{"text":"🗑 بله، همه‌چیز پاک شود","callback_data":"/full_reset_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
         return
@@ -16528,7 +16553,7 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id, msg + '\n\n🤖 *ربات معامله‌گر*\n\nحالت حساب را انتخاب کنید.', get_start_keyboard())
             sync_bottom_keyboard(chat_id, "🔴 اسکن متوقف است.\n⚙️ تنظیمات آماده تغییر هستند.")
         else:
-            send_message(chat_id,msg,get_performance_keyboard())
+            send_message(chat_id,msg,get_performance_keyboard(chat_id))
         return
 
 

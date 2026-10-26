@@ -41,6 +41,11 @@ USER_EXACT = frozenset({
     '/support',
 })
 
+# V3.44.83: ریست آمار و ریست کامل ربات؛ فقط برای کاربر عادیِ «حساب کاغذی» مجاز است (در حساب واقعی بسته می‌ماند)
+PAPER_ONLY_EXACT = frozenset({
+    '/reset_stats_prompt', '/reset_stats_confirm', '/full_reset_prompt', '/full_reset_confirm',
+})
+
 # --- الگوهای مجاز (regex کامل‌منطبق) -------------------------------------------------------------
 _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/start(\s.*)?$',
@@ -74,14 +79,17 @@ USER_HIDDEN_REPLY_BUTTONS = frozenset({
 })
 
 
-def user_command_allowed(cmd):
-    """آیا کاربر عادی اجازه‌ی اجرای این دستور/دکمه را دارد؟ (پیش‌فرض: خیر)"""
+def user_command_allowed(cmd, paper=False):
+    """آیا کاربر عادی اجازه‌ی اجرای این دستور/دکمه را دارد؟ (پیش‌فرض: خیر)
+    paper=True یعنی حساب فعلی کاربر کاغذی است؛ فقط در این حالت دستورهای PAPER_ONLY_EXACT مجازند."""
     c = str(cmd or '').strip()
     if not c:
         return False
     if c.startswith('/back:'):
-        return user_command_allowed(c[len('/back:'):] or '/menu')
+        return user_command_allowed(c[len('/back:'):] or '/menu', paper)
     cl = c.lower()
+    if cl in PAPER_ONLY_EXACT:
+        return bool(paper)
     if c in USER_EXACT or cl in USER_EXACT:
         return True
     return any(p.match(cl) for p in _USER_PATTERNS)
@@ -101,7 +109,7 @@ def is_restricted(chat_id, admin_ids, enabled=True):
     return cid not in admin_ids
 
 
-def filter_markup(markup):
+def filter_markup(markup, paper=False):
     """کیبورد را برای کاربر عادی پاک‌سازی می‌کند: دکمه‌های مخصوص ادمین، و ردیف‌های نمایشی (/dummy) که
     مقدار پارامترها را لو می‌دهند حذف می‌شوند. ورودی تغییر نمی‌کند."""
     if isinstance(markup, str):
@@ -122,7 +130,7 @@ def filter_markup(markup):
                     kept.append(b)                      # url / web_app / ...
                 elif str(cd).strip().lower() == '/dummy':
                     continue                            # ردیف نمایشی (اطلاعات پارامتر)
-                elif user_command_allowed(cd):
+                elif user_command_allowed(cd, paper):
                     kept.append(b)
             if kept:
                 rows.append(kept)

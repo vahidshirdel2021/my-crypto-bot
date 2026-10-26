@@ -30,7 +30,7 @@ DENY = ['/admin_panel', '/admin_access', '/admin_tests', '/admin_users_list', '/
         '/assist_stats', '/assist_expiry_cycle', '/toggle_halving_model', '/toggle_gate_x', '/toggle_scenario_x', '/toggle_setup_daily',
         '/toggle_signal_all3', '/toggle_regime_adv', '/toggle_btc_guard', '/halving_depth_cycle', '/halving_k_cycle', '/sl_up', '/tp_down',
         '/adx_up', '/set_max_same_2', '/set_dir_cooldown_60', '/profile_advanced', '/profile_balanced', '/apply_my_profile', '/save_my_profile',
-        '/learn_menu', '/reset_stats_prompt', '/reset_stats_confirm', '/full_reset_prompt', '/full_reset_confirm', '/same_dir_menu',
+        '/learn_menu', '/same_dir_menu',
         '/chreg', '/chlist', '/chind_5', '/fq_flt_r1', '/rvclear', '/touch_auto_next', '/hours_profile_next', '/trail_profile_next',
         '/back:/admin_panel', '/back:/trade_filter_management', '/set_tf_30m', '/set_lev_abc', '/manage_watchlist', '/unknown_new_command', '', None,
         'BTC', 'تحلیل', '/ADMIN_PANEL']
@@ -62,6 +62,14 @@ assert settings == ['/check_wizard', '/trade_mode_menu', '/menu'], settings     
 
 perf = callbacks(ap.filter_markup(ui.get_performance_keyboard()))
 assert set(perf) == {'/performance_today', '/performance_week', '/performance_month', '/performance', '/today_trades', '/menu'}, perf
+# V3.44.83: ریست آمار و ریست کامل ربات فقط در حساب کاغذی (paper=True) برای کاربر عادی باز است
+RESETS = ('/reset_stats_prompt', '/reset_stats_confirm', '/full_reset_prompt', '/full_reset_confirm')
+for c in RESETS:
+    assert not ap.user_command_allowed(c) and not ap.user_command_allowed(c, paper=False), c
+    assert ap.user_command_allowed(c, paper=True), c
+    assert ap.user_command_allowed('/back:' + c, paper=True) and not ap.user_command_allowed('/back:' + c), c
+perf_paper = callbacks(ap.filter_markup(ui.get_performance_keyboard(), paper=True))
+assert set(perf_paper) == set(perf) | {'/reset_stats_prompt', '/full_reset_prompt'}, perf_paper
 
 # ویزارد اولیه نباید بشکند: همه‌ی دکمه‌ها (به‌جز ردیف‌های نمایشی) باید سالم بمانند
 for kb in (ui.get_start_keyboard(), ui.get_balance_keyboard(), ui.get_margin_keyboard(), ui.get_leverage_keyboard(),
@@ -102,14 +110,14 @@ assert not ap.is_restricted(222, {111}, enabled=False)
 assert not ap.is_restricted('abc', {111})
 
 # 6) سیم‌کشی در bot.py
-for needle in ("def is_restricted_user(", "def _deny_restricted(", "not _ap.user_command_allowed(cmd)",
-               "_ap.filter_markup(payload['reply_markup'])", "if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)",
+for needle in ("def is_restricted_user(", "def _deny_restricted(", "not _ap.user_command_allowed(cmd, paper=_paper_account(chat_id))",
+               "_ap.filter_markup(payload['reply_markup'], paper=_paper_account(payload.get('chat_id')))", "if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))",
                "current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET')", "startswith(('/chind_', '/assist_ind_', '/fq_flt_'))",
                "if is_restricted_user(chat_id):\n        # V3.44.59: کاربر عادی فقط خطوط ورود"):
     assert needle in src, needle
-assert src.count("if is_restricted_user(chat_id): markup = _ap.filter_markup(markup)") == 2
+assert src.count("if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))") == 2
 # گیت دستورها باید قبل از هر منطق دیگرِ process_command باشد
-i_gate = src.index('not _ap.user_command_allowed(cmd)')
+i_gate = src.index('not _ap.user_command_allowed(cmd, paper=')
 i_back = src.index("if str(cmd).startswith('/back:'):", i_gate)
 assert 0 < i_back - i_gate < 400
 
