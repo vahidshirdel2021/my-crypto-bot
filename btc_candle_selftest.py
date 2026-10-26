@@ -202,7 +202,7 @@ SP['pending_orders'] = [{'symbol': 'AAA', 'side': 'BUY', 'entry_price': 100.0, '
 gp['check_pending_orders'](1); assert SP['pending_orders'] == [] and 'باز نشد' in sent[-1]       # خطاهای دیگر مثل قبل حذف می‌کنند
 
 # ---------------------------------------------------------------- ۵) ثبت کلید + وصل بودن در مسیرهای خودکار ----------
-i = src.index("'gate_btc_candle_enabled': ("); assert "False, 'entry_rules'" in src[i:i + 260]
+i = src.index("'gate_btc_candle_enabled': ("); assert "False, 'btceth'" in src[i:i + 260]
 assert "'btc_candle', sig" in src and "_bc_ok, _bc_txt = btc_candle_verdict(tf, side)" in src
 fq = src[src.index("def fav_quick_entry("):src.index("def fav_queue_list(")]
 assert 'btc_candle' not in fq        # ورود سریع دستی خودش از execute_manual_trade (پیش‌بررسی) رد می‌شود، نه با منطق جدا

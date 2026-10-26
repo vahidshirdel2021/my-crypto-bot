@@ -68,5 +68,5 @@ assert r['status'] == 'opened' and calls['exec'] == 1, r
 # --- ۳) ورود سریع دستی (رأی کاربر) از کلید عبور می‌کند؛ کلید پیش‌فرض خاموش و در منوی «شرایط ورود» است ---
 fq = src[src.index("def fav_quick_entry("):src.index("def fav_queue_list(")]
 assert '_final_regime' not in fq and 'gate_final_regime' not in fq
-i = src.index("'gate_final_regime_enabled': ("); assert "False, 'entry_rules'" in src[i:i + 260]
+i = src.index("'gate_final_regime_enabled': ("); assert "False, 'regime'" in src[i:i + 260]
 print('ALL OK')

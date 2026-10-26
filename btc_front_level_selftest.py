@@ -196,7 +196,7 @@ SF['cfg']['gate_btc_front_level_enabled'] = False; calls.update(exec=0, front_ok
 r = mkr(); gf['_fav_process_one'](1, SF, r); assert r['status'] == 'opened' and calls['exec'] == 1, r
 
 # ---------------------------------------------------------------- ۷) ثبت کلید + سیم‌کشی مسیرها ----------
-i = src.index("'gate_btc_front_level_enabled': ("); assert "True, 'entry_rules'" in src[i:i + 260]
+i = src.index("'gate_btc_front_level_enabled': ("); assert "True, 'btceth'" in src[i:i + 260]
 assert src.count("_btc_front_gate(") >= 3 and src.count("gate_on(s, 'gate_btc_front_level_enabled')") == 1 and src.count("_btc_front_flags(s)") == 5     # تعریف + صف تایید + لیست انتظار + مسیر مستقیم + پیش‌بررسی همه‌ی مسیرها
 assert "_btc_front_gate(chat_id, s, symbol, sig, tf, front=_ff, chop=_fc)" in src and "_btc_front_gate(chat_id, s, symbol, side, tf, front=_ff, chop=_fc)" in src
 assert "asyncio.to_thread(_btc_front_gate, chat_id, s, symbol, sig, tf, True, True, _ff, _fc)" in src
@@ -423,7 +423,7 @@ for _ in range(3):
 assert len(sent10) == 1 and 'حالت نامشخص' in sent10[0][1] and 'KLF' in sent10[0][1], sent10
 
 # ---------------------------------------------------------------- ۱۱) کلید مستقل «BTC کلاف» (gate_btc_chop_enabled) ----------
-i = src.index("'gate_btc_chop_enabled': ("); assert "True, 'entry_rules'" in src[i:i + 260]       # پیش‌فرض روشن، صفحه‌ی «شرایط ورود»
+i = src.index("'gate_btc_chop_enabled': ("); assert "True, 'btceth'" in src[i:i + 260]       # پیش‌فرض روشن، صفحه‌ی «شرایط ورود»
 g10 = chop_env(choppy); cv = g10['btc_front_level_verdict']
 for sig in ('BUY', 'SELL'):
     ok, t, _i = cv(S0, '5min', sig, front=False, chop=True);  assert not ok and 'حالت نامشخص' in t, (sig, t)      # فقط کلید کلاف روشن: کلاف را می‌بندد

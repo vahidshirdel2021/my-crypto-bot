@@ -378,6 +378,7 @@ def keyboard(s):
     for n, p in PRESETS.items():
         rows.append([{'text': f"{'✅' if n == act else '⚪'} کلید {_fa(n)} — {p['label']}" + (' ✏️' if n in custom else ''),
                       'callback_data': f'/preset_apply_{n}'}])
+        rows.append([{'text': f'👁 نمایش فعال‌های کلید {_fa(n)}', 'callback_data': f'/preset_show_{n}'}])   # V3.44.87
         row = [{'text': f'💾 ذخیره‌ی تنظیمات فعلی در کلید {_fa(n)}', 'callback_data': f'/preset_save_{n}'}]
         if n in custom:
             row.append({'text': '↩️ پیش‌فرض', 'callback_data': f'/preset_reset_{n}'})

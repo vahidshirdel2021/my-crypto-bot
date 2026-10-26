@@ -42,7 +42,7 @@ vs = [{'key': 'level', 'vote': 'BUY'}, {'key': 'ylevel', 'vote': 'SELL'}]
 r = g2['_touch_summarize'](vs, 'all'); assert r['groups'] == {'structure': 'BUY', 'ylevel': 'SELL'} and r['dir'] is None, r
 vs.append({'key': 'pattern', 'vote': 'SELL'}); r = g2['_touch_summarize'](vs, 'all'); assert r['dir'] == 'SELL' and r['agree'] == 2, r
 # --- ثبت: کلید، منو، پریست ---
-assert "'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', True, 'entry_filter'" in src
+assert "'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', True, 'level'" in src
 assert "if 'ylevel' in keys:" in src and "'ylevel': 'برخورد/عبور از سقف و کف دیروز'" in src
 import presets; assert 'gate_fc_ylevel_enabled' in presets._GATES_ON      # پریست من: رأی «سقف/کف دیروز» روشن است
 print('ALL OK')

@@ -18,5 +18,5 @@ for r, exp in cases:
     rows['v'] = r; ok, txt = f('5min'); print(ok, txt); assert ok == exp
 # registry/default/enforcement present
 assert "'gate_btceth_aligned_enabled': (" in src and "'btceth_aligned'" in src
-i = src.index("'gate_btceth_aligned_enabled': ("); assert "False, 'entry_filter'" in src[i:i+200]
+i = src.index("'gate_btceth_aligned_enabled': ("); assert "False, 'btceth'" in src[i:i+200]
 print('ALL OK')
