@@ -36,7 +36,7 @@ g = dict(time=time, math=math, logger=logging.getLogger('rc'), hashlib=__import_
          REAL_VENUES={'binance': 'Binance Futures', 'bitunix': 'Bitunix Futures'}, REAL_MIN_BALANCE_USDT=5.0, PAPER_ONLY=False,
          CREDENTIALS=store, CredentialsError=Exception, BINANCE_ACCOUNTS=ENV, MARGIN_MODE='isolated', PROTECTION_TRIGGER='mark_price',
          ExchangeStateError=ExchangeStateError, get_session=get_session, save_session=lambda c: SAVES.__setitem__(0, SAVES[0] + 1),
-         send_message=send_message, edit_page=edit_page, tg=tg, get_margin_keyboard=lambda: {'inline_keyboard': [[{'text': '10 USDT', 'callback_data': '/set_margin_10'}]]},
+         send_message=send_message, edit_page=edit_page, tg=tg, get_margin_keyboard=lambda **k: {'inline_keyboard': [[{'text': '10 USDT', 'callback_data': '/set_margin_10'}]]},
          BitunixExchange=None, ccxt=None)
 exec(src[a1:b1], g); g['build_exchange'] = build_exchange_stub        # build_exchange واقعی در تست بیتیونیکس/ccxt پوشش داده شده؛ اینجا جعلی
 exec(src[a2:b2], g); g['build_exchange'] = build_exchange_stub

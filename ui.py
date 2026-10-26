@@ -112,27 +112,27 @@ def get_start_keyboard():
 
 
 def get_balance_keyboard():
-    return {"inline_keyboard": [[{"text": "300 USDT", "callback_data": "/set_bal_300"}, {"text": "500 USDT", "callback_data": "/set_bal_500"}], [{"text": "1000 USDT", "callback_data": "/set_bal_1000"}, {"text": "5000 USDT", "callback_data": "/set_bal_5000"}], [{"text": "10000 USDT", "callback_data": "/set_bal_10000"}]]}
+    return {"inline_keyboard": [[{"text": "300 USDT", "callback_data": "/set_bal_300"}, {"text": "500 USDT", "callback_data": "/set_bal_500"}], [{"text": "1000 USDT", "callback_data": "/set_bal_1000"}, {"text": "5000 USDT", "callback_data": "/set_bal_5000"}], [{"text": "10000 USDT", "callback_data": "/set_bal_10000"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
-def get_margin_keyboard():
-    return {"inline_keyboard": [[{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}], [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}], [{"text": "200 USDT", "callback_data": "/set_margin_200"}, {"text": "500 USDT", "callback_data": "/set_margin_500"}]]}
+def get_margin_keyboard(back="/menu_settings"):
+    """V3.44.84: دکمه‌ی برگشت (پیش‌فرض: منوی تنظیمات) + منوی اصلی."""
+    return {"inline_keyboard": [[{"text": "10 USDT", "callback_data": "/set_margin_10"}, {"text": "25 USDT", "callback_data": "/set_margin_25"}], [{"text": "50 USDT", "callback_data": "/set_margin_50"}, {"text": "100 USDT", "callback_data": "/set_margin_100"}], [{"text": "200 USDT", "callback_data": "/set_margin_200"}, {"text": "500 USDT", "callback_data": "/set_margin_500"}], [{"text": "🔙 بازگشت", "callback_data": back}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
 def get_leverage_keyboard():
-    return {"inline_keyboard": [[{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}]]}
+    return {"inline_keyboard": [[{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}], [{"text": "🔙 بازگشت", "callback_data": "/check_wizard"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
 def get_max_positions_keyboard():
-    return {"inline_keyboard": [[{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], [{"text": "5", "callback_data": "/set_max_5"}, {"text": "10", "callback_data": "/set_max_10"}], [{"text": "15", "callback_data": "/set_max_15"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}]]}
+    return {"inline_keyboard": [[{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], [{"text": "5", "callback_data": "/set_max_5"}, {"text": "10", "callback_data": "/set_max_10"}], [{"text": "15", "callback_data": "/set_max_15"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}], [{"text": "🔙 بازگشت", "callback_data": "/wiz_lev"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
 def get_timeframe_keyboard():
     return {"inline_keyboard": [
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "📈 دسته ۲: معاملات روندی (تأیید روند و شکست)", "callback_data": "/dummy"}],
-        [{"text": "⏱ ۱ ساعته", "callback_data": "/set_tf_1h"}, {"text": "⏱ ۴ ساعته", "callback_data": "/set_tf_4h"}],
+        [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
 

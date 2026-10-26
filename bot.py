@@ -14207,6 +14207,8 @@ def wizard_same_dir_keyboard(chat_id):
         [opt(1, '1'), opt(2, '2')],
         [opt(3, '3'), opt(5, '5')],
         [opt(10, '10'), opt(0, 'بدون محدودیت')],
+        [{'text': '🔙 بازگشت', 'callback_data': '/wiz_max'}],
+        [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
     ]}
 
 
@@ -14729,7 +14731,7 @@ def real_enter_or_charge(chat_id, venue, equity, avail, message_id=None):
         s['real_exchange'] = venue; EXCHANGE_CACHE.pop(chat_id, None); _cred_cache_clear(chat_id)
         s['trading_mode'] = 'REAL'; s['is_bot_active'] = False; s['daily_start_equity'] = equity
         s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime()); s['daily_stopped'] = False; save_session(chat_id)
-        send_message(chat_id, f'✅ به *{name}* متصل شدید.\n\n💰 موجودی کل: `{equity:.2f}` USDT\n✅ قابل استفاده: `{avail:.2f}` USDT\n\n⚙️ مارجین هر معامله:', get_margin_keyboard())
+        send_message(chat_id, f'✅ به *{name}* متصل شدید.\n\n💰 موجودی کل: `{equity:.2f}` USDT\n✅ قابل استفاده: `{avail:.2f}` USDT\n\n⚙️ مارجین هر معامله:', get_margin_keyboard(back='/menu'))
         return
     send_message(chat_id,
                  f'✅ اتصال به *{name}* برقرار شد، اما موجودی فیوچرز شما برای شروع کافی نیست.\n\n'
@@ -15549,7 +15551,7 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,f'🗑 کلید ذخیره‌شده‌ی {REAL_VENUES[v]} حذف شد.', real_exchange_keyboard(chat_id))
         return
     if cl.startswith('/set_bal_'):
-        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(),message_id); return
+        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(back='/mode_paper'),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
     if cl.startswith('/set_max_same_'):
@@ -15581,6 +15583,10 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...', message_id=message_id)
         send_message(chat_id, market_dashboard_all_timeframes(chat_id), message_id=message_id); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
+    # V3.44.84: دکمه‌ی «برگشت» مراحل ویزارد (اهرم ← حداکثر پوزیشن ← هم‌جهت ← تایم‌فریم)
+    if cl=='/wiz_lev': edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
+    if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
         edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}\n⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[entry_report_interval(s)]}", get_entry_diag_keyboard(enabled, entry_report_interval(s)), message_id); return
