@@ -35,7 +35,7 @@ EXPECT = {
     'regime': ['gate_fc_tf_enabled', 'gate_fc_h4_enabled', 'gate_final_regime_enabled', 'gate_h4_tier_enabled'],
     'timing': ['gate_4h_close_block_enabled', 'gate_cooldown_enabled', 'gate_risk_guard_enabled'],
     'quality': ['gate_min_score_enabled', 'gate_min_rr_enabled', 'gate_max_sl_atr_enabled', 'gate_fee_ratio_enabled', 'use_edge_proxy_gate', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled'],
-    'experimental': ['gate_inverse_trading_enabled'],
+    'experimental': ['gate_inverse_trading_enabled', 'gate_reversal_contra_enabled'],
 }
 seen = []
 for sec, keys in EXPECT.items():

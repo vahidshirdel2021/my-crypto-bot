@@ -5511,7 +5511,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.80'
+BOT_VERSION = '3.44.88'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -7846,14 +7846,15 @@ def _fn_after_eval(chat_id, s, rec, votes, votes_all, summ):
     raw = {v['key']: ({'BUY': 'B', 'SELL': 'S', 'OK': 'O'}.get(v.get('vote'), '-')) for v in (votes_all or [])}
     cf = _fn_cf(rec.get('touch_sig'), votes_all) if votes_all else {}
     rec['_fn_n'] = int(rec.get('_fn_n', 0) or 0) + 1
-    sig = json.dumps([summ.get('dir'), summ.get('agree'), summ.get('total'), st, cf], sort_keys=True, default=str)
+    cx = rec.get('contra')
+    sig = json.dumps([summ.get('dir'), summ.get('agree'), summ.get('total'), st, cf, cx], sort_keys=True, default=str)
     if sig == rec.get('_fn_sig'):
         return
     rec['_fn_sig'] = sig
     _fn_emit(chat_id, 'vote', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), n=rec['_fn_n'],
              age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1),
              dir=summ.get('dir'), agree=summ.get('agree'), total=summ.get('total'), mode=s.get('touch_auto_mode'),
-             auto_ok=bool(summ.get('auto_ok')), st=st, raw=raw, cf=cf, groups=summ.get('groups'))
+             auto_ok=bool(summ.get('auto_ok')), st=st, raw=raw, cf=cf, groups=summ.get('groups'), cx=cx)
 
 
 def _fn_touch_created(chat_id, s, rec, plan, flip_from):
@@ -11462,6 +11463,11 @@ def fav_filters_popup(chat_id, rid):
             live = None
         keys = _touch_enabled_keys(s)
         votes = _touch_votes(sym, tf, rec.get('reason') or '', keys, cfg=s.get('strategy_config')) if keys else []
+        try:
+            if votes and _contra_active(s, rec.get('scn'), sig if gate_on(s, 'gate_touch_dir_fixed_enabled') else None):
+                votes = _contra_flip_votes(votes)       # V3.44.88: همان رأی برگشتِ رأی‌گیری (هیچ خطایی نباید پنجره را خراب کند)
+        except Exception:
+            logger.debug('contra popup flip failed', exc_info=True)
         reg_line = ''
         if gate_on(s, 'gate_final_regime_enabled'):
             reg_ok, _t = _final_regime_check(tf, sig)
@@ -12417,6 +12423,36 @@ def _touch_summarize(votes, mode, fixed_dir=None):
             'auto_ok': bool(direction and total > 0 and agree >= need)}
 
 
+# V3.44.88: «رأی برگشت» (آزمایشی، پیش‌فرض خاموش). فقط رأی‌دهنده است و جلوی هیچ معامله‌ای را نمی‌گیرد.
+# روی حالت‌های برگشتی (۱ و ۲: سویپ + ریکلیم، ۵ و ۶: شکست کاذب) رأی‌دهنده‌های مومنتوم/روند کوتاه‌مدت برعکس حساب می‌شوند:
+# وقتی بازار هنوز خلاف جهت برگشت است (فرسودگیِ حرکت قبلی)، «مخالف» بودن آن‌ها یعنی «موافق برگشت».
+# در داده‌ی قیف (۲۲ ساعت، بازار رنج) این رأی‌دهنده‌ها در برگشت‌ها عکس عمل کرده‌اند؛ هنوز اثبات‌شده نیست و باید روی داده‌ی چند روز دیگر سنجیده شود.
+_REVERSAL_SCENARIOS = ('1', '2', '5', '6')
+_CONTRA_FLIP_KEYS = ('btceth', 'tf', 'rsi', 'adx')
+
+
+def _contra_flip_votes(votes):
+    """نسخه‌ی تازه‌ی رأی‌ها با معکوس‌کردن BUY↔SELL برای _CONTRA_FLIP_KEYS. ورودی دست‌نخورده می‌ماند."""
+    out = []
+    for v in votes:
+        nv = dict(v)
+        if nv.get('key') in _CONTRA_FLIP_KEYS and nv.get('vote') in ('BUY', 'SELL'):
+            nv['vote'] = 'SELL' if nv['vote'] == 'BUY' else 'BUY'
+            nv['flipped'] = True
+            nv['detail'] = (str(nv.get('detail') or '') + ' (معکوس برای برگشت)').strip()
+        out.append(nv)
+    return out
+
+
+def _contra_active(s, scn, fixed_dir):
+    """True اگر «رأی برگشت» روی این برخورد اعمال می‌شود: کلید روشن + حالت برگشتی + جهتِ ثابت از الگو."""
+    try:
+        return bool(fixed_dir in ('BUY', 'SELL') and str(scn or '') in _REVERSAL_SCENARIOS
+                    and gate_on(s, 'gate_reversal_contra_enabled'))
+    except Exception:
+        return False
+
+
 def _touch_eval_one(chat_id, rec):
     s = get_session(chat_id)
     keys = _touch_enabled_keys(s)
@@ -12435,7 +12471,20 @@ def _touch_eval_one(chat_id, rec):
         # V3.44.15: جهتِ پیشنهادیِ خودِ الگوی برخورد (برگشت بدون نفوذ / شکست کاذب / پولبک و ادامه) هم یک رأی است
         _lt, _st = _assist_describe_source(rec.get('reason') or '', rec.get('level_token'), rec.get('level_value'), rec.get('scn'))
         votes.insert(0, {'key': 'pattern', 'label': 'الگوی برخورد با سطح', 'vote': rec['touch_sig'], 'detail': _st})
-    summ = _touch_summarize(votes, s.get('touch_auto_mode', 'all'), fixed_dir=fixed_dir)
+    _cmode = s.get('touch_auto_mode', 'all')
+    _contra_on = _contra_active(s, rec.get('scn'), fixed_dir)
+    _base_votes = votes
+    if _contra_on:
+        votes = _contra_flip_votes(votes)          # V3.44.88: رأی برگشت
+    summ = _touch_summarize(votes, _cmode, fixed_dir=fixed_dir)
+    try:       # V3.44.88: نتیجه‌ی هر دو حالت (بدون/با معکوس) برای ثبت قیف؛ روی تصمیم اثری ندارد
+        if fixed_dir and _base_votes:
+            _alt = _touch_summarize([dict(v) for v in _base_votes] if _contra_on else _contra_flip_votes(_base_votes), _cmode, fixed_dir=fixed_dir)
+            _n_, _f_ = (_alt, summ) if _contra_on else (summ, _alt)
+            _pack = lambda x: [x.get('dir'), x.get('agree'), x.get('total'), int(bool(x.get('auto_ok')))]
+            rec['contra'] = {'on': bool(_contra_on), 'rev': str(rec.get('scn') or '') in _REVERSAL_SCENARIOS, 'n': _pack(_n_), 'f': _pack(_f_)}
+    except Exception:
+        logger.debug('contra counterfactual failed', exc_info=True)
     with _TOUCH_LOCK:
         rec['votes'] = votes
         rec.update(summ)
@@ -13894,6 +13943,7 @@ GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'structure', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت ثابت از الگو', True, 'structure', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_reversal_contra_enabled': ('رأی برگشت (آزمایشی): مومنتوم معکوس', False, 'experimental', 'پیش‌فرض خاموش و آزمایشی. فقط رأی‌دهنده است و جلوی هیچ معامله‌ای را نمی‌گیرد؛ فقط «موافق/مخالف» را در رأی‌گیری عوض می‌کند. فقط روی حالت‌های برگشتی (۱ و ۲: برگشت از سطح، ۵ و ۶: شکست کاذب) و فقط وقتی «جهت ثابت از الگو» روشن است اثر دارد. روشن: رأی‌دهنده‌های «رژیم BTC و ETH»، «رژیم ۵ و ۱۵ دقیقه»، «RSI» و «روند ADX» برعکس حساب می‌شوند؛ یعنی وقتی بازار هنوز خلاف جهت برگشت است (فرسودگی حرکت قبلی) این رأی‌ها «موافق» شمرده می‌شوند. «رژیم ۴ ساعته»، MACD، کلوز سطح و سقف/کف دیروز عادی می‌مانند. نتیجه‌ی هر دو حالت (با و بدون معکوس) همیشه در ثبت قیف نوشته می‌شود تا بعداً سنجیده شود.'),
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد. (از V3.44.47: اگر «جهت فقط از الگوی برخورد» روشن باشد جهت از رأی‌ها عوض نمی‌شود و فقط تعداد رأی‌های موافق برای ورود خودکار سنجیده می‌شود.)'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'timing', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود', False, 'regime', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
