@@ -1305,8 +1305,18 @@ def get_session(chat_id):
             created = True
         else: created = False
         s = USER_SESSIONS[chat_id]
+        if created: _apply_default_mode(chat_id, s)
     if created: save_session(chat_id)
     return s
+
+
+def _apply_default_mode(chat_id, s):
+    """V3.44.85: حالت معامله‌ی پیش‌فرض کاربر عادی «معمولی» است (ادمین دست‌نخورده می‌ماند)."""
+    try:
+        if s.get('active_preset') is None and int(chat_id) not in ADMIN_CHAT_IDS:
+            presets_mod.apply_preset(s, presets_mod.DEFAULT_MODE)
+    except Exception:
+        logger.exception('default trade mode failed')
 
 
 _CRED_CACHE = {}          # {(chat_id, venue): (ts, creds|None)}؛ کش کوتاه تا هر بار sqlite+رمزگشایی نشود
@@ -14220,6 +14230,14 @@ def wizard_same_dir_text(chat_id):
             f"سقف کل معامله‌های باز: {overall or 'بدون محدودیت'}")
 
 
+def wizard_mode_page(chat_id, message_id=None):
+    """V3.44.85: مرحله‌ی «حالت معامله» ویزارد. اگر کاربر عادی هنوز حالتی ندارد، «معمولی» پیش‌فرض می‌نشیند."""
+    s = get_session(chat_id)
+    if s.get('active_preset') is None:
+        _apply_default_mode(chat_id, s); save_session(chat_id)
+    edit_page(chat_id, presets_mod.wizard_mode_text(s), presets_mod.wizard_mode_keyboard(s), message_id)
+
+
 def same_direction_limit_keyboard(chat_id):
     """انتخاب سقف پوزیشن‌های هم‌جهت هم‌زمان (۲ / ۵ / ۱۰ / بدون محدودیت). مقدار ۰ = بدون محدودیت."""
     s = get_session(chat_id)
@@ -14338,6 +14356,7 @@ def full_reset(chat_id):
         stop_scan(chat_id, 'full-reset')
     with STATE_LOCK:
         USER_SESSIONS[chat_id] = default_session()
+        _apply_default_mode(chat_id, USER_SESSIONS[chat_id])
     save_session(chat_id)
     return True, '✅ *همه‌چیز پاک شد.*\nحالا از صفر شروع می‌کنیم؛ لطفاً تنظیمات را قدم‌به‌قدم دوباره انتخاب کنید.'
 
@@ -15578,7 +15597,8 @@ def process_command(cmd,chat_id,message_id=None):
             s['timeframe']=tf_map[cl]; s['strategy_config']=_p4_keep_flags(_old_cfg, get_timeframe_preset(s['timeframe']))
             _halving_tf_apply(s['strategy_config'], s['timeframe'])      # V3.44.40
             _p4_sync_tags(s)
-            save_session(chat_id); menu(chat_id, message_id); return
+            save_session(chat_id)
+            wizard_mode_page(chat_id, message_id); return      # V3.44.85: آخرین مرحله‌ی ویزارد = حالت معامله
     if cl=='/market_report':
         send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...', message_id=message_id)
         send_message(chat_id, market_dashboard_all_timeframes(chat_id), message_id=message_id); return
@@ -15587,6 +15607,14 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/wiz_lev': edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
     if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
+    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
+    if cl.startswith('/set_wmode_'):          # V3.44.85: انتخاب حالت معامله در ویزارد (همان صفحه ویرایش می‌شود)
+        _mk = cl[len('/set_wmode_'):]
+        if not any(x[0] == _mk for x in presets_mod.TRADE_MODES) or not presets_mod.apply_preset(s, _mk):
+            edit_page(chat_id, '⚠️ این حالت شناخته نشد.', presets_mod.wizard_mode_keyboard(s), message_id); return
+        save_session(chat_id)
+        edit_page(chat_id, presets_mod.wizard_mode_text(s), presets_mod.wizard_mode_keyboard(s), message_id); return
+    if cl=='/wiz_mode_done': menu(chat_id, message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
         edit_page(chat_id, f"🔍 وضعیت لاگ تشخیصی: {'🟢 فعال' if enabled else '🔴 خاموش'}\n⏱ فاصله‌ی ارسال گزارش: {_ENTRY_REPORT_LABELS[entry_report_interval(s)]}", get_entry_diag_keyboard(enabled, entry_report_interval(s)), message_id); return

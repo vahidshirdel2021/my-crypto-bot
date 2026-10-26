@@ -344,6 +344,33 @@ def mode_keyboard(s):
     return {'inline_keyboard': rows}
 
 
+# V3.44.85: مرحله‌ی «حالت معامله» در ویزارد «تنظیمات معامله» (بعد از موجودی، مارجین، اهرم، ... و تایم‌فریم).
+# پیش‌فرض «معمولی» است؛ کاربر می‌تواند عوض کند. دکمه‌ها همان صفحه را ویرایش می‌کنند.
+DEFAULT_MODE = '3'
+
+
+def wizard_mode_text(s):
+    act = s.get('active_preset')
+    cur = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
+    lines = ['🎯 *حالت معامله*', '',
+             f"حالت فعلی: {cur or 'هیچ‌کدام (تنظیم دستی)'}", '']
+    for k, ic, nm, d in TRADE_MODES:
+        lines.append(f"{'✅ ' if k == act else ''}{ic} *{nm}*: {d}")
+    lines += ['', 'پیش‌فرض «معمولی» است. هر وقت خواستی از «تنظیمات ← حالت معامله» هم می‌توانی عوضش کنی.',
+              'روی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.']
+    return '\n'.join(lines)
+
+
+def wizard_mode_keyboard(s):
+    act = s.get('active_preset')
+    rows = [[{'text': f"{'✅ ' if k == act else ''}{ic} {nm}", 'callback_data': f'/set_wmode_{k}'}]
+            for k, ic, nm, _ in TRADE_MODES]
+    rows.append([{'text': '✔️ پایان و رفتن به پنل', 'callback_data': '/wiz_mode_done'}])
+    rows.append([{'text': '🔙 بازگشت', 'callback_data': '/wiz_tf'}])
+    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
+    return {'inline_keyboard': rows}
+
+
 def keyboard(s):
     act = s.get('active_preset')
     rows = []

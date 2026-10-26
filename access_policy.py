@@ -41,6 +41,8 @@ USER_EXACT = frozenset({
     '/support',
     # V3.44.84: دکمه‌ی برگشتِ مراحل ویزارد تنظیمات معامله
     '/wiz_lev', '/wiz_max', '/wiz_same',
+    # V3.44.85: مرحله‌ی «حالت معامله» در ویزارد
+    '/wiz_tf', '/wiz_mode_done',
 })
 
 # V3.44.83: ریست آمار و ریست کامل ربات؛ فقط برای کاربر عادیِ «حساب کاغذی» مجاز است (در حساب واقعی بسته می‌ماند)
@@ -52,7 +54,7 @@ PAPER_ONLY_EXACT = frozenset({
 _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/start(\s.*)?$',
     # تنظیمات ریسک (فقط عدد). «هم‌جهت» فقط از داخل ویزارد (/set_wsame_N)؛ منوی جداگانه‌ی آن و «کولداون» بیرون است
-    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', r'^/trade_mode_set_[345]$',
+    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', r'^/trade_mode_set_[345]$', r'^/set_wmode_[345]$',
     # تایم‌فریم: مرحله‌ی اجباریِ ویزارد اولیه
     r'^/set_tf_(5m|15m|1h|4h)$',
     # اتصال صرافی (REAL)
