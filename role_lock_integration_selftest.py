@@ -43,7 +43,7 @@ for cmd in ('/trade_filter_management', '/setup_management', '/menu_reports'):
 sent.clear(); bot.process_command('/menu', USER)
 assert sent and 'در دسترس نیست' not in sent[0][1]
 txt = sent[0][1]
-assert 'تایم‌فریم' not in txt and 'استراتژی' not in txt and 'لاگ ورود' not in txt, txt
+assert 'تایم‌فریم' in txt and 'استراتژی' not in txt and 'لاگ ورود' not in txt, txt
 sent.clear(); bot.process_command('/menu', ADMIN)
 assert 'تایم‌فریم' in sent[0][1] and 'استراتژی' in sent[0][1]
 sent.clear(); bot.process_command('/menu_settings', USER)

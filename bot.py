@@ -3257,7 +3257,7 @@ def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rat
             lines.append(f"• سود خالص پس از سهم پلتفرم ({platform_rate:g}%): `{platform_txt} USDT`")
         elif PLATFORM_FEE_MODE == 'daily' and platform_rate and platform_rate > 0:
             lines.append(f"• سهم پلتفرم ({platform_rate:g}%) از این معامله کم نمی‌شود؛ آخر روز از مجموع سود روز حساب می‌شود.")
-        lines.append(f"• حجم محاسبه‌شده: مارجین `{margin:.2f}` × اهرم `{leverage}`")
+        lines.append(f"• حجم محاسبه‌شده: مقدار هر معامله `{margin:.2f}` × اهرم `{leverage}`")
     if compact:
         lines.append(f"• خالص R: TP `{tp_r:+.2f}R` / SL `{sl_r:+.2f}R`")
     else:
@@ -3492,7 +3492,7 @@ def pending_orders_report(chat_id):
         side_fa = 'خرید' if side_long(o.get('side')) else 'فروش'
         status = 'فعال - در انتظار رسیدن به قیمت ورود' if o.get('triggered') else f"در انتظار رسیدن به تریگر `{fmt(o.get('trigger_price'))}`"
         lines.append(
-            f"• `{o['symbol']}` ({side_fa}) — ورود `{fmt(o['entry_price'])}` | TP `{fmt(o['tp'])}` | SL `{fmt(o['sl'])}` | مارجین `{o['margin']}` | اهرم `{o['leverage']}x`\n  وضعیت: {status}"
+            f"• `{o['symbol']}` ({side_fa}) — ورود `{fmt(o['entry_price'])}` | TP `{fmt(o['tp'])}` | SL `{fmt(o['sl'])}` | مقدار معامله `{o['margin']}` | اهرم `{o['leverage']}x`\n  وضعیت: {status}"
         )
     return '\n'.join(lines)
 
@@ -6176,7 +6176,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     margin, amount_or_reason=safe_size(chat_id,s,price,sl,force=force,risk_mult=_tier_mult)
     s.pop('_symbol_tmp',None)
     if margin<=0:
-        return _blk(chat_id, f'محاسبه‌ی حجم/مارجین ناموفق: {amount_or_reason}', key=None, simple='حجم معامله با موجودی و شرایط فعلی قابل محاسبه نبود.')
+        return _blk(chat_id, f'محاسبه‌ی حجم/مقدار معامله ناموفق: {amount_or_reason}', key=None, simple='حجم معامله با موجودی و شرایط فعلی قابل محاسبه نبود.')
     leverage=int(s['leverage'])
     risk_dist=abs(float(price)-float(sl))
     risk_usdt=float(margin)*((risk_dist/float(price))*float(leverage)) if price>0 else 0.0
@@ -6242,7 +6242,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         try:
             leverage=_binance_prepare_symbol(ex,sym,int(leverage)); trade['leverage']=leverage
         except Exception as exc:
-            send_message(chat_id,f'❌ تنظیم اهرم/مارجین `{symbol}` شکست خورد: `{exc}`',parse_mode=None); return False
+            send_message(chat_id,f'❌ تنظیم اهرم `{symbol}` شکست خورد: `{exc}`',parse_mode=None); return False
         amount=(margin*leverage)/price
         amount=normalize_amount(chat_id,symbol,amount)      # بر حسب کوین (واحد ربات)
         contracts=amount/scale                              # بر حسب قرارداد فیوچرز
@@ -6342,7 +6342,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
             return False
     else:
         if float(s['paper_balance']) - reserved_margin(s) < margin:
-            return _blk(chat_id, 'موجودی آزاد پیپر برای مارجین این معامله کافی نیست', key=None, simple='موجودی آزاد برای این معامله کافی نیست.')
+            return _blk(chat_id, 'موجودی آزاد پیپر برای مقدار این معامله کافی نیست', key=None, simple='موجودی آزاد برای این معامله کافی نیست.')
         trade['amount'] = (margin * leverage) / price
         audit_event(chat_id, trade_id, 'paper_opened', {'entry_price': price, 'amount': trade['amount'], 'margin': margin, 'quality_score': quality_score, 'quality_label': quality_label, 'planned_rr': planned_rr})
         s['paper_positions'].append(trade)
@@ -6741,7 +6741,7 @@ def quick_channel_trade(chat_id, symbol, side, skip_trend=False):
             f"• حد ضرر: `{fmt(pos['sl'])}` ({plan['sl_source']})\n"
             f"• حد سود: `{fmt(pos['tp'])}` ({plan['tp_source']})\n"
             f"• سطح هدف (TP): `{plan.get('tp_level_name') or '-'}`\n"
-            f"• R:R: `{plan['rr']:.2f}` | مارجین: `{fmt(pos['margin'])}` × `{pos['leverage']}` | ریسک: `{pos['risk_usdt']:.2f}$`\n"
+            f"• R:R: `{plan['rr']:.2f}` | مقدار معامله: `{fmt(pos['margin'])}` × اهرم `{pos['leverage']}` | ریسک: `{pos['risk_usdt']:.2f}$`\n"
             + (f"• 💰 سود در صورت TP (پس از کارمزد): `{pos['expected_tp_pnl_net']:+.2f} USDT`\n"
                f"• 🛑 زیان در صورت SL (با کارمزد): `{pos['expected_sl_pnl_net']:+.2f} USDT`\n"
                if pos.get('expected_tp_pnl_net') is not None else "") +
@@ -8603,7 +8603,7 @@ def handle_profit_alert_close(chat_id, pct, symbol):
     cur_margin = float(p.get('margin') or 0)
     orig_margin = float(p.get('orig_margin') or cur_margin)
     if cur_margin <= 0 or orig_margin <= 0:
-        send_message(chat_id, f'❌ مارجین پوزیشن `{sym}` نامعتبر است.', back)
+        send_message(chat_id, f'❌ مقدار استفاده‌شده در پوزیشن `{sym}` نامعتبر است.', back)
         return
     frac_orig = (pct / 100.0) * (cur_margin / orig_margin)   # partial_close_position سهم را از مارجین «اولیه» حساب می‌کند
     if not p.get('orig_margin'):
@@ -14750,7 +14750,7 @@ def real_enter_or_charge(chat_id, venue, equity, avail, message_id=None):
         s['real_exchange'] = venue; EXCHANGE_CACHE.pop(chat_id, None); _cred_cache_clear(chat_id)
         s['trading_mode'] = 'REAL'; s['is_bot_active'] = False; s['daily_start_equity'] = equity
         s['daily_start_date'] = time.strftime('%Y-%m-%d', time.gmtime()); s['daily_stopped'] = False; save_session(chat_id)
-        send_message(chat_id, f'✅ به *{name}* متصل شدید.\n\n💰 موجودی کل: `{equity:.2f}` USDT\n✅ قابل استفاده: `{avail:.2f}` USDT\n\n⚙️ مارجین هر معامله:', get_margin_keyboard(back='/menu'))
+        send_message(chat_id, f'✅ به *{name}* متصل شدید.\n\n💰 موجودی کل: `{equity:.2f}` USDT\n✅ قابل استفاده: `{avail:.2f}` USDT\n\n⚙️ مقدار استفاده‌شده در هر معامله:', get_margin_keyboard(back='/menu'))
         return
     send_message(chat_id,
                  f'✅ اتصال به *{name}* برقرار شد، اما موجودی فیوچرز شما برای شروع کافی نیست.\n\n'
@@ -14770,12 +14770,12 @@ def menu(chat_id,message_id=None):
     max_same_disp = max_same if max_same>0 else '∞'
     dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     if is_restricted_user(chat_id):
         # V3.44.59: پنل کاربر عادی بدون جزئیات استراتژی (تایم‌فریم، نوع استراتژی، لاگ ورود، قوانین هم‌جهت).
         text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
-                f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`\n"
-                f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مارجین: `{s['trade_amount_usdt']:.0f} USDT`\n"
+                f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
+                f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
                 f"🤝 حالت دستیار: `{'روشن (ورود فقط با تایید شما)' if s.get('assist_mode_enabled') else 'خاموش (ورود خودکار)'}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
     send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER'), bool(s.get('assist_mode_enabled', False)), is_restricted_user(chat_id)),message_id)
@@ -15570,7 +15570,7 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,f'🗑 کلید ذخیره‌شده‌ی {REAL_VENUES[v]} حذف شد.', real_exchange_keyboard(chat_id))
         return
     if cl.startswith('/set_bal_'):
-        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مارجین:',get_margin_keyboard(back='/mode_paper'),message_id); return
+        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مقدار استفاده‌شده در هر معامله:',get_margin_keyboard(back='/mode_paper'),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
     if cl.startswith('/set_max_same_'):
@@ -16579,7 +16579,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, '❌ ریست کامل ربات فقط برای حساب کاغذی فعال است.', get_performance_keyboard(chat_id))
         return
     if cl=='/full_reset_prompt':
-        send_message(chat_id, '⚠️ *ریست کامل ربات*\n\nاین کار همه‌چیز را برای همیشه پاک می‌کند: پوزیشن‌ها، تاریخچه معاملات، آمار، فیلترها و تمام تنظیمات شما (تایم‌فریم، حالت حساب، مارجین، اهرم و...).\nبعد از تأیید، دوباره از صفر و قدم‌به‌قدم تنظیمات را از شما می‌پرسیم.\n\nآیا مطمئن هستید؟', {"inline_keyboard": [[{"text":"🗑 بله، همه‌چیز پاک شود","callback_data":"/full_reset_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
+        send_message(chat_id, '⚠️ *ریست کامل ربات*\n\nاین کار همه‌چیز را برای همیشه پاک می‌کند: پوزیشن‌ها، تاریخچه معاملات، آمار، فیلترها و تمام تنظیمات شما (تایم‌فریم، حالت حساب، مقدار هر معامله، اهرم و...).\nبعد از تأیید، دوباره از صفر و قدم‌به‌قدم تنظیمات را از شما می‌پرسیم.\n\nآیا مطمئن هستید؟', {"inline_keyboard": [[{"text":"🗑 بله، همه‌چیز پاک شود","callback_data":"/full_reset_confirm"},{"text":"❌ انصراف","callback_data":"/cancel"}]]})
         return
     if cl=='/full_reset_confirm':
         ok,msg=full_reset(chat_id)
@@ -16930,7 +16930,7 @@ def handle_text(chat_id,text,message_id=None):
         if not ((is_long and sl<entry<tp) or ((not is_long) and tp<entry<sl)):
             send_message(chat_id, f"⚠️ نسبت SL/TP/ورود با جهت {'خرید' if is_long else 'فروش'} همخوانی ندارد (باید {'SL < ورود < TP' if is_long else 'TP < ورود < SL'} باشد). دوباره SL را بفرستید:"); return
         tmp['sl']=sl; s['_pending_tmp']=tmp; s['user_state']='WAIT_PENDING_MARGIN'; save_session(chat_id)
-        send_message(chat_id,'*کادر ۵:* مارجین معامله (USDT) را ارسال کنید:'); return
+        send_message(chat_id,'*کادر ۵:* مقدار استفاده‌شده در این معامله (USDT) را ارسال کنید:'); return
     if current_state == 'WAIT_PENDING_MARGIN':
         tmp=s.get('_pending_tmp') or {}
         try:
@@ -16955,7 +16955,7 @@ def handle_text(chat_id,text,message_id=None):
             f"• ورود: `{fmt(tmp.get('entry'))}`\n"
             f"• حد سود: `{fmt(tmp.get('tp'))}`\n"
             f"• حد ضرر: `{fmt(tmp.get('sl'))}`\n"
-            f"• مارجین: `{tmp.get('margin')} USDT`\n"
+            f"• مقدار معامله: `{tmp.get('margin')} USDT`\n"
             f"• اهرم: `{tmp.get('leverage')}x`\n\n"
             f"تایید می‌کنید؟"
         )
