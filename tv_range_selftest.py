@@ -58,16 +58,14 @@ assert sync('ETHUSDT') == (5000.0, 900.0) and sync('SOLUSDT') == (300.0, 10.0)
 os.environ['HALVING_RANGE_BYBIT'] = '0'; script['binance'] = (200, [[0, 0, 7, 6, 0, 0]] * 9)
 os.environ.pop('HALVING_RANGE_OVERRIDE'); cache.clear(); print('3 env override ok')
 
-# 4) نماد خارج از جدول: Bybit (کندل هفتگی، جدیدترین اول) سقف/کف را می‌دهد
-reset(); g['BYBIT_RANGE_ENABLED'] = True
-rows = [[str(1_700_000_000_000 - i * 604800000), '1', str(100 + (i == 5) * 25), str(20 - (i == 7) * 5), '1', '1', '1'] for i in range(40)]
-script['bybit'] = (200, {'retCode': 0, 'result': {'list': rows}})
-assert sync('ABCUSDT') == (125.0, 15.0) and src_map['ABCUSDT'][0] == 'Bybit'
-assert calls[0][0].endswith('/v5/market/kline') and calls[0][1] == {'category': 'linear', 'symbol': 'ABCUSDT', 'interval': 'W', 'limit': 1000}
-print('4 bybit weekly range ok')
+# 4) نماد خارج از جدول: فقط Binance (کندل هفتگی/روزانه)؛ Bybit اصلاً صدا زده نمی‌شود
+reset(); script['bybit'] = (200, {'retCode': 0, 'result': {'list': []}}); script['binance'] = (200, [[1_600_000_000_000 + i, 5, 60 if i == 3 else 40, 8 if i == 4 else 20, 30, 1] for i in range(40)])
+assert sync('ABCUSDT') == (60.0, 8.0) and src_map['ABCUSDT'][0] == 'Binance' and not any('bybit' in c[0] for c in calls)
+assert '_bybit_hist_range_sync' not in src and 'api.bybit.com' not in src and 'BYBIT_RANGE_ENABLED' not in src
+print('4 binance only ok')
 
-# 5) Bybit بلاک (403) → منبع موقتاً خاموش و بدون خطا به Binance می‌رود
-reset(); script['bybit'] = (403, None); script['binance'] = (200, [[1_600_000_000_000 + i, 5, 60 if i == 3 else 40, 8 if i == 4 else 20, 30, 1] for i in range(40)])
-assert sync('ABCUSDT') == (60.0, 8.0) and 'bybit' in down and src_map['ABCUSDT'][0] == 'Binance'
-print('5 bybit blocked -> binance ok')
+# 5) Binance خراب/بلاک (403) → هیچ منبع دیگری (نه Bybit، نه کندل ربات) و سقف/کف None
+reset(); script['binance'] = (403, None); script['bybit'] = (200, {'retCode': 0, 'result': {'list': []}})
+assert sync('ABCUSDT') is None and not any('bybit' in c[0] for c in calls) and 'ABCUSDT' not in src_map
+print('5 no fallback to other sources ok')
 print('ALL OK')

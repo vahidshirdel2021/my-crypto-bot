@@ -5514,7 +5514,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.95'
+BOT_VERSION = '3.44.97'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6609,7 +6609,7 @@ _HIST_RANGE_SRC = {}     # {symbol: ('Binance', (سقف, کف))}؛ برای نم
 # V3.44.92: سقف/کفِ مدل نصف‌کردن باید «دقیقاً» همان اندیکاتور HalvLvl در TradingView باشد. TradingView برای رنج خودکار
 # از تاریخچه‌ی همان چارت (Bybit perp) استفاده می‌کند، نه کل تاریخچه‌ی Binance Spot (مثلاً کف اتریوم ۸۱.۷۹ در Binance
 # ولی ۸۷۸ در چارت) و شبکه‌ی سطوح کاملاً جابه‌جا می‌شد. ترتیب اولویت:
-#   1) env HALVING_RANGE_OVERRIDE   2) جدول داخلی (مقادیرِ استخراج‌شده از چارت TV)   3) Bybit linear (کندل هفتگی)   4) Binance   5) کندل ربات
+#   1) env HALVING_RANGE_OVERRIDE   2) جدول داخلی (مقادیرِ استخراج‌شده از چارت TV)   3) Binance (V3.44.97: تنها منبع؛ Bybit و کندل ربات حذف شدند)
 _HALVING_RANGE_BUILTIN = {
     'BTC': (126199.5, 2817.15),    # سقف، کف؛ تطبیق‌شده با چارت BTCUSDT 15m (فاصله‌ی عمق ۷ = ۹۶۳.۹۳)
     'ETH': (4955.87, 878.0),       # بازسازی از سطوح چارت ETHUSDT 15m (فاصله‌ی عمق ۷ = ۳۱.۸۵۸)
@@ -6643,44 +6643,6 @@ def _manual_halving_range(symbol):
     if rng:
         _HIST_RANGE_SRC[symbol] = ('Manual', tuple(rng))
     return rng
-
-
-BYBIT_RANGE_ENABLED = os.environ.get('HALVING_RANGE_BYBIT', '1').strip().lower() not in ('0', 'false', 'off', 'no')
-
-
-def _bybit_hist_range_sync(symbol):
-    """سقف/کف تاریخی از کندل هفتگی Bybit linear perp (همان منبع چارت TradingView) یا None.
-    اگر Bybit در دسترس نبود/نماد را نداشت None برمی‌گردد و زنجیره به Binance می‌رود."""
-    if not BYBIT_RANGE_ENABLED or not _source_available('bybit'):
-        return None
-    sym = str(symbol).upper().replace('/', '')
-    try:
-        r = requests.get('https://api.bybit.com/v5/market/kline',
-                         params={'category': 'linear', 'symbol': sym, 'interval': 'W', 'limit': 1000}, timeout=6)
-    except Exception as exc:
-        logger.debug('bybit hist range %s: %s', symbol, exc)
-        _source_fail('bybit')
-        return None
-    if _status_trips_source(r.status_code):
-        _source_trip('bybit')
-        return None
-    if not r.ok:
-        return None
-    _source_ok('bybit')
-    try:
-        j = r.json()
-        rows = ((j.get('result') or {}).get('list')) or []
-        if j.get('retCode') not in (0, '0', None) or len(rows) < 8:
-            return None
-        hi = max(float(x[2]) for x in rows)
-        lo = min(float(x[3]) for x in rows)
-        if math.isfinite(hi) and math.isfinite(lo) and lo > 0 and hi > lo:
-            logger.info('halving range %s from Bybit/W: high=%s low=%s', symbol, hi, lo)
-            _HIST_RANGE_SRC[symbol] = ('Bybit', (hi, lo))
-            return (hi, lo)
-    except Exception as exc:
-        logger.debug('bybit hist range parse %s: %s', symbol, exc)
-    return None
 
 
 def _binance_hist_range_sync(symbol):
@@ -6727,8 +6689,8 @@ def _binance_hist_range_sync(symbol):
 
 
 async def get_halving_range(http, symbol):
-    """سقف/کف تاریخی نماد برای مدل نصف‌کردن (کش‌شده). از کندل هفتگیِ کل تاریخچه‌ی در دسترس
-    می‌گیرد؛ اگر نشد روزانه. سایه‌ها (high/low) ملاک‌اند. خروجی (high, low) یا None."""
+    """سقف/کف تاریخی نماد برای مدل نصف‌کردن (کش‌شده). فقط Binance (یا جدول دستی/داخلی برای BTC/ETH یا env).
+    V3.44.97: Bybit و کندل‌های منبع‌های دیگر حذف شدند؛ نمادی که روی Binance نیست سقف/کف ندارد (None) و معامله نمی‌شود."""
     now = time.time()
     c = HALVING_RANGE_CACHE.get(symbol)
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
@@ -6736,31 +6698,14 @@ async def get_halving_range(http, symbol):
     rng = _manual_halving_range(symbol)        # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
     if not rng:
         try:
-            rng = await asyncio.to_thread(_bybit_hist_range_sync, symbol)
-        except Exception as exc:
-            logger.debug('bybit hist range %s: %s', symbol, exc)
-            rng = None
-    if not rng:
-        try:
-            # V3.44.89: منبع اصلیِ سقف/کف تاریخی = Binance (کل تاریخچه‌ی نماد از روز لیست‌شدن)
-            rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)
+            rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)      # V3.44.89: کل تاریخچه‌ی نماد روی Binance
         except Exception as exc:
             logger.debug('binance hist range %s: %s', symbol, exc)
             rng = None
-    if not rng:
-        # فقط وقتی Binance جواب نداد/نماد را ندارد: منبع عمومی کندل (Bitunix -> ...)
-        for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
-            try:
-                d = await get_klines_async(http, symbol, tf_, lim)
-            except Exception:
-                d = None
-            rng = _halving_range_from_df(d)
-            if rng:
-                break
     if rng:
         HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
-        return c['range']      # دادهٔ تازه نیامد: آخرین مقدار معتبر
+        return c['range']      # Binance لحظه‌ای جواب نداد: آخرین مقدار معتبرِ خودِ Binance
     return rng
 
 
@@ -6772,24 +6717,10 @@ def get_halving_range_sync(symbol):
     rng = _manual_halving_range(symbol)            # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
     if not rng:
         try:
-            rng = _bybit_hist_range_sync(symbol)
-        except Exception as exc:
-            logger.debug('bybit hist range %s: %s', symbol, exc)
-            rng = None
-    if not rng:
-        try:
-            rng = _binance_hist_range_sync(symbol)     # V3.44.89: منبع اصلی = Binance
+            rng = _binance_hist_range_sync(symbol)     # V3.44.97: فقط Binance
         except Exception as exc:
             logger.debug('binance hist range %s: %s', symbol, exc)
             rng = None
-    if not rng:
-        for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
-            try:
-                rng = _halving_range_from_df(get_klines(symbol, tf_, lim))
-            except Exception:
-                rng = None
-            if rng:
-                break
     if rng:
         HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
@@ -14969,7 +14900,7 @@ def symbol_levels_chart(chat_id, raw_symbol):
     up = [x for x in lv if x['price'] > price][:3]
     dn = [x for x in reversed([x for x in lv if x['price'] <= price])][:3]
     src_rec = _HIST_RANGE_SRC.get(symbol)
-    src_label = {'Manual': 'Range: manual/TV', 'Bybit': 'Range: Bybit', 'Binance': 'Range: Binance'}.get(src_rec[0], '') if src_rec else ''
+    src_label = {'Manual': 'Range: manual/TV', 'Binance': 'Range: Binance'}.get(src_rec[0], '') if src_rec else ''
     png = render_levels_chart_png(symbol, dated_df, price, up, dn, TF_DISPLAY.get(tf, tf), ctx['depth'], ctx['step'], src_label)
     if png is None:
         return None, '❌ ساخت چارت ناموفق بود.', None
@@ -15005,9 +14936,9 @@ def symbol_levels_report(chat_id, raw_symbol):
     if rng:
         hi, lo = float(rng[0]), float(rng[1])
         src_rec = _HIST_RANGE_SRC.get(symbol)
-        _lbl = {'Manual': 'جدول دستی (هم‌تراز با TradingView)', 'Bybit': 'Bybit (کندل هفتگی، همان منبع TradingView)', 'Binance': 'Binance'}
+        _lbl = {'Manual': 'جدول دستی (هم‌تراز با TradingView)', 'Binance': 'Binance'}
         src = _lbl.get(src_rec[0]) if (src_rec and src_rec[0] in _lbl and (abs(src_rec[1][0] - hi) < 1e-12 * max(1.0, hi)) and (abs(src_rec[1][1] - lo) < 1e-12 * max(1.0, lo))) \
-            else 'منبع کندل ربات (Bitunix/...) چون Binance در دسترس نبود'
+            else 'نامشخص'
         pos = min(100.0, max(0.0, (price - lo) / (hi - lo) * 100.0)) if hi > lo else 0.0
         lines += ['📜 *سقف و کف تاریخی (مبنای مدل نصف‌کردن)*',
                   f"• سقف تاریخی: `{fmt(hi)}`  ({_pct_from(price, hi)})",
@@ -15015,7 +14946,7 @@ def symbol_levels_report(chat_id, raw_symbol):
                   f"• جایگاه قیمت در بازه: `{pos:.1f}٪` از کف به سقف",
                   f"• منبع: {src}"]
     else:
-        lines.append('⚠️ سقف/کف تاریخی این نماد در دسترس نیست (نه Binance و نه منبع کندل ربات).')
+        lines.append('⚠️ سقف/کف تاریخی این نماد در دسترس نیست (روی Binance نیست).')
 
     # --- سطوح نصف‌کردن اطراف قیمت + سطوح دوره‌ای ---
     dated_df = None
@@ -18090,17 +18021,19 @@ WATCHLIST_REPORT_PATH = os.environ.get('WATCHLIST_REPORT_PATH', 'watchlist_repor
 
 
 def refresh_watchlists_from_spot():
-    """نمادهای غیرموجود روی بیتیونیکس و باینانس (هر دو) را از LONG/SHORT حذف و با نمادهای برتر موجود جایگزین می‌کند (in-place؛
-    همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند). اگر فهرست صرافی‌ها قابل‌اعتماد نباشد چیزی حذف نمی‌شود."""
+    """V3.44.97: نمادهای غیرموجود روی Binance اسپات (USDT) را از LONG/SHORT حذف و با نمادهای برتر موجود روی Binance جایگزین می‌کند
+    (in-place؛ همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند). اگر فهرست Binance قابل‌اعتماد نباشد چیزی حذف نمی‌شود."""
     if not WATCHLIST_AUTO_PRUNE:
         return None
     union, per, errors = watchlist_tools.fetch_available()
     report = {'generated_at': int(time.time()), 'sources_ok': {k: len(v) for k, v in per.items()}, 'sources_error': errors}
-    if not watchlist_tools.availability_is_sane(per):
-        report['note'] = 'هیچ منبعی فهرست معتبر نداد؛ واچ‌لیست دست‌نخورده ماند.'
-        logger.warning('watchlist prune skipped (no sane spot listing): %s', errors)
+    # V3.44.97: فقط Binance معیار است؛ نمادی که روی Binance اسپات نیست اسکن نمی‌شود (حتی اگر روی Bitunix باشد)
+    binance_set = per.get('binance') or set()
+    if not watchlist_tools.availability_is_sane({'binance': binance_set}):
+        report['note'] = 'فهرست Binance در دسترس/معتبر نبود؛ واچ‌لیست دست‌نخورده ماند.'
+        logger.warning('watchlist prune skipped (no sane Binance listing): %s', errors)
     else:
-        plans = {name: watchlist_tools.plan_watchlist(list(lst), watchlist_tools.RESERVE_TOP_SYMBOLS, union)
+        plans = {name: watchlist_tools.plan_watchlist(list(lst), watchlist_tools.RESERVE_TOP_SYMBOLS, binance_set)
                  for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}
         if any(watchlist_tools.plan_is_suspicious(p, len(lst)) for p, lst in ((plans['long'], LONG_WATCHLIST), (plans['short'], SHORT_WATCHLIST))):
             report['note'] = 'تعداد نمادهای غایب مشکوکاً زیاد است (فهرست صرافی ناقص؟)؛ واچ‌لیست دست‌نخورده ماند.'
@@ -18109,7 +18042,7 @@ def refresh_watchlists_from_spot():
             for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST)):
                 lst[:] = plans[name]['final']
                 report[name] = {'removed': plans[name]['removed'], 'added': plans[name]['added'], 'final_count': len(plans[name]['final'])}
-            logger.info('Watchlist spot-check: long removed=%s added=%s | sources=%s',
+            logger.info('Watchlist Binance-check: long removed=%s added=%s | sources=%s',
                         report['long']['removed'], report['long']['added'], report['sources_ok'])
     if 'bitunix' in per:
         # V3.44.56: نمادهای واچ‌لیست که فیوچرز بیتیونیکس ندارد (داده‌ی آن‌ها از باینانس می‌آید)

@@ -72,8 +72,8 @@ n = len(FK.calls); assert sync('ABCUSDT') == (123.5, 7.25) and len(FK.calls) == 
 print('2 cache ok')
 
 # 3) نماد روی اسپات Binance نیست → برگشت به منبع قبلی (مقیاس قیمت منبع معاملاتی حفظ می‌شود)
-reset(); r = sync('1000SHIBUSDT'); assert r == (999.0, 1.0) and FK.fallback_calls and not FK.calls
-print('3 not-listed fallback ok')
+reset(); r = sync('1000SHIBUSDT'); assert r is None and not FK.fallback_calls and not FK.calls      # V3.44.97: نماد غیرموجود روی Binance = بدون سقف/کف (بدون جایگزین)
+print('3 not-listed -> no range ok')
 
 # 4) ۴۵۱ روی api.binance.com → آینه‌ی vision جواب بدهد
 reset(); FK.script[('api', '1w')] = (451, None); FK.script[('vision', '1w')] = (200, kl(40, 55.0, 5.0))
@@ -81,8 +81,8 @@ assert sync('ABCUSDT') == (55.0, 5.0) and 'binance' in state['down'] and not FK.
 print('4 vision mirror ok')
 
 # 5) هر دو شبکه‌خطا → برگشت به منبع قبلی
-reset(); assert sync('ABCUSDT') == (999.0, 1.0) and FK.fallback_calls
-print('5 network-fail fallback ok')
+reset(); assert sync('ABCUSDT') is None and not FK.fallback_calls      # V3.44.97: قطع شبکه = None (بدون کندل ربات)
+print('5 network-fail -> none ok')
 
 # 6) نماد خیلی تازه: هفتگی <۸ کندل → روزانه
 reset(); FK.script[('api', '1w')] = (200, kl(5, 9.0, 1.0)); FK.script[('api', '1d')] = (200, kl(30, 8.0, 2.0))
@@ -96,6 +96,6 @@ print('7 async ok')
 
 # 8) داده‌ی خراب (کف ≤ ۰) رد می‌شود → برگشت به منبع قبلی
 reset(); FK.script[('api', '1w')] = (200, kl(40, 10.0, 0.0)); FK.script[('vision', '1w')] = (200, kl(40, 10.0, 0.0))
-assert sync('ABCUSDT') == (999.0, 1.0)
-print('8 bad-data fallback ok')
+assert sync('ABCUSDT') is None and not FK.fallback_calls      # V3.44.97: داده‌ی خراب Binance = None
+print('8 bad-data -> none ok')
 print('ALL OK')

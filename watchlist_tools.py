@@ -107,10 +107,10 @@ def main(argv=None):
     candidates = _read_long_watchlist_from_bot()
     union, per, errors = fetch_available()
     report = {'generated_at': int(time.time()), 'sources_ok': {k: len(v) for k, v in per.items()}, 'sources_error': errors}
-    if not availability_is_sane(per):
-        report['note'] = 'هیچ منبعی فهرست معتبر نداد؛ چیزی حذف نمی‌شود (احتمالاً بلاک جغرافیایی یا قطعی شبکه).'
+    if not availability_is_sane({'binance': per.get('binance') or set()}):
+        report['note'] = 'فهرست Binance معتبر نبود؛ هیچ چیزی فهرست معتبر نداد؛ چیزی حذف نمی‌شود (احتمالاً بلاک جغرافیایی یا قطعی شبکه).'
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
-    plan = plan_watchlist(candidates, RESERVE_TOP_SYMBOLS, union)
+    plan = plan_watchlist(candidates, RESERVE_TOP_SYMBOLS, per.get('binance') or set())      # V3.44.97: فقط Binance معیار است
     if plan_is_suspicious(plan, len(candidates)):
         report['note'] = f"بیش از {int(MAX_REMOVE_FRACTION * 100)}٪ لیست غایب بود ({len(plan['removed'])} از {len(candidates)})؛ داده‌ی صرافی مشکوک است و حذفی انجام نمی‌شود."
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
