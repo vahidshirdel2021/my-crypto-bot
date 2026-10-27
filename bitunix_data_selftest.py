@@ -145,7 +145,7 @@ def binance_df(n=120):
     return pd.DataFrame({'timestamp': range(n), 'open': [100.0 + i for i in range(n)], 'high': [102.0 + i for i in range(n)], 'low': [99.0 + i for i in range(n)], 'close': [101.0 + i for i in range(n)], 'volume': [1.0] * n})
 def kenv(order, bitunix_result, binance_ok=True, avail=None):
     env = dict(time=time, pd=pd, logger=logging.getLogger('gk'), DATA_LOCK=RLock(), DATA_CACHE={}, DATA_CACHE_SECONDS=20, TIMEFRAME_MAP={'5min': '5min'},
-               MARKET_DATA_SOURCES=order, _BINANCE_SOURCES=('binance', 'binancevision'), _DATA_NOTES={}, _DATA_SOURCE_USED={}, _SYMBOL_MISS_UNTIL={}, _SOURCE_DOWN_UNTIL=dict(avail or {}),
+               MARKET_DATA_SOURCES=order, _sources_now=lambda: order, _venue=lambda: 'binance', _BINANCE_SOURCES=('binance', 'binancevision'), _DATA_NOTES={}, _DATA_SOURCE_USED={}, _SYMBOL_MISS_UNTIL={}, _SOURCE_DOWN_UNTIL=dict(avail or {}),
                _base_asset=lambda sy: str(sy).upper().replace('USDT', ''), _source_available=lambda s_: time.time() >= (avail or {}).get(s_, 0), _symbol_missing=lambda s_, b_: False,
                _mark_symbol_missing=lambda s_, b_: env['_marked'].append((s_, b_)), _marked=[],
                _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None,
@@ -205,7 +205,7 @@ asyncio.run(run_async())
 # ---------------------------------------------------------------- ۸) latest_price
 a4 = src.index("def latest_price(symbol):"); b4 = src.index("# ===================== Binance USDⓈ-M Futures (V3.44.0)")
 def penv(order, bprice, binance_price=None):
-    env = dict(time=time, logger=logging.getLogger('lp'), DATA_LOCK=RLock(), PRICE_CACHE={}, MARKET_DATA_SOURCES=order, _BINANCE_SOURCES=('binance', 'binancevision'),
+    env = dict(time=time, logger=logging.getLogger('lp'), DATA_LOCK=RLock(), PRICE_CACHE={}, MARKET_DATA_SOURCES=order, _sources_now=lambda: order, _venue=lambda: 'binance', _BINANCE_SOURCES=('binance', 'binancevision'),
                _base_asset=lambda sy: str(sy).upper().replace('USDT', ''), _source_available=lambda s_: True, _symbol_missing=lambda s_, b_: False,
                _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None, _bitunix_map_needs_refresh=lambda: False, _bitunix_refresh_symbol_map=lambda: None,
                _bitunix_price=bprice, _status_trips_source=lambda st: False, _source_trip=lambda *a: None, _source_ok=lambda s_: None, _source_fail=lambda s_: None,
@@ -218,12 +218,14 @@ def boomp(b_): raise RuntimeError('x')
 assert penv(ORDER, boomp, 80990.0)['latest_price']('BTC') == 80990.0
 assert penv(['binance'], boomp, 80990.0)['latest_price']('BTC') == 80990.0
 
-# ---------------------------------------------------------------- ۹) لینک TradingView
-a5 = src.index("def tradingview_symbol(symbol):"); b5 = src.index("def tradingview_chart_url(symbol, timeframe='5min'):")
-tv = dict(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), TRADINGVIEW_EXCHANGE='', _DATA_SOURCE_USED={'BTC': 'bitunix', 'ETH': 'binance'},
+# ---------------------------------------------------------------- ۹) لینک TradingView (V3.44.98: بر اساس صرافیِ حالت، نه آخرین منبع داده)
+a5 = src.index("def tradingview_symbol(symbol, chat_id=None):"); b5 = src.index("def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):")
+ctx = {'v': 'binance'}; by_chat = {1: 'binance', 2: 'bitunix'}
+tv = dict(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), TRADINGVIEW_EXCHANGE='', _venue=lambda: ctx['v'], data_venue_for=lambda c: by_chat.get(c, 'binance'),
           TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
 exec(src[a5:b5], tv)
-assert tv['tradingview_symbol']('BTC') == 'BITUNIX:BTCUSDT.P' and tv['tradingview_symbol']('ETH') == 'BINANCE:ETHUSDT' and tv['tradingview_symbol']('NEW') == 'BINANCE:NEWUSDT'
+assert tv['tradingview_symbol']('BTC') == 'BINANCE:BTCUSDT' and tv['tradingview_symbol']('BTC', 1) == 'BINANCE:BTCUSDT' and tv['tradingview_symbol']('BTC', 2) == 'BITUNIX:BTCUSDT.P'
+ctx['v'] = 'bitunix'; assert tv['tradingview_symbol']('ETH') == 'BITUNIX:ETHUSDT.P'
 tv['TRADINGVIEW_EXCHANGE'] = 'OKX'; assert tv['tradingview_symbol']('BTC') == 'OKX:BTCUSDT'
 
 # ---------------------------------------------------------------- ۱۰) watchlist_tools
@@ -242,15 +244,14 @@ union, per, errors = wt.fetch_available(); assert list(per) == ['binance'] and '
 # ربات: گزارش نمادهای غایب روی بیتیونیکس
 assert "report['not_on_bitunix']" in src and 'Watchlist vs Bitunix' in src
 
-# ---------------------------------------------------------------- ۱۱) MARKET_DATA_SOURCES: مقدار قدیمی .env نباید بیتیونیکس را کنار بگذارد
-i0 = src.index("_ALL_DATA_SOURCES = ("); j0 = src.index('\n', src.index("MARKET_DATA_SOURCES = [x for x in _MDS_RAW"))
+# ---------------------------------------------------------------- ۱۱) V3.44.98: MARKET_DATA_SOURCES با env محدود/مرتب نمی‌شود (صرافی را حالت تعیین می‌کند)
+i0 = src.index("_ALL_DATA_SOURCES = ("); j0 = src.index('\n', src.index("MARKET_DATA_SOURCES = list(_ALL_DATA_SOURCES)"))
 seg = src[i0:j0]
-for env, exp in (("binance,binancevision,bybit,kucoin", ['bitunix', 'binance', 'binancevision']), ("binance,bybit", ['bitunix', 'binance', 'binancevision']),
-                 ("binance,bitunix", ['binance', 'bitunix']), ("binance", ['binance']), ("", ['bitunix', 'binance', 'binancevision']), (None, ['bitunix', 'binance', 'binancevision'])):
+for env in ("binance,binancevision,bybit,kucoin", "binance", "", None):
     if env is None: os.environ.pop('MARKET_DATA_SOURCES', None)
     else: os.environ['MARKET_DATA_SOURCES'] = env
-    ns = {'os': os}; exec(seg, ns); assert ns['MARKET_DATA_SOURCES'] == exp, (env, ns['MARKET_DATA_SOURCES'])
+    ns = {'os': os}; exec(seg, ns); assert ns['MARKET_DATA_SOURCES'] == ['bitunix', 'binance', 'binancevision'], (env, ns['MARKET_DATA_SOURCES'])
 os.environ.pop('MARKET_DATA_SOURCES', None)
 env_ex = open('.env.example', encoding='utf-8').read()
-assert 'MARKET_DATA_SOURCES=bitunix,binance,binancevision' in env_ex and not re.search(r'bybit|kucoin', env_ex.replace('Bybit و KuCoin حذف شدند', ''), re.I)
+assert not re.search(r'bybit|kucoin', env_ex.replace('Bybit و KuCoin حذف شدند', ''), re.I)
 print('bitunix_data_selftest: ALL OK')

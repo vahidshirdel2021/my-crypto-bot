@@ -38,7 +38,7 @@ def counting_ind(df):
     st['ind'] += 1
     return stg.calculate_indicators(df)
 
-g = dict(os=os, time=time, math=math, threading=threading, logger=log,
+g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, os=os, time=time, math=math, threading=threading, logger=log,
          _TF_SECONDS={'5min': 300}, TIMEFRAME_MAP={'5min': '5min'}, TF_DISPLAY={'5min': '5م'},
          DATA_LOCK=LOCK, DATA_CACHE=CACHE, get_klines=fake_klines, fmt=lambda v: f'{float(v):.2f}',
          STRATEGY_DEFAULTS=stg.STRATEGY_DEFAULTS, calculate_indicators=counting_ind,

@@ -30,7 +30,7 @@ g = dict(pd=pd, math=math, time=time, asyncio=asyncio, json=json, os=os, logger=
          _source_available=lambda s: s not in down, _source_trip=lambda s, seconds=None: down.add(s),
          _source_fail=lambda s: None, _source_ok=lambda s: None,
          _status_trips_source=lambda st: st in (403, 418, 429, 451) or st >= 500,
-         Dict=dict, Any=object)
+         Dict=dict, Any=object, _venue=lambda: 'binance')
 g.update(get_klines=lambda *a: None)
 async def _ak(*a): return None
 g.update(get_klines_async=_ak)

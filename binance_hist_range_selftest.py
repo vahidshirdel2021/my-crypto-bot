@@ -39,7 +39,7 @@ def fake_get(url, params=None, timeout=None):
 
 class R: get = staticmethod(fake_get)
 def trip(src_): state['down'].add(src_)
-g = dict(pd=pd, math=math, time=time, asyncio=asyncio, logger=logging.getLogger('t'), requests=R,
+g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, pd=pd, math=math, time=time, asyncio=asyncio, logger=logging.getLogger('t'), requests=R,
          _base_asset=lambda s: str(s).upper().replace('USDT', '').replace('/', ''),
          _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None,
          _binance_symbol_from_cache=lambda base: state['map'].get(base),
@@ -91,7 +91,7 @@ print('6 new-listing daily ok')
 
 # 7) نسخه‌ی async هم همین مسیر را دارد و کش می‌کند
 reset(); FK.script[('api', '1w')] = (200, kl(40, 321.0, 3.0))
-assert asyncio.run(asyn(None, 'BTCUSDT')) == (321.0, 3.0) and cache['BTCUSDT']['range'] == (321.0, 3.0) and not FK.fallback_calls
+assert asyncio.run(asyn(None, 'BTCUSDT')) == (321.0, 3.0) and cache['binance:BTCUSDT']['range'] == (321.0, 3.0) and not FK.fallback_calls
 print('7 async ok')
 
 # 8) داده‌ی خراب (کف ≤ ۰) رد می‌شود → برگشت به منبع قبلی

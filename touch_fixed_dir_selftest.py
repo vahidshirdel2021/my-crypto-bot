@@ -47,7 +47,7 @@ print('touch_fixed_dir_selftest OK')
 import time as _time
 import pandas as pd
 calls = {'sig': 0, 'klines': []}
-ctx = dict(time=_time, STRATEGY_DEFAULTS={}, FILTER_DEFAULTS={}, logger=__import__('logging').getLogger('t'),
+ctx = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, time=_time, STRATEGY_DEFAULTS={}, FILTER_DEFAULTS={}, logger=__import__('logging').getLogger('t'),
            get_klines=lambda sym, tf, lim: (calls['klines'].append((sym, tf)) or pd.DataFrame({'close': [1.0] * 100})),
            calculate_indicators=lambda d: d, latest_price=lambda sym: 100.0,
            extract_setup_level=lambda r: ('Daily', 'PDH', 100.0), extract_scenario_tag=lambda r: 2,

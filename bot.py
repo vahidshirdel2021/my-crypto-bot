@@ -12,7 +12,7 @@ except ImportError:
 
 import urllib.parse as urlparse
 from threading import Thread, RLock, Timer
-import threading, functools
+import threading, functools, contextvars, inspect
 from typing import Dict, Any
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -555,7 +555,7 @@ _ALL_DATA_SOURCES = ('bitunix', 'binance', 'binancevision')
 _MDS_RAW = [x.strip().lower() for x in os.environ.get('MARKET_DATA_SOURCES', ','.join(_ALL_DATA_SOURCES)).split(',') if x.strip()]
 if ('bybit' in _MDS_RAW or 'kucoin' in _MDS_RAW) and 'bitunix' not in _MDS_RAW:
     _MDS_RAW = []     # V3.44.56: مقدار قدیمی .env (binance,binancevision,bybit,kucoin) => ترتیب پیش‌فرض جدید (bitunix اول)
-MARKET_DATA_SOURCES = [x for x in _MDS_RAW if x in _ALL_DATA_SOURCES] or list(_ALL_DATA_SOURCES)
+MARKET_DATA_SOURCES = list(_ALL_DATA_SOURCES)   # V3.44.98: دیگر با env محدود/مرتب نمی‌شود؛ منبع داده را «صرافیِ حالت» تعیین می‌کند (VENUE_SOURCES)
 SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOWN_SECONDS', '60')))   # مدت کنارگذاشتن منبعِ بلاک/rate-limit/خراب
 SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
 BINANCE_SYMBOLS_TTL = 6 * 3600
@@ -2326,6 +2326,95 @@ _BINANCE_SYMBOLS = {'map': {}, 'ts': 0.0, 'next_try': 0.0}
 _BINANCE_REFRESH_LOCK = RLock()
 _BINANCE_SOURCES = ('binance', 'binancevision')
 
+# ===================== V3.44.98: صرافیِ داده = صرافیِ حالت =====================
+# PAPER: همه‌ی داده (کندل، قیمت، سطوح تاریخی سقف/کف، PDH/PDL)، معامله‌ی کاغذی و چارت TradingView فقط Binance.
+# REAL : همه‌ی آن‌ها از صرافیِ انتخابیِ کاربر (Binance یا Bitunix)؛ هیچ fallback‌ی بین دو صرافی نیست.
+VENUE_SOURCES = {'binance': ('binance', 'binancevision'), 'bitunix': ('bitunix',)}
+_DATA_VENUE_CTX = contextvars.ContextVar('data_venue', default='binance')
+
+
+def _venue():
+    v = _DATA_VENUE_CTX.get()
+    return v if v in VENUE_SOURCES else 'binance'
+
+
+def _sources_now():
+    return VENUE_SOURCES[_venue()]
+
+
+def _tfk(tf):
+    """کلید کشِ رژیم تایم‌فریم: برای Binance همان tf (سازگار با قبل)، برای Bitunix جدا؛ تا داده‌ی دو صرافی قاطی نشود."""
+    v = _venue()
+    return tf if v == 'binance' else f'{tf}@{v}'
+
+
+def _session_venue(s):
+    """از روی خودِ session: PAPER → 'binance'؛ REAL → real_exchange کاربر."""
+    try:
+        if isinstance(s, dict) and s.get('trading_mode') == 'REAL':
+            v = s.get('real_exchange')
+            return v if v in VENUE_SOURCES else 'binance'
+    except Exception:
+        pass
+    return 'binance'
+
+
+def data_venue_for(chat_id):
+    """PAPER → همیشه 'binance'؛ REAL → صرافیِ انتخابیِ کاربر ('binance' | 'bitunix')."""
+    try:
+        return _session_venue(USER_SESSIONS.get(chat_id))
+    except Exception:
+        return 'binance'
+
+
+def _with_data_venue(fn, kind, idx):
+    """دکوراتور: صرافیِ داده را برای مدت اجرای تابع (و هر چه از آن صدا زده شود) تنظیم می‌کند.
+    kind: 'chat' (آرگومان chat_id) | 'sess' (آرگومان session کاربر) | 'rec' (دیکشنریِ رکورد که 'chat_id' دارد)."""
+    def _venue_of(args, kwargs, pname):
+        v = kwargs.get(pname) if pname in kwargs else (args[idx] if idx is not None and len(args) > idx else None)
+        if v is None: return None
+        if kind == 'chat': return data_venue_for(v)
+        if kind == 'sess': return _session_venue(v) if isinstance(v, dict) and 'trading_mode' in v else None
+        if isinstance(v, dict) and v.get('chat_id') is not None: return data_venue_for(v.get('chat_id'))
+        return None
+    pname = {'chat': 'chat_id', 'sess': 's'}.get(kind, None) or fn.__code__.co_varnames[idx]
+    if inspect.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def aw(*args, **kwargs):
+            ven = _venue_of(args, kwargs, pname)
+            if ven is None: return await fn(*args, **kwargs)
+            tok = _DATA_VENUE_CTX.set(ven)
+            try: return await fn(*args, **kwargs)
+            finally: _DATA_VENUE_CTX.reset(tok)
+        return aw
+    @functools.wraps(fn)
+    def w(*args, **kwargs):
+        ven = _venue_of(args, kwargs, pname)
+        if ven is None: return fn(*args, **kwargs)
+        tok = _DATA_VENUE_CTX.set(ven)
+        try: return fn(*args, **kwargs)
+        finally: _DATA_VENUE_CTX.reset(tok)
+    return w
+
+
+def _install_data_venue_wrappers():
+    """V3.44.98: هر تابعِ سطح-ماژول که chat_id / session (s) / رکورد (r, rec) می‌گیرد با صرافیِ داده‌ی همان کاربر اجرا می‌شود؛
+    پس همه‌ی get_klines / latest_price / سطوح تاریخی / لینک TradingView داخل آن خودکار از صرافیِ درست می‌آیند."""
+    g = globals(); n = 0
+    for name, fn in list(g.items()):
+        if name.startswith('__') or not inspect.isfunction(fn) or fn.__module__ != __name__: continue
+        if getattr(fn, '_venue_wrapped', False) or name in ('_with_data_venue', '_install_data_venue_wrappers', 'data_venue_for', '_session_venue', '_venue', '_sources_now'):
+            continue
+        if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn): continue
+        params = list(fn.__code__.co_varnames[:fn.__code__.co_argcount])
+        kind = idx = None
+        for k, pn in (('chat', 'chat_id'), ('sess', 's'), ('rec', 'rec'), ('rec', 'r')):
+            if pn in params: kind, idx = k, params.index(pn); break
+        if kind is None: continue
+        w = _with_data_venue(fn, kind, idx); w._venue_wrapped = True
+        g[name] = w; n += 1
+    return n
+
 
 def _binance_base_url(source):
     return BINANCE_VISION if source == 'binancevision' else BINANCE_SPOT
@@ -2666,12 +2755,12 @@ def _fail_note(source, status, payload):
 def get_klines(symbol, tf='5min', limit=200):
     """کندل‌ها را از اولین منبع سالم می‌گیرد (Bitunix Futures -> Binance Spot -> Binance Vision).
     آخرین ردیف کندلِ در حال تشکیل است (استراتژی از iloc[-2] استفاده می‌کند)."""
-    period = TIMEFRAME_MAP.get(tf, tf); key = f'{symbol}:{period}:{limit}'; now = time.time()
+    period = TIMEFRAME_MAP.get(tf, tf); key = f'{_venue()}:{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
         c = DATA_CACHE.get(key)
         if c and now - c['ts'] < DATA_CACHE_SECONDS: return c['df'].copy()
     base = _base_asset(symbol); notes = []
-    for source in MARKET_DATA_SOURCES:
+    for source in _sources_now():
         if not _source_available(source): notes.append(f'{source}:down'); continue
         if _symbol_missing(source, base): notes.append(f'{source}:skipped_missing'); continue
         if source in _BINANCE_SOURCES and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
@@ -2712,23 +2801,34 @@ def get_klines(symbol, tf='5min', limit=200):
     return pd.DataFrame()
 
 
+
+def get_klines_for(chat_id, symbol, tf='5min', limit=200):
+    """get_klines با صرافیِ حالتِ همان کاربر (برای حلقه‌های پس‌زمینه که روی همه‌ی کاربران می‌چرخند)."""
+    tok = _DATA_VENUE_CTX.set(data_venue_for(chat_id))
+    try:
+        return get_klines(symbol, tf, limit)
+    finally:
+        _DATA_VENUE_CTX.reset(tok)
+
+
 async def get_klines_async(http, symbol, tf='5min', limit=200):
     """نسخه‌ی async با همان ترتیب منابع get_klines."""
-    period = TIMEFRAME_MAP.get(tf, tf); key = f'{symbol}:{period}:{limit}'; now = time.time()
+    period = TIMEFRAME_MAP.get(tf, tf); key = f'{_venue()}:{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
         c = DATA_CACHE.get(key)
         if c and now - c['ts'] < DATA_CACHE_SECONDS: return c['df'].copy()
     base = _base_asset(symbol); notes = []
     loop = asyncio.get_running_loop()
-    if any(s in MARKET_DATA_SOURCES and _source_available(s) for s in _BINANCE_SOURCES) and _binance_map_needs_refresh():
+    _srcs = _sources_now()
+    if any(s in _srcs and _source_available(s) for s in _BINANCE_SOURCES) and _binance_map_needs_refresh():
         try: await asyncio.to_thread(_binance_refresh_symbol_map)   # درخواست sync را از event loop دور نگه می‌دارد
         except Exception as exc: logger.debug('binance symbol map refresh: %s', exc)
-    if 'bitunix' in MARKET_DATA_SOURCES and _source_available('bitunix') and _bitunix_map_needs_refresh():
+    if 'bitunix' in _srcs and _source_available('bitunix') and _bitunix_map_needs_refresh():
         try: await loop.run_in_executor(_BITUNIX_POOL, _bitunix_refresh_symbol_map)
         except Exception as exc: logger.debug('bitunix symbol map refresh: %s', exc)
     await ASYNC_SEMAPHORE.acquire()
     try:
-        for source in MARKET_DATA_SOURCES:
+        for source in _srcs:
             if not _source_available(source): notes.append(f'{source}:down'); continue
             if _symbol_missing(source, base): notes.append(f'{source}:skipped_missing'); continue
             payload = None
@@ -2768,12 +2868,12 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
     return pd.DataFrame()
 def latest_price(symbol):
     """قیمت لحظه‌ای برای PAPER (از همان زنجیره‌ی منابعِ کندل‌ها: Bitunix -> Binance)."""
-    key = symbol.upper(); now = time.time()
+    key = f'{_venue()}:{symbol.upper()}'; now = time.time()
     with DATA_LOCK:
         c = PRICE_CACHE.get(key)
         if c and now - c['ts'] < 5: return c['price']
     base = _base_asset(symbol)
-    for source in MARKET_DATA_SOURCES:
+    for source in _sources_now():
         if not _source_available(source) or _symbol_missing(source, base): continue
         if source in _BINANCE_SOURCES and _binance_map_needs_refresh(): _binance_refresh_symbol_map()
         if source == 'bitunix':
@@ -3269,7 +3369,7 @@ def pnl_estimate_lines(entry, sl, tp, side, margin=0.0, leverage=0, platform_rat
 
 def _tf_regime_line(tf):
     """یک خط کوتاه: رژیم/جهت بازار روی تایم‌فریم فعال (از کش گیت جهت بازار؛ هر چرخه‌ی اسکن تازه می‌شود)."""
-    gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+    gate = (TIMEFRAME_REGIME_CACHE.get(_tfk(tf)) or {}).get('gate')
     label = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(gate, '⏳ نامشخص')
     return f"🧭 رژیم بازار ({TF_DISPLAY.get(tf, tf)}): *{label}*"
 
@@ -3284,7 +3384,7 @@ def _ensure_tf_gate_sync(tf):
     """رژیم بازار تایم‌فریم tf را در TIMEFRAME_REGIME_CACHE تازه نگه می‌دارد (نسخه‌ی همگام، برای حلقه‌ی
     کانال که جدا از اسکن اصلی اجرا می‌شود). همان منطق refresh_market_gate؛ فقط اگر کش نیست/کهنه است محاسبه می‌کند."""
     try:
-        c = TIMEFRAME_REGIME_CACHE.get(tf)
+        c = TIMEFRAME_REGIME_CACHE.get(_tfk(tf))
         if c and c.get('gate') and time.time() - float(c.get('ts', 0) or 0) < TIMEFRAME_REGIME_TTL:
             return
         with ThreadPoolExecutor(max_workers=min(6, len(MARKET_REPORT_SYMBOLS))) as ex:
@@ -3294,7 +3394,7 @@ def _ensure_tf_gate_sync(tf):
         bull_n = sum(1 for x in scores if x > 0)
         bear_n = sum(1 for x in scores if x < 0)
         gate = 'BULLISH' if bull_n >= MARKET_GATE_MIN_SYMBOLS else ('BEARISH' if bear_n >= MARKET_GATE_MIN_SYMBOLS else 'RANGE')
-        TIMEFRAME_REGIME_CACHE[tf] = {
+        TIMEFRAME_REGIME_CACHE[_tfk(tf)] = {
             'ts': (time.time() if total >= MARKET_GATE_MIN_SYMBOLS else 0.0), 'gate': gate,
             'bull_n': bull_n, 'bear_n': bear_n, 'total': total,
             'bull_pct': (bull_n / total * 100.0) if total else 0.0,
@@ -3435,17 +3535,18 @@ TRADINGVIEW_BUTTON_INTERVAL = os.environ.get('TRADINGVIEW_BUTTON_INTERVAL', '').
 _TV_INTERVALS = {'1min': '1', '3min': '3', '5min': '5', '15min': '15', '30min': '30', '1hour': '60', '2hour': '120', '4hour': '240', '1day': 'D', '1week': 'W'}
 
 
-def tradingview_symbol(symbol):
-    """نماد برای TradingView، مثلاً BINANCE:FILUSDT (اسپات، بدون .P).
-    صرافی = منبعی که داده‌ی همین نماد از آن آمده؛ برای بیتیونیکس (فیوچرز) BITUNIX:FILUSDT.P؛ پیش‌فرض BINANCE اسپات."""
+def tradingview_symbol(symbol, chat_id=None):
+    """نماد برای TradingView. V3.44.98: صرافی = صرافیِ حالتِ کاربر (نه «آخرین منبعی که داده داد»):
+    PAPER → همیشه BINANCE:XUSDT (اسپات، بدون .P)؛ REAL+Binance → BINANCE:XUSDT؛ REAL+Bitunix → BITUNIX:XUSDT.P (فیوچرز).
+    chat_id اگر داده نشود، همان صرافیِ زمینه‌ی جاری (contextvar) خوانده می‌شود."""
     base = _base_asset(symbol)
-    src = _DATA_SOURCE_USED.get(base, '')
-    exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(src, 'BINANCE')
-    suffix = '.P' if (not TRADINGVIEW_EXCHANGE and src == 'bitunix') else ''
+    venue = data_venue_for(chat_id) if chat_id is not None else _venue()
+    exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(venue, 'BINANCE')
+    suffix = '.P' if (not TRADINGVIEW_EXCHANGE and venue == 'bitunix') else ''
     return f'{exchange}:{base}USDT{suffix}'
 
 
-def tradingview_chart_url(symbol, timeframe='5min'):
+def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):
     """
     لینک چارت TradingView برای نماد/تایم‌فریم فعال (بازار اسپات، هم‌جنس با داده‌ی اسکنر).
     این یک لینک معمولی tradingview.com است؛ تلگرام و سیستم‌عامل موبایل به‌صورت خودکار
@@ -3454,7 +3555,7 @@ def tradingview_chart_url(symbol, timeframe='5min'):
     """
     # V3.44.25: تایم‌فریم چارت = تایم‌فریم همان سیگنال/کاربر (۱۵ دقیقه → ۱۵، ۴ ساعته → ۲۴۰ ...)؛ اگر TRADINGVIEW_BUTTON_INTERVAL ست شده باشد همان ثابت می‌ماند.
     interval = TRADINGVIEW_BUTTON_INTERVAL or _TV_INTERVALS.get(str(timeframe or '').strip().lower(), '5')
-    tv_symbol = urlparse.quote(tradingview_symbol(symbol), safe='')
+    tv_symbol = urlparse.quote(tradingview_symbol(symbol, chat_id), safe='')
     return f'https://www.tradingview.com/chart/?symbol={tv_symbol}&interval={interval}'
 
 
@@ -3988,7 +4089,7 @@ def btc_front_level_info(s, tf, is_long):
     chop_win = _ci('btc_chop_window', BTC_CHOP_WINDOW, 4)
     chop_k = _ci('btc_chop_clear_closes', BTC_CHOP_CLEAR_CLOSES, 1)
     chop_x = _cf('btc_chop_clear_atr', BTC_CHOP_CLEAR_ATR)
-    ckey = (tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
+    ckey = (_venue(), tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
             cfg0.get('halving_min_depth'), cfg0.get('halving_max_depth'), bool(cfg0.get('halving_dynamic_k')),
             bool(cfg0.get('halving_only_targets', True)))
     with _BTC_FRONT_LOCK:
@@ -4674,7 +4775,7 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
                     logger.exception('sweep_retest indicator calc failed symbol=%s', symbol)
                 last_row = ind_df_r.iloc[-2].to_dict() if (ind_df_r is not None and len(ind_df_r) >= 2) else None
                 reg_r = _signal_channel_symbol_regime(df)
-                mkt_r = (TIMEFRAME_REGIME_CACHE.get(timeframe) or {}).get('gate')
+                mkt_r = (TIMEFRAME_REGIME_CACHE.get(_tfk(timeframe)) or {}).get('gate')
                 for tag, side_fa, lvl, st in cands:
                     side_r = 'BUY' if side_fa == 'کف' else 'SELL'
                     rec_row = None
@@ -4995,7 +5096,7 @@ def _signal_channel_scan_once():
             # V3.43.13: هم‌جهتی کامل (همه‌ی الگوها): رژیم بازار + رژیم نماد + ۳ اندیکاتور + جهت سیگنال. در غیر این‌صورت ارسال نمی‌شود
             # (کلید ثبت نمی‌شود؛ اگر شرایط روی همان کندل بعداً هم‌جهت شد، ارسال می‌شود).
             if _SIGNAL_CHANNEL_FLAGS.get('align4'):
-                _mkt_regime = (TIMEFRAME_REGIME_CACHE.get(timeframe) or {}).get('gate')
+                _mkt_regime = (TIMEFRAME_REGIME_CACHE.get(_tfk(timeframe)) or {}).get('gate')
                 if not _signal_channel_align4_ok(verdict or implied_side, regime, _mkt_regime, buy_votes, sell_votes):
                     continue
             # V3.43.11: «شکست کاذب + ریتست + تأیید»: آخرین شرط = ریسک‌به‌ریوارد طرح (ورود لحظه‌ای، SL/TP همان طرح پیام) حداقل SIGNAL_CHANNEL_RULE_MIN_RR.
@@ -5514,7 +5615,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.97'
+BOT_VERSION = '3.44.98'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -5902,7 +6003,7 @@ def _regime_alignment_snapshot(symbol, timeframe):
     except Exception:
         pass
     try:
-        tf_cache = TIMEFRAME_REGIME_CACHE.get(timeframe)
+        tf_cache = TIMEFRAME_REGIME_CACHE.get(_tfk(timeframe))
         if tf_cache:
             out['timeframe_bull_pct'] = round(float(tf_cache.get('bull_pct') or 0.0), 1)
             out['timeframe_bear_pct'] = round(float(tf_cache.get('bear_pct') or 0.0), 1)
@@ -6449,13 +6550,13 @@ async def get_log_grid_levels(http, symbol):
     (تا LOG_GRID_LOOKBACK_DAYS کندل، برای تخمین نزدیک به کف/سقف کل تاریخچه‌ی نماد -
     دقیقاً مثل chart_low/chart_high در اسکریپت اصلی که کل چارت را می‌بیند).
     """
-    now = time.time()
-    c = LOG_GRID_CACHE.get(symbol)
+    now = time.time(); _ck = f'{_venue()}:{symbol}'
+    c = LOG_GRID_CACHE.get(_ck)
     if c and now - c['ts'] < LOG_GRID_TTL:
         return c['levels']
     d = await get_klines_async(http, symbol, '1day', LOG_GRID_LOOKBACK_DAYS)
     levels = compute_log_grid_levels(d, LOG_GRID_BASE_STEPS) if d is not None and not d.empty else []
-    LOG_GRID_CACHE[symbol] = {'ts': now, 'levels': levels}
+    LOG_GRID_CACHE[_ck] = {'ts': now, 'levels': levels}
     return levels
 
 
@@ -6571,8 +6672,8 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
 def _log_grid_levels_sync(symbol):
     """نسخه‌ی همگام get_log_grid_levels (از همان کش LOG_GRID_CACHE استفاده می‌کند) -
     برای مسیرهایی که داخل حلقه‌ی async اسکن نیستند، مثل ورود سریع از دکمه‌ی کانال."""
-    now = time.time()
-    c = LOG_GRID_CACHE.get(symbol)
+    now = time.time(); _ck = f'{_venue()}:{symbol}'
+    c = LOG_GRID_CACHE.get(_ck)
     if c and now - c['ts'] < LOG_GRID_TTL:
         return c['levels']
     try:
@@ -6581,7 +6682,7 @@ def _log_grid_levels_sync(symbol):
     except Exception:
         logger.exception('log grid (sync) failed symbol=%s', symbol)
         levels = []
-    LOG_GRID_CACHE[symbol] = {'ts': now, 'levels': levels}
+    LOG_GRID_CACHE[_ck] = {'ts': now, 'levels': levels}
     return levels
 
 
@@ -6639,10 +6740,63 @@ def _halving_manual_table():
 
 
 def _manual_halving_range(symbol):
-    rng = _halving_manual_table().get(_base_asset(symbol))
+    table = _halving_manual_table()
+    if _venue() != 'binance':
+        # V3.44.98: مقادیر داخلی (BTC/ETH) از چارت/Binance استخراج شده‌اند؛ برای Bitunix فقط override صریح کاربر (env) معتبر است.
+        table = {k: v for k, v in table.items() if k not in _HALVING_RANGE_BUILTIN or tuple(v) != tuple(_HALVING_RANGE_BUILTIN[k])}
+    rng = table.get(_base_asset(symbol))
     if rng:
         _HIST_RANGE_SRC[symbol] = ('Manual', tuple(rng))
     return rng
+
+
+def _bitunix_hist_range_sync(symbol):
+    """V3.44.98: سقف/کف تاریخیِ نماد از فیوچرز Bitunix (کندل هفتگی تا ۵×۲۰۰؛ اگر تاریخچه کمتر از ۸ هفته بود روزانه). یا None."""
+    base = _base_asset(symbol)
+    if _bitunix_map_needs_refresh():
+        try:
+            _bitunix_refresh_symbol_map()
+        except Exception as exc:
+            logger.debug('bitunix symbol map refresh: %s', exc)
+    sym = _bitunix_symbol_from_cache(base)
+    if not sym or not _source_available('bitunix'):
+        return None
+    for interval in ('1w', '1d'):
+        frames = []; end = None
+        try:
+            for _ in range(5):
+                params = {'symbol': sym, 'interval': interval, 'limit': 200}
+                if end:
+                    params['endTime'] = end
+                r = _bitunix_get('/api/v1/futures/market/kline', params, timeout=10)
+                if _status_trips_source(r.status_code):
+                    _source_trip('bitunix'); return None
+                if not r.ok:
+                    break
+                df = _bitunix_kline_df(r.json())
+                if df.empty:
+                    break
+                frames.append(df)
+                if len(df) < 200:
+                    break
+                end = int(df['timestamp'].iloc[0]) - 1
+        except Exception as exc:
+            logger.debug('bitunix hist range %s: %s', symbol, exc)
+            _source_fail('bitunix')
+            return None
+        if not frames:
+            continue
+        _source_ok('bitunix')
+        rng = _halving_range_from_df(pd.concat(frames[::-1]).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True))
+        if rng:
+            logger.info('halving range %s from bitunix/%s: high=%s low=%s', symbol, interval, rng[0], rng[1])
+            _HIST_RANGE_SRC[symbol] = ('Bitunix', tuple(rng))
+            return rng
+    return None
+
+
+def _hist_range_sync_for_venue(symbol):
+    return _bitunix_hist_range_sync(symbol) if _venue() == 'bitunix' else _binance_hist_range_sync(symbol)
 
 
 def _binance_hist_range_sync(symbol):
@@ -6691,38 +6845,38 @@ def _binance_hist_range_sync(symbol):
 async def get_halving_range(http, symbol):
     """سقف/کف تاریخی نماد برای مدل نصف‌کردن (کش‌شده). فقط Binance (یا جدول دستی/داخلی برای BTC/ETH یا env).
     V3.44.97: Bybit و کندل‌های منبع‌های دیگر حذف شدند؛ نمادی که روی Binance نیست سقف/کف ندارد (None) و معامله نمی‌شود."""
-    now = time.time()
-    c = HALVING_RANGE_CACHE.get(symbol)
+    now = time.time(); _ck = f'{_venue()}:{symbol}'
+    c = HALVING_RANGE_CACHE.get(_ck)
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
     rng = _manual_halving_range(symbol)        # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
     if not rng:
         try:
-            rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)      # V3.44.89: کل تاریخچه‌ی نماد روی Binance
+            rng = await asyncio.to_thread(_hist_range_sync_for_venue, symbol)      # V3.44.98: کل تاریخچه‌ی نماد روی صرافیِ حالت (Binance یا Bitunix)
         except Exception as exc:
             logger.debug('binance hist range %s: %s', symbol, exc)
             rng = None
     if rng:
-        HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
+        HALVING_RANGE_CACHE[_ck] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
-        return c['range']      # Binance لحظه‌ای جواب نداد: آخرین مقدار معتبرِ خودِ Binance
+        return c['range']      # صرافی لحظه‌ای جواب نداد: آخرین مقدار معتبرِ همان صرافی
     return rng
 
 
 def get_halving_range_sync(symbol):
-    now = time.time()
-    c = HALVING_RANGE_CACHE.get(symbol)
+    now = time.time(); _ck = f'{_venue()}:{symbol}'
+    c = HALVING_RANGE_CACHE.get(_ck)
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
     rng = _manual_halving_range(symbol)            # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
     if not rng:
         try:
-            rng = _binance_hist_range_sync(symbol)     # V3.44.97: فقط Binance
+            rng = _hist_range_sync_for_venue(symbol)     # V3.44.98: صرافیِ حالت (Binance یا Bitunix)
         except Exception as exc:
             logger.debug('binance hist range %s: %s', symbol, exc)
             rng = None
     if rng:
-        HALVING_RANGE_CACHE[symbol] = {'ts': now, 'range': rng}
+        HALVING_RANGE_CACHE[_ck] = {'ts': now, 'range': rng}
     elif c and c.get('range'):
         return c['range']
     return rng
@@ -9853,7 +10007,7 @@ def _entry_diag_report(chat_id, results, elapsed, symbol_states=None, transition
 
 def _active_tf_regime_status(tf):
     """رژیم بازار روی تایم‌فریم فعال (فقط نمایش؛ منطق در refresh_market_gate)."""
-    c = TIMEFRAME_REGIME_CACHE.get(tf) or {}
+    c = TIMEFRAME_REGIME_CACHE.get(_tfk(tf)) or {}
     gate = c.get('gate')
     if not gate:
         return '⏳ هنوز محاسبه نشده'
@@ -10247,11 +10401,11 @@ _TREND_SNAP_TTL = 20.0
 
 def _trend_snapshot_cached(sym, tf):
     now = time.time()
-    c = _TREND_SNAP_CACHE.get((sym, tf))
+    c = _TREND_SNAP_CACHE.get((sym, tf, _venue()))
     if c and now - c[0] < _TREND_SNAP_TTL:
         return c[1]
     snap = _market_snapshot(sym, tf)
-    _TREND_SNAP_CACHE[(sym, tf)] = (now, snap)
+    _TREND_SNAP_CACHE[(sym, tf, _venue())] = (now, snap)
     return snap
 
 
@@ -10680,7 +10834,7 @@ def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
         if not snap:
             out['items'][sym] = ('na', None)
             continue
-        _TREND_SNAP_CACHE[(sym, tf)] = (time.time(), snap)
+        _TREND_SNAP_CACHE[(sym, tf, _venue())] = (time.time(), snap)
         sc = int(snap.get('score', 0))
         bad = (sc < 0 and is_long) or (sc > 0 and not is_long)
         out['items'][sym] = ('bad' if bad else 'ok', sc)
@@ -11027,7 +11181,7 @@ def _final_regime_check(tf, sig):
         _ensure_tf_gate_sync(tf)
     except Exception:
         logger.exception('final regime: gate refresh failed tf=%s', tf)
-    gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+    gate = (TIMEFRAME_REGIME_CACHE.get(_tfk(tf)) or {}).get('gate')
     return _final_regime_verdict(gate, sig)
 
 
@@ -11570,7 +11724,7 @@ def fav_filters_popup(chat_id, rid):
         reg_line = ''
         if gate_on(s, 'gate_final_regime_enabled'):
             reg_ok, _t = _final_regime_check(tf, sig)
-            gate = (TIMEFRAME_REGIME_CACHE.get(tf) or {}).get('gate')
+            gate = (TIMEFRAME_REGIME_CACHE.get(_tfk(tf)) or {}).get('gate')
             reg_fa = {'BULLISH': 'صعودی', 'BEARISH': 'نزولی', 'RANGE': 'رنج'}.get(gate, 'نامشخص')
             reg_line = f"🧭 رژیم {TF_DISPLAY.get(tf, tf)}: {reg_fa} {'✅' if reg_ok else '❌'}"
         last_close_r = None
@@ -11738,7 +11892,7 @@ def fav_shadow_once():
                 by_sym.setdefault(r['symbol'], []).append(r)
             for sym, recs in by_sym.items():
                 try:
-                    df = get_klines(sym, recs[0].get('tf') or '5min', 300)
+                    df = get_klines_for(chat_id, sym, recs[0].get('tf') or '5min', 300)
                 except Exception:
                     df = None
                 if df is None or getattr(df, 'empty', True):
@@ -12345,7 +12499,7 @@ def _btc_pattern_vote(tf, cfg=None):
     که برای نماد استفاده می‌شود روی داده‌ی BTC و سطوح خودِ BTC اجرا می‌شود. خروجی (vote, توضیح)؛ vote: 'BUY' | 'SELL' | None
     (الگویی روی BTC نیست، BTC بلاتکلیف است یا داده نیست). نتیجه ۱۵ ثانیه کش می‌شود تا هر بار بررسی لیست انتظار BTC را دوباره نخواند."""
     base = {**STRATEGY_DEFAULTS, **(cfg or {})}
-    ckey = (tf, hash(repr(sorted((k, repr(v)) for k, v in base.items()))))
+    ckey = (_venue(), tf, hash(repr(sorted((k, repr(v)) for k, v in base.items()))))
     now = time.time()
     hit = _BTCPAT_CACHE.get(ckey)       # عملیات ساده‌ی dict زیر GIL امن است؛ بدون قفل (تا کد در تست‌های مستقل هم بارگذاری شود)
     if hit and now - hit[0] < BTCPAT_CACHE_TTL:
@@ -13497,7 +13651,7 @@ def assist_maintenance_once():
                 by_symbol.setdefault(r['symbol'], []).append(r)
             for sym, recs in by_symbol.items():
                 try:
-                    df = get_klines(sym, recs[0].get('tf') or '5min', 300)
+                    df = get_klines_for(chat_id, sym, recs[0].get('tf') or '5min', 300)
                 except Exception:
                     df = None
                 if df is None or getattr(df, 'empty', True):
@@ -14936,7 +15090,7 @@ def symbol_levels_report(chat_id, raw_symbol):
     if rng:
         hi, lo = float(rng[0]), float(rng[1])
         src_rec = _HIST_RANGE_SRC.get(symbol)
-        _lbl = {'Manual': 'جدول دستی (هم‌تراز با TradingView)', 'Binance': 'Binance'}
+        _lbl = {'Manual': 'جدول دستی (هم‌تراز با TradingView)', 'Binance': 'Binance', 'Bitunix': 'Bitunix'}
         src = _lbl.get(src_rec[0]) if (src_rec and src_rec[0] in _lbl and (abs(src_rec[1][0] - hi) < 1e-12 * max(1.0, hi)) and (abs(src_rec[1][1] - lo) < 1e-12 * max(1.0, lo))) \
             else 'نامشخص'
         pos = min(100.0, max(0.0, (price - lo) / (hi - lo) * 100.0)) if hi > lo else 0.0
@@ -15310,7 +15464,7 @@ async def refresh_market_gate(http, timeframe):
     تا چرخه‌ی بعد دوباره تلاش شود."""
     tf = timeframe
     now = time.time()
-    c = TIMEFRAME_REGIME_CACHE.get(tf)
+    c = TIMEFRAME_REGIME_CACHE.get(_tfk(tf))
     if c and now - c['ts'] < TIMEFRAME_REGIME_TTL:
         return c['gate']
     scores = await asyncio.gather(*[_market_snapshot_async(http, sym, tf) for sym in MARKET_REPORT_SYMBOLS])
@@ -15332,7 +15486,7 @@ async def refresh_market_gate(http, timeframe):
     }
     if total < MARKET_GATE_MIN_SYMBOLS:
         entry['ts'] = 0.0  # داده‌ی ناکافی: ورود ممنوع، ولی نتیجه کش نمی‌شود و چرخه‌ی بعد دوباره تلاش می‌کند
-    TIMEFRAME_REGIME_CACHE[tf] = entry
+    TIMEFRAME_REGIME_CACHE[_tfk(tf)] = entry
     return gate
 
 
@@ -18063,6 +18217,9 @@ def _watchlist_refresh_loop():
         except Exception:
             logger.exception('watchlist spot refresh failed')
         time.sleep(24 * 3600)
+
+
+_DATA_VENUE_WRAPPED = _install_data_venue_wrappers()
 
 
 def main():

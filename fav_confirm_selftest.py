@@ -6,7 +6,7 @@ block=src[a:b]
 sent=[]; calls=[]
 S={'paper_positions':[],'timeframe':'5min','trading_mode':'PAPER','fav_confirm_enabled':True}
 state={'live':100.15,'df':None,'gate':False,'exec_ok':True}
-g=dict(os=os,time=time,hashlib=hashlib,logger=logging.getLogger('t'),pd=pd,
+g=dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, os=os,time=time,hashlib=hashlib,logger=logging.getLogger('t'),pd=pd,
   ASSIST_SEEN_TTL_SECONDS=21600,_TF_SECONDS={'5min':300},_LAST_BLOCK_REASON={},
   get_session=lambda c:S, save_session=lambda c:None, fmt=lambda v:str(v),
   extract_setup_level=lambda r:('t','L','1.0'),
@@ -17,6 +17,7 @@ g=dict(os=os,time=time,hashlib=hashlib,logger=logging.getLogger('t'),pd=pd,
   execute_trade=lambda *a,**k:(calls.append(k) or state['exec_ok']),
   gate_on=lambda s,k:False, _btc_front_flags=lambda s:(False,False), USER_SESSIONS={}, ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a,**k:(calls.append(('assist',a[5],a[3],k)) or 'assist_sent'))
 exec(block,g)
+g['get_klines_for']=lambda cid,sym,tf,n: g['get_klines'](sym,tf,n)   # V3.44.98
 D=g['_fav_decide']
 # BUY entry 100, sl 99 (R=1), tp 102 (2R)
 for px,exp in [(100.05,'wait'),(100.10,'wait'),(100.15,'confirm'),(100.30,'confirm'),(100.31,'overrun'),(99.4,'cancel'),(98.9,'cancel'),(102.0,'cancel')]:
