@@ -5615,7 +5615,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.99'
+BOT_VERSION = '3.44.100'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6690,13 +6690,27 @@ HALVING_RANGE_TTL = float(os.environ.get('HALVING_RANGE_TTL_SECONDS', '21600')) 
 HALVING_RANGE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
+HALVING_RANGE_WICK_RATIO = float(os.environ.get('HALVING_RANGE_WICK_RATIO', '0.01') or 0.01)   # V3.44.100: سایه‌ی کمتر از این نسبتِ بدنه (یا بیش از معکوسش) خطای داده است؛ 0 = فیلتر خاموش
+
+
 def _halving_range_from_df(d):
-    """(سقف، کف) تاریخی از کندل‌های هفتگی/روزانه (سایه‌ها: high/low) یا None."""
+    """(سقف، کف) تاریخی از کندل‌های هفتگی/روزانه (سایه‌ها: high/low) یا None.
+    V3.44.100: سایه‌ی غیرواقعی (مثلاً کف 0.0001 روی کندلی که بدنه‌اش حدود 2 است: LINK هفته‌ی 2020-03-09 در Binance) به بدنه‌ی همان
+    کندل محدود می‌شود تا سقف/کف با چارت TradingView یکی بماند و کل شبکه‌ی سطوح جابه‌جا نشود."""
     try:
         if d is None or d.empty or len(d) < 8:
             return None
-        hi = float(pd.to_numeric(d['high'], errors='coerce').max())
-        lo = float(pd.to_numeric(d['low'], errors='coerce').min())
+        hi_s = pd.to_numeric(d['high'], errors='coerce'); lo_s = pd.to_numeric(d['low'], errors='coerce')
+        ratio = HALVING_RANGE_WICK_RATIO
+        if ratio and ratio > 0 and 'open' in d.columns and 'close' in d.columns:
+            op = pd.to_numeric(d['open'], errors='coerce'); cl = pd.to_numeric(d['close'], errors='coerce')
+            body_lo = pd.concat([op, cl], axis=1).min(axis=1); body_hi = pd.concat([op, cl], axis=1).max(axis=1)
+            bad_lo = (body_lo > 0) & (lo_s < body_lo * ratio)
+            bad_hi = (body_hi > 0) & (hi_s > body_hi / ratio)
+            if bool(bad_lo.any()) or bool(bad_hi.any()):
+                logger.info('halving range: %d low-wick / %d high-wick outlier candle(s) clipped to body', int(bad_lo.sum()), int(bad_hi.sum()))
+            lo_s = lo_s.where(~bad_lo, body_lo); hi_s = hi_s.where(~bad_hi, body_hi)
+        hi = float(hi_s.max()); lo = float(lo_s.min())
         if math.isfinite(hi) and math.isfinite(lo) and lo > 0 and hi > lo:
             return (hi, lo)
     except Exception:

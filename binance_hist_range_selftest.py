@@ -94,8 +94,8 @@ reset(); FK.script[('api', '1w')] = (200, kl(40, 321.0, 3.0))
 assert asyncio.run(asyn(None, 'BTCUSDT')) == (321.0, 3.0) and cache['binance:BTCUSDT']['range'] == (321.0, 3.0) and not FK.fallback_calls
 print('7 async ok')
 
-# 8) داده‌ی خراب (کف ≤ ۰) رد می‌شود → برگشت به منبع قبلی
-reset(); FK.script[('api', '1w')] = (200, kl(40, 10.0, 0.0)); FK.script[('vision', '1w')] = (200, kl(40, 10.0, 0.0))
+# 8) داده‌ی خراب (سقف ≤ کف) رد می‌شود → None  (V3.44.100: کفِ صفر/سایه‌ی غیرواقعی دیگر خراب حساب نمی‌شود؛ به بدنه‌ی کندل محدود می‌شود)
+reset(); FK.script[('api', '1w')] = (200, kl(40, 3.0, 10.0)); FK.script[('vision', '1w')] = (200, kl(40, 3.0, 10.0))
 assert sync('ABCUSDT') is None and not FK.fallback_calls      # V3.44.97: داده‌ی خراب Binance = None
 print('8 bad-data -> none ok')
 print('ALL OK')
