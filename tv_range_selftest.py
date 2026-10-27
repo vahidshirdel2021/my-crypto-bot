@@ -39,18 +39,12 @@ exec(block, g)
 sync, cache, src_map = g['get_halving_range_sync'], g['HALVING_RANGE_CACHE'], g['_HIST_RANGE_SRC']
 def reset(): calls.clear(); script.clear(); down.clear(); cache.clear(); src_map.clear()
 
-# 1) ETH: جدول داخلی → سطوح دقیقاً همان چارت TradingView (±0.02)، بدون هیچ درخواست شبکه
-reset(); hi, lo = sync('ETHUSDT'); assert not calls and src_map['ETHUSDT'][0] == 'Manual'
-tv = [2216.04, 2247.90, 2279.76, 2311.61, 2343.47, 2375.33, 2407.19, 2439.04]
-D = hv.choose_depth(hi, lo, 7.5, 4.0, 3, 10); assert D == 7, D
-got = [round(x['price'], 2) for x in hv.levels_near(hi, lo, D, 2200, 2450)]
-assert len(got) == len(tv) and all(abs(x - y) <= 0.03 for x, y in zip(got, tv)), got
-depths = [x['depth'] for x in hv.levels_near(hi, lo, D, 2200, 2450)]; assert depths == [6, 7, 5, 7, 6, 7, 3, 7], depths
-print('1 ETH matches TradingView levels ok')
-
-# 2) BTC: همان رنج تأییدشده‌ی قبلی (فاصله‌ی عمق ۷ = ۹۶۳.۹۳)
-reset(); hi, lo = sync('BTCUSDT'); assert abs(hv.spacing_at(hi, lo, 7) - 963.93) < 0.01
-print('2 BTC range ok')
+# 1) V3.44.99: ETH/BTC دیگر جدول داخلی ندارند؛ سقف/کف از Binance می‌آید (کف واقعی تاریخچه‌ی Binance)
+reset(); script['binance'] = (200, [[0, 0, 4956.0, 81.79, 0, 0]] * 9)
+assert sync('ETHUSDT') == (4956.0, 81.79) and calls and src_map['ETHUSDT'][0] == 'Binance'
+reset(); script['binance'] = (200, [[0, 0, 126199.5, 15760.0, 0, 0]] * 9)
+assert sync('BTCUSDT') == (126199.5, 15760.0) and src_map['BTCUSDT'][0] == 'Binance'
+print('1-2 ETH/BTC from Binance ok')
 
 # 3) env بازنویسی می‌کند و "off" نماد را از جدول برمی‌دارد
 reset(); os.environ['HALVING_RANGE_OVERRIDE'] = json.dumps({'ETHUSDT': [5000, 900], 'SOLUSDT': [300, 10], 'BTC': 'off'})

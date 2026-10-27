@@ -5615,7 +5615,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.98'
+BOT_VERSION = '3.44.99'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6711,10 +6711,9 @@ _HIST_RANGE_SRC = {}     # {symbol: ('Binance', (سقف, کف))}؛ برای نم
 # از تاریخچه‌ی همان چارت (Bybit perp) استفاده می‌کند، نه کل تاریخچه‌ی Binance Spot (مثلاً کف اتریوم ۸۱.۷۹ در Binance
 # ولی ۸۷۸ در چارت) و شبکه‌ی سطوح کاملاً جابه‌جا می‌شد. ترتیب اولویت:
 #   1) env HALVING_RANGE_OVERRIDE   2) جدول داخلی (مقادیرِ استخراج‌شده از چارت TV)   3) Binance (V3.44.97: تنها منبع؛ Bybit و کندل ربات حذف شدند)
-_HALVING_RANGE_BUILTIN = {
-    'BTC': (126199.5, 2817.15),    # سقف، کف؛ تطبیق‌شده با چارت BTCUSDT 15m (فاصله‌ی عمق ۷ = ۹۶۳.۹۳)
-    'ETH': (4955.87, 878.0),       # بازسازی از سطوح چارت ETHUSDT 15m (فاصله‌ی عمق ۷ = ۳۱.۸۵۸)
-}
+# V3.44.99: جدول داخلی BTC/ETH حذف شد؛ سقف/کف همه‌ی نمادها (از جمله BTC/ETH) از کل تاریخچه‌ی صرافیِ حالت (Binance یا Bitunix) می‌آید.
+# فقط override صریح کاربر (env HALVING_RANGE_OVERRIDE) بر آن اولویت دارد.
+_HALVING_RANGE_BUILTIN = {}
 
 
 def _halving_manual_table():

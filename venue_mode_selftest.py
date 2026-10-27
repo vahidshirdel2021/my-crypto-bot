@@ -118,7 +118,7 @@ sync, cache, srcmap = henv['get_halving_range_sync'], henv['HALVING_RANGE_CACHE'
 def reset(v): calls.clear(); cache.clear(); srcmap.clear(); henv['_v'] = v
 
 # Binance: BTC از جدول داخلی (بدون درخواست)؛ نماد دیگر از Binance
-reset('binance'); hi, lo = sync('BTCUSDT'); assert not calls and srcmap['BTCUSDT'][0] == 'Manual'
+reset('binance'); hi, lo = sync('BTCUSDT'); assert (hi, lo) == (123.0, 2.0) and {c[0] for c in calls} == {'binance'} and srcmap['BTCUSDT'][0] == 'Binance'  # V3.44.99: جدول داخلی حذف شد
 reset('binance'); hi, lo = sync('FOOUSDT'); assert (hi, lo) == (123.0, 2.0) and {c[0] for c in calls} == {'binance'} and srcmap['FOOUSDT'][0] == 'Binance'
 # Bitunix: جدول داخلی BTC اعمال نمی‌شود، فقط Bitunix صدا زده می‌شود و Binance هرگز
 reset('bitunix'); hi, lo = sync('BTCUSDT'); assert (hi, lo) == (55.5, 3.25) and {c[0] for c in calls} == {'bitunix'} and srcmap['BTCUSDT'][0] == 'Bitunix', (hi, lo, calls)
