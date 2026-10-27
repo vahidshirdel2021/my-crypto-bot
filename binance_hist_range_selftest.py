@@ -1,6 +1,7 @@
 """تست آفلاین: سقف/کف تاریخی (مدل نصف‌کردن) اول از Binance گرفته می‌شود و فقط در نبودش به منبع قبلی برمی‌گردد.
 اجرا:  python binance_hist_range_selftest.py"""
-import os, re, time, math, asyncio, logging
+import os, re, json, time, math, asyncio, logging
+os.environ['HALVING_RANGE_BYBIT'] = '0'; os.environ['HALVING_RANGE_OVERRIDE'] = '{"BTC":"off","ETH":"off"}'   # V3.44.92: این تست فقط زنجیره‌ی Binance را می‌سنجد
 import pandas as pd
 
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.py'), encoding='utf-8').read()
@@ -46,7 +47,7 @@ g = dict(pd=pd, math=math, time=time, asyncio=asyncio, logger=logging.getLogger(
          _binance_base_url=lambda s: 'https://data-api.binance.vision' if s == 'binancevision' else 'https://api.binance.com',
          _source_available=lambda s: s not in state['down'], _source_trip=trip, _source_fail=lambda s: None, _source_ok=lambda s: None,
          _status_trips_source=lambda st: st in (403, 418, 429, 451) or st >= 500,
-         os=os, Dict=dict, Any=object)
+         os=os, json=json, Dict=dict, Any=object)
 def old_klines(sym, tf, lim):
     FK.fallback_calls.append((sym, tf, lim)); return kl(30, 999.0, 1.0) and _df(kl(30, 999.0, 1.0))
 def _df(rows):

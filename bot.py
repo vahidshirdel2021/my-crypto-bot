@@ -1059,6 +1059,7 @@ def default_session():
         'fav_confirm_max_mode': 'tp',
         'fav_confirm_max_tp_pct': 0.20,
         'fav_confirm_wait_sec': 1800,      # V3.44.27: مهلت پیش‌فرض صف تایید حرکت ۳۰ دقیقه
+        'fav_close_5m_enabled': False,     # V3.44.95: خروج از صف تایید حرکت روی کلوز کندل ۵ دقیقه‌ای (به‌جای تایم‌فریم سیگنال، مثلاً ۱۵ دقیقه). پیش‌فرض خاموش
         'fav_wait30': True,                # V3.44.27: نشانه‌ی اینکه مهاجرت مهلت قدیمی (۱۵ دقیقه) به ۳۰ دقیقه انجام شده
         # V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح
         'touch_auto_mode': 'all',
@@ -5513,12 +5514,12 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.94'
+BOT_VERSION = '3.44.95'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
-                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'touch_auto_mode', 'timeframe', 'active_strategy',
+                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'touch_auto_mode', 'timeframe', 'active_strategy',
                   'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
@@ -11031,6 +11032,18 @@ def _fav_move_r(sig, entry, sl, px):
     return mv / risk
 
 
+def _fav_eval_tf(s, tf):
+    """V3.44.95: تایم‌فریمِ کندلی که تایید صف روی «کلوز بسته‌شده»‌اش سنجیده می‌شود.
+    کلید fav_close_5m_enabled روشن و تایم‌فریم سیگنال بزرگ‌تر از ۵ دقیقه باشد = کلوز ۵ دقیقه‌ای (خروج زودتر)؛ وگرنه همان تایم‌فریم سیگنال.
+    فقط ارزیابی حرکت قیمت (min/max/cancel) را عوض می‌کند؛ رژیم/BTC/سطح دیروز همچنان روی تایم‌فریم سیگنال سنجیده می‌شوند."""
+    try:
+        if s.get('fav_close_5m_enabled', False) and _TF_SECONDS.get(tf, 300) > 300:
+            return '5min'
+    except Exception:
+        pass
+    return tf
+
+
 def _fav_decide(sig, entry, sl, tp, px, min_r, max_r, min_rr=None, cancel_r=None):
     """تصمیم روی قیمت px (کلوز کندل بسته‌شده): 'confirm' | 'overrun' | 'cancel' | 'wait'."""
     min_rr = FAV_CONFIRM_MIN_RR if min_rr is None else min_rr
@@ -11240,7 +11253,9 @@ def _fav_process_one_core(chat_id, s, rec):
     if any(p.get('symbol') == symbol for p in s.get('paper_positions', [])):
         return _fav_finish(chat_id, s, rec, 'skipped', f"ℹ️ صف تایید `{symbol}` لغو شد: همین حالا پوزیشن باز روی این نماد وجود دارد.")
     tf = rec.get('tf') or '5min'
-    tf_s = _TF_SECONDS.get(tf, 300)
+    ev_tf = _fav_eval_tf(s, tf)                 # V3.44.95: تایم‌فریم کندلِ ارزیابی (کلید «خروج سریع‌تر»: ۵ دقیقه)
+    tf_s = _TF_SECONDS.get(ev_tf, 300)          # فقط برای برگرداندنِ last_eval_ts (دوباره‌سنجی همان کندل در تیک بعد)
+    rec['eval_tf'] = ev_tf
     try:
         live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
         live = float(live) if live else None
@@ -11255,7 +11270,7 @@ def _fav_process_one_core(chat_id, s, rec):
     # ارزیابی روی کلوز کندل‌های بسته‌شده‌ی بعد از سیگنال (فقط کندل‌های جدید)
     decision, close_px = 'wait', None
     try:
-        df = get_klines(symbol, tf, 30)
+        df = get_klines(symbol, ev_tf, 30)
         if df is not None and len(df) >= 3:
             closed = df.iloc[:-1]            # آخرین ردیف کندل در حال تشکیل است
             for _, row in closed.iterrows():
@@ -11426,7 +11441,7 @@ def _fav_card_payload(r, now=None):
     if r.get('status') != 'waiting':
         lines += ['', _FAV_FINAL_TXT.get(r.get('status'), 'پایان') + (' 🔁 در جهت مخالف به «📋 سیگنال‌های در انتظار» رفت.' if r.get('flipped') and r.get('flip_status') in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened') else '')]
         return '\n'.join(lines), {'inline_keyboard': []}
-    lines += ['', 'تایید فقط روی کلوز کندل بسته‌شده انجام می‌شود.']
+    lines += ['', ('تایید فقط روی کلوز کندل بسته‌شده‌ی ۵ دقیقه‌ای انجام می‌شود.' if (r.get('eval_tf') == '5min' and tf != '5min') else 'تایید فقط روی کلوز کندل بسته‌شده انجام می‌شود.')]
     rid, sym = r['id'], r['symbol']
     row1 = [{'text': f"⚡ ورود سریع {sym} {'🟢 خرید' if is_long else '🔴 فروش'}", 'callback_data': f"/fq_qe_{'buy' if is_long else 'sell'}_{rid}"}]
     try:
@@ -11629,7 +11644,7 @@ def fav_filters_popup(chat_id, rid):
             reg_line = f"🧭 رژیم {TF_DISPLAY.get(tf, tf)}: {reg_fa} {'✅' if reg_ok else '❌'}"
         last_close_r = None
         try:
-            df = get_klines(sym, tf, 30)
+            df = get_klines(sym, _fav_eval_tf(s, tf), 30)
             if df is not None and len(df) >= 3:
                 row = df.iloc[-2]          # آخرین کندل بسته‌شده
                 ts = float(row['timestamp'])
@@ -14146,6 +14161,8 @@ def _filter_info(key):
             f'خاموش (پیش‌فرض): رژیم مثل قبل فقط از EMA20 و EMA50 ساخته می‌شود. روشن: برای «صعودی/نزولی» علاوه بر EMA، ADX ≥ {REGIME_ADX_MIN:g}، هم‌جهت بودن DI و هم‌جهت بودن شیب EMA50 هم لازم است و فاصله‌ی قیمت از EMA50 نباید خیلی کم باشد؛ وگرنه «رنج». روی همه‌ی بخش‌هایی که رژیم می‌سنجند اثر دارد (رژیم BTC/ETH، رژیم نماد، گیت جهت بازار) و برای کل ربات است. روشن کردنش معمولاً سیگنال کمتری می‌دهد.'),
         'fav_confirm': ('صبر برای تایید حرکت به نفع معامله',
             'سیگنال صادر می‌شود ولی بی‌صدا در پس‌زمینه می‌ماند (تا مهلت تنظیم‌شده). فقط وقتی کلوز یک کندل بسته‌شده بعد از سیگنال، بین «حداقل تایید» و «سقف ورود» (بر حسب R) به نفع معامله رفته باشد، کارت سیگنال مثل قبل نمایش داده می‌شود (حالت دستیار: کارت ورود/رد؛ حالت خودکار: ورود). SL و TP همان سطوح سیگنال می‌مانند. اگر قیمت از سقف گذشت، سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند و فقط در صورت برگشت وارد می‌شود (تعقیب قیمت نداریم). اگر خلاف جهت رفت، به SL رسید یا تایید نگرفت، چیزی نمایش داده نمی‌شود. پیش‌فرض: خاموش.'),
+        'fav_close5m': ('خروج سریع‌تر از صف (کلوز ۵ دقیقه)',
+            'خاموش (پیش‌فرض): صف تایید حرکت فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال (مثلاً ۱۵ دقیقه) تصمیم می‌گیرد. روشن: تصمیم روی کلوز هر کندل ۵ دقیقه‌ای گرفته می‌شود؛ پس سیگنال زودتر (تا ۱۰ دقیقه) از صف خارج می‌شود. شرط‌های حداقل تایید/سقف ورود/لغو همان می‌مانند ولی روی کلوزهای ۵ دقیقه‌ای حساس‌ترند. رژیم، BTC و سطح دیروز همچنان روی تایم‌فریم سیگنال سنجیده می‌شوند. فقط وقتی اثر دارد که تایم‌فریم سیگنال بزرگ‌تر از ۵ دقیقه باشد.'),
         'fav_min_r': ('حداقل تایید', 'قیمت باید حداقل این‌قدر (بر حسب R) به نفع معامله رفته باشد.'),
         'fav_max_r': ('سقف ورود', 'اگر قیمت بیشتر از این رفته باشد، ورود دیرهنگام است و سیگنال تا برگشت منتظر می‌ماند. پیش‌فرض: درصدی از فاصله‌ی ورود تا هدفِ همان سیگنال (برای هر نماد جدا)؛ با دکمه‌ی «نوع سقف» می‌شود آن را عدد ثابت R کرد.'),
         'fav_wait': ('مهلت صبر', 'حداکثر مدت صبر برای گرفتن تایید.'),
@@ -14383,6 +14400,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [{'text': f"🎯 حداقل تایید: +{_fmn:g}R", 'callback_data': '/fav_min_r_next'},
              {'text': f"🚧 سقف ورود: {_fav_max_label(s)}", 'callback_data': '/fav_max_r_next'},
              {'text': f"⏱ مهلت: {_fwt // 60} دقیقه", 'callback_data': '/fav_wait_next'}],
+            [fcell(bool(s.get('fav_close_5m_enabled', False)), 'fav_close5m', '/toggle_fav_close5m')],
             [{'text': ('📏 سقف: بر اساس فاصله تا هدف ✅' if _fav_max_mode(s) == 'tp' else '📏 سقف: عدد ثابت R'), 'callback_data': '/fav_max_mode_toggle'}],
             [{'text': '⏳ مشاهده‌ی صف تایید', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
             ] + [_grow(k) for k in _rest] + [back_entry])}
@@ -16476,6 +16494,14 @@ def process_command(cmd,chat_id,message_id=None):
         note = (f'از این پس سیگنال صادر می‌شود ولی تا {_wt // 60} دقیقه بی‌صدا در پس‌زمینه می‌ماند؛ فقط وقتی حداقل +{_mn:g}R و حداکثر {_fav_max_label(s)} به نفع معامله رفت، کارت سیگنال مثل قبل نمایش داده می‌شود (SL/TP همان سیگنال). اگر تایید نگرفت، چیزی نمایش داده نمی‌شود.'
                 if not current else 'برگشت به حالت قبلی: سیگنال‌ها بدون صبر وارد می‌شوند. سیگنال‌هایی که الان در صف‌اند تا پایان مهلت بررسی می‌شوند.')
         send_message(chat_id, f"⏳ {_filter_info('fav_confirm')[0]}: {'🟢 روشن' if not current else '🔴 خاموش'}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
+        return
+    if cl == '/toggle_fav_close5m':
+        current = bool(s.get('fav_close_5m_enabled', False))
+        s['fav_close_5m_enabled'] = not current
+        save_session(chat_id)
+        note = ('از این پس تایید صف روی کلوز کندل‌های ۵ دقیقه‌ای سنجیده می‌شود؛ سیگنال زودتر از صف خارج می‌شود (روی سیگنال‌های در صف هم از کندل بعدی اثر می‌کند). این حالت روی کلوزهای ۵ دقیقه‌ای حساس‌تر است و لغو/رد شدن‌ها هم ممکن است بیشتر شود.'
+                if not current else 'برگشت به حالت قبلی: تایید صف فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال انجام می‌شود.')
+        send_message(chat_id, f"⚡ {_filter_info('fav_close5m')[0]}: {'🟢 روشن' if not current else '🔴 خاموش'}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
         return
     if cl == '/fav_max_mode_toggle':
         s['fav_confirm_max_mode'] = 'r' if _fav_max_mode(s) == 'tp' else 'tp'
