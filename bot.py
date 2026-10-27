@@ -2003,7 +2003,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 _NEW_MESSAGE_PREFIXES = (
     '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
-    '/lv_', '/an_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
+    '/lv_', '/lvc_', '/an_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
 
 
@@ -5513,7 +5513,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.91'
+BOT_VERSION = '3.44.94'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6605,6 +6605,83 @@ def _halving_range_from_df(d):
 _HIST_RANGE_SRC = {}     # {symbol: ('Binance', (سقف, کف))}؛ برای نمایش منبعِ سقف/کف در گزارش سطوح
 
 
+# V3.44.92: سقف/کفِ مدل نصف‌کردن باید «دقیقاً» همان اندیکاتور HalvLvl در TradingView باشد. TradingView برای رنج خودکار
+# از تاریخچه‌ی همان چارت (Bybit perp) استفاده می‌کند، نه کل تاریخچه‌ی Binance Spot (مثلاً کف اتریوم ۸۱.۷۹ در Binance
+# ولی ۸۷۸ در چارت) و شبکه‌ی سطوح کاملاً جابه‌جا می‌شد. ترتیب اولویت:
+#   1) env HALVING_RANGE_OVERRIDE   2) جدول داخلی (مقادیرِ استخراج‌شده از چارت TV)   3) Bybit linear (کندل هفتگی)   4) Binance   5) کندل ربات
+_HALVING_RANGE_BUILTIN = {
+    'BTC': (126199.5, 2817.15),    # سقف، کف؛ تطبیق‌شده با چارت BTCUSDT 15m (فاصله‌ی عمق ۷ = ۹۶۳.۹۳)
+    'ETH': (4955.87, 878.0),       # بازسازی از سطوح چارت ETHUSDT 15m (فاصله‌ی عمق ۷ = ۳۱.۸۵۸)
+}
+
+
+def _halving_manual_table():
+    """جدول دستی {BASE: (سقف, کف)}: داخلی + env HALVING_RANGE_OVERRIDE (JSON مثل {"ETHUSDT":[4956,878]})؛
+    env مقدار داخلی را بازنویسی می‌کند؛ مقدار \"off\"/null برای یک نماد آن را از جدول حذف می‌کند."""
+    table = dict(_HALVING_RANGE_BUILTIN)
+    raw = (os.environ.get('HALVING_RANGE_OVERRIDE') or '').strip()
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    base = _base_asset(k)
+                    if v is None or (isinstance(v, str) and v.strip().lower() in ('off', 'none', '')):
+                        table.pop(base, None)
+                        continue
+                    hi, lo = float(v[0]), float(v[1])
+                    if math.isfinite(hi) and math.isfinite(lo) and hi > lo > 0:
+                        table[base] = (hi, lo)
+        except Exception as exc:
+            logger.warning('HALVING_RANGE_OVERRIDE invalid: %s', exc)
+    return table
+
+
+def _manual_halving_range(symbol):
+    rng = _halving_manual_table().get(_base_asset(symbol))
+    if rng:
+        _HIST_RANGE_SRC[symbol] = ('Manual', tuple(rng))
+    return rng
+
+
+BYBIT_RANGE_ENABLED = os.environ.get('HALVING_RANGE_BYBIT', '1').strip().lower() not in ('0', 'false', 'off', 'no')
+
+
+def _bybit_hist_range_sync(symbol):
+    """سقف/کف تاریخی از کندل هفتگی Bybit linear perp (همان منبع چارت TradingView) یا None.
+    اگر Bybit در دسترس نبود/نماد را نداشت None برمی‌گردد و زنجیره به Binance می‌رود."""
+    if not BYBIT_RANGE_ENABLED or not _source_available('bybit'):
+        return None
+    sym = str(symbol).upper().replace('/', '')
+    try:
+        r = requests.get('https://api.bybit.com/v5/market/kline',
+                         params={'category': 'linear', 'symbol': sym, 'interval': 'W', 'limit': 1000}, timeout=6)
+    except Exception as exc:
+        logger.debug('bybit hist range %s: %s', symbol, exc)
+        _source_fail('bybit')
+        return None
+    if _status_trips_source(r.status_code):
+        _source_trip('bybit')
+        return None
+    if not r.ok:
+        return None
+    _source_ok('bybit')
+    try:
+        j = r.json()
+        rows = ((j.get('result') or {}).get('list')) or []
+        if j.get('retCode') not in (0, '0', None) or len(rows) < 8:
+            return None
+        hi = max(float(x[2]) for x in rows)
+        lo = min(float(x[3]) for x in rows)
+        if math.isfinite(hi) and math.isfinite(lo) and lo > 0 and hi > lo:
+            logger.info('halving range %s from Bybit/W: high=%s low=%s', symbol, hi, lo)
+            _HIST_RANGE_SRC[symbol] = ('Bybit', (hi, lo))
+            return (hi, lo)
+    except Exception as exc:
+        logger.debug('bybit hist range parse %s: %s', symbol, exc)
+    return None
+
+
 def _binance_hist_range_sync(symbol):
     """سقف/کف تاریخیِ واقعی نماد از Binance Spot (سایه‌ها: high/low) یا None.
     کندل هفتگی تا ۱۰۰۰ عدد (≈۱۹ سال، یعنی کل تاریخچه‌ی Binance) در یک درخواست؛ اگر نماد خیلی تازه بود
@@ -6655,13 +6732,20 @@ async def get_halving_range(http, symbol):
     c = HALVING_RANGE_CACHE.get(symbol)
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
-    rng = None
-    try:
-        # V3.44.89: منبع اصلیِ سقف/کف تاریخی = Binance (کل تاریخچه‌ی نماد از روز لیست‌شدن)
-        rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)
-    except Exception as exc:
-        logger.debug('binance hist range %s: %s', symbol, exc)
-        rng = None
+    rng = _manual_halving_range(symbol)        # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
+    if not rng:
+        try:
+            rng = await asyncio.to_thread(_bybit_hist_range_sync, symbol)
+        except Exception as exc:
+            logger.debug('bybit hist range %s: %s', symbol, exc)
+            rng = None
+    if not rng:
+        try:
+            # V3.44.89: منبع اصلیِ سقف/کف تاریخی = Binance (کل تاریخچه‌ی نماد از روز لیست‌شدن)
+            rng = await asyncio.to_thread(_binance_hist_range_sync, symbol)
+        except Exception as exc:
+            logger.debug('binance hist range %s: %s', symbol, exc)
+            rng = None
     if not rng:
         # فقط وقتی Binance جواب نداد/نماد را ندارد: منبع عمومی کندل (Bitunix -> ...)
         for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
@@ -6684,12 +6768,19 @@ def get_halving_range_sync(symbol):
     c = HALVING_RANGE_CACHE.get(symbol)
     if c and now - c['ts'] < HALVING_RANGE_TTL and c.get('range'):
         return c['range']
-    rng = None
-    try:
-        rng = _binance_hist_range_sync(symbol)     # V3.44.89: منبع اصلی = Binance
-    except Exception as exc:
-        logger.debug('binance hist range %s: %s', symbol, exc)
-        rng = None
+    rng = _manual_halving_range(symbol)            # V3.44.92: اول جدول دستی/داخلی (هم‌تراز با TradingView)
+    if not rng:
+        try:
+            rng = _bybit_hist_range_sync(symbol)
+        except Exception as exc:
+            logger.debug('bybit hist range %s: %s', symbol, exc)
+            rng = None
+    if not rng:
+        try:
+            rng = _binance_hist_range_sync(symbol)     # V3.44.89: منبع اصلی = Binance
+        except Exception as exc:
+            logger.debug('binance hist range %s: %s', symbol, exc)
+            rng = None
     if not rng:
         for tf_, lim in (('1week', 1000), ('1week', 400), ('1day', 1000)):
             try:
@@ -14766,6 +14857,114 @@ def _pct_from(price, level):
         return ''
 
 
+def render_levels_chart_png(symbol, d, price, up, dn, tf_label, depth, step, src_label=''):
+    """V3.44.93: چارت PNG «سطوح ربات»: کندل‌های اخیر + قیمت لحظه‌ای + سطوح نصف‌کردن (۳ بالا / ۳ پایین) که ربات
+    روی آن‌ها معامله می‌کند. up/dn: لیست {'price','depth'}. خروجی: BytesIO یا None."""
+    try:
+        if d is None or len(d) < 5:
+            return None
+        d = d.tail(110).reset_index(drop=True)
+        fig, ax = plt.subplots(figsize=(11.5, 6.2), dpi=120)
+        fig.patch.set_facecolor('#0f172a'); ax.set_facecolor('#0f172a')
+        for i, row in d.iterrows():
+            o = float(row['open']); h = float(row['high']); l = float(row['low']); c = float(row['close'])
+            col = '#22c55e' if c >= o else '#ef4444'
+            ax.vlines(i, l, h, color=col, linewidth=1.1, alpha=0.95, zorder=2)
+            ax.add_patch(plt.Rectangle((i - 0.31, min(o, c)), 0.62, max(abs(c - o), max((h - l) * 0.003, 1e-12)),
+                                       facecolor=col, edgecolor=col, linewidth=0.7, alpha=0.92, zorder=3))
+        x_right = len(d) + 1.8
+        items = [(float(x['price']), int(x['depth']), '#8b5cf6') for x in (list(up) + list(dn))]
+        items.append((float(price), None, '#60a5fa'))
+        # برچسب‌های نزدیک به هم روی هم نیفتند: فقط جای «متن» جابه‌جا می‌شود، خط سر جای واقعی‌اش می‌ماند
+        _yl = [min(float(d['low'].min()), *[v for v, _, _ in items]), max(float(d['high'].max()), *[v for v, _, _ in items])]
+        _gap = max((_yl[1] - _yl[0]) * 0.045, 1e-12)
+        _order = sorted(range(len(items)), key=lambda k: items[k][0])
+        _ty = {}
+        for n_, k_ in enumerate(_order):
+            _ty[k_] = items[k_][0] if n_ == 0 else max(items[k_][0], _ty[_order[n_ - 1]] + _gap)
+        for k_, (value, dp, color) in enumerate(items):
+            if dp is None:
+                ax.axhline(value, color=color, linestyle='-', linewidth=1.6, alpha=0.95, zorder=1)
+                label = f' PRICE  {fmt(value)} '
+            else:
+                ax.axhline(value, color=color, linestyle=':', linewidth=1.3, alpha=0.95, zorder=1)
+                label = f' {_hv_level_label(dp)}  {fmt(value)}  ({_pct_from(price, value)}) '
+            ax.text(x_right, _ty[k_], label, va='center', ha='left', fontsize=9.5, fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.28', facecolor=color, edgecolor='none', alpha=0.95), clip_on=False, zorder=5)
+        ax.set_title(f'{symbol}  •  {tf_label}  •  Bot levels (3 up / 3 down)', loc='left',
+                     color='white', fontsize=15, fontweight='bold', pad=14)
+        summary = f'Depth: {depth} | Step: {fmt(step)}' + (f' | {src_label}' if src_label else '')
+        ax.text(0.01, 0.015, summary, transform=ax.transAxes, color='#cbd5e1', fontsize=9.5, va='bottom', ha='left',
+                bbox=dict(boxstyle='round,pad=0.35', facecolor='#1e293b', edgecolor='#334155', alpha=0.95))
+        vals = [v for v, _, _ in items] + list(_ty.values())
+        ymin = min(float(d['low'].min()), *vals); ymax = max(float(d['high'].max()), *vals)
+        pad = max((ymax - ymin) * 0.06, abs(price) * 0.001)
+        ax.set_ylim(ymin - pad, ymax + pad); ax.set_xlim(-1, len(d) + 5.5)
+        ax.grid(True, axis='y', color='#334155', alpha=0.45, linewidth=0.7); ax.grid(False, axis='x')
+        ax.tick_params(axis='both', colors='#94a3b8', labelsize=8.5)
+        for sp in ax.spines.values(): sp.set_visible(False)
+        ax.set_xticks([]); ax.set_ylabel('Price', color='#94a3b8', fontsize=9)
+        plt.subplots_adjust(left=0.06, right=0.78, top=0.90, bottom=0.10)
+        b = io.BytesIO()
+        plt.savefig(b, format='png', dpi=120, bbox_inches='tight', facecolor=fig.get_facecolor())
+        plt.close(fig); b.seek(0)
+        return b
+    except Exception:
+        logger.exception('levels chart render error')
+        try: plt.close('all')
+        except Exception: pass
+        return None
+
+
+def symbol_levels_chart(chat_id, raw_symbol):
+    """V3.44.93: (BytesIO, caption, keyboard) یا (None, پیام خطا, None). همان سقف/کف، عمق و ATR که گزارش
+    «سطوح مهم» و معاملات ربات استفاده می‌کنند؛ ۳ سطح بالا و ۳ سطح پایین قیمت."""
+    symbol = _levels_symbol(raw_symbol)
+    if not symbol:
+        return None, '⚠️ نام نماد معتبر نیست. مثال: `BTC` یا `ETH`', None
+    s = get_session(chat_id)
+    tf = s['timeframe']
+    rng = get_halving_range_sync(symbol)
+    if not rng:
+        return None, f'⚠️ سقف/کف تاریخی `{symbol}` در دسترس نیست.', None
+    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+    if df is None or df.empty:
+        return None, f'❌ داده‌ی کافی برای `{symbol}` پیدا نشد.', None
+    live = latest_price(symbol)
+    price = float(live) if live is not None else float(df['close'].iloc[-1])
+    ind = calculate_indicators(df)
+    dated_df, _a, _b = _compute_prev_day_levels(df)
+    if dated_df is None or ind is None or len(ind) != len(dated_df) or 'atr' not in ind.columns:
+        return None, f'❌ محاسبه‌ی ATR برای `{symbol}` ممکن نشد.', None
+    dated_df['atr'] = ind['atr'].values
+    scfg = s.get('strategy_config') or {}
+    cfg = {**get_timeframe_preset(tf), 'halving_model_enabled': True,
+           'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k'):
+        if k in scfg:
+            cfg[k] = scfg[k]
+    cfg.update(_halving_tf_params(scfg, tf))
+    ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
+    if not (ctx and ctx.get('levels')):
+        return None, f'⚠️ سطوح نصف‌کردن `{symbol}` ساخته نشد.', None
+    lv = sorted(({'price': float(x['price']), 'depth': int(x['depth'])} for x in ctx['levels']), key=lambda x: x['price'])
+    up = [x for x in lv if x['price'] > price][:3]
+    dn = [x for x in reversed([x for x in lv if x['price'] <= price])][:3]
+    src_rec = _HIST_RANGE_SRC.get(symbol)
+    src_label = {'Manual': 'Range: manual/TV', 'Bybit': 'Range: Bybit', 'Binance': 'Range: Binance'}.get(src_rec[0], '') if src_rec else ''
+    png = render_levels_chart_png(symbol, dated_df, price, up, dn, TF_DISPLAY.get(tf, tf), ctx['depth'], ctx['step'], src_label)
+    if png is None:
+        return None, '❌ ساخت چارت ناموفق بود.', None
+    caption = (f"🖼 *چارت سطوح ربات — {symbol}*\n"
+               f"عمق `{ctx['depth']}` | فاصله‌ی سطوح `{fmt(ctx['step'])}` | قیمت `{fmt(price)}`\n"
+               f"همین سطوح مبنای معاملات ربات هستند (۳ بالا / ۳ پایین).")
+    kb = {'inline_keyboard': [
+        [{'text': '🔄 بروزرسانی چارت', 'callback_data': f'/lvc_{symbol}'}, {'text': '🎯 گزارش سطوح', 'callback_data': f'/lv_{symbol}'}],
+        [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+    ]}
+    return png, caption, kb
+
+
 def symbol_levels_report(chat_id, raw_symbol):
     """گزارش سطوح مهم یک نماد: سقف/کف تاریخیِ مورد استفاده‌ی ربات (و منبعش)، جایگاه قیمت در بازه،
     نزدیک‌ترین سطوح نصف‌کردن بالا/پایین قیمت (با عمق)، و سقف/کف دیروز، ۴ساعته، هفته و ماه قبل.
@@ -14788,7 +14987,8 @@ def symbol_levels_report(chat_id, raw_symbol):
     if rng:
         hi, lo = float(rng[0]), float(rng[1])
         src_rec = _HIST_RANGE_SRC.get(symbol)
-        src = 'Binance' if (src_rec and src_rec[0] == 'Binance' and (abs(src_rec[1][0] - hi) < 1e-12 * max(1.0, hi)) and (abs(src_rec[1][1] - lo) < 1e-12 * max(1.0, lo))) \
+        _lbl = {'Manual': 'جدول دستی (هم‌تراز با TradingView)', 'Bybit': 'Bybit (کندل هفتگی، همان منبع TradingView)', 'Binance': 'Binance'}
+        src = _lbl.get(src_rec[0]) if (src_rec and src_rec[0] in _lbl and (abs(src_rec[1][0] - hi) < 1e-12 * max(1.0, hi)) and (abs(src_rec[1][1] - lo) < 1e-12 * max(1.0, lo))) \
             else 'منبع کندل ربات (Bitunix/...) چون Binance در دسترس نبود'
         pos = min(100.0, max(0.0, (price - lo) / (hi - lo) * 100.0)) if hi > lo else 0.0
         lines += ['📜 *سقف و کف تاریخی (مبنای مدل نصف‌کردن)*',
@@ -14853,6 +15053,7 @@ def symbol_levels_report(chat_id, raw_symbol):
 
     keyboard = {'inline_keyboard': [
         [{'text': '🔄 بروزرسانی', 'callback_data': f'/lv_{symbol}'}, {'text': '🔎 تحلیل', 'callback_data': f'/an_{symbol}'}],
+        [{'text': '🖼 چارت سطوح ربات', 'callback_data': f'/lvc_{symbol}'}],
         [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}],
         [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
     ]}
@@ -15555,6 +15756,15 @@ def process_command(cmd,chat_id,message_id=None):
         _raw_sym = str(cmd)[4:] if str(cmd).startswith('/lv_') else str(cmd).split(None, 1)[1]
         atext, akb = symbol_levels_report(chat_id, _raw_sym)
         send_message(chat_id, atext, akb)
+        return
+    if str(cmd).startswith('/lvc_'):      # V3.44.93: چارت سطوح ربات (فقط ادمین)
+        if is_restricted_user(chat_id):
+            return
+        _png, _cap, _kb = symbol_levels_chart(chat_id, str(cmd)[5:])
+        if _png is None:
+            send_message(chat_id, _cap)
+        else:
+            send_photo(chat_id, _png, _cap, _kb, keep=True)
         return
     if str(cmd).startswith('/an_'):
         _sym = _levels_symbol(str(cmd)[4:])

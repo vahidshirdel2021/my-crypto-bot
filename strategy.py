@@ -2096,8 +2096,20 @@ def build_quick_trade_plan(df, signal, strategy_config=None, grid_levels=None, l
     # مدل نصف‌کردن: هدف = نزدیک‌ترین سطح معتبر درخت (حتی اگر دورتر از R ثابت باشد)، نه R ثابت
     _hv_targets = bool(cfg.get("halving_model_enabled") and cfg.get("halving_high") is not None
                        and cfg.get("halving_only_targets", True))
+    # V3.44.94: مدل نصف‌کردن → TP همیشه روی «نزدیک‌ترین» سطح درخت در مسیر است (SL بدون تغییر، پشت سوینگ)؛ حداقل R:R
+    # دیگر باعث پریدن از یک سطح نزدیک به سطح دورتر نمی‌شود. تنها سطحی رد می‌شود که آن‌قدر چسبیده به ورود است
+    # که بعد از بافر عملاً هدفی نمی‌ماند (کمتر از halving_tp_min_gap_atr × ATR). با halving_tp_nearest=False رفتار قبلی.
+    _hv_nearest = bool(_hv_targets and cfg.get("halving_tp_nearest", True))
+    _min_gap = atr * max(0.0, float(cfg.get("halving_tp_min_gap_atr", 0.15)))
     for gap, lvl_name in candidates:
         capped_gap = gap - buf
+        if _hv_nearest:
+            if capped_gap <= max(_min_gap, 0.0):
+                continue      # خیلی چسبیده به ورود؛ بعد از بافر هدفی نمی‌ماند
+            tp = entry + direction * capped_gap
+            tp_source = "قبل از نزدیک‌ترین سطح"
+            tp_level_name = f"قبل از {lvl_name}"
+            break
         if capped_gap / dist < min_rr:
             continue          # این سطح خیلی نزدیک است؛ سراغ سطح بعدی
         if _hv_targets or capped_gap < abs(tp - entry):
@@ -2212,6 +2224,8 @@ HALVING_DEFAULTS = {
     "halving_zone_atr": 0.30,          # ضخامت ناحیه‌ی هر سطح (برای «برخورد بدون نفوذ») به ATR
     "halving_max_trade_depth": 0,      # 0 = همه‌ی عمق‌ها؛ n = فقط سطوحی با عمق ≤ n معامله می‌شوند
     "halving_only_targets": True,      # هدف فقط از سطوح نصف‌کردن
+    "halving_tp_nearest": True,        # V3.44.94: ورود سریع/دستی: TP روی نزدیکترین سطح (بدون پرش به دورتر به‌خاطر R:R)
+    "halving_tp_min_gap_atr": 0.15,    # سطحی که بعد از بافر کمتر از این × ATR تا ورود فاصله دارد هدف نمی‌شود
     "halving_atr_smooth_candles": 200, # ATR هموار (میانه‌ی N کندل اخیر) تا عمق هر کندل جابه‌جا نشود
     # k پویا: ATR مؤثر = ATR کند × clamp(ATR سریع / ATR کند). نوسان بالا → سطوح درشت‌تر، بازار آرام → سطوح ریزتر.
     "halving_dynamic_k": False,
