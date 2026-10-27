@@ -28,7 +28,7 @@ bot.edit_page = lambda chat_id, text, markup=None, message_id=None, parse_mode='
 
 USER, ADMIN = 222, 111
 # 1) کاربر عادی: دستورهای ممنوع => پیام ممنوع، و هیچ هندلر استراتژی اجرا نشود
-for cmd in ('/trade_filter_management', '/setup_management', '/market_report', '/btc_eth_regime', '/entry_diag',
+for cmd in ('/trade_filter_management', '/setup_management', '/market_report', '/entry_diag',
             '/export_trade_data', '/admin_panel', '/toggle_halving_model', '/manage_watchlist', '/preset_menu',
             '/back:/trade_filter_management', '/halving_depth_cycle', '/trade_audit'):
     sent.clear()
@@ -54,7 +54,14 @@ bot.analyze = lambda chat, val: called.append((chat, val)) or ('تحلیل', Non
 sent.clear(); bot.handle_text(USER, 'BTC'); assert not called and 'در دسترس نیست' in sent[0][1], (called, sent)
 sent.clear(); bot.handle_text(ADMIN, 'BTC'); assert called == [(ADMIN, 'BTC')], called
 # دکمه‌ی ثابت متنی (رژیم) برای کاربر عادی ممنوع
-sent.clear(); bot.handle_text(USER, '🧭 رژیم BTC/ETH'); assert 'در دسترس نیست' in sent[0][1], sent
+# V3.44.91: رژیم BTC/ETH و «سیگنال‌های در حال تایید» برای کاربر عادی باز است (متن ساده، بدون ADX/RSI و پارامتر)
+bot.btc_eth_regime_rows = lambda tf: [('BTC', 'BULLISH', 31.0, 62.0), ('ETH', 'BULLISH', 28.0, 58.0)]
+sent.clear(); bot.handle_text(USER, '🧭 رژیم BTC/ETH')
+assert sent and 'در دسترس نیست' not in sent[0][1] and 'رژیم BTC و ETH' in sent[0][1] and 'ADX' not in sent[0][1] and 'RSI' not in sent[0][1], sent
+sent.clear(); bot.handle_text(ADMIN, '🧭 رژیم BTC/ETH'); assert 'ADX' in sent[0][1], sent      # ادمین جزئیات کامل را می‌بیند
+sent.clear(); bot.handle_text(USER, '⏳ سیگنال‌های در حال تایید')
+assert sent and 'در دسترس نیست' not in sent[0][1] and 'حداقل تایید' not in sent[0][1] and 'سیگنال‌های در حال تایید' in sent[0][1], sent
+sent.clear(); bot.handle_text(ADMIN, '⏳ سیگنال‌های در حال تایید'); assert 'حداقل تایید' in sent[0][1], sent
 # وضعیت انتظار باقی‌مانده پاک می‌شود
 s = bot.get_session(USER); s['user_state'] = 'WAIT_BACKTEST_SYMBOL'
 sent.clear(); bot.handle_text(USER, 'ETH'); assert bot.get_session(USER)['user_state'] is None

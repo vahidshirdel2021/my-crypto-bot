@@ -35,6 +35,9 @@ USER_EXACT = frozenset({
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
     '/assist_pending',
+    # V3.44.91: «⏳ سیگنال‌های در حال تایید» (صف تایید حرکت) و «🧭 رژیم BTC/ETH» برای کاربر عادی هم باز شد
+    # (متن هر دو در bot.py برای کاربر عادی ساده می‌شود: بدون پارامتر و اطلاعات فنی)
+    '/fav_queue', '/btc_eth_regime',
     # V3.44.75: کلید حالت دستیار در منوی اصلی
     '/assist_main_toggle',
     # V3.44.76: پشتیبان ربات
@@ -79,8 +82,14 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
 
 # دکمه‌های کیبورد ثابت پایین چت که برای کاربر عادی نمایش داده نمی‌شود
 USER_HIDDEN_REPLY_BUTTONS = frozenset({
-    '⏳ سیگنال‌های در حال تایید', '🧭 رژیم BTC/ETH', '📊 وضعیت بازار',
+    '📊 وضعیت بازار',
 })
+
+# V3.44.91: دکمه‌ی ثابت «📋 سیگنال‌های در انتظار» برای کاربر عادی با «⏳ سیگنال‌های در حال تایید» عوض می‌شود
+# (همان جای دکمه‌ی قبلی؛ نسخه‌ی تکراری پایین کیبورد حذف می‌شود). فرمان /assist_pending هنوز مجاز است.
+USER_REPLY_BUTTON_SWAPS = {
+    '📋 سیگنال‌های در انتظار': '⏳ سیگنال‌های در حال تایید',
+}
 
 
 def user_command_allowed(cmd, paper=False):
@@ -141,8 +150,21 @@ def filter_markup(markup, paper=False):
         out['inline_keyboard'] = rows
     if isinstance(out.get('keyboard'), list):
         rows = []
+        seen_texts = set()
         for row in out['keyboard']:
-            kept = [b for b in row if not (isinstance(b, dict) and b.get('text') in USER_HIDDEN_REPLY_BUTTONS)]
+            kept = []
+            for b in row:
+                if isinstance(b, dict):
+                    t = b.get('text')
+                    if t in USER_HIDDEN_REPLY_BUTTONS:
+                        continue
+                    t2 = USER_REPLY_BUTTON_SWAPS.get(t, t)
+                    if t2 != t:
+                        b['text'] = t2
+                    if t2 in seen_texts:                # دکمه‌ی جایگزین‌شده فقط یک‌بار (همان جای اول) بماند
+                        continue
+                    seen_texts.add(t2)
+                kept.append(b)
             if kept:
                 rows.append(kept)
         out['keyboard'] = rows

@@ -25,7 +25,8 @@ def cbs(mk): return [b['callback_data'] for r in mk['inline_keyboard'] for b in 
 kp = ui.get_main_menu_keyboard(False, True, False, 'PAPER'); kr = ui.get_main_menu_keyboard(False, True, False, 'REAL')
 assert '/mode_real' in cbs(kp) and '/mode_paper' not in cbs(kp)
 assert '/mode_paper' in cbs(kr) and '/mode_real' not in cbs(kr)
-assert 'واقعی' in kp['inline_keyboard'][-1][0]['text'] and 'کاغذی' in kr['inline_keyboard'][-1][0]['text']
+# V3.44.91: با باز شدن «🧭 رژیم BTC/ETH» برای کاربر عادی، چیدمان دوتایی عوض شد؛ کلید حساب در ردیف آخر است (نه لزوماً اولین دکمه)
+assert any('واقعی' in b['text'] for b in kp['inline_keyboard'][-1]) and any('کاغذی' in b['text'] for b in kr['inline_keyboard'][-1])
 # برای کاربر عادی بعد از فیلتر نقش هم می‌ماند (و برای ادمین هم کنار پنل مدیریت)
 assert '/mode_real' in cbs(ap.filter_markup(kp)) and '/mode_paper' in cbs(ap.filter_markup(kr))
 ka = ui.get_main_menu_keyboard(False, True, True, 'PAPER'); assert '/mode_real' in cbs(ka) and cbs(ka)[-1] == '/admin_panel'

@@ -107,6 +107,6 @@ print('funnel cx field OK')
 # ---- ۵) رجیستری: کلید هست، پیش‌فرض خاموش، در دسته‌ی آزمایشی
 m = re.search(r"'gate_reversal_contra_enabled': \('([^']+)', (True|False), '([a-z_]+)'", _src)
 assert m and m.group(2) == 'False' and m.group(3) == 'experimental', m and m.groups()
-assert "BOT_VERSION = '3.44.88'" in _src
+assert re.search(r"BOT_VERSION = '3\.44\.(8[8-9]|9\d)'", _src), 'BOT_VERSION'
 print('registry OK (default OFF, experimental)')
 print('reversal_contra_selftest: ALL OK')

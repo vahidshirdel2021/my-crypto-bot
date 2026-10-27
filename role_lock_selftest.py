@@ -15,7 +15,8 @@ ALLOW = ['/start', '/menu', '/cancel', '/start_scan', '/stop_scan', '/reload_and
          '/show_chart_BTC', '/assist_ok_ab12', '/assist_no_ab12', '/assist_rev_ab12', '/autotg_ok_r1', '/autotg_no_r1',
          '/qt_buy_BTC', '/qt_sell_ETH', '/qtm_buy_BTC', '/tw_qe_buy_t1', '/fq_qe_buy_f1', '/fq_rej_f1', '/cfm_abc', '/cfmno_abc',
          '/back:/menu', '/back:/menu_settings', '🔴 توقف اسکن', '🟢 شروع اسکن', '🏠 منوی اصلی', '/assist_pending',
-         '/fee_menu', '/my_fee_report', '/check_entry_BTC', '/cancel_watch_BTC', '/start ref123']
+         '/fee_menu', '/my_fee_report', '/check_entry_BTC', '/cancel_watch_BTC', '/start ref123',
+         '/fav_queue', '/btc_eth_regime', '/back:/fav_queue']      # V3.44.91
 for c in ALLOW:
     assert ap.user_command_allowed(c), ('should be allowed', c)
 
@@ -23,8 +24,8 @@ for c in ALLOW:
 DENY = ['/admin_panel', '/admin_access', '/admin_tests', '/admin_users_list', '/users', '/allow 123', '/audit', '/set_fee 5',
         '/setup_management', '/trade_filter_management', '/trade_filter_entry', '/trade_filter_limits', '/scenario_management',
         '/strategy_families_menu', '/signal_channel_settings', '/preset_menu', '/preset_export', '/preset_stats', '/preset_apply_x',
-        '/market_report', '/btc_eth_regime', '/entry_diag', '/entry_diag_log', '/trade_audit', '/quality_report', '/export_trade_data',
-        '/export_trade_pipeline', '/trade_tracking_menu', '/trade_pipeline', '/fav_queue', '/fav_stats', '/fav_star', '/review_list',
+        '/market_report', '/entry_diag', '/entry_diag_log', '/trade_audit', '/quality_report', '/export_trade_data',
+        '/export_trade_pipeline', '/trade_tracking_menu', '/trade_pipeline', '/fav_stats', '/fav_star', '/review_list',
         '/menu_reports', '/menu_trading', '/manual_trade', '/pending_order_start', '/backtest_start', '/scan_signal_start',
         '/manage_watchlist', '/add_long_symbol', '/remove_short_symbol', '/watchlist_list', '/assist_ind_ab12', '/assist_menu',
         '/assist_stats', '/assist_expiry_cycle', '/toggle_halving_model', '/toggle_gate_x', '/toggle_scenario_x', '/toggle_setup_daily',
@@ -41,7 +42,7 @@ for c in DENY:
 a = src.index('def process_command(')
 pc = src[a:a + 220000]
 lits = set(re.findall(r"'(/[a-z0-9_]+)'", pc))
-admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c)]
+admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c) and c != '/fav_queue']   # V3.44.91: /fav_queue عمداً برای کاربر عادی باز است
 assert len(admin_like) > 30, len(admin_like)
 for c in admin_like:
     assert not ap.user_command_allowed(c + 'x' if c.endswith('_') else c), c
@@ -54,7 +55,7 @@ main = ap.filter_markup(ui.get_main_menu_keyboard(True, True, False))
 cbs = callbacks(main)
 assert '/start_scan' in cbs or '/stop_scan' in cbs
 assert '/open_positions' in cbs and '/performance' in cbs and '/menu_settings' in cbs
-for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list', '/btc_eth_regime', '/admin_panel'):
+for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list', '/admin_panel'):
     assert hidden not in cbs, hidden
 
 settings = callbacks(ap.filter_markup(ui.get_settings_menu_keyboard()))
@@ -92,10 +93,19 @@ assert "'/edit_sl_" in card_src and "'/close_prompt_" in card_src
 bottom = ap.filter_markup(ui.get_bottom_menu_keyboard(True))
 texts = [b['text'] for r in bottom['keyboard'] for b in r]
 assert '🔄 پوزیشن‌ها' in texts and '💰 سود و زیان امروز' in texts and '🏠 منوی اصلی' in texts
-assert '🧭 رژیم BTC/ETH' not in texts and '⏳ سیگنال‌های در حال تایید' not in texts
+# V3.44.91: «📋 سیگنال‌های در انتظار» با «⏳ سیگنال‌های در حال تایید» عوض شده (همان جای اول، بدون تکرار) و رژیم دیده می‌شود
+assert '📋 سیگنال‌های در انتظار' not in texts, texts
+assert texts.count('⏳ سیگنال‌های در حال تایید') == 1 and '🧭 رژیم BTC/ETH' in texts, texts
+assert bottom['keyboard'][0][0]['text'] == '⏳ سیگنال‌های در حال تایید', bottom['keyboard'][0]
+assert '📊 وضعیت بازار' not in texts
 assert 'تحلیل' not in bottom['input_field_placeholder']
-# ورودی تغییر نکرده
-assert '🧭 رژیم BTC/ETH' in [b['text'] for r in ui.get_bottom_menu_keyboard(True)['keyboard'] for b in r]
+# ورودی تغییر نکرده (ادمین همان کیبورد قبلی را می‌بیند)
+orig = [b['text'] for r in ui.get_bottom_menu_keyboard(True)['keyboard'] for b in r]
+assert '🧭 رژیم BTC/ETH' in orig and '📋 سیگنال‌های در انتظار' in orig and orig.count('⏳ سیگنال‌های در حال تایید') == 1
+# دکمه‌های داخل صف تایید: «آمار فیلتر» و «⭐ فقط در محدوده» برای کاربر عادی حذف می‌شوند، بروزرسانی/منو می‌مانند
+fq_kb = {'inline_keyboard': [[{'text': '⭐', 'callback_data': '/fav_star'}], [{'text': '🔄', 'callback_data': '/fav_queue'}, {'text': '📊', 'callback_data': '/fav_stats'}],
+                             [{'text': '📋', 'callback_data': '/assist_pending'}, {'text': '🏠', 'callback_data': '/menu'}]]}
+assert callbacks(ap.filter_markup(fq_kb)) == ['/fav_queue', '/assist_pending', '/menu'], callbacks(ap.filter_markup(fq_kb))
 
 # دکمه‌های url / web_app حفظ می‌شوند
 mk = {'inline_keyboard': [[{'text': 'x', 'web_app': {'url': 'https://e.x'}}, {'text': 'y', 'url': 'https://t.v'}, {'text': 'bad', 'callback_data': '/admin_panel'}]]}

@@ -118,7 +118,8 @@ import threading
 tgc=[]; qt=[]
 def _tg(m,pl=None,t=10):
     tgc.append((m,pl)); return {'ok':True,'result':{'message_id':len(tgc)+500}}
-g.update(tg=_tg, is_allowed=lambda c:True, TF_DISPLAY={'5min':'5م','15min':'15م'}, tradingview_chart_url=lambda sym,tf:f'https://tv/{sym}/{tf}',
+restricted={'v':False}
+g.update(is_restricted_user=lambda c: restricted['v'], tg=_tg, is_allowed=lambda c:True, TF_DISPLAY={'5min':'5م','15min':'15م'}, tradingview_chart_url=lambda sym,tf:f'https://tv/{sym}/{tf}',
          miniapp_chart_url=lambda sym,tf:None, _CB_CTX=threading.local(),
          quick_channel_trade=lambda c,sym,side,skip_trend=False:(qt.append((sym,side)) or S['paper_positions'].append({'symbol':sym})))
 S['fav_wait']={}; S['fav_wait_seen']={}; S['paper_positions']=[]; sent.clear(); flips.clear()

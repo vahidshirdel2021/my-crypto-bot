@@ -2003,7 +2003,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 _NEW_MESSAGE_PREFIXES = (
     '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
-    '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
+    '/lv_', '/an_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
 
 
@@ -2019,6 +2019,7 @@ _BACK_PARENT = {
     '/add_long_symbol': '/manage_watchlist', '/remove_long_symbol': '/manage_watchlist',
     '/add_short_symbol': '/manage_watchlist', '/remove_short_symbol': '/manage_watchlist',
     '/backtest_start': '/manage_watchlist', '/scan_signal_start': '/manage_watchlist',
+    '/levels_start': '/menu_reports',
     '/pending_order_start': '/menu_trading', '/market_report': '/menu_reports',
     '/export_trade_data': '/performance', '/export_trade_pipeline': '/trade_tracking_menu',
     '/admin_set_fee_prompt': '/admin_fee_report', '/admin_fee_account_prompt': '/admin_fee_menu', '/admin_access_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
@@ -4219,7 +4220,8 @@ def btc_eth_aligned(tf):
     return False, f'BTC {fa[regs[0]]} و ETH {fa[regs[1]]} (ناهم‌جهت)'
 
 
-def btc_eth_regime_text(tf, popup=False):
+def btc_eth_regime_text(tf, popup=False, plain=False):
+    """plain=True (کاربر عادی): فقط رژیم هر نماد و هم‌جهتی؛ بدون ADX/RSI و توضیح پارامترها."""
     rows = btc_eth_regime_rows(tf)
     tf_label = TF_DISPLAY.get(tf, tf)
     icons = {'BTC': '₿', 'ETH': 'Ξ'}
@@ -4230,14 +4232,14 @@ def btc_eth_regime_text(tf, popup=False):
         return '\n'.join(lines)
     lines = [f'🧭 *رژیم BTC و ETH — تایم‌فریم فعال ({tf_label})*', '━━━━━━━━━━━━━━━━━━━━']
     for sym, reg, adx, rsi in rows:
-        extra = f" · ADX `{adx:.0f}` · RSI `{rsi:.0f}`" if adx is not None and rsi is not None else ''
+        extra = f" · ADX `{adx:.0f}` · RSI `{rsi:.0f}`" if (not plain and adx is not None and rsi is not None) else ''
         lines.append(f"{icons[sym]} {sym}: *{_REGIME_FA.get(reg, '⏳ نامشخص')}*{extra}")
     regs = [r[1] for r in rows]
     if all(regs) and regs[0] == regs[1]:
         lines.append(f"\n✅ هر دو هم‌جهت: {_REGIME_FA[regs[0]]}")
     elif all(regs):
         lines.append('\n⚠️ دو رژیم هم‌جهت نیستند.')
-    if regime_advanced_on():
+    if regime_advanced_on() and not plain:
         lines.append(f"ℹ️ صعودی/نزولی یعنی: EMA20/50 هم‌جهت + ADX ≥ {REGIME_ADX_MIN:g} + DI هم‌جهت + شیب EMA50 هم‌جهت؛ وگرنه رنج.")
     lines.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
     return '\n'.join(lines)
@@ -4344,7 +4346,7 @@ def review_card_show(chat_id, msg_id):
 def btc_eth_regime_show(chat_id, message_id=None):
     s = get_session(chat_id)
     tf = s.get('timeframe', '5min')
-    send_message(chat_id, btc_eth_regime_text(tf),
+    send_message(chat_id, btc_eth_regime_text(tf, plain=is_restricted_user(chat_id)),
                  {'inline_keyboard': [[{'text': '🔄 بروزرسانی', 'callback_data': '/btc_eth_regime'}],
                                       [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]},
                  message_id=message_id)
@@ -5511,7 +5513,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.89'
+BOT_VERSION = '3.44.91'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6600,6 +6602,9 @@ def _halving_range_from_df(d):
     return None
 
 
+_HIST_RANGE_SRC = {}     # {symbol: ('Binance', (سقف, کف))}؛ برای نمایش منبعِ سقف/کف در گزارش سطوح
+
+
 def _binance_hist_range_sync(symbol):
     """سقف/کف تاریخیِ واقعی نماد از Binance Spot (سایه‌ها: high/low) یا None.
     کندل هفتگی تا ۱۰۰۰ عدد (≈۱۹ سال، یعنی کل تاریخچه‌ی Binance) در یک درخواست؛ اگر نماد خیلی تازه بود
@@ -6638,6 +6643,7 @@ def _binance_hist_range_sync(symbol):
                 rng = None
             if rng:
                 logger.info('halving range %s from %s/%s: high=%s low=%s', symbol, source, interval, rng[0], rng[1])
+                _HIST_RANGE_SRC[symbol] = ('Binance', tuple(rng))
                 return rng
     return None
 
@@ -11603,7 +11609,10 @@ def fav_queue_list(chat_id, message_id=None):
                                    [{'text': '🔄 بروزرسانی', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
                                    [{'text': '📋 سیگنال‌های در انتظار', 'callback_data': '/assist_pending'},
                                     {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}
-    head = f"⏳ *صف تایید حرکت* ({state_txt})\nحداقل تایید: `+{mn:g}R` | سقف ورود: `{_fav_max_label(s)}` | مهلت: `{wt // 60}` دقیقه"
+    if is_restricted_user(chat_id):        # V3.44.91: کاربر عادی بدون پارامترهای فیلتر (حداقل تایید/سقف ورود/مهلت)
+        head = "⏳ *سیگنال‌های در حال تایید*"
+    else:
+        head = f"⏳ *صف تایید حرکت* ({state_txt})\nحداقل تایید: `+{mn:g}R` | سقف ورود: `{_fav_max_label(s)}` | مهلت: `{wt // 60}` دقیقه"
     if not waiting:
         send_message(chat_id, head + "\n\n✅ الان سیگنالی در صف نیست.", refresh, message_id=message_id)
         return
@@ -14733,10 +14742,121 @@ def analyze(chat_id,symbol):
     )
     keyboard = {'inline_keyboard': [
         [{'text':'🔎 بررسی و ورود سریع','callback_data':f'/check_entry_{symbol}'}],
+        [{'text':'🎯 سطوح مهم و سقف/کف تاریخی','callback_data':f'/lv_{symbol}'}],
         [{'text':'📈 چارت در TradingView','url':tradingview_chart_url(symbol, tf)}],
         [{'text':'🏠 منوی اصلی','callback_data':'/menu'}],
     ]}
     return text, keyboard
+
+
+# ===================== V3.44.89: «سطوح نماد» - سقف/کف تاریخی + سطوح مهم =====================
+def _levels_symbol(raw):
+    v = str(raw or '').strip().upper().replace('/', '').replace(' ', '').replace('-', '')
+    if not v:
+        return None
+    if not v.endswith('USDT'):
+        v += 'USDT'
+    return v if 5 <= len(v) <= 20 and v.isalnum() else None
+
+
+def _pct_from(price, level):
+    try:
+        return f"{(float(level) / float(price) - 1.0) * 100:+.1f}٪"
+    except Exception:
+        return ''
+
+
+def symbol_levels_report(chat_id, raw_symbol):
+    """گزارش سطوح مهم یک نماد: سقف/کف تاریخیِ مورد استفاده‌ی ربات (و منبعش)، جایگاه قیمت در بازه،
+    نزدیک‌ترین سطوح نصف‌کردن بالا/پایین قیمت (با عمق)، و سقف/کف دیروز، ۴ساعته، هفته و ماه قبل.
+    خروجی: (متن، کیبورد). هیچ سفارشی ثبت نمی‌شود؛ فقط نمایش."""
+    symbol = _levels_symbol(raw_symbol)
+    if not symbol:
+        return '⚠️ نام نماد معتبر نیست. مثال: `BTC` یا `ETH`', None
+    s = get_session(chat_id)
+    tf = s['timeframe']
+    rng = get_halving_range_sync(symbol)
+    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+    if df is None or df.empty:
+        return f'❌ داده‌ی کافی برای `{symbol}` پیدا نشد.', None
+    live = latest_price(symbol)
+    price = float(live) if live is not None else float(df['close'].iloc[-1])
+    lines = [f'🎯 *سطوح مهم {symbol}*',
+             f"💰 قیمت لحظه‌ای: `{fmt(price)}`   ⏱ تایم‌فریم ربات: `{TF_DISPLAY.get(tf, tf)}`", '']
+
+    # --- سقف و کف تاریخی ---
+    if rng:
+        hi, lo = float(rng[0]), float(rng[1])
+        src_rec = _HIST_RANGE_SRC.get(symbol)
+        src = 'Binance' if (src_rec and src_rec[0] == 'Binance' and (abs(src_rec[1][0] - hi) < 1e-12 * max(1.0, hi)) and (abs(src_rec[1][1] - lo) < 1e-12 * max(1.0, lo))) \
+            else 'منبع کندل ربات (Bitunix/...) چون Binance در دسترس نبود'
+        pos = min(100.0, max(0.0, (price - lo) / (hi - lo) * 100.0)) if hi > lo else 0.0
+        lines += ['📜 *سقف و کف تاریخی (مبنای مدل نصف‌کردن)*',
+                  f"• سقف تاریخی: `{fmt(hi)}`  ({_pct_from(price, hi)})",
+                  f"• کف تاریخی: `{fmt(lo)}`  ({_pct_from(price, lo)})",
+                  f"• جایگاه قیمت در بازه: `{pos:.1f}٪` از کف به سقف",
+                  f"• منبع: {src}"]
+    else:
+        lines.append('⚠️ سقف/کف تاریخی این نماد در دسترس نیست (نه Binance و نه منبع کندل ربات).')
+
+    # --- سطوح نصف‌کردن اطراف قیمت + سطوح دوره‌ای ---
+    dated_df = None
+    try:
+        ind = calculate_indicators(df)
+        dated_df, _pdh_unused, _pdl_unused = _compute_prev_day_levels(df)
+        if dated_df is not None and ind is not None and len(ind) == len(dated_df) and 'atr' in ind.columns:
+            dated_df['atr'] = ind['atr'].values
+    except Exception:
+        logger.exception('levels report: indicators failed %s', symbol)
+        dated_df = None
+
+    if rng and dated_df is not None and 'atr' in dated_df.columns:
+        try:
+            scfg = s.get('strategy_config') or {}
+            cfg = {**get_timeframe_preset(tf), 'halving_model_enabled': True,
+                   'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+            for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k'):
+                if k in scfg:
+                    cfg[k] = scfg[k]
+            cfg.update(_halving_tf_params(scfg, tf))
+            ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
+            if ctx and ctx.get('levels'):
+                lv = sorted(({'price': float(x['price']), 'depth': int(x['depth'])} for x in ctx['levels']), key=lambda x: x['price'])
+                up = [x for x in lv if x['price'] > price][:3]
+                dn = [x for x in reversed([x for x in lv if x['price'] <= price])][:3]
+                lines += ['', f"🧮 *سطوح نصف‌کردن* (عمق انتخابی `{ctx['depth']}` | فاصله‌ی هر سطح `{fmt(ctx['step'])}`)"]
+                for x in reversed(up):
+                    lines.append(f"🔺 `{fmt(x['price'])}`  ({_pct_from(price, x['price'])})  عمق {x['depth']}")
+                lines.append(f"▶️ قیمت: `{fmt(price)}`")
+                for x in dn:
+                    lines.append(f"🔻 `{fmt(x['price'])}`  ({_pct_from(price, x['price'])})  عمق {x['depth']}")
+        except Exception:
+            logger.exception('levels report: halving failed %s', symbol)
+
+    if dated_df is not None:
+        try:
+            n = len(dated_df)
+            rows = []
+            pdh, pdl = _pdh_pdl_at(dated_df, n - 1)
+            if pdh is not None and pdl is not None:
+                rows.append(('دیروز', pdh, pdl))
+            htf = _compute_prev_htf_levels(dated_df, n - 1)
+            for name, hk, lk in (('۴ساعته قبل', 'P4H', 'P4L'), ('هفته‌ی قبل', 'PWH', 'PWL'), ('ماه قبل', 'PMH', 'PML')):
+                if hk in htf and lk in htf:
+                    rows.append((name, htf[hk], htf[lk]))
+            if rows:
+                lines += ['', '📅 *سقف / کف دوره‌های قبل*']
+                for name, h_, l_ in rows:
+                    lines.append(f"• {name}: سقف `{fmt(h_)}` ({_pct_from(price, h_)}) | کف `{fmt(l_)}` ({_pct_from(price, l_)})")
+        except Exception:
+            logger.exception('levels report: periodic levels failed %s', symbol)
+
+    keyboard = {'inline_keyboard': [
+        [{'text': '🔄 بروزرسانی', 'callback_data': f'/lv_{symbol}'}, {'text': '🔎 تحلیل', 'callback_data': f'/an_{symbol}'}],
+        [{'text': '📈 چارت در TradingView', 'url': tradingview_chart_url(symbol, tf)}],
+        [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}],
+    ]}
+    return '\n'.join(lines), keyboard
 
 
 # ===================== V3.44.57: انتخاب صرافی و اتصال حساب REAL =====================
@@ -15426,6 +15546,22 @@ def process_command(cmd,chat_id,message_id=None):
         return process_command(str(cmd)[len('/back:'):] or '/menu', chat_id, message_id)
     if cmd == '/backtest_start':
         start_backtest_flow(chat_id); return
+    # V3.44.89: سطوح نماد (سقف/کف تاریخی از Binance + سطوح نصف‌کردن)
+    if cmd == '/levels_start':
+        s=get_session(chat_id); s['user_state']='WAIT_LEVELS_SYMBOL'; save_session(chat_id)
+        send_message(chat_id,'🎯 نام نماد را بفرستید تا سقف/کف تاریخی و سطوح مهمش را بگویم.\nمثال: BTC یا ETH')
+        return
+    if str(cmd).startswith('/lv_') or str(cmd).lower().startswith('/levels '):
+        _raw_sym = str(cmd)[4:] if str(cmd).startswith('/lv_') else str(cmd).split(None, 1)[1]
+        atext, akb = symbol_levels_report(chat_id, _raw_sym)
+        send_message(chat_id, atext, akb)
+        return
+    if str(cmd).startswith('/an_'):
+        _sym = _levels_symbol(str(cmd)[4:])
+        if _sym:
+            atext, akb = analyze(chat_id, _sym)
+            send_message(chat_id, atext, akb)
+        return
     if cmd == '/scan_signal_start':
         s=get_session(chat_id); s['user_state']='WAIT_SCAN_SYMBOL'; save_session(chat_id)
         send_message(chat_id,'🔍 لطفاً نماد مورد نظر برای بررسی با استراتژی فعال را وارد کنید.\nمثال: BTC یا ETH')
@@ -16836,6 +16972,7 @@ def handle_text(chat_id,text,message_id=None):
         '📋 واچ‌لیست':'/manage_watchlist', 'واچ‌لیست':'/manage_watchlist',
         '❌ بستن همه':'/close_all_prompt', 'بستن همه':'/close_all_prompt',
         '🆘 بستن اضطراری همه':'/emergency_close_all', 'بستن اضطراری همه':'/emergency_close_all', '🆘 اضطراری':'/emergency_close_all', '🆘 بستن اضطراری':'/emergency_close_all',
+        '🎯 سطوح نماد':'/levels_start', 'سطوح نماد':'/levels_start',
         '🖐 معامله دستی':'/manual_trade', '🧪 تست استراتژی':'/backtest_start', '🔍 پیشنهاد نماد با استراتژی فعال':'/scan_signal_start', 'معامله دستی':'/manual_trade',
         '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
         '⏳ در صف تایید':'/fav_queue', 'صف تایید':'/fav_queue', '⏳ سیگنال‌های در حال تایید':'/fav_queue', 'سیگنال‌های در حال تایید':'/fav_queue', 'آمار فیلتر':'/fav_stats',
@@ -16880,6 +17017,12 @@ def handle_text(chat_id,text,message_id=None):
         elif current_state=='/REMOVE_SHORT_SYMBOL' and sym in SHARED_SHORT_WATCHLIST: SHARED_SHORT_WATCHLIST.remove(sym)
         s['user_state']=None; save_session(chat_id)
         send_message(chat_id,'✅ واچ‌لیست اصلاح شد.')
+        return
+
+    if current_state == 'WAIT_LEVELS_SYMBOL':
+        s['user_state']=None; save_session(chat_id)
+        atext, akb = symbol_levels_report(chat_id, raw)
+        send_message(chat_id, atext, akb)
         return
 
     if current_state == 'WAIT_SCAN_SYMBOL':
@@ -17125,6 +17268,10 @@ def handle_text(chat_id,text,message_id=None):
         send_message(chat_id, summary, get_pending_confirm_keyboard()); return
     if admin_channel_post_applies(chat_id, raw, current_state):
         admin_post_to_channel(chat_id, raw); return    # V3.44.77
+    _lv_m = re.match(r'^(?:سطوح|سطح|levels?)\s+([A-Za-z0-9/]{2,15})$', raw, re.IGNORECASE)
+    if _lv_m:                                  # V3.44.89: «سطوح BTC» یا «levels BTC»
+        atext, akb = symbol_levels_report(chat_id, _lv_m.group(1))
+        send_message(chat_id, atext, akb); return
     if 2<=len(val)<=12 and (val.isalpha() or val.replace('1','').isalnum()):
         atext, akeyboard = analyze(chat_id,val)
         send_message(chat_id,atext,akeyboard)

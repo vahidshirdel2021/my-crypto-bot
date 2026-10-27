@@ -334,6 +334,7 @@ def get_reports_menu_keyboard():
          {"text": "🔎 ممیزی آخرین معامله", "callback_data": "/trade_audit"}],
         [{"text": "🔍 لاگ تشخیصی ورود", "callback_data": "/entry_diag"},
          {"text": "💰 کارمزد من", "callback_data": "/fee_menu"}],
+        [{"text": "🎯 سطوح نماد (سقف/کف تاریخی)", "callback_data": "/levels_start"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
