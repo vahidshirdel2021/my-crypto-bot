@@ -46,6 +46,7 @@ _GATES_OFF = (
     'gate_inverse_trading_enabled',         # معاملات معکوس (آزمایشی)
     'gate_touch_dir_fixed_enabled',         # V3.44.47: جهت فقط از الگوی برخورد (در کلید ۱ خاموش = رفتار قبلی)
     'gate_fc_btcpat_enabled',               # V3.44.47: رأی «الگوی BTC روی سطح خودش»
+    'gate_fc_btcside_enabled',              # V3.44.102: رأی «سمت BTC نسبت به نزدیک‌ترین سطح»
 )
 
 BASE_CFG = {
@@ -369,6 +370,24 @@ def wizard_mode_keyboard(s):
     rows.append([{'text': '🔙 بازگشت', 'callback_data': '/wiz_tf'}])
     rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
     return {'inline_keyboard': rows}
+
+
+def panel_line(s):
+    """V3.44.102: خط «حالت معامله / پریست فعال» پنل اصلی (یک خط، Markdown)."""
+    act = s.get('active_preset')
+    mode = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
+    mod = ''
+    if act in PRESETS:
+        try:
+            if preset_diff(s, act):
+                mod = ' (دستی تغییر کرده)'
+        except Exception:
+            pass
+    if mode:
+        return f"🎯 حالت معامله: `{mode}`{mod}"
+    if act in PRESETS:
+        return f"🎚 پریست فعال: `کلید {_fa(act)} — {PRESETS[act]['label']}`{mod}"
+    return "🎯 حالت معامله: `بدون پریست (تنظیم دستی)`"
 
 
 def keyboard(s):

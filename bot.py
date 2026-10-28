@@ -182,6 +182,7 @@ FEE_INCLUDE_PAPER = os.environ.get('FEE_INCLUDE_PAPER', 'true').lower() not in (
 FEE_PAYMENT_ACCOUNT_ENV = os.environ.get('FEE_PAYMENT_ACCOUNT', '').strip()      # حساب/آدرس ادمین؛ با /set_fee_account هم قابل تغییر است
 ADMIN_CHAT_IDS_RAW = os.environ.get('ADMIN_CHAT_IDS', os.environ.get('ALLOWED_CHAT_IDS', '')).strip()
 ADMIN_CHAT_IDS = {int(x.strip()) for x in ADMIN_CHAT_IDS_RAW.split(',') if x.strip().lstrip('-').isdigit()}
+_ENV_ADMIN_IDS = frozenset(ADMIN_CHAT_IDS)      # V3.44.103: ادمین‌های env؛ ادمین‌های افزوده‌شده از پنل جدا در جدول extra_admins نگه‌داری می‌شوند
 # V3.44.59: قفل نقش‌ها. کاربر عادی فقط بخش‌های لازم (access_policy.py) را می‌بیند؛ بقیه فقط ادمین.
 # قفل فقط وقتی فعال است که حداقل یک ادمین تعریف شده باشد (ADMIN_CHAT_IDS) تا مالک از ربات بیرون نماند.
 import access_policy as _ap
@@ -734,6 +735,13 @@ def init_db():
                     pass
             # V3.42.14: لیست دسترسی پویا (مدیریت از پنل ادمین)
             conn.execute('''CREATE TABLE IF NOT EXISTS allowed_users(
+                chat_id INTEGER PRIMARY KEY,
+                note TEXT,
+                added_by INTEGER,
+                added_at INTEGER NOT NULL
+            )''')
+            # V3.44.103: ادمین‌های افزوده‌شده از پنل ادمین (کنار ADMIN_CHAT_IDS در env)
+            conn.execute('''CREATE TABLE IF NOT EXISTS extra_admins(
                 chat_id INTEGER PRIMARY KEY,
                 note TEXT,
                 added_by INTEGER,
@@ -1499,6 +1507,86 @@ def access_remove_user(target_id):
     return existed, open_count
 
 
+# --- V3.44.103: تعریف ادمین از پنل ---
+# ادمین‌های env (ADMIN_CHAT_IDS) ثابت‌اند و از پنل حذف نمی‌شوند. ادمین‌های افزوده‌شده از پنل در جدول extra_admins ذخیره می‌شوند
+# (با ری‌استارت می‌مانند) و درجا داخل همان مجموعه‌ی ADMIN_CHAT_IDS ادغام می‌شوند تا is_admin و قفل نقش‌ها بدون تغییر کار کنند.
+_EXTRA_ADMIN_IDS = set()
+
+
+def load_extra_admins():
+    ids = set()
+    try:
+        with DB_LOCK:
+            conn = db_connect()
+            try:
+                for r in conn.execute('SELECT chat_id FROM extra_admins').fetchall():
+                    ids.add(int(r[0]))
+            finally:
+                conn.close()
+    except Exception:
+        logger.exception('load_extra_admins failed')
+        return
+    with _DYN_ALLOWED_LOCK:
+        stale = set(_EXTRA_ADMIN_IDS) - ids - set(_ENV_ADMIN_IDS)
+        ADMIN_CHAT_IDS.update(ids)                 # اول اضافه، بعد حذف: هیچ لحظه‌ای ادمین «نیست» نمی‌شود
+        ADMIN_CHAT_IDS.difference_update(stale)
+        _EXTRA_ADMIN_IDS.clear(); _EXTRA_ADMIN_IDS.update(ids)
+    logger.info('Extra admins loaded: %s from panel, %s from env', len(ids), len(_ENV_ADMIN_IDS))
+
+
+def _extra_admin_rows():
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            return conn.execute('SELECT a.chat_id,a.note,u.username,u.first_name FROM extra_admins a LEFT JOIN users u ON u.chat_id=a.chat_id ORDER BY a.added_at DESC LIMIT 20').fetchall()
+        finally:
+            conn.close()
+
+
+def admin_add(target_id, added_by, note=''):
+    """یک آیدی را ادمین می‌کند. خروجی: (موفق؟, پیام)."""
+    try:
+        target_id = int(target_id)
+    except Exception:
+        return False, '⚠️ آیدی نامعتبر است.'
+    if target_id <= 0:
+        return False, '⚠️ آیدی ادمین باید آیدی عددیِ مثبتِ یک کاربر باشد (نه گروه یا کانال).'
+    if target_id in ADMIN_CHAT_IDS:
+        return False, f'ℹ️ `{target_id}` از قبل ادمین است.'
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            conn.execute('INSERT INTO extra_admins(chat_id,note,added_by,added_at) VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET note=excluded.note',
+                         (target_id, (note or '')[:100], int(added_by), int(time.time())))
+            conn.commit()
+        finally:
+            conn.close()
+    load_extra_admins()
+    return True, f'✅ `{target_id}` ادمین شد.'
+
+
+def admin_remove(target_id, by=None):
+    """ادمینِ افزوده‌شده از پنل را برمی‌دارد. ادمین‌های env و خودِ شخص قابل حذف نیستند. خروجی: (موفق؟, پیام)."""
+    try:
+        target_id = int(target_id)
+    except Exception:
+        return False, '⚠️ آیدی نامعتبر است.'
+    if target_id in _ENV_ADMIN_IDS:
+        return False, 'ℹ️ این ادمین در تنظیمات سرور (ADMIN_CHAT_IDS) تعریف شده و از داخل ربات حذف نمی‌شود.'
+    if by is not None and int(by) == target_id:
+        return False, 'ℹ️ نمی‌توانی ادمینیِ خودت را حذف کنی (تا از ربات بیرون نمانی).'
+    with DB_LOCK:
+        conn = db_connect()
+        try:
+            existed = conn.execute('SELECT 1 FROM extra_admins WHERE chat_id=?', (target_id,)).fetchone() is not None
+            conn.execute('DELETE FROM extra_admins WHERE chat_id=?', (target_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    load_extra_admins()
+    return (True, f'✅ ادمینی `{target_id}` برداشته شد.') if existed else (False, 'ℹ️ این آیدی در لیست ادمین‌های پنل نبود.')
+
+
 def access_resolve_target(raw):
     """ورودی: آیدی عددی یا @username (فقط اگر کاربر قبلاً با ربات تعامل داشته). خروجی: (chat_id یا None, پیام خطا)"""
     raw = (raw or '').strip()
@@ -1528,9 +1616,16 @@ def access_panel_text():
         restricted = bool(ALLOWED_CHAT_IDS or _DYN_ALLOWED or _ACCESS_RESTRICTED)
     lines = ['🔐 *مدیریت دسترسی کاربران*', '',
              f"• وضعیت: {'🔒 محدود (فقط کاربران مجاز)' if restricted else '🔓 باز برای همه'}",
-             f"• ادمین‌ها (همیشه مجاز): `{len(ADMIN_CHAT_IDS)}`",
+             f"• ادمین‌ها (همیشه مجاز): `{len(ADMIN_CHAT_IDS)}` (سرور: `{len(_ENV_ADMIN_IDS)}` · از پنل: `{len(_EXTRA_ADMIN_IDS)}`)",
              f"• لیست ثابت env (ALLOWED_CHAT_IDS): `{len(ALLOWED_CHAT_IDS)}`",
              f"• لیست پنل: `{len(rows)}`", '']
+    _ea = _extra_admin_rows()
+    if _ea:
+        lines.append('*ادمین‌های افزوده‌شده از پنل:*')
+        for cid, note, username, first in _ea:
+            who = ' '.join(x for x in ((f'@{username}' if username else ''), (first or ''), (f'— {note}' if note else '')) if x)
+            lines.append(f"👑 `{cid}` {who}".rstrip())
+        lines.append('')
     if rows:
         lines.append('*کاربران افزوده‌شده از پنل:*')
         for cid, note, added_at, username, first in rows:
@@ -1550,7 +1645,10 @@ def access_panel_keyboard():
             rows = conn.execute('SELECT chat_id FROM allowed_users ORDER BY added_at DESC LIMIT 20').fetchall()
         finally:
             conn.close()
-    kb = [[{'text': '➕ افزودن کاربر', 'callback_data': '/admin_access_add_prompt'}]]
+    kb = [[{'text': '➕ افزودن کاربر', 'callback_data': '/admin_access_add_prompt'}],
+          [{'text': '👑 افزودن ادمین', 'callback_data': '/admin_access_admin_add_prompt'}]]
+    for _cid, *_r in _extra_admin_rows():
+        kb.append([{'text': f'❌ حذف ادمین {_cid}', 'callback_data': f'/admin_access_admin_rm_{_cid}'}])
     for (cid,) in rows:
         kb.append([{'text': f'❌ حذف {cid}', 'callback_data': f'/admin_access_rm_{cid}'}])
     with _DYN_ALLOWED_LOCK:
@@ -2025,7 +2123,7 @@ _BACK_PARENT = {
     '/levels_start': '/menu_reports',
     '/pending_order_start': '/menu_trading', '/market_report': '/menu_reports',
     '/export_trade_data': '/performance', '/export_trade_pipeline': '/trade_tracking_menu',
-    '/admin_set_fee_prompt': '/admin_fee_report', '/admin_fee_account_prompt': '/admin_fee_menu', '/admin_access_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
+    '/admin_set_fee_prompt': '/admin_fee_report', '/admin_fee_account_prompt': '/admin_fee_menu', '/admin_access_add_prompt': '/admin_access', '/admin_access_admin_add_prompt': '/admin_access', '/pending_side_buy': '/menu_trading',
     '/pending_side_sell': '/menu_trading', '/confirm_pending_order': '/menu_trading',
     '/cancel_pending_all': '/menu_trading', '/close_longs_prompt': '/open_positions',
     '/close_shorts_prompt': '/open_positions', '/confirm_close_longs': '/open_positions',
@@ -11652,7 +11750,7 @@ def _tg_len(text):
 
 FAV_FLT_POPUP_MAX = 200     # V3.44.39: سقف تلگرام برای متن پنجره‌ی بازشو (answerCallbackQuery)
 _FAV_FLT_SHORT = {'btceth': 'BTC/ETH', 'h4': '۴س', 'tf': '۵/۱۵', 'rsi': 'RSI', 'macd': 'MACD', 'adx': 'ADX',
-                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز', 'btcpat': 'الگوی BTC'}
+                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز', 'btcpat': 'الگوی BTC', 'btcside': 'سمت BTC'}
 
 
 def _fav_flt_mark(vote, sig):
@@ -12455,12 +12553,12 @@ TOUCH_CARDS_PER_LIST = 25         # V3.44.21: حداکثر تعداد ردیف �
 TOUCH_MAX_DRIFT_R = float(os.environ.get('TOUCH_MAX_DRIFT_R', '0.5'))     # V3.44.16: ورود خودکار فقط تا این‌قدر R دوری قیمت از لحظه‌ی برخورد
 # V3.44.16: گروه‌بندی رأی‌ها - فیلترهای هم‌خانواده (همه «روند» یا همه «مومنتوم») مستقل حساب نمی‌شوند؛ هر گروه یک رأی (با اکثریت اعضایش) می‌دهد
 # و الگوی برخورد وزن ۲ دارد؛ پس چند فیلتر هم‌خانواده به‌تنهایی الگو را کنار نمی‌زنند.
-_TOUCH_GROUP = {'pattern': 'pattern', 'btcpat': 'btc', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
-_TOUCH_GROUP_W = {'pattern': 2, 'btc': 1, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
-_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'btc': 'الگوی BTC', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
+_TOUCH_GROUP = {'pattern': 'pattern', 'btcpat': 'btc', 'btcside': 'btcside', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
+_TOUCH_GROUP_W = {'pattern': 2, 'btc': 1, 'btcside': 1, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
+_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'btc': 'الگوی BTC', 'btcside': 'سمت BTC از سطح', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
 _TOUCH_LOCK = RLock()
-_TOUCH_KEYS = ('btcpat', 'btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
-_TOUCH_LABELS = {'btcpat': 'الگوی BTC روی سطح خودش', 'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
+_TOUCH_KEYS = ('btcpat', 'btcside', 'btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
+_TOUCH_LABELS = {'btcpat': 'الگوی BTC روی سطح خودش', 'btcside': 'سمت BTC نسبت به نزدیک‌ترین سطح', 'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
                  'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'ylevel': 'برخورد/عبور از سقف و کف دیروز', 'vol': 'حجم'}
 _TOUCH_ST_TXT = {'ok': '✅ تایید', 'wait': '⏳ منتظر تایید', 'against': '❌ مخالف', 'buy': '🟢 رأی خرید', 'sell': '🔴 رأی فروش'}
 
@@ -12567,6 +12665,29 @@ def _btc_pattern_vote(tf, cfg=None):
     return vote, detail
 
 
+def _btc_side_vote(tf, cfg=None):
+    """V3.44.102: رأیِ «سمت BTC نسبت به نزدیک‌ترین سطح». نزدیک‌ترین سطحِ BTC (از هر دو طرف) به کلوز آخرین کندل بسته‌شده‌ی BTC
+    روی تایم‌فریم tf مرجع است؛ کلوز بالای آن = 'BUY'، پایین آن = 'SELL'، روی سطح/نبود داده = None. خروجی: (vote, توضیح).
+    همان منبعِ «سمت درست سطحِ» دروازه‌ی BTC (btc_front_level_info) است، ولی اینجا فقط رأی می‌دهد و جلوی ورود را نمی‌گیرد."""
+    try:
+        info = btc_front_level_info({'strategy_config': cfg or {}}, tf, True)
+    except Exception:
+        logger.exception('btc side vote failed tf=%s', tf)
+        return None, 'خطا در بررسی سطح BTC'
+    if not info or info.get('ref_price') is None or info.get('close') is None:
+        return None, 'سطح BTC در دسترس نیست'
+    try:
+        close, rp = float(info['close']), float(info['ref_price'])
+    except Exception:
+        return None, 'سطح BTC در دسترس نیست'
+    lbl = info.get('ref_label') or 'سطح'
+    if close > rp:
+        return 'BUY', f"BTC بالای نزدیک‌ترین سطح ({lbl} {fmt(rp)})"
+    if close < rp:
+        return 'SELL', f"BTC پایین نزدیک‌ترین سطح ({lbl} {fmt(rp)})"
+    return None, f"BTC روی نزدیک‌ترین سطح ({lbl} {fmt(rp)})"
+
+
 def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
     """sync (از thread صدا زده شود). خروجی: [{'key','label','vote','detail'}]؛ vote: 'BUY' | 'SELL' | None (خنثی/نبود داده)،
     و برای «حجم»: 'OK' | None."""
@@ -12580,6 +12701,9 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
     if 'btcpat' in keys and sym_u != 'BTC':
         _bv, _bd = _btc_pattern_vote(tf, cfg)
         add('btcpat', _bv, _bd)
+    if 'btcside' in keys and sym_u != 'BTC':       # V3.44.102
+        _sv, _sd = _btc_side_vote(tf, cfg)
+        add('btcside', _sv, _sd)
     if 'btceth' in keys:
         regs = {}
         for sym in ('BTC', 'ETH'):
@@ -14222,6 +14346,7 @@ GATE_REGISTRY = {
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود', False, 'regime', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
     'gate_btc_candle_enabled': ('₿ کندل BTC هم‌جهت با معامله', False, 'btceth', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'btceth', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
+    'gate_fc_btcside_enabled':    ('رأی‌گیری: سمت BTC نسبت به نزدیک‌ترین سطح', False, 'btceth', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): نزدیک‌ترین سطح BTC (از هر دو طرف) به کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال مرجع است. کلوز BTC بالای آن سطح = رأی خرید؛ پایین آن = رأی فروش؛ روی سطح یا نبود داده = بدون رأی. برخلاف «📏 فاصله معقول تا سطح جلویی BTC» که ورود را می‌بندد، این کلید فقط رأی می‌دهد و جلوی ورود را نمی‌گیرد. برای خودِ BTC رأی نمی‌دهد.'),
     'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
     'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
@@ -15366,11 +15491,16 @@ def menu(chat_id,message_id=None):
     max_same_disp = max_same if max_same>0 else '∞'
     dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    try:
+        mode_line = presets_mod.panel_line(s)      # V3.44.102: حالت معامله / پریست فعال
+    except Exception:
+        mode_line = ''
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n{mode_line}\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     if is_restricted_user(chat_id):
         # V3.44.59: پنل کاربر عادی بدون جزئیات استراتژی (تایم‌فریم، نوع استراتژی، لاگ ورود، قوانین هم‌جهت).
         text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
                 f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
+                f"{mode_line}\n"
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
                 f"🤝 حالت دستیار: `{'روشن (ورود فقط با تایید شما)' if s.get('assist_mode_enabled') else 'خاموش (ورود خودکار)'}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
@@ -15992,7 +16122,7 @@ def process_command(cmd,chat_id,message_id=None):
             _save_signal_channel_level_tags(_SIGNAL_CHANNEL_LEVEL_TAGS)
         edit_page(chat_id, signal_channel_settings_report(), signal_channel_settings_keyboard(), message_id)
         return
-    if cmd in ('/admin_access', '/admin_access_toggle', '/admin_access_add_prompt') or str(cmd).startswith(('/admin_access_rm_', '/admin_access_approve_', '/admin_access_deny_', '/allow ', '/disallow ')):
+    if cmd in ('/admin_access', '/admin_access_toggle', '/admin_access_add_prompt', '/admin_access_admin_add_prompt') or str(cmd).startswith(('/admin_access_admin_rm_', '/admin_access_rm_', '/admin_access_approve_', '/admin_access_deny_', '/allow ', '/disallow ')):
         if not is_admin(chat_id):
             send_message(chat_id,'⛔ دسترسی ادمین ندارید.'); return
         _panel_btn = {'inline_keyboard': [[{'text': '🔐 مدیریت دسترسی', 'callback_data': '/admin_access'}]]}
@@ -16018,7 +16148,17 @@ def process_command(cmd,chat_id,message_id=None):
                 _ACCESS_DENIED.add(target)
                 send_message(chat_id, f'🚫 درخواست {who} رد شد.', _panel_btn, parse_mode=None)
             return
-        if cmd == '/admin_access_toggle':
+        if cmd == '/admin_access_admin_add_prompt':        # V3.44.103
+            s = get_session(chat_id); s['user_state'] = 'WAIT_ADMIN_ADMIN_ADD'; save_session(chat_id)
+            send_message(chat_id, '👑 *افزودن ادمین*\n\nآیدی عددی تلگرام کسی که می‌خواهی ادمین شود را بفرست (اختیاری: یک یادداشت بعدش).\nمثال: `123456789 علی`\nیا `@username` اگر قبلاً ربات را استارت کرده.\n\n⚠️ ادمین به همه‌ی بخش‌های مدیریت (دسترسی کاربران، تنظیمات، پریست‌ها و ...) دسترسی کامل دارد.')
+            return
+        if str(cmd).startswith('/admin_access_admin_rm_'):
+            try:
+                _ok, _msg = admin_remove(int(str(cmd)[len('/admin_access_admin_rm_'):]), chat_id)
+            except ValueError:
+                _ok, _msg = False, '⚠️ آیدی نامعتبر است.'
+            send_message(chat_id, _msg)
+        elif cmd == '/admin_access_toggle':
             access_toggle_restricted()
         elif str(cmd).startswith('/admin_access_rm_'):
             try:
@@ -17410,6 +17550,24 @@ def handle_text(chat_id,text,message_id=None):
         run_user_backtest(chat_id)
         return
 
+    if current_state == 'WAIT_ADMIN_ADMIN_ADD':          # V3.44.103
+        s['user_state'] = None
+        save_session(chat_id)
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ دسترسی ادمین ندارید.'); return
+        parts = raw.split(None, 1)
+        target, err = access_resolve_target(parts[0] if parts else '')
+        if target is None:
+            send_message(chat_id, '⚠️ ' + (err or 'آیدی نامعتبر است.'), access_panel_keyboard()); return
+        _ok, _msg = admin_add(target, chat_id, parts[1] if len(parts) > 1 else '')
+        if _ok:
+            try:
+                send_message(target, '👑 شما به‌عنوان ادمین ربات تعریف شدید. برای دیدن پنل مدیریت /menu را بزنید.', keep=True)
+            except Exception:
+                logger.exception('new admin notice failed chat=%s', target)
+        send_message(chat_id, _msg + '\n\n' + access_panel_text(), access_panel_keyboard())
+        return
+
     if current_state == 'WAIT_ADMIN_ALLOW_ADD':
         s['user_state'] = None
         save_session(chat_id)
@@ -18259,6 +18417,7 @@ _DATA_VENUE_WRAPPED = _install_data_venue_wrappers()
 def main():
     init_db()
     load_access_control()
+    load_extra_admins()      # V3.44.103: ادمین‌های افزوده‌شده از پنل
     fee_reload_state()
     if not ADMIN_CHAT_IDS:
         logger.warning('هیچ ادمینی تعریف نشده: ADMIN_CHAT_IDS (یا ALLOWED_CHAT_IDS) خالی است؛ پنل مدیریت و تایید کاربران کار نمی‌کند.')
