@@ -11750,7 +11750,7 @@ def _tg_len(text):
 
 FAV_FLT_POPUP_MAX = 200     # V3.44.39: سقف تلگرام برای متن پنجره‌ی بازشو (answerCallbackQuery)
 _FAV_FLT_SHORT = {'btceth': 'BTC/ETH', 'h4': '۴س', 'tf': '۵/۱۵', 'rsi': 'RSI', 'macd': 'MACD', 'adx': 'ADX',
-                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز', 'btcpat': 'الگوی BTC', 'btcside': 'سمت BTC'}
+                  'vol': 'حجم', 'level': 'سطح', 'ylevel': 'دیروز', 'btcpat': 'الگوی BTC', 'btcside': 'سمت BTC', 'symreg': 'رژیم نماد'}
 
 
 def _fav_flt_mark(vote, sig):
@@ -12553,12 +12553,12 @@ TOUCH_CARDS_PER_LIST = 25         # V3.44.21: حداکثر تعداد ردیف �
 TOUCH_MAX_DRIFT_R = float(os.environ.get('TOUCH_MAX_DRIFT_R', '0.5'))     # V3.44.16: ورود خودکار فقط تا این‌قدر R دوری قیمت از لحظه‌ی برخورد
 # V3.44.16: گروه‌بندی رأی‌ها - فیلترهای هم‌خانواده (همه «روند» یا همه «مومنتوم») مستقل حساب نمی‌شوند؛ هر گروه یک رأی (با اکثریت اعضایش) می‌دهد
 # و الگوی برخورد وزن ۲ دارد؛ پس چند فیلتر هم‌خانواده به‌تنهایی الگو را کنار نمی‌زنند.
-_TOUCH_GROUP = {'pattern': 'pattern', 'btcpat': 'btc', 'btcside': 'btcside', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
-_TOUCH_GROUP_W = {'pattern': 2, 'btc': 1, 'btcside': 1, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
-_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'btc': 'الگوی BTC', 'btcside': 'سمت BTC از سطح', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
+_TOUCH_GROUP = {'pattern': 'pattern', 'btcpat': 'btc', 'btcside': 'btcside', 'btceth': 'trend', 'h4': 'trend', 'tf': 'trend', 'symreg': 'symreg', 'rsi': 'momentum', 'macd': 'momentum', 'adx': 'momentum', 'level': 'structure', 'ylevel': 'ylevel'}
+_TOUCH_GROUP_W = {'pattern': 2, 'btc': 1, 'btcside': 1, 'symreg': 1, 'trend': 1, 'momentum': 1, 'structure': 1, 'ylevel': 1}
+_TOUCH_GROUP_FA = {'pattern': 'الگو (×۲)', 'btc': 'الگوی BTC', 'btcside': 'سمت BTC از سطح', 'symreg': 'رژیم نماد (تایم‌فریم فعال)', 'trend': 'روند', 'momentum': 'مومنتوم', 'structure': 'سطح', 'ylevel': 'سقف/کف دیروز'}
 _TOUCH_LOCK = RLock()
-_TOUCH_KEYS = ('btcpat', 'btcside', 'btceth', 'h4', 'tf', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
-_TOUCH_LABELS = {'btcpat': 'الگوی BTC روی سطح خودش', 'btcside': 'سمت BTC نسبت به نزدیک‌ترین سطح', 'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'rsi': 'RSI',
+_TOUCH_KEYS = ('btcpat', 'btcside', 'btceth', 'h4', 'tf', 'symreg', 'rsi', 'macd', 'adx', 'level', 'ylevel', 'vol')
+_TOUCH_LABELS = {'btcpat': 'الگوی BTC روی سطح خودش', 'btcside': 'سمت BTC نسبت به نزدیک‌ترین سطح', 'btceth': 'رژیم BTC و ETH', 'h4': 'رژیم ۴ ساعته‌ی نماد', 'tf': 'رژیم ۵ و ۱۵ دقیقه‌ی نماد', 'symreg': 'رژیم نماد در تایم‌فریم فعال', 'rsi': 'RSI',
                  'macd': 'MACD', 'adx': 'روند ADX', 'level': 'کندل بسته‌شده نسبت به سطح', 'ylevel': 'برخورد/عبور از سقف و کف دیروز', 'vol': 'حجم'}
 _TOUCH_ST_TXT = {'ok': '✅ تایید', 'wait': '⏳ منتظر تایید', 'against': '❌ مخالف', 'buy': '🟢 رأی خرید', 'sell': '🔴 رأی فروش'}
 
@@ -12688,6 +12688,81 @@ def _btc_side_vote(tf, cfg=None):
     return None, f"BTC روی نزدیک‌ترین سطح ({lbl} {fmt(rp)})"
 
 
+SYMSTRUCT_BARS = 160
+
+
+def _swing_structure(df, left=3, right=3):
+    """V3.44.105: ساختار سقف/کفِ نماد روی کندل‌های بسته‌شده. خروجی: ('UP'|'DOWN'|None, info).
+    UP = دو سقف آخر و دو کف آخر هر دو بالاتر (HH + HL)؛ DOWN = هر دو پایین‌تر (LH + LL)؛ غیر از این None (مختلط/رنج/داده‌ی ناکافی).
+    پیوت‌ها علّی‌اند (هر پیوت بعد از `right` کندل تایید می‌شود) و کندل آخرِ df (در حال تشکیل) نادیده گرفته می‌شود.
+    شکست ساختار: اگر کلوز آخرین کندل بسته‌شده زیر آخرین کفِ بالاتر (در UP) یا بالای آخرین سقفِ پایین‌تر (در DOWN) باشد، ساختار دیگر معتبر نیست → None."""
+    try:
+        if df is None or len(df) < left + right + 12:
+            return None, {}
+        d = df.iloc[:-1]
+        hi = [float(x) for x in d['high']]
+        lo = [float(x) for x in d['low']]
+        cl = float(d['close'].iloc[-1])
+        highs, lows = [], []
+        for i in range(left, len(d) - right):
+            if hi[i] > max(hi[i - left:i]) and hi[i] >= max(hi[i + 1:i + 1 + right]):
+                highs.append((i, hi[i]))
+            if lo[i] < min(lo[i - left:i]) and lo[i] <= min(lo[i + 1:i + 1 + right]):
+                lows.append((i, lo[i]))
+        if len(highs) < 2 or len(lows) < 2:
+            return None, {}
+        (_h1i, h1), (_h2i, h2) = highs[-2], highs[-1]
+        (_l1i, l1), (_l2i, l2) = lows[-2], lows[-1]
+        info = {'h1': h1, 'h2': h2, 'l1': l1, 'l2': l2, 'close': cl}
+        if h2 > h1 and l2 > l1:
+            return ('UP' if cl >= l2 else None), info
+        if h2 < h1 and l2 < l1:
+            return ('DOWN' if cl <= h2 else None), info
+        return None, info
+    except Exception:
+        logger.exception('swing structure failed')
+        return None, {}
+
+
+def _symbol_structure_verdict(symbol, tf, sig, s=None):
+    """V3.44.105: (ok, توضیح). ساختار UP جلوی فروش را می‌گیرد و ساختار DOWN جلوی خرید را؛ نبود داده/ساختار مختلط = مجاز.
+    sig جهت برخورد است؛ با «معاملات معکوس» روشن جهت واقعی معامله برعکس می‌شود و همان سنجیده می‌شود."""
+    eff = sig
+    try:
+        if s is not None and gate_on(s, 'gate_inverse_trading_enabled'):
+            eff = 'SELL' if sig == 'BUY' else 'BUY'
+        cfg = (s or {}).get('strategy_config') or {}
+        pv = max(2, min(6, int(cfg.get('symstruct_pivot', 3))))
+        df = get_klines(symbol, tf, SYMSTRUCT_BARS)
+        st, info = _swing_structure(df, pv, pv)
+    except Exception:
+        logger.exception('symbol structure verdict failed symbol=%s', symbol)
+        return True, ''
+    if (st == 'UP' and eff == 'SELL') or (st == 'DOWN' and eff == 'BUY'):
+        tf_fa = TF_DISPLAY.get(tf, tf)
+        kind = 'صعودی (سقف‌ها و کف‌های بالاتر)' if st == 'UP' else 'نزولی (سقف‌ها و کف‌های پایین‌تر)'
+        side_fa = 'فروش' if eff == 'SELL' else 'خرید'
+        txt = (f"⛔ ساختار قیمت `{symbol}` در {tf_fa} {kind} است (سقف {fmt(info['h1'])}→{fmt(info['h2'])} · کف {fmt(info['l1'])}→{fmt(info['l2'])}) "
+               f"و معامله‌ی {side_fa} خلاف آن است؛ این برخورد وارد لیست انتظار نمی‌شود"
+               + _btc_gate_key_line('gate_symbol_structure_block_enabled'))
+        _block_simple_register(txt, 'ساختار قیمت این نماد خلاف جهت این معامله است؛ در این شرایط ورود به معامله مجاز نیست.')
+        return False, txt
+    return True, ''
+
+
+def _symbol_active_tf_regime(symbol, tf):
+    """V3.44.104: رژیم خودِ نماد روی تایم‌فریم فعال tf ('BULLISH'|'BEARISH'|'RANGE'|None) با همان معیار رژیم ۵/۱۵ دقیقه و ۴ ساعته
+    (close نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده)."""
+    try:
+        df = get_klines(symbol, tf, 160)
+        if df is None or df.empty or len(df) < 60:
+            return None
+        return _signal_channel_symbol_regime(df)
+    except Exception:
+        logger.exception('symbol active tf regime failed symbol=%s tf=%s', symbol, tf)
+        return None
+
+
 def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
     """sync (از thread صدا زده شود). خروجی: [{'key','label','vote','detail'}]؛ vote: 'BUY' | 'SELL' | None (خنثی/نبود داده)،
     و برای «حجم»: 'OK' | None."""
@@ -12721,6 +12796,9 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
         vs = {r2v.get(r) for r in regs.values()}
         vote = next(iter(vs)) if (len(vs) == 1 and None not in vs) else None
         add('btceth', vote, '، '.join(f"{k} {fa.get(v, 'نامشخص')}" for k, v in regs.items()))
+    if 'symreg' in keys:                      # V3.44.104: رأی «رژیم نماد در تایم‌فریم فعال»؛ صعودی = رأی خرید، نزولی = رأی فروش، رنج/نبود داده = بدون رأی
+        reg = _symbol_active_tf_regime(symbol, tf)
+        add('symreg', r2v.get(reg), f"{TF_DISPLAY.get(tf, tf)} {fa.get(reg, 'نامشخص')}")
     if 'h4' in keys:
         reg = _symbol_h4_regime(symbol)
         add('h4', r2v.get(reg), fa.get(reg, 'نامشخص'))
@@ -12903,6 +12981,11 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
         return 'touch_skipped', 'روی این نماد پوزیشن باز داریم'
     if (not flip_from) and level_token is not None and gate_on(s, 'gate_traded_level_enabled') and f"{symbol}:{level_token}:{level_value}" in s.get('traded_levels', {}):
         return 'touch_skipped', 'روی همین سطح قبلاً معامله شده'
+    if gate_on(s, 'gate_symbol_structure_block_enabled'):
+        # V3.44.105: ساختار قیمت نماد (سقف/کف‌ها) خلاف جهت معامله است → اصلاً وارد لیست انتظار رأی‌گیری نمی‌شود (هر ورودی به لیست از همین تابع می‌گذرد: اسکن و برگشت از صف تایید)
+        _ss_ok, _ss_txt = _symbol_structure_verdict(symbol, tf, touch_sig, s)
+        if not _ss_ok:
+            return 'blocked', _ss_txt
     with _TOUCH_LOCK:
         waits = s.setdefault('touch_wait', {})
         if any(r.get('symbol') == symbol and r.get('status') == 'waiting' for r in waits.values()):
@@ -14353,6 +14436,8 @@ GATE_REGISTRY = {
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'btceth', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'regime', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
+    'gate_symbol_structure_block_enabled': ('🧱 مانع ثبت: ساختار قیمت نماد خلاف جهت سیگنال', False, 'regime', 'پیش‌فرض خاموش. روشن: قبل از اینکه برخورد با سطح وارد «📋 سیگنال‌های در انتظار» شود، ساختار سقف/کفِ خودِ نماد روی تایم‌فریم فعال سنجیده می‌شود (کندل‌های بسته‌شده، پیوت ۳ کندلی). اگر دو سقف آخر و دو کف آخر هر دو بالاتر باشند (HH/HL = ساختار صعودی)، برخورد فروش اصلاً ثبت نمی‌شود، حتی اگر روی سطح برگشته باشد؛ و برعکس: اگر هر دو پایین‌تر باشند (LH/LL = ساختار نزولی)، برخورد خرید ثبت نمی‌شود. ساختار مختلط یا رنج، نبود داده، و ساختاری که شکسته شده باشد (کلوز زیر آخرین کفِ بالاتر یا بالای آخرین سقفِ پایین‌تر) جلوی هیچ‌طرفی را نمی‌گیرد. روی همه‌ی سناریوها، از جمله برگشتی‌ها، اعمال می‌شود؛ هر ورودی به لیست انتظار (اسکن و برگشت از صف تایید) از همین بررسی می‌گذرد. رد شدن‌ها با دلیل در «تشخیص ورود» ثبت می‌شود. با «معاملات معکوس» روشن، جهت واقعی معامله سنجیده می‌شود.'),
+    'gate_fc_symreg_enabled':     ('رأی‌گیری: رژیم نماد در تایم‌فریم فعال', False, 'regime', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): رژیم خودِ نماد روی همان تایم‌فریمی که ربات روی آن معامله می‌کند (۵ دقیقه، ۱۵ دقیقه یا ۱ ساعته) سنجیده می‌شود (close نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده). نزولی = رأی فروش و صعودی = رأی خرید؛ یعنی برای سیگنال فروش رژیم نزولی رأی موافق (مثبت) و رژیم صعودی رأی مخالف (منفی) است و برای سیگنال خرید برعکس. رنج یا نبود داده = بدون رأی. جدا از «هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد» است (آن هر دو تایم‌فریم ۵ و ۱۵ را با هم می‌سنجد) و در شمارش رأی‌ها یک گروه مستقل است.'),
     'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'regime', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
     'gate_fc_rsi_enabled':        ('تایید RSI', True, 'momentum', 'RSI آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (برای خرید: RSI رو به بالا یا اشباع فروش؛ برای فروش: رو به پایین یا اشباع خرید). RSI خنثی یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_macd_enabled':       ('تایید MACD', True, 'momentum', 'هیستوگرام MACD آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (خرید: مثبت، فروش: منفی). صفر یا نبود داده = سیگنال صادر نمی‌شود.'),

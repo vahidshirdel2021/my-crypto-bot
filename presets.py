@@ -47,6 +47,8 @@ _GATES_OFF = (
     'gate_touch_dir_fixed_enabled',         # V3.44.47: جهت فقط از الگوی برخورد (در کلید ۱ خاموش = رفتار قبلی)
     'gate_fc_btcpat_enabled',               # V3.44.47: رأی «الگوی BTC روی سطح خودش»
     'gate_fc_btcside_enabled',              # V3.44.102: رأی «سمت BTC نسبت به نزدیک‌ترین سطح»
+    'gate_fc_symreg_enabled',               # V3.44.104: رأی «رژیم نماد در تایم‌فریم فعال»
+    'gate_symbol_structure_block_enabled',  # V3.44.105: مانع ثبت وقتی ساختار سقف/کف نماد خلاف جهت سیگنال است
 )
 
 BASE_CFG = {
