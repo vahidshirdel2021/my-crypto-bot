@@ -7,12 +7,14 @@ exec(src[a:b].replace("\n\n\ndef _p4_keep_flags", "\n\n\ndef _p4_keep_flags"), g
 P, A, S = g['_halving_tf_params'], g['_halving_tf_apply'], g['_halving_tf_store']
 assert P({}, '5min') == {'halving_k_atr': 3.0, 'halving_max_depth': 12}
 assert P({}, '15min') == {'halving_k_atr': 4.0, 'halving_max_depth': 10}
-assert P({}, '1hour') == {}
+assert P({}, '1hour') == {'halving_k_atr': 4.0, 'halving_max_depth': 10}      # V3.44.101: ۱ ساعته
+assert P({}, '4hour') == {}
 # نشست قدیمی با مقدار سراسری 4/10 → روی ۵ دقیقه 3/12 می‌شود
 cfg = {'halving_k_atr': 4.0, 'halving_max_depth': 10}
 A(cfg, '5min'); assert (cfg['halving_k_atr'], cfg['halving_max_depth']) == (3.0, 12)
 A(cfg, '15min'); assert (cfg['halving_k_atr'], cfg['halving_max_depth']) == (4.0, 10)
 # تایم‌فریم بدون پیش‌فرض: مقدار فعلی دست‌نخورده
+A(cfg, '4hour'); assert (cfg['halving_k_atr'], cfg['halving_max_depth']) == (4.0, 10)
 A(cfg, '1hour'); assert (cfg['halving_k_atr'], cfg['halving_max_depth']) == (4.0, 10)
 # تغییر دستی روی ۵ دقیقه فقط برای ۵ دقیقه می‌ماند
 A(cfg, '5min'); cfg['halving_k_atr'] = 5.0; S(cfg, '5min')

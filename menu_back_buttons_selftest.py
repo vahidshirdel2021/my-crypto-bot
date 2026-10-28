@@ -33,11 +33,11 @@ for name, f in inspect.getmembers(ui, inspect.isfunction):
     n += 1
 assert n >= 20, n
 
-# 2) تایم‌فریم: فقط ۵ و ۱۵ دقیقه
+# 2) تایم‌فریم: ۵ و ۱۵ دقیقه و ۱ ساعته (V3.44.101)
 tf = [c for c in cbs(ui.get_timeframe_keyboard()) if c != '/dummy']
-assert [c for c in tf if c.startswith('/set_tf_')] == ['/set_tf_5m', '/set_tf_15m'], tf
+assert [c for c in tf if c.startswith('/set_tf_')] == ['/set_tf_5m', '/set_tf_15m', '/set_tf_1h'], tf
 txt = ' '.join(b['text'] for r in ui.get_timeframe_keyboard()['inline_keyboard'] for b in r)
-assert 'ساعته' not in txt and 'روندی' not in txt, txt
+assert 'روندی' not in txt and '۴ ساعت' not in txt, txt
 
 # 3) زنجیره‌ی برگشتِ ویزارد «تنظیمات معامله»
 mk = ui.get_margin_keyboard(); assert '/menu_settings' in cbs(mk) and '/menu' in cbs(mk)

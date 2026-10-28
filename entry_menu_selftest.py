@@ -49,7 +49,7 @@ assert '/toggle_regime_adv' in cbs('regime')
 
 # صفحه‌ی «رأی‌گیری و ورود»: فقط کلید رأی‌گیری + ورود خودکار + تایید حرکت (بدون کلیدهای دسته‌های دیگر)
 rul = cbs('entry_rules')
-need = {'/toggle_gate_gate_touch_vote_enabled', '/touch_auto_next', '/toggle_sweep_confirm', '/toggle_fav_confirm', '/toggle_fav_close5m', '/fav_min_r_next',
+need = {'/toggle_gate_gate_touch_vote_enabled', '/touch_auto_next', '/toggle_sweep_confirm', '/toggle_fav_confirm', '/toggle_fav_close5m', '/toggle_fav_close15m', '/fav_min_r_next',
         '/fav_max_r_next', '/fav_wait_next', '/fav_max_mode_toggle', '/fav_queue', '/fav_stats', '/trade_filter_management', '/menu'}
 assert set(rul) == need, set(rul) ^ need
 assert rul.index('/toggle_gate_gate_touch_vote_enabled') < rul.index('/touch_auto_next') < rul.index('/toggle_fav_confirm')
@@ -67,7 +67,7 @@ for sec in ('level', 'momentum', 'btceth', 'regime', 'timing', 'experimental', '
     assert f"'{sec}'" in src.split('_FILTER_SECTION_TITLES = {')[1].split('\n}\n')[0], sec
     assert f"'{sec}'" in src.split('has_toggles = section in (')[1][:240], sec
 # تنظیم‌های تایید حرکت/رأی‌گیری به همین صفحه برمی‌گردند
-assert src.count("trade_filter_management_keyboard(chat_id, 'entry_rules'))") == 6
+assert src.count("trade_filter_management_keyboard(chat_id, 'entry_rules'))") == 7
 print('entry_menu_selftest OK', len(seen))
 
 # V3.44.28: منوی «خروج و حفظ سود» دو کلید بستن سر به سر (هشدار / خودکار) و دو دکمه‌ی آستانه دارد

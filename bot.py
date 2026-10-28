@@ -1060,6 +1060,7 @@ def default_session():
         'fav_confirm_max_tp_pct': 0.20,
         'fav_confirm_wait_sec': 1800,      # V3.44.27: مهلت پیش‌فرض صف تایید حرکت ۳۰ دقیقه
         'fav_close_5m_enabled': False,     # V3.44.95: خروج از صف تایید حرکت روی کلوز کندل ۵ دقیقه‌ای (به‌جای تایم‌فریم سیگنال، مثلاً ۱۵ دقیقه). پیش‌فرض خاموش
+        'fav_close_15m_enabled': False,    # V3.44.101: خروج از صف تایید حرکت روی کلوز کندل ۱۵ دقیقه‌ای (برای سیگنال ۱ ساعته). پیش‌فرض خاموش
         'fav_wait30': True,                # V3.44.27: نشانه‌ی اینکه مهاجرت مهلت قدیمی (۱۵ دقیقه) به ۳۰ دقیقه انجام شده
         # V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح
         'touch_auto_mode': 'all',
@@ -1129,7 +1130,8 @@ _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
 # V3.44.40: پیش‌فرضِ «فاصله‌ی حداقل سطوح (×ATR)» و «سقف عمق درخت» برای هر تایم‌فریم جدا؛ با تغییر تایم‌فریم خودکار اعمال می‌شود.
 # تغییر دستی کاربر با دکمه‌ها فقط برای همان تایم‌فریمِ فعال ذخیره می‌شود (کلید halving_tf). تایم‌فریم‌های دیگر (۱ و ۴ ساعته) دست‌نخورده می‌مانند.
 HALVING_TF_DEFAULTS = {'5min': {'halving_k_atr': 3.0, 'halving_max_depth': 12},
-                       '15min': {'halving_k_atr': 4.0, 'halving_max_depth': 10}}
+                       '15min': {'halving_k_atr': 4.0, 'halving_max_depth': 10},
+                       '1hour': {'halving_k_atr': 4.0, 'halving_max_depth': 10}}   # V3.44.101: ۱ ساعته (مثل ۱۵ دقیقه)
 
 
 def _halving_tf_params(cfg, tf):
@@ -4047,7 +4049,7 @@ def btc_front_level_info(s, tf, is_long):
     if not secs:
         return None
     period = TIMEFRAME_MAP.get(tf, tf)
-    limit = 650 if tf in ('5min', '15min') else 200
+    limit = 650 if tf in ('5min', '15min', '1hour') else 200
     df = None
     for attempt in (0, 1):
         now = time.time()
@@ -4675,7 +4677,7 @@ def _signal_channel_touch_scan_symbol(symbol, timeframe):
         # اصلاً در بازار واقعی وجود نداشت تشخیص بدهد. حالا دقیقاً همان تعداد کندلی که
         # موتور اصلی معاملات برای همین محاسبه استفاده می‌کند خوانده می‌شود، تا PDH/PDL
         # همیشه از یک روز تقویمی کامل به‌دست بیاید.
-        df = get_klines(symbol, timeframe, 650 if timeframe in ('5min', '15min') else 200)
+        df = get_klines(symbol, timeframe, 650 if timeframe in ('5min', '15min', '1hour') else 200)
         if df is None or df.empty or len(df) < 110:
             return []
         dated_df, _, _ = _compute_prev_day_levels(df)
@@ -5321,7 +5323,7 @@ def compute_trade_setup_levels(df, tf, trade):
     setup_level_value = None
     setup_tag = None
 
-    if tf in ('5min', '15min'):
+    if tf in ('5min', '15min', '1hour'):
         try:
             dated_df, pdh, pdl = _compute_prev_day_levels(df)
         except Exception:
@@ -5620,7 +5622,7 @@ H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDU
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
-                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'touch_auto_mode', 'timeframe', 'active_strategy',
+                  'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled', 'touch_auto_mode', 'timeframe', 'active_strategy',
                   'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
@@ -6479,7 +6481,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     save_session(chat_id)
     audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
     chart_tf = s['timeframe']
-    df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min') else 200)
+    df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min', '1hour') else 200)
     if not df.empty:
         chart(chat_id, symbol, calculate_indicators(df), trade, entry_card=True)
     return True
@@ -6911,7 +6913,7 @@ def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_i
         strategy_config = _with_halving_cfg(strategy_config, get_halving_range_sync(symbol))   # هدف‌ها از سطوح نصف‌کردن
     try:
         if df_ind is None:
-            df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+            df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
             df_ind = calculate_indicators(df) if df is not None and not df.empty else None
         if df_ind is not None and not df_ind.empty:
             plan, why = build_quick_trade_plan(
@@ -10447,7 +10449,7 @@ def _indicator_conflict(symbol, side, tf):
     """(conflict, lines) - اجماع اندیکاتورها (همان رأی‌های دکمه‌ی «📊 اندیکاتورها»: RSI/MACD/ADX روی آخرین کندل بسته‌شده)
     در برابر جهت معامله. تضاد = تعداد رأی‌های خلاف جهت معامله بیشتر از رأی‌های هم‌جهت باشد. نبود داده/اجماع = بدون تضاد."""
     try:
-        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
         ind_df = calculate_indicators(df) if df is not None and not df.empty else None
         if ind_df is None or ind_df.empty or len(ind_df) < 2:
             return False, ['• 📊 اندیکاتورها: ⚪ داده‌ی کافی نیست — بدون تضاد']
@@ -10776,7 +10778,7 @@ def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None, use=None):
     try:
         ind = ind_df
         if ind is None:
-            d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+            d = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
             ind = calculate_indicators(d) if d is not None and not d.empty else None
         if ind is None or len(ind) < 4:
             raise ValueError('no indicator data')
@@ -11137,6 +11139,8 @@ def _fav_eval_tf(s, tf):
     try:
         if s.get('fav_close_5m_enabled', False) and _TF_SECONDS.get(tf, 300) > 300:
             return '5min'
+        if s.get('fav_close_15m_enabled', False) and _TF_SECONDS.get(tf, 300) > 900:      # V3.44.101: کلید جدا؛ مثلاً سیگنال ۱ ساعته با کلوز ۱۵ دقیقه‌ای
+            return '15min'
     except Exception:
         pass
     return tf
@@ -11208,7 +11212,7 @@ def _pd_level_gate(s, symbol, sig, tf, live=None):
         cfg = {**STRATEGY_DEFAULTS, **(s.get('strategy_config') or {})}
         if not cfg.get('halving_model_enabled'):
             return True, ''
-        d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        d = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
         if d is None or d.empty:
             return True, ''
         ind = calculate_indicators(d)
@@ -11539,7 +11543,7 @@ def _fav_card_payload(r, now=None):
     if r.get('status') != 'waiting':
         lines += ['', _FAV_FINAL_TXT.get(r.get('status'), 'پایان') + (' 🔁 در جهت مخالف به «📋 سیگنال‌های در انتظار» رفت.' if r.get('flipped') and r.get('flip_status') in ('touch_wait', 'assist_card', 'fav_wait', 'entry_opened') else '')]
         return '\n'.join(lines), {'inline_keyboard': []}
-    lines += ['', ('تایید فقط روی کلوز کندل بسته‌شده‌ی ۵ دقیقه‌ای انجام می‌شود.' if (r.get('eval_tf') == '5min' and tf != '5min') else 'تایید فقط روی کلوز کندل بسته‌شده انجام می‌شود.')]
+    lines += ['', ('تایید فقط روی کلوز کندل بسته‌شده‌ی ۵ دقیقه‌ای انجام می‌شود.' if (r.get('eval_tf') == '5min' and tf != '5min') else ('تایید فقط روی کلوز کندل بسته‌شده‌ی ۱۵ دقیقه‌ای انجام می‌شود.' if (r.get('eval_tf') == '15min' and tf != '15min') else 'تایید فقط روی کلوز کندل بسته‌شده انجام می‌شود.'))]
     rid, sym = r['id'], r['symbol']
     row1 = [{'text': f"⚡ ورود سریع {sym} {'🟢 خرید' if is_long else '🔴 فروش'}", 'callback_data': f"/fq_qe_{'buy' if is_long else 'sell'}_{rid}"}]
     try:
@@ -12229,7 +12233,7 @@ def assist_indicators_popup(chat_id, aid):
         return 'ℹ️ این سیگنال دیگر پیدا نشد.'
     symbol = rec['symbol']; tf = rec.get('tf') or '5min'; side = rec['sig']
     try:
-        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
         ind_df = calculate_indicators(df) if df is not None and not df.empty else None
         if ind_df is None or ind_df.empty or len(ind_df) < 2:
             return '⚠️ داده‌ی کافی برای محاسبه‌ی اندیکاتورها نیست.'
@@ -12251,7 +12255,7 @@ def assist_indicators(chat_id, aid):
         send_message(chat_id, 'ℹ️ این سیگنال دیگر پیدا نشد.'); return
     symbol = rec['symbol']; tf = rec.get('tf') or '5min'; side = rec['sig']
     try:
-        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+        df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
         ind_df = calculate_indicators(df) if df is not None and not df.empty else None
         if ind_df is None or ind_df.empty or len(ind_df) < 2:
             send_message(chat_id, '⚠️ داده‌ی کافی برای محاسبه‌ی اندیکاتورها نیست.'); return
@@ -12519,7 +12523,7 @@ def _btc_pattern_vote(tf, cfg=None):
         return hit[1], hit[2]
     vote, detail = None, 'داده‌ی BTC نیست'
     try:
-        limit = 650 if tf in ('5min', '15min') else 200
+        limit = 650 if tf in ('5min', '15min', '1hour') else 200
         d = get_klines('BTC', tf, limit)
         if d is not None and not d.empty and len(d) >= 62:
             ind = calculate_indicators(d)
@@ -12606,7 +12610,7 @@ def _touch_votes(symbol, tf, reason, keys, ind_df=None, cfg=None):
         try:
             ind = ind_df
             if ind is None:
-                d = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+                d = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
                 ind = calculate_indicators(d) if d is not None and not d.empty else None
             if ind is None or len(ind) < 4:
                 raise ValueError('no indicator data')
@@ -13765,7 +13769,7 @@ async def scan_symbol(http,chat_id,symbol):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     tf=s['timeframe']; strat=s['active_strategy']; md={}
     try:
-        klimit = 650 if tf in ('5min', '15min') else 160
+        klimit = 650 if tf in ('5min', '15min', '1hour') else 160
         d=await get_klines_async(http,symbol,tf,klimit)
     except Exception as exc:
         return _entry_diag_result(chat_id, symbol, 'data_error', f'خطا در دریافت داده: {exc}', 'data')
@@ -13798,7 +13802,7 @@ async def scan_symbol(http,chat_id,symbol):
     if not s['is_bot_active'] or int(s.get('scan_generation',0)) != scan_generation:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'وضعیت ربات پس از بررسی ریسک تغییر کرد', 'state')
 
-    is_scalp_strategy = (strat == 'dynamic' and primary_tf in ('5min', '15min'))
+    is_scalp_strategy = (strat == 'dynamic' and primary_tf in ('5min', '15min', '1hour'))
     # برای 5m/15m، استراتژی هنوز بر اساس کندل بسته‌شده و PDH/PDL تصمیم می‌گیرد؛
     # فقط برای بازیابی یک ستاپ خیلی تازه، قیمت زنده جهت جلوگیری از تعقیب قیمت استفاده می‌شود.
     live_entry_price = None
@@ -14261,6 +14265,8 @@ def _filter_info(key):
             'سیگنال صادر می‌شود ولی بی‌صدا در پس‌زمینه می‌ماند (تا مهلت تنظیم‌شده). فقط وقتی کلوز یک کندل بسته‌شده بعد از سیگنال، بین «حداقل تایید» و «سقف ورود» (بر حسب R) به نفع معامله رفته باشد، کارت سیگنال مثل قبل نمایش داده می‌شود (حالت دستیار: کارت ورود/رد؛ حالت خودکار: ورود). SL و TP همان سطوح سیگنال می‌مانند. اگر قیمت از سقف گذشت، سیگنال نمی‌میرد و تا پایان مهلت منتظر برگشت (پولبک) به محدوده می‌ماند و فقط در صورت برگشت وارد می‌شود (تعقیب قیمت نداریم). اگر خلاف جهت رفت، به SL رسید یا تایید نگرفت، چیزی نمایش داده نمی‌شود. پیش‌فرض: خاموش.'),
         'fav_close5m': ('خروج سریع‌تر از صف (کلوز ۵ دقیقه)',
             'خاموش (پیش‌فرض): صف تایید حرکت فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال (مثلاً ۱۵ دقیقه) تصمیم می‌گیرد. روشن: تصمیم روی کلوز هر کندل ۵ دقیقه‌ای گرفته می‌شود؛ پس سیگنال زودتر (تا ۱۰ دقیقه) از صف خارج می‌شود. شرط‌های حداقل تایید/سقف ورود/لغو همان می‌مانند ولی روی کلوزهای ۵ دقیقه‌ای حساس‌ترند. رژیم، BTC و سطح دیروز همچنان روی تایم‌فریم سیگنال سنجیده می‌شوند. فقط وقتی اثر دارد که تایم‌فریم سیگنال بزرگ‌تر از ۵ دقیقه باشد.'),
+        'fav_close15m': ('خروج از صف با کلوز ۱۵ دقیقه (برای ۱ ساعته)',
+            'خاموش (پیش‌فرض): صف تایید حرکت فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال تصمیم می‌گیرد. روشن: وقتی تایم‌فریم سیگنال ۱ ساعته است، تصمیم روی کلوز هر کندل ۱۵ دقیقه‌ای گرفته می‌شود و سیگنال زودتر از صف خارج می‌شود. روی ۵ و ۱۵ دقیقه اثری ندارد. با کلید «کلوز ۵ دقیقه» هم‌زمان روشن نمی‌ماند (روشن‌کردن هرکدام دیگری را خاموش می‌کند).'),
         'fav_min_r': ('حداقل تایید', 'قیمت باید حداقل این‌قدر (بر حسب R) به نفع معامله رفته باشد.'),
         'fav_max_r': ('سقف ورود', 'اگر قیمت بیشتر از این رفته باشد، ورود دیرهنگام است و سیگنال تا برگشت منتظر می‌ماند. پیش‌فرض: درصدی از فاصله‌ی ورود تا هدفِ همان سیگنال (برای هر نماد جدا)؛ با دکمه‌ی «نوع سقف» می‌شود آن را عدد ثابت R کرد.'),
         'fav_wait': ('مهلت صبر', 'حداکثر مدت صبر برای گرفتن تایید.'),
@@ -14499,6 +14505,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
              {'text': f"🚧 سقف ورود: {_fav_max_label(s)}", 'callback_data': '/fav_max_r_next'},
              {'text': f"⏱ مهلت: {_fwt // 60} دقیقه", 'callback_data': '/fav_wait_next'}],
             [fcell(bool(s.get('fav_close_5m_enabled', False)), 'fav_close5m', '/toggle_fav_close5m')],
+            [fcell(bool(s.get('fav_close_15m_enabled', False)), 'fav_close15m', '/toggle_fav_close15m')],
             [{'text': ('📏 سقف: بر اساس فاصله تا هدف ✅' if _fav_max_mode(s) == 'tp' else '📏 سقف: عدد ثابت R'), 'callback_data': '/fav_max_mode_toggle'}],
             [{'text': '⏳ مشاهده‌ی صف تایید', 'callback_data': '/fav_queue'}, {'text': '📊 آمار فیلتر', 'callback_data': '/fav_stats'}],
             ] + [_grow(k) for k in _rest] + [back_entry])}
@@ -15043,7 +15050,7 @@ def symbol_levels_chart(chat_id, raw_symbol):
     rng = get_halving_range_sync(symbol)
     if not rng:
         return None, f'⚠️ سقف/کف تاریخی `{symbol}` در دسترس نیست.', None
-    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
     if df is None or df.empty:
         return None, f'❌ داده‌ی کافی برای `{symbol}` پیدا نشد.', None
     live = latest_price(symbol)
@@ -15091,7 +15098,7 @@ def symbol_levels_report(chat_id, raw_symbol):
     s = get_session(chat_id)
     tf = s['timeframe']
     rng = get_halving_range_sync(symbol)
-    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min') else 200)
+    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
     if df is None or df.empty:
         return f'❌ داده‌ی کافی برای `{symbol}` پیدا نشد.', None
     live = latest_price(symbol)
@@ -16210,6 +16217,8 @@ def process_command(cmd,chat_id,message_id=None):
             _old_cfg = s.get('strategy_config')
             s['timeframe']=tf_map[cl]; s['strategy_config']=_p4_keep_flags(_old_cfg, get_timeframe_preset(s['timeframe']))
             _halving_tf_apply(s['strategy_config'], s['timeframe'])      # V3.44.40
+            if s['timeframe'] == '1hour':
+                s['strategy_config']['halving_model_enabled'] = True      # V3.44.101: روی ۱ ساعته فقط مدل نصف‌کردن سیگنال می‌دهد
             _p4_sync_tags(s)
             save_session(chat_id)
             wizard_mode_page(chat_id, message_id); return      # V3.44.85: آخرین مرحله‌ی ویزارد = حالت معامله
@@ -16596,10 +16605,22 @@ def process_command(cmd,chat_id,message_id=None):
     if cl == '/toggle_fav_close5m':
         current = bool(s.get('fav_close_5m_enabled', False))
         s['fav_close_5m_enabled'] = not current
+        if not current:
+            s['fav_close_15m_enabled'] = False      # V3.44.101: ۵ و ۱۵ دقیقه هم‌زمان روشن نمی‌ماند
         save_session(chat_id)
         note = ('از این پس تایید صف روی کلوز کندل‌های ۵ دقیقه‌ای سنجیده می‌شود؛ سیگنال زودتر از صف خارج می‌شود (روی سیگنال‌های در صف هم از کندل بعدی اثر می‌کند). این حالت روی کلوزهای ۵ دقیقه‌ای حساس‌تر است و لغو/رد شدن‌ها هم ممکن است بیشتر شود.'
                 if not current else 'برگشت به حالت قبلی: تایید صف فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال انجام می‌شود.')
         send_message(chat_id, f"⚡ {_filter_info('fav_close5m')[0]}: {'🟢 روشن' if not current else '🔴 خاموش'}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
+        return
+    if cl == '/toggle_fav_close15m':        # V3.44.101
+        current = bool(s.get('fav_close_15m_enabled', False))
+        s['fav_close_15m_enabled'] = not current
+        if not current:
+            s['fav_close_5m_enabled'] = False
+        save_session(chat_id)
+        note = ('از این پس برای سیگنال‌های ۱ ساعته تایید صف روی کلوز کندل‌های ۱۵ دقیقه‌ای سنجیده می‌شود (روی سیگنال‌های در صف هم از کندل بعدی اثر می‌کند). روی تایم‌فریم ۵ و ۱۵ دقیقه اثری ندارد.'
+                if not current else 'برگشت به حالت قبلی: تایید صف فقط روی کلوز کندل بسته‌شده‌ی تایم‌فریم سیگنال انجام می‌شود.')
+        send_message(chat_id, f"⚡ {_filter_info('fav_close15m')[0]}: {'🟢 روشن' if not current else '🔴 خاموش'}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_rules'))
         return
     if cl == '/fav_max_mode_toggle':
         s['fav_confirm_max_mode'] = 'r' if _fav_max_mode(s) == 'tp' else 'tp'
