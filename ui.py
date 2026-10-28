@@ -132,6 +132,7 @@ def get_timeframe_keyboard():
     return {"inline_keyboard": [
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
+        [{"text": "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "callback_data": "/set_tf_1h"}],
         [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
