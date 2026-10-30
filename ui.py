@@ -124,15 +124,28 @@ def get_leverage_keyboard():
     return {"inline_keyboard": [[{"text": "3X", "callback_data": "/set_lev_3"}, {"text": "5X", "callback_data": "/set_lev_5"}, {"text": "10X", "callback_data": "/set_lev_10"}], [{"text": "🔙 بازگشت", "callback_data": "/check_wizard"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
-def get_max_positions_keyboard():
-    return {"inline_keyboard": [[{"text": "2", "callback_data": "/set_max_2"}, {"text": "3", "callback_data": "/set_max_3"}], [{"text": "5", "callback_data": "/set_max_5"}, {"text": "10", "callback_data": "/set_max_10"}], [{"text": "15", "callback_data": "/set_max_15"}, {"text": "بدون محدودیت", "callback_data": "/set_max_0"}], [{"text": "🔙 بازگشت", "callback_data": "/wiz_lev"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
+def get_max_positions_keyboard(cur=3):
+    """cur = سقف فعلی پوزیشن باز (پیش‌فرض ۳)؛ گزینه‌ی فعلی تیک ✅ می‌خورد."""
+    try:
+        cur = int(cur)
+    except Exception:
+        cur = 3
+
+    def opt(n, label):
+        return {"text": f"{'✅ ' if cur == n else ''}{label}", "callback_data": f"/set_max_{n}"}
+
+    return {"inline_keyboard": [[opt(2, "2"), opt(3, "3")], [opt(5, "5"), opt(10, "10")], [opt(15, "15"), opt(0, "بدون محدودیت")], [{"text": "🔙 بازگشت", "callback_data": "/wiz_lev"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
-def get_timeframe_keyboard():
+def get_timeframe_keyboard(cur='15min'):
+    """cur = تایم‌فریم فعلی (پیش‌فرض ۱۵ دقیقه)؛ گزینه‌ی فعلی تیک ✅ می‌خورد."""
+    def t(tf, label, cb):
+        return {"text": f"{'✅ ' if cur == tf else ''}{label}", "callback_data": cb}
+
     return {"inline_keyboard": [
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
-        [{"text": "⏱ ۵ دقیقه", "callback_data": "/set_tf_5m"}, {"text": "⏱ ۱۵ دقیقه", "callback_data": "/set_tf_15m"}],
-        [{"text": "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "callback_data": "/set_tf_1h"}],
+        [t("5min", "⏱ ۵ دقیقه", "/set_tf_5m"), t("15min", "⏱ ۱۵ دقیقه", "/set_tf_15m")],
+        [t("1hour", "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "/set_tf_1h")],
         [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}

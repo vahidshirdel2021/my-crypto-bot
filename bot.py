@@ -1082,7 +1082,7 @@ def default_session():
         'manual_block_all_entries': False,
         'pending_orders': [],
         'last_direction_entry_ts': {},
-        'timeframe': '5min',
+        'timeframe': '15min',
         'active_strategy': 'dynamic',
         'enabled_setup_tags': ['Daily'],  # مدل PDH/PDL+P4: فقط سطح روزانه برای معامله فعال است
         'paper_positions': [],
@@ -1094,7 +1094,7 @@ def default_session():
         'user_state': None,
         'active_symbols': (PAPER_SYMBOLS[:] if PAPER_FORCE_SYMBOLS else DEFAULT_ACTIVE_SYMBOLS[:]),
         'filters': FILTER_DEFAULTS.copy(),
-        'strategy_config': {**get_timeframe_preset('5min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
+        'strategy_config': {**get_timeframe_preset('15min'), 'sweep_require_confirmation_candle': SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT,
                             'halving_model_enabled': True, 'halving_k_atr': 3.0, 'halving_max_depth': 12, 'halving_tf': {}},   # مدل نصف‌کردن برای نشست‌های جدید پیش‌فرض است
         'daily_loss_limit_pct': DAILY_LOSS_LIMIT_PCT,
         'risk_per_trade_pct': RISK_PER_TRADE_PCT,
@@ -1245,7 +1245,7 @@ def normalize_session(data):
     for k in ('paper_balance','daily_start_equity','trade_amount_usdt','daily_loss_limit_pct','risk_per_trade_pct','max_margin_usage_pct'):
         s[k] = float(s.get(k, default_session()[k]))
     if s.get('timeframe') not in SUPPORTED_TRADING_TIMEFRAMES:
-        s['timeframe'] = '5min'
+        s['timeframe'] = '15min'
     valid_tags = list(LEVEL_SETUP_DEFS.keys())
     stored_tags = [t for t in (data.get('enabled_setup_tags') or []) if t in valid_tags]
     s['enabled_setup_tags'] = stored_tags or valid_tags
@@ -5729,7 +5729,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.110'
+BOT_VERSION = '3.44.111'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -15620,10 +15620,7 @@ def paper_exchange_keyboard(chat_id):
 
 
 def paper_exchange_text(chat_id):
-    return ('📄 *حساب کاغذی*\n\nرباتِ کاغذی با داده‌ی کدام صرافی کار کند؟\n'
-            '• *Binance*: کندل، چارت، قیمت و سطوح (سقف/کف تاریخی، PDH/PDL و ...) همه از Binance.\n'
-            '• *Bitunix*: کندل، چارت، قیمت و سطوح همه از Bitunix.\n'
-            'هیچ‌وقت داده‌ی دو صرافی قاطی نمی‌شود.')
+    return '📄 *حساب کاغذی*\n\nرباتِ کاغذی با داده‌ی کدام صرافی کار کند؟'
 
 
 def real_start_picker(chat_id, message_id=None):
@@ -16631,7 +16628,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_bal_'):
         v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مقدار استفاده‌شده در هر معامله:',get_margin_keyboard(back='/paper_bal'),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
-    if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(s.get('max_open_positions', 3)),message_id); return
     if cl.startswith('/set_max_same_'):
         s['max_same_direction_positions']=max(0,int(cl.replace('/set_max_same_',''))); save_session(chat_id)
         cur = s['max_same_direction_positions']
@@ -16645,7 +16642,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
     if cl.startswith('/set_wsame_'):          # V3.44.62: مرحله‌ی هم‌جهت ویزارد
         s['max_same_direction_positions']=max(0,int(cl.replace('/set_wsame_',''))); save_session(chat_id)
-        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
+        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min')), message_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
@@ -16666,9 +16663,9 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     # V3.44.84: دکمه‌ی «برگشت» مراحل ویزارد (اهرم ← حداکثر پوزیشن ← هم‌جهت ← تایم‌فریم)
     if cl=='/wiz_lev': edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
-    if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
+    if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(s.get('max_open_positions', 3)),message_id); return
     if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
-    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(), message_id); return
+    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min')), message_id); return
     if cl.startswith('/set_wmode_'):          # V3.44.85: انتخاب حالت معامله در ویزارد (همان صفحه ویرایش می‌شود)
         _mk = cl[len('/set_wmode_'):]
         if not any(x[0] == _mk for x in presets_mod.TRADE_MODES) or not presets_mod.apply_preset(s, _mk):
