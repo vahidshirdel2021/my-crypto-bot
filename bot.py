@@ -1020,6 +1020,7 @@ def default_session():
         'last_stop_reason': None,
         'trading_mode': 'PAPER',
         'real_exchange': 'binance',        # V3.44.57: صرافی انتخابی کاربر برای REAL (binance | bitunix)
+        'paper_exchange': 'binance',       # V3.44.108: صرافی انتخابی کاربر برای حالت کاغذی (binance | bitunix)؛ همه‌ی داده/چارت/سطوح از همین صرافی
         'paper_balance': 1000.0,
         'paper_start_balance': None,   # V3.44.45: موجودی اولیه‌ای که کاربر انتخاب کرده؛ دکمه‌ی «ریست آمار» موجودی را به همین برمی‌گرداند (None = ثبت نشده)
         'daily_start_equity': 1000.0,
@@ -1032,9 +1033,9 @@ def default_session():
         'same_direction_entry_cooldown_seconds': 120,
         'max_total_open_risk_pct': MAX_TOTAL_OPEN_RISK_PCT,
         # V3.42: هشدار وقتی سود پوزیشن باز به PROFIT_ALERT_USDT برسد (دکمه در «مدیریت خروج»).
-        'profit_alert_enabled': True,
+        'profit_alert_enabled': False,   # V3.44.109: پیش‌فرض خاموش
         # V3.43.21: بستن خودکار معامله در سود PROFIT_AUTOCLOSE_USDT (۵$). پیش‌فرض روشن.
-        'profit_autoclose_enabled': True,
+        'profit_autoclose_enabled': False,   # V3.44.109: پیش‌فرض خاموش
         # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۵$) برسد. پیش‌فرض خاموش (V3.44.106).
         'total_profit_autoclose_enabled': False,
         # V3.43.29: هشدار وقتی رژیم خودِ نماد روی ۵ و ۱۵ دقیقه هم‌جهت نیست (ورود نگه داشته می‌شود و تایید می‌گیرد). پیش‌فرض روشن.
@@ -1042,7 +1043,7 @@ def default_session():
         # V3.43.30: هشدار وقتی جهت معامله با رژیم ۴ ساعته‌ی نماد نمی‌خواند (خرید فقط در ۴ساعته‌ی صعودی، فروش فقط در ۴ساعته‌ی نزولی). پیش‌فرض روشن.
         'symbol_h4_regime_warn_enabled': True,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
-        'profit_fade_alert_enabled': True,
+        'profit_fade_alert_enabled': False,   # V3.44.110: پیش‌فرض خاموش
         # V3.44.28: بستن سر به سر. اگر معامله به +X R سود رسید و برگشت تا نقطه‌ی ورود، یا تا -Y R منفی رفت و برگشت تا نقطه‌ی ورود:
         # کلید هشدار (پیام + دکمه‌ی بستن) و کلید خودکار (بستن با قیمت بازار) جدا از هم‌اند. پیش‌فرض هر دو خاموش.
         'be_close_alert_enabled': False,
@@ -1053,7 +1054,7 @@ def default_session():
         'btc_guard_enabled': True,
         'btc_guard_frac': 0.5,
         # V3.44.33: تریلینگ استاپ هوشمند پله‌ای (قفل سود با حرکت دادن SL فقط به سمت سود). پیش‌فرض خاموش.
-        'trail_enabled': False,
+        'trail_enabled': True,   # V3.44.109: پیش‌فرض روشن (کلید ۱ منوی خروج و حفظ سود)
         # V3.44.34: فقط در «بهترین ساعات معامله» اسکن کن. پیش‌فرض خاموش.
         'hours_filter_enabled': False,
         'hours_profile': 'both',
@@ -1203,6 +1204,14 @@ def _setup_mgmt_text(s):
 def normalize_session(data):
     s = default_session(); s.update(data or {})
     # V3.44.106: پیش‌فرض کلید «بستن با مجموع سود» خاموش شد؛ مقدار روشنِ قدیمی (که کاربر آگاهانه روشن نکرده بود) یک‌بار خاموش می‌شود.
+    # V3.44.110: پیش‌فرض‌های منوی «خروج و حفظ سود»: فقط کلید ۱ (تریلینگ) و ۸ (محافظ BTC) روشن؛ بقیه خاموش. یک‌بار روی تنظیمات قبلی اعمال می‌شود؛ بعدش انتخاب دستی کاربر حفظ می‌شود.
+    if not s.get('exit_defaults_v110'):
+        s['trail_enabled'] = True
+        s['btc_guard_enabled'] = True
+        for _k in ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'profit_alert_enabled',
+                   'profit_fade_alert_enabled', 'be_close_alert_enabled', 'be_close_auto_enabled'):
+            s[_k] = False
+        s['exit_defaults_v110'] = True
     if not s.get('total_profit_autoclose_v106'):
         s['total_profit_autoclose_enabled'] = False
         s['total_profit_autoclose_v106'] = True
@@ -2431,8 +2440,8 @@ _BINANCE_REFRESH_LOCK = RLock()
 _BINANCE_SOURCES = ('binance', 'binancevision')
 
 # ===================== V3.44.98: صرافیِ داده = صرافیِ حالت =====================
-# PAPER: همه‌ی داده (کندل، قیمت، سطوح تاریخی سقف/کف، PDH/PDL)، معامله‌ی کاغذی و چارت TradingView فقط Binance.
-# REAL : همه‌ی آن‌ها از صرافیِ انتخابیِ کاربر (Binance یا Bitunix)؛ هیچ fallback‌ی بین دو صرافی نیست.
+# V3.44.108: هم PAPER و هم REAL: همه‌ی داده (کندل، قیمت، سطوح تاریخی سقف/کف، PDH/PDL)، معامله و چارت TradingView از صرافیِ انتخابیِ کاربر
+# (PAPER: paper_exchange که اولِ ویزارد انتخاب می‌شود؛ REAL: real_exchange)؛ هیچ fallback‌ی بین دو صرافی نیست.
 VENUE_SOURCES = {'binance': ('binance', 'binancevision'), 'bitunix': ('bitunix',)}
 _DATA_VENUE_CTX = contextvars.ContextVar('data_venue', default='binance')
 
@@ -2453,10 +2462,11 @@ def _tfk(tf):
 
 
 def _session_venue(s):
-    """از روی خودِ session: PAPER → 'binance'؛ REAL → real_exchange کاربر."""
+    """از روی خودِ session: REAL → real_exchange کاربر؛ PAPER → paper_exchange کاربر (V3.44.108؛ پیش‌فرض binance)."""
     try:
-        if isinstance(s, dict) and s.get('trading_mode') == 'REAL':
-            v = s.get('real_exchange')
+        if isinstance(s, dict):
+            key = 'real_exchange' if s.get('trading_mode') == 'REAL' else 'paper_exchange'
+            v = s.get(key)
             return v if v in VENUE_SOURCES else 'binance'
     except Exception:
         pass
@@ -2464,7 +2474,7 @@ def _session_venue(s):
 
 
 def data_venue_for(chat_id):
-    """PAPER → همیشه 'binance'؛ REAL → صرافیِ انتخابیِ کاربر ('binance' | 'bitunix')."""
+    """صرافیِ انتخابیِ کاربر ('binance' | 'bitunix')؛ در PAPER از paper_exchange و در REAL از real_exchange."""
     try:
         return _session_venue(USER_SESSIONS.get(chat_id))
     except Exception:
@@ -3641,7 +3651,7 @@ _TV_INTERVALS = {'1min': '1', '3min': '3', '5min': '5', '15min': '15', '30min': 
 
 def tradingview_symbol(symbol, chat_id=None):
     """نماد برای TradingView. V3.44.98: صرافی = صرافیِ حالتِ کاربر (نه «آخرین منبعی که داده داد»):
-    PAPER → همیشه BINANCE:XUSDT (اسپات، بدون .P)؛ REAL+Binance → BINANCE:XUSDT؛ REAL+Bitunix → BITUNIX:XUSDT.P (فیوچرز).
+    صرافی Binance (PAPER یا REAL) → BINANCE:XUSDT؛ صرافی Bitunix (PAPER یا REAL) → BITUNIX:XUSDT.P (فیوچرز).
     chat_id اگر داده نشود، همان صرافیِ زمینه‌ی جاری (contextvar) خوانده می‌شود."""
     base = _base_asset(symbol)
     venue = data_venue_for(chat_id) if chat_id is not None else _venue()
@@ -5719,7 +5729,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.106'
+BOT_VERSION = '3.44.110'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -8124,7 +8134,7 @@ def _fn_ctx(chat_id):
     except Exception:
         pmod = None
     return {'chat': chat_id, 'preset': name, 'pmod': pmod, 'v': BOT_VERSION, 'tf': s.get('timeframe'),
-            'mode': 'REAL' if _mode_is_real(s) else 'PAPER'}
+            'mode': 'REAL' if _mode_is_real(s) else 'PAPER', 'cfg': _fn_cfg(chat_id, s)}
 
 
 def _fn_emit(chat_id, kind, **kw):
@@ -8144,6 +8154,149 @@ def _fn_count(chat_id, key, n=1):
         funnel_log.count(chat_id, c['preset'], c['tf'], c['mode'], key, n)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------- V3.44.107: زمینه‌ی بیشتر برای تحلیل قیف ----------
+# فقط ثبت می‌کنند و روی هیچ تصمیمی اثر ندارند؛ با FUNNEL_CTX=0 خاموش می‌شوند. همه‌ی خطاها قورت داده می‌شوند.
+_FN_CTX_ON = os.environ.get('FUNNEL_CTX', '1') != '0'
+_FN_CFG_CACHE = {}      # chat -> (ts, hash, day)
+_FN_CFG_LAST = {}       # chat -> (hash, day) آخرین عکسی که نوشته شد
+_FN_SYM_CACHE = {}      # (symbol, tf) -> (ts, dict)
+_FN_MKT_CACHE = {}      # tf -> (ts, dict)
+_FN_REG_LETTER = {'BULLISH': 'B', 'BEARISH': 'S', 'RANGE': 'R'}
+_FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r',
+                'fav_confirm_max_r', 'fav_confirm_max_mode', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled',
+                'touch_auto_mode', 'assist_mode_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled',
+                'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'max_open_positions', 'max_same_direction_positions',
+                'risk_per_trade_pct', 'active_strategy', 'timeframe', 'enabled_setup_tags', 'hours_filter_enabled', 'hours_profile')
+_FN_TOG_DEFAULTS = {'symbol_tf_regime_warn_enabled': True, 'symbol_h4_regime_warn_enabled': True}
+_FN_SC_KEYS = ('halving_model_enabled', 'min_rr', 'min_target_r', 'max_target_r')
+
+
+def _fn_cfg(chat_id, s):
+    """هش کوتاه از کلیدهای روشنِ گیت‌ها + تنظیمات مهم این حساب. هر بار که عوض شود (و روزی یک‌بار) یک رکورد
+    kind=settings با فهرست کامل نوشته می‌شود تا بعداً دقیق معلوم باشد هر رکورد با کدام کلیدها ثبت شده."""
+    try:
+        now = time.time()
+        day = time.strftime('%Y-%m-%d', time.gmtime(now))
+        c = _FN_CFG_CACHE.get(chat_id)
+        if c and now - c[0] < 20 and c[2] == day:
+            return c[1]
+        on = sorted(k for k in GATE_REGISTRY if gate_on(s, k))
+        tog = {k: s.get(k, _FN_TOG_DEFAULTS.get(k)) for k in _FN_TOG_KEYS}
+        sc = {k: (s.get('strategy_config') or {}).get(k) for k in _FN_SC_KEYS}
+        raw = json.dumps({'g': on, 't': tog, 'sc': sc}, sort_keys=True, default=str, ensure_ascii=False)
+        h = hashlib.sha1(raw.encode('utf-8')).hexdigest()[:8]
+        _FN_CFG_CACHE[chat_id] = (now, h, day)
+        if _FN_CFG_LAST.get(chat_id) != (h, day):
+            _FN_CFG_LAST[chat_id] = (h, day)
+            short = [k.replace('gate_', '').replace('_enabled', '') for k in on]
+            chunks, cur = [], ''
+            for k in short:
+                if len(cur) + len(k) + 1 > 450:
+                    chunks.append(cur)
+                    cur = ''
+                cur += (',' if cur else '') + k
+            if cur:
+                chunks.append(cur)
+            funnel_log.emit('settings', chat=chat_id, preset=s.get('active_preset'), v=BOT_VERSION, cfg=h,
+                            n_on=len(on), gates_on=chunks, tog=tog, sc=sc)
+        return h
+    except Exception:
+        return None
+
+
+def _fn_symbol_ctx(symbol, tf):
+    """رژیم خودِ نماد (مستقل از اینکه کلیدش روشن باشد): reg = تایم‌فریم فعال، h4، tfr = ۵ و ۱۵ دقیقه؛
+    و ADX / RSI / ATR٪ / نسبت حجم. حروف: B=صعودی، S=نزولی، R=رنج، None=نبود داده."""
+    if not _FN_CTX_ON:
+        return None
+    try:
+        now = time.time()
+        k = (symbol, tf)
+        c = _FN_SYM_CACHE.get(k)
+        if c and now - c[0] < 120:
+            return c[1]
+        out = {'reg': _FN_REG_LETTER.get(_symbol_active_tf_regime(symbol, tf)),
+               'h4': _FN_REG_LETTER.get(_symbol_h4_regime(symbol))}
+        tfr = _symbol_tf_regimes(symbol) or {}
+        out['tfr'] = {str(t): _FN_REG_LETTER.get(v) for t, v in tfr.items()}
+        snap = _trend_snapshot_cached(symbol, tf) or {}
+        for src, dst, nd in (('adx', 'adx', 1), ('rsi', 'rsi', 1), ('atr_pct', 'atr_pct', 3), ('volume_ratio', 'vol_ratio', 2)):
+            v = snap.get(src)
+            out[dst] = round(float(v), nd) if v is not None else None
+        _FN_SYM_CACHE[k] = (now, out)
+        if len(_FN_SYM_CACHE) > 500:
+            for kk in sorted(_FN_SYM_CACHE, key=lambda x: _FN_SYM_CACHE[x][0])[:100]:
+                _FN_SYM_CACHE.pop(kk, None)
+        return out
+    except Exception:
+        return None
+
+
+def _fn_market_ctx(tf):
+    """زمینه‌ی بازار: قیمت BTC/ETH، تغییر تقریبی ۴ و ۲۴ ساعته (٪)، رژیمشان روی tf، و گیت جهت بازار (۷ از ۱۰ نماد) از کش."""
+    if not _FN_CTX_ON:
+        return None
+    try:
+        now = time.time()
+        c = _FN_MKT_CACHE.get(tf)
+        if c and now - c[0] < 60:
+            return c[1]
+        out = {}
+        for sym, key in (('BTC', 'btc'), ('ETH', 'eth')):
+            snap = _trend_snapshot_cached(sym, tf) or {}
+            sc = snap.get('score')
+            out[key + '_reg'] = None if sc is None else ('B' if sc > 0 else ('S' if sc < 0 else 'R'))
+            out[key + '_adx'] = round(float(snap['adx']), 1) if snap.get('adx') is not None else None
+            try:
+                d = get_klines(sym, '1hour', 30)
+                if d is not None and len(d) >= 26:
+                    px = float(d['close'].iloc[-1])
+                    out[key + '_px'] = px
+                    out[key + '_c4h'] = round((px / float(d['close'].iloc[-5]) - 1.0) * 100.0, 2)
+                    out[key + '_c24h'] = round((px / float(d['close'].iloc[-25]) - 1.0) * 100.0, 2)
+            except Exception:
+                pass
+        g = TIMEFRAME_REGIME_CACHE.get(_tfk(tf)) or {}
+        out['gate'] = _FN_REG_LETTER.get(g.get('gate'))
+        out['bull_pct'] = round(g['bull_pct'], 0) if g.get('bull_pct') is not None else None
+        out['bear_pct'] = round(g['bear_pct'], 0) if g.get('bear_pct') is not None else None
+        _FN_MKT_CACHE[tf] = (now, out)
+        return out
+    except Exception:
+        return None
+
+
+def _fn_hold_tick(rec, gate, text=None):
+    """هر بار که یکی از گیت‌های بعد از تایید (رژیم بازار / PDH-PDL / فاصله‌ی BTC / کلاف BTC / کندل BTC) سیگنال را در صف نگه می‌دارد."""
+    try:
+        if gate == 'front' and text and 'کلاف' in str(text):
+            gate = 'chop'
+        h = rec.setdefault('hold_ticks', {})
+        now = time.time()
+        e = h.get(gate)
+        if not isinstance(e, dict):
+            e = {'n': 0, 't0': now, 't1': now}
+            h[gate] = e
+        e['n'] = int(e.get('n', 0)) + 1
+        e['t1'] = now
+    except Exception:
+        pass
+
+
+def _fn_hold_summary(rec):
+    """{gate: [تعداد دفعات نگه‌داشتن، دقیقه‌ی بین اولین تا آخرین نگه‌داشتن]} + تاخیر ورود به‌خاطر گیت‌ها."""
+    try:
+        h = rec.get('hold_ticks') or {}
+        out = {g: [int(e.get('n', 0)), round((float(e.get('t1', 0)) - float(e.get('t0', 0))) / 60.0, 1)] for g, e in h.items() if isinstance(e, dict)}
+        delay = None
+        if h and rec.get('confirmed_at'):
+            t0 = min(float(e.get('t0', 0)) for e in h.values() if isinstance(e, dict))
+            delay = round((float(rec['confirmed_at']) - t0) / 60.0, 1)
+        return out or None, delay
+    except Exception:
+        return None, None
 
 
 _FN_SCAN_NOISE = ('ستاپی روی سطوح ثبت نشد',)
@@ -8222,7 +8375,8 @@ def _fn_touch_created(chat_id, s, rec, plan, flip_from):
              level_token=rec.get('level_token'), level_value=rec.get('level_value'), touch_price=rec.get('touch_price'),
              plan_entry=pl.get('entry'), plan_sl=pl.get('sl'), plan_tp=pl.get('tp'), plan_rr=pl.get('rr'), plan_score=pl.get('score'),
              flip_from=flip_from, reason=str(rec.get('reason') or '')[:300],
-             waiting_now=sum(1 for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting'))
+             waiting_now=sum(1 for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting'),
+             sctx=_fn_symbol_ctx(rec.get('symbol'), tf), mkt=_fn_market_ctx(tf))
     _fn_count(chat_id, 'touches')
     entry, sl, tp = pl.get('entry') or rec.get('touch_price'), pl.get('sl'), pl.get('tp')
     side = rec.get('touch_sig')
@@ -8233,8 +8387,13 @@ def _fn_touch_created(chat_id, s, rec, plan, flip_from):
         except Exception:
             sl = tp = None
     if entry and sl and tp:
-        funnel_log.shadow_register(rec.get('id'), 'touch', _fn_ctx(chat_id), rec['symbol'], side, entry, sl, tp, tf,
+        _ctx_sh = _fn_ctx(chat_id)
+        funnel_log.shadow_register(rec.get('id'), 'touch', _ctx_sh, rec['symbol'], side, entry, sl, tp, tf,
                                    _TF_SECONDS.get(tf, 900), start_ts=rec.get('created_at'))
+        # V3.44.107: ورودهای فرضیِ تأخیری (ورود روی کلوز کندل برخورد / روی کلوز کندل بعدی) برای سنجیدن «ورود زودهنگام»
+        for _sk, _dl in (('touch_d1', 0), ('touch_d2', 1)):
+            funnel_log.shadow_register(rec.get('id'), _sk, _ctx_sh, rec['symbol'], side, entry, sl, tp, tf,
+                                       _TF_SECONDS.get(tf, 900), start_ts=rec.get('created_at'), delay=_dl)
 
 
 def _fn_after_enter(chat_id, rec, res):
@@ -8278,11 +8437,16 @@ def _fn_fav_queued(chat_id, rec):
 
 def _fn_fav_final(chat_id, rec, status):
     _fn_count(chat_id, f'fav_final:{status}' + (f":{rec.get('why')}" if rec.get('why') else ''))
+    _hs, _hd = _fn_hold_summary(rec)
     _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
              why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
              # V3.44.82: برای تشخیص «چرا باز نشد»: متن دقیق مانعِ بعد از تایید، تعداد کلوزهای سنجیده‌شده و حرکت آخرین کلوز (R)
              hold=str(rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
              eval_n=rec.get('eval_n', 0), last_x=rec.get('last_x'),
+             # V3.44.107: هر گیتِ بعد از تایید چند بار و چند دقیقه سیگنال را نگه داشت؛ تاخیرِ ورود به‌خاطر گیت‌ها؛ نوع و R لغو
+             hold_ticks=_hs, hold_delay_min=_hd, cancel_kind=rec.get('cancel_kind'), cancel_r=rec.get('cancel_r'),
+             confirm_delay_min=(round((float(rec['confirmed_at']) - float(rec.get('created_at', 0) or 0)) / 60.0, 1) if rec.get('confirmed_at') else None),
+             overran=bool(rec.get('overran')),
              age_min=round((time.time() - float(rec.get('created_at', time.time()) or time.time())) / 60.0, 1))
 
 
@@ -8294,9 +8458,20 @@ def _fn_trade_event(chat_id, trade_id, stage, data):
         if m:
             votes = m.group(1)
         _fn_count(chat_id, 'entry')
+        # V3.44.107: هم‌زمانی پوزیشن‌ها در لحظه‌ی ورود (بدون خودِ این معامله) + زمینه‌ی بازار
+        _o_tot = _o_same = _o_opp = None
+        try:
+            _my = str(data.get('side') or '').upper()[:3]
+            _others = [p for p in (s.get('paper_positions') or []) if p.get('trade_id') != trade_id]
+            _o_tot = len(_others)
+            _o_same = sum(1 for p in _others if str(p.get('side') or '').upper()[:3] == _my)
+            _o_opp = _o_tot - _o_same
+        except Exception:
+            pass
         _fn_emit(chat_id, 'entry', trade_id=trade_id, tid=getattr(_FN_TLS, 'tid', None), symbol=data.get('symbol'), side=data.get('side'),
                  entry=data.get('entry_price'), sl=data.get('sl'), tp=data.get('tp'), planned_rr=data.get('planned_rr'),
-                 trade_preset=data.get('preset'), votes=votes)
+                 trade_preset=data.get('preset'), votes=votes, open_other=_o_tot, open_same_dir=_o_same, open_opp_dir=_o_opp,
+                 mkt=_fn_market_ctx(s.get('timeframe') or '5min'))
         return
     pos = None
     for lst in (s.get('closed_positions') or [], s.get('paper_positions') or []):
@@ -8311,7 +8486,11 @@ def _fn_trade_event(chat_id, trade_id, stage, data):
     _fn_emit(chat_id, 'trade_close', trade_id=trade_id, symbol=pos.get('symbol') or data.get('symbol'), side=pos.get('side'),
              r=pos.get('realized_r'), pnl=data.get('pnl_usdt'), reason=str(data.get('reason') or pos.get('close_reason') or '')[:120],
              dur_s=data.get('duration_seconds') or pos.get('duration_seconds'), mfe_r=pos.get('mfe_r'), mae_r=pos.get('mae_r'),
-             planned_rr=pos.get('planned_rr'), trade_preset=pos.get('preset'))
+             planned_rr=pos.get('planned_rr'), trade_preset=pos.get('preset'),
+             # V3.44.107: کارمزد و ناخالص/خالص، تا معلوم باشد PnL قبل یا بعد از کارمزد است
+             fee_usdt=pos.get('fee_usdt'), platform_fee_usdt=pos.get('platform_fee_usdt'), funding_usdt=pos.get('funding_usdt'),
+             pnl_gross_usdt=pos.get('pnl_gross_usdt'), pnl_before_platform_fee_usdt=pos.get('pnl_before_platform_fee_usdt'),
+             risk_usdt=pos.get('risk_usdt'), margin=pos.get('margin'), leverage=pos.get('leverage'), opened_at=pos.get('opened_at'))
 # ============================== پایان V3.44.72 (قیف) ==============================
 
 
@@ -8988,7 +9167,7 @@ def profit_autoclose_scan_once():
         return
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
-            if not bool(s.get('profit_autoclose_enabled', True)):
+            if not bool(s.get('profit_autoclose_enabled', False)):
                 continue
             for p in list(s.get('paper_positions') or []):
                 try:
@@ -9067,8 +9246,8 @@ def profit_alert_scan_once():
         return
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
-            up_on = bool(s.get('profit_alert_enabled', True))
-            fade_on = bool(s.get('profit_fade_alert_enabled', True)) and PROFIT_FADE_PCT > 0
+            up_on = bool(s.get('profit_alert_enabled', False))
+            fade_on = bool(s.get('profit_fade_alert_enabled', False)) and PROFIT_FADE_PCT > 0
             if not (up_on or fade_on):
                 continue
             for p in list(s.get('paper_positions') or []):
@@ -9498,7 +9677,7 @@ def trailing_scan_once():
     """هر چرخه‌ی پس‌زمینه (۵ ثانیه): اوج سود پوزیشن‌ها را دنبال می‌کند و SL را فقط به سمت سود بالا می‌آورد."""
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
-            if not s.get('trail_enabled', False):
+            if not s.get('trail_enabled', True):
                 continue
             profile = _trail_profile_key(s)
             changed = False
@@ -11469,6 +11648,12 @@ def _fav_process_one_core(chat_id, s, rec):
     if live:
         d_live = _fav_decide(sig, rec['entry'], rec['sl'], rec['tp'], live, rec['min_r'], rec['max_r'])
         if d_live == 'cancel':
+            try:                                    # V3.44.107: فقط برای ثبت قیف
+                rec['cancel_kind'] = 'live'
+                _cr = _fav_move_r(sig, rec['entry'], rec['sl'], live)
+                rec['cancel_r'] = None if _cr is None else round(float(_cr), 3)
+            except Exception:
+                pass
             _fav_flip_to_touch(chat_id, s, rec, live)
             return _fav_finish(chat_id, s, rec, 'cancelled', f"🚫 سیگنال `{symbol}` ({side_txt}) لغو شد: قیمت خلاف جهت رفت یا به SL/TP رسید؛ بدون ورود.")
     # ارزیابی روی کلوز کندل‌های بسته‌شده‌ی بعد از سیگنال (فقط کندل‌های جدید)
@@ -11500,6 +11685,7 @@ def _fav_process_one_core(chat_id, s, rec):
     except Exception:
         logger.exception('fav confirm: candle eval failed symbol=%s', symbol)
     if decision == 'cancel':
+        rec['cancel_kind'] = 'close'                # V3.44.107: فقط برای ثبت قیف (R لغو = last_x)
         _fav_flip_to_touch(chat_id, s, rec, close_px or live)
         return _fav_finish(chat_id, s, rec, 'cancelled', f"🚫 سیگنال `{symbol}` ({side_txt}) لغو شد: کلوز کندل خلاف جهت یا به SL/TP رسید؛ بدون ورود.")
     if decision == 'confirm':
@@ -11519,7 +11705,7 @@ def _fav_process_one_core(chat_id, s, rec):
             # V3.44.31: آخرین مرحله‌ی خروج از صف: رژیم بازار باید به نفع معامله باشد؛ وگرنه در صف می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
             reg_ok, reg_txt = _final_regime_check(tf, sig)
             if not reg_ok:
-                rec['regime_blocked'] = True; rec['regime_hold'] = reg_txt
+                rec['regime_blocked'] = True; rec['regime_hold'] = reg_txt; _fn_hold_tick(rec, 'regime')
                 if now >= float(rec.get('expires_at', 0)):
                     return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {reg_txt}؛ بدون ورود.")
                 rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
@@ -11530,7 +11716,7 @@ def _fav_process_one_core(chat_id, s, rec):
             # V3.44.58: آخرین مرحله‌ی خروج از صف: سقف/کف دیروز (PDH/PDL) نباید جلوی معامله باشد و قیمت نباید تازه از آن برگشته باشد؛ وگرنه سیگنال در صف می‌ماند.
             pd_ok, pd_txt = _pd_level_gate(s, symbol, sig, tf, live)
             if not pd_ok:
-                rec['pd_blocked'] = True; rec['pd_hold'] = pd_txt
+                rec['pd_blocked'] = True; rec['pd_hold'] = pd_txt; _fn_hold_tick(rec, 'pd')
                 if now >= float(rec.get('expires_at', 0)):
                     return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {pd_txt}؛ بدون ورود.")
                 rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
@@ -11543,7 +11729,7 @@ def _fav_process_one_core(chat_id, s, rec):
             # V3.44.55: کلید مستقل «BTC کلاف دور سطح» هم از همین مرحله می‌گذرد.
             fl_ok, fl_txt = _btc_front_gate(chat_id, s, symbol, sig, tf, front=_ff, chop=_fc)
             if not fl_ok:
-                rec['front_blocked'] = True; rec['front_hold'] = fl_txt
+                rec['front_blocked'] = True; rec['front_hold'] = fl_txt; _fn_hold_tick(rec, 'front', fl_txt)
                 if now >= float(rec.get('expires_at', 0)):
                     return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {fl_txt}؛ بدون ورود.")
                 rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
@@ -11559,7 +11745,7 @@ def _fav_process_one_core(chat_id, s, rec):
                 logger.exception('fav confirm: btc candle check failed symbol=%s', symbol)
                 btc_ok, btc_txt = False, f'{_BTC_CANDLE_BLOCK_PREFIX}: خطا در بررسی کندل'
             if not btc_ok:
-                rec['btc_blocked'] = True; rec['btc_hold'] = btc_txt
+                rec['btc_blocked'] = True; rec['btc_hold'] = btc_txt; _fn_hold_tick(rec, 'btc')
                 if now >= float(rec.get('expires_at', 0)):
                     return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {btc_txt}؛ بدون ورود.")
                 rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
@@ -14497,7 +14683,7 @@ def _filter_info(key):
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
         'profit_autoclose': (f'معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند',
-            f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش کن. پیش‌فرض: روشن.'),
+            f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش نگه دار. پیش‌فرض: خاموش.'),
         'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$',
             f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {PROFIT_AUTOCLOSE_USDT:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: خاموش.'),
         'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
@@ -14505,7 +14691,7 @@ def _filter_info(key):
         'profit_fade_alert': ('هشدار کم شدن سود',
             f'اگر سود معامله به یک پله ({pa:g}$ و مضرب‌ها) برسد و بعد حدود {PROFIT_FADE_PCT*100:g}% (حداقل {PROFIT_FADE_MIN_USDT:g}$) از اوجش پایین بیاید، پیام «ضعف سود» می‌گیری. معامله بسته نمی‌شود.'),
         'trail': ('🛡 تریلینگ استاپ هوشمند (قفل سود)',
-            'پیش‌فرض خاموش. روشن: وقتی معامله به سود رسید، حد ضرر (SL) فقط به سمت سود بالا می‌آید و هرگز عقب نمی‌رود؛ هدف (TP) دست‌نخورده می‌ماند. اول سر به سر (ورود + کارمزد) قفل می‌شود، بعد هرچه سود بزرگ‌تر شود درصد بیشتری از اوج سود قفل می‌شود؛ پس با یک برگشت کوچک از سود بزرگ جا نمی‌مانی. اوج از قیمت‌های لحظه‌ای هر ۵ ثانیه گرفته می‌شود. در حساب واقعی SL روی خود صرافی جابه‌جا می‌شود. با دکمه‌ی «نوع تریلینگ» می‌شود آرام/متعادل/فشرده انتخاب کرد. روی پوزیشن‌های باز هم اثر می‌کند.'),
+            'پیش‌فرض روشن. روشن: وقتی معامله به سود رسید، حد ضرر (SL) فقط به سمت سود بالا می‌آید و هرگز عقب نمی‌رود؛ هدف (TP) دست‌نخورده می‌ماند. اول سر به سر (ورود + کارمزد) قفل می‌شود، بعد هرچه سود بزرگ‌تر شود درصد بیشتری از اوج سود قفل می‌شود؛ پس با یک برگشت کوچک از سود بزرگ جا نمی‌مانی. اوج از قیمت‌های لحظه‌ای هر ۵ ثانیه گرفته می‌شود. در حساب واقعی SL روی خود صرافی جابه‌جا می‌شود. با دکمه‌ی «نوع تریلینگ» می‌شود آرام/متعادل/فشرده انتخاب کرد. روی پوزیشن‌های باز هم اثر می‌کند.'),
         'hours': ('🕐 فقط در بهترین ساعات معامله اسکن کن',
             'پیش‌فرض خاموش. روشن: ربات فقط در ساعات پرحجم بازار دنبال سیگنال جدید می‌گردد و بیرون از آن‌ها اسکن نمادهای جدید متوقف است. مدیریت پوزیشن‌های باز (SL/TP، تریلینگ)، سیگنال‌هایی که از قبل در صف تایید یا لیست انتظار هستند، و «ورود سریع» دستیِ خودت ادامه دارد. ساعت‌ها به UTC ثابت‌اند و نمایش به وقت تهران است. با دکمه‌ی «بازه‌ی ساعت» می‌شود لندن + نیویورک، فقط لندن، یا فقط نیویورک را انتخاب کرد.'),
         'be_alert': ('هشدار بستن سر به سر',
@@ -14733,12 +14919,12 @@ def trade_filter_management_keyboard(chat_id, section=None):
     if section == 'exit':
         _tp_name = TRAIL_PROFILES[_trail_profile_key(s)][0]
         return {'inline_keyboard': [
-            [fcell(bool(s.get('trail_enabled', False)), 'trail', '/toggle_trail')],
+            [fcell(bool(s.get('trail_enabled', True)), 'trail', '/toggle_trail')],
             [{'text': f"🛡 نوع تریلینگ: {_tp_name} (تغییر)", 'callback_data': '/trail_profile_next'}],
-            [fcell(bool(s.get('profit_autoclose_enabled', True)), 'profit_autoclose', '/toggle_profit_autoclose')],
+            [fcell(bool(s.get('profit_autoclose_enabled', False)), 'profit_autoclose', '/toggle_profit_autoclose')],
             [fcell(bool(s.get('total_profit_autoclose_enabled', False)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
-            [fcell(bool(s.get('profit_alert_enabled', True)), 'profit_alert', '/toggle_profit_alert')],
-            [fcell(bool(s.get('profit_fade_alert_enabled', True)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
+            [fcell(bool(s.get('profit_alert_enabled', False)), 'profit_alert', '/toggle_profit_alert')],
+            [fcell(bool(s.get('profit_fade_alert_enabled', False)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             [fcell(bool(s.get('be_close_alert_enabled', False)), 'be_alert', '/toggle_be_alert')],
             [fcell(bool(s.get('be_close_auto_enabled', False)), 'be_auto', '/toggle_be_auto')],
             [{'text': f"📈 آستانه‌ی سود: +{_be_cfg(s)[0]:g}R (تغییر)", 'callback_data': '/be_profit_next'},
@@ -15425,6 +15611,21 @@ def real_exchange_keyboard(chat_id):
     return {'inline_keyboard': rows}
 
 
+def paper_exchange_keyboard(chat_id):
+    """V3.44.108: انتخاب صرافی برای حساب کاغذی (اولین مرحله‌ی ویزارد)."""
+    cur = (get_session(chat_id) or {}).get('paper_exchange', 'binance')
+    rows = [[{'text': f"{'✅ ' if v == cur else ''}{name}", 'callback_data': f'/paper_pick_{v}'}] for v, name in REAL_VENUES.items()]
+    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
+    return {'inline_keyboard': rows}
+
+
+def paper_exchange_text(chat_id):
+    return ('📄 *حساب کاغذی*\n\nرباتِ کاغذی با داده‌ی کدام صرافی کار کند؟\n'
+            '• *Binance*: کندل، چارت، قیمت و سطوح (سقف/کف تاریخی، PDH/PDL و ...) همه از Binance.\n'
+            '• *Bitunix*: کندل، چارت، قیمت و سطوح همه از Bitunix.\n'
+            'هیچ‌وقت داده‌ی دو صرافی قاطی نمی‌شود.')
+
+
 def real_start_picker(chat_id, message_id=None):
     s = get_session(chat_id); s['user_state'] = None; save_session(chat_id)
     _REAL_PENDING_KEYS.pop(chat_id, None)
@@ -15584,11 +15785,11 @@ def menu(chat_id,message_id=None):
         mode_line = presets_mod.panel_line(s)      # V3.44.102: حالت معامله / پریست فعال
     except Exception:
         mode_line = ''
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n{mode_line}\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی · '+REAL_VENUES.get(s.get('paper_exchange','binance'),'Binance').split()[0]}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n{mode_line}\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     if is_restricted_user(chat_id):
         # V3.44.59: پنل کاربر عادی بدون جزئیات استراتژی (تایم‌فریم، نوع استراتژی، لاگ ورود، قوانین هم‌جهت).
         text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
-                f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی'}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
+                f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی · '+REAL_VENUES.get(s.get('paper_exchange','binance'),'Binance').split()[0]}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
                 f"{mode_line}\n"
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
@@ -16397,7 +16598,15 @@ def process_command(cmd,chat_id,message_id=None):
     if cl == '/reload_and_start': reload_and_restart_scan(chat_id, message_id); return
     if cl=='/mode_paper':
         if s['paper_positions']: send_message(chat_id,'❌ تا وقتی پوزیشن باز دارید نمی‌توانید به PAPER بروید.'); return
-        s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id); edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
+        s['trading_mode']='PAPER'; s['is_bot_active']=False; save_session(chat_id)
+        edit_page(chat_id, paper_exchange_text(chat_id), paper_exchange_keyboard(chat_id), message_id); return      # V3.44.108: اولین مرحله‌ی ویزارد کاغذی = انتخاب صرافی
+    if cl.startswith('/paper_pick_'):
+        v=cl[len('/paper_pick_'):]
+        if v not in REAL_VENUES: return
+        if s['paper_positions'] and s.get('paper_exchange','binance')!=v: send_message(chat_id,'❌ با پوزیشن باز نمی‌توان صرافی حساب کاغذی را عوض کرد.'); return
+        s['trading_mode']='PAPER'; s['paper_exchange']=v; s['is_bot_active']=False; save_session(chat_id)
+        edit_page(chat_id,f'✅ صرافی حساب کاغذی: *{REAL_VENUES[v]}*\n\n⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
+    if cl=='/paper_bal': edit_page(chat_id,'⚙️ موجودی PAPER را انتخاب کنید.',get_balance_keyboard(),message_id); return
     if cl=='/mode_real':
         if PAPER_ONLY:
             send_message(chat_id,'🟢 این Build برای تست PAPER قفل شده و ورود REAL عمداً غیرفعال است.')
@@ -16420,7 +16629,7 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id,f'🗑 کلید ذخیره‌شده‌ی {REAL_VENUES[v]} حذف شد.', real_exchange_keyboard(chat_id))
         return
     if cl.startswith('/set_bal_'):
-        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مقدار استفاده‌شده در هر معامله:',get_margin_keyboard(back='/mode_paper'),message_id); return
+        v=float(cl.replace('/set_bal_','')); s['paper_balance']=v; s['paper_start_balance']=v; s['daily_start_equity']=v; s['daily_start_date']=time.strftime('%Y-%m-%d',time.gmtime()); s['daily_stopped']=False; save_session(chat_id); edit_page(chat_id,'✅ موجودی ثبت شد.\n\n⚙️ مقدار استفاده‌شده در هر معامله:',get_margin_keyboard(back='/paper_bal'),message_id); return
     if cl.startswith('/set_margin_'): s['trade_amount_usdt']=float(cl.replace('/set_margin_','')); save_session(chat_id); edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl.startswith('/set_lev_'): s['leverage']=int(cl.replace('/set_lev_','')); save_session(chat_id); edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(),message_id); return
     if cl.startswith('/set_max_same_'):
@@ -16909,7 +17118,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🕐 بازه‌ی ساعت: *{TRADE_HOURS_PROFILES[_hk][0]}*\n`{_trade_hours_ranges_text(_hk)}`\n\n" + ('(کلید فعلاً خاموش است؛ از همین صفحه روشنش کن.)' if not s.get('hours_filter_enabled') else 'از اسکن بعدی اعمال می‌شود.'), trade_filter_management_keyboard(chat_id, 'limits'))
         return
     if cl == '/toggle_trail':
-        s['trail_enabled'] = not bool(s.get('trail_enabled', False))
+        s['trail_enabled'] = not bool(s.get('trail_enabled', True))
         save_session(chat_id)
         _tpk = _trail_profile_key(s); _tpn, _be_at, _lad = TRAIL_PROFILES[_tpk]
         _note = (f"{_filter_info('trail')[1]}\n\nنوع فعلی: *{_tpn}* — سر به سر از `+{_be_at:g}R`" if s['trail_enabled'] else 'خاموش شد. SL پوزیشن‌هایی که قبلاً جابه‌جا شده‌اند همان‌جا می‌ماند.')
@@ -16956,7 +17165,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🔒 آستانه‌های بستن سر به سر: سود `+{_pr:g}R` | ضرر `-{_lr:g}R`\n\nروی پوزیشن‌های باز و بعدی اثر می‌کند. (-1R همان SL است، پس آستانه‌ی ضرر کمتر از 1R انتخاب می‌شود.)", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_fade_alert':
-        current = bool(s.get('profit_fade_alert_enabled', True))
+        current = bool(s.get('profit_fade_alert_enabled', False))
         s['profit_fade_alert_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -17031,7 +17240,7 @@ def process_command(cmd,chat_id,message_id=None):
             trade_filter_management_keyboard(chat_id, 'entry_warn'))
         return
     if cl=='/toggle_profit_autoclose':
-        current = bool(s.get('profit_autoclose_enabled', True))
+        current = bool(s.get('profit_autoclose_enabled', False))
         s['profit_autoclose_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -17055,7 +17264,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"💵 {_filter_info('total_profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_alert':
-        current = bool(s.get('profit_alert_enabled', True))
+        current = bool(s.get('profit_alert_enabled', False))
         s['profit_alert_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'

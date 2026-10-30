@@ -16,6 +16,9 @@ kind ها:
     entry        : معامله باز شد (trade_id، tid)
     trade_close  : معامله بسته شد (R، علت، MFE/MAE)
     shadow       : اگر در لحظه‌ی برخورد/صف وارد می‌شدیم تا چند ساعت بعد چه می‌شد (tp/sl اول، MFE/MAE، زمان رسیدن به +۰.۱۵/۰.۲۵/۰.۳۵R)
+                   V3.44.107: sk = touch_d1 / touch_d2 = «ورود روی کلوز کندل برخورد» / «روی کلوز کندل بعدی» با همان SL/TP مطلق؛
+                   فیلدهای entry (قیمت ورود فرضی)، plan_entry، shift_r (+ = قیمت بهتر از طرح)، و outcome='void' وقتی قیمت از قبل بیرون از SL/TP بوده.
+    settings     : V3.44.107: عکس کلیدهای روشن/تنظیمات مهم هر حساب (هر بار که عوض شود + روزی یک‌بار)؛ هش آن (cfg) در همه‌ی رکوردها هست.
 
 هیچ‌چیز از این ماژول نباید جلوی کار ربات را بگیرد: همه‌ی خطاها قورت داده می‌شوند.
 """
@@ -183,7 +186,7 @@ def _save_pending():
         pass
 
 
-def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_seconds, start_ts=None):
+def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_seconds, start_ts=None, delay=None):
     """ثبت یک ردیابی: «اگر با این entry/sl/tp وارد می‌شدیم». هر (tid, kind) فقط یک‌بار."""
     if not ENABLED:
         return False
@@ -191,13 +194,16 @@ def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_s
         entry, sl, tp = float(entry), float(sl), float(tp)
         if side not in ('BUY', 'SELL') or abs(entry - sl) <= 0:
             return False
+        if delay is not None:
+            delay = int(delay)       # V3.44.107: 0 = ورود روی کلوز کندل برخورد، 1 = روی کلوز کندل بعدی
         with _LOCK:
             _load_pending()
             if any(x.get('tid') == tid and x.get('sk') == shadow_kind for x in _SHADOW):
                 return False
             _SHADOW.append({'tid': tid, 'sk': shadow_kind, 'ctx': dict(ctx or {}), 'symbol': symbol, 'side': side,
                             'entry': entry, 'sl': sl, 'tp': tp, 'tf': tf, 'tfs': int(tf_seconds or 900),
-                            'start_ts': float(start_ts or time.time()), 'due': float(start_ts or time.time()) + SHADOW_HORIZON_SECONDS})
+                            'start_ts': float(start_ts or time.time()), 'due': float(start_ts or time.time()) + SHADOW_HORIZON_SECONDS,
+                            'delay': delay})
             if len(_SHADOW) > 4000:
                 del _SHADOW[:len(_SHADOW) - 4000]
             _save_pending()
@@ -248,6 +254,37 @@ def evaluate_path(side, entry, sl, tp, timestamps, highs, lows, start_ts, end_ts
             'r_end': (round(r_end, 3) if r_end is not None else None), 'tp_r': round(r_tp, 3)}
 
 
+def _evaluate_delayed(x, df, ts):
+    """V3.44.107: ورودِ فرضیِ تأخیری. delay=0 → ورود روی کلوز کندلی که برخورد در آن رخ داد؛ delay=1 → روی کلوز کندل بعدی.
+    SL/TP همان قیمت‌های مطلقِ طرح می‌مانند؛ R نسبت به ریسکِ جدید (فاصله‌ی ورودِ جدید تا SL) سنجیده می‌شود.
+    خروجی: (res, entry_used, extra). اگر قیمت کلوز از قبل بیرون SL یا TP باشد outcome='void'."""
+    side, sl, tp = x['side'], float(x['sl']), float(x['tp'])
+    plan_entry = float(x['entry'])
+    tfs = int(x.get('tfs') or 900)
+    open_ts = (int(x['start_ts']) // tfs) * tfs + int(x['delay']) * tfs
+    ent_ts = open_ts + tfs
+    tsv, closes = ts.values, df['close'].values
+    idx = None
+    for j in range(len(tsv)):
+        if abs(float(tsv[j]) - open_ts) < 1.0:
+            idx = j
+            break
+    extra = {'delay': int(x['delay']), 'plan_entry': plan_entry, 'entry_ts': ent_ts}
+    if idx is None:
+        return {'outcome': 'void', 'void': 'no_candle'}, plan_entry, extra
+    entry_new = float(closes[idx])
+    risk_plan = abs(plan_entry - sl) or 1e-12
+    is_long = side == 'BUY'
+    extra['shift_r'] = round(((plan_entry - entry_new) if is_long else (entry_new - plan_entry)) / risk_plan, 3)
+    beyond_sl = (entry_new <= sl) if is_long else (entry_new >= sl)
+    beyond_tp = (entry_new >= tp) if is_long else (entry_new <= tp)
+    if beyond_sl or beyond_tp:
+        return {'outcome': 'void', 'void': ('beyond_sl' if beyond_sl else 'beyond_tp')}, entry_new, extra
+    res = evaluate_path(side, entry_new, sl, tp, tsv, df['high'].values, df['low'].values, ent_ts,
+                        float(x['start_ts']) + SHADOW_HORIZON_SECONDS, tfs)
+    return res, entry_new, extra
+
+
 def shadow_run_once(get_klines_fn):
     """موارد سررسیدشده را روی کندل‌ها حل می‌کند و رویداد shadow می‌نویسد. تعداد حل‌شده را برمی‌گرداند."""
     if not ENABLED:
@@ -277,10 +314,15 @@ def shadow_run_once(get_klines_fn):
                 ts = df['timestamp'].astype('float64')
                 if float(ts.max()) > 1e12:
                     ts = ts / 1000.0
-                res = evaluate_path(x['side'], x['entry'], x['sl'], x['tp'], ts.values, df['high'].values, df['low'].values,
-                                    x['start_ts'], x['start_ts'] + SHADOW_HORIZON_SECONDS, x.get('tfs', 900))
-                payload = {'tid': x['tid'], 'sk': x['sk'], 'symbol': x['symbol'], 'side': x['side'], 'entry': x['entry'], 'sl': x['sl'],
+                entry_used, extra = x['entry'], {}
+                if x.get('delay') is not None:
+                    res, entry_used, extra = _evaluate_delayed(x, df, ts)
+                else:
+                    res = evaluate_path(x['side'], x['entry'], x['sl'], x['tp'], ts.values, df['high'].values, df['low'].values,
+                                        x['start_ts'], x['start_ts'] + SHADOW_HORIZON_SECONDS, x.get('tfs', 900))
+                payload = {'tid': x['tid'], 'sk': x['sk'], 'symbol': x['symbol'], 'side': x['side'], 'entry': entry_used, 'sl': x['sl'],
                            'tp': x['tp'], 'horizon_s': SHADOW_HORIZON_SECONDS}
+                payload.update(extra)
                 payload.update(dict(x.get('ctx') or {}))
                 payload['tf'] = tf
                 payload.update(res)

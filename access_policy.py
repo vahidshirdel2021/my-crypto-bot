@@ -30,7 +30,7 @@ USER_EXACT = frozenset({
     '/performance', '/performance_today', '/performance_week', '/performance_month',
     '/daily_pnl', '/today_trades',
     # تنظیمات ریسک و حساب
-    '/menu_settings', '/check_wizard', '/mode_paper', '/mode_real', '/trade_mode_menu',
+    '/menu_settings', '/check_wizard', '/mode_paper', '/paper_bal', '/mode_real', '/trade_mode_menu',
     # کارمزد خود کاربر
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
@@ -62,6 +62,8 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/set_tf_(5m|15m|1h|4h)$',
     # اتصال صرافی (REAL)
     r'^/real_(pick|use|new|del)_[a-z0-9_]+$',
+    # V3.44.108: انتخاب صرافی حساب کاغذی (اولین مرحله‌ی ویزارد کاغذی) و بازگشت به صفحه‌ی موجودی
+    r'^/paper_pick_(binance|bitunix)$',
     # پوزیشن‌های خود کاربر
     r'^/manage_(?!watchlist$)[a-z0-9_]+$',
     r'^/close_prompt_[a-z0-9_]+$', r'^/confirm_close_[a-z0-9_]+$', r'^/pclose_[a-z0-9_]+$',

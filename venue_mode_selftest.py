@@ -1,5 +1,5 @@
-"""تست آفلاین V3.44.98: صرافیِ داده = صرافیِ حالت.
-PAPER → همه‌چیز (کندل، قیمت، سطوح تاریخی، لینک TradingView) فقط Binance؛ REAL → صرافیِ انتخابیِ کاربر (Binance یا Bitunix) بدون fallback به صرافی دیگر.
+"""تست آفلاین V3.44.98 (+V3.44.108): صرافیِ داده = صرافیِ انتخابیِ کاربر.
+PAPER → paper_exchange (پیش‌فرض Binance)؛ REAL → real_exchange؛ همه‌چیز (کندل، قیمت، سطوح تاریخی، لینک TradingView) از همان صرافی و بدون fallback به صرافی دیگر.
 اجرا: python venue_mode_selftest.py"""
 import os, json, time, math, asyncio, logging, functools, inspect, contextvars
 from threading import RLock
@@ -14,11 +14,14 @@ SESS = {1: {'trading_mode': 'PAPER', 'real_exchange': 'bitunix'},      # PAPER �
         2: {'trading_mode': 'REAL', 'real_exchange': 'bitunix'},
         3: {'trading_mode': 'REAL', 'real_exchange': 'binance'},
         4: {'trading_mode': 'REAL'},                                   # انتخاب نشده → پیش‌فرض Binance
-        5: {'trading_mode': 'REAL', 'real_exchange': 'okx'}}           # مقدار نامعتبر → Binance
+        5: {'trading_mode': 'REAL', 'real_exchange': 'okx'},           # مقدار نامعتبر → Binance
+        6: {'trading_mode': 'PAPER', 'paper_exchange': 'bitunix'},     # V3.44.108: کاغذی با Bitunix → Bitunix
+        7: {'trading_mode': 'PAPER', 'paper_exchange': 'binance', 'real_exchange': 'bitunix'},
+        8: {'trading_mode': 'PAPER', 'paper_exchange': 'okx'}}         # نامعتبر → Binance
 env = dict(contextvars=contextvars, USER_SESSIONS=SESS, inspect=inspect, functools=functools)
 exec(src[a:b], env)
 dv = env['data_venue_for']
-assert [dv(c) for c in (1, 2, 3, 4, 5, 999, None)] == ['binance', 'bitunix', 'binance', 'binance', 'binance', 'binance', 'binance']
+assert [dv(c) for c in (1, 2, 3, 4, 5, 999, None, 6, 7, 8)] == ['binance', 'bitunix', 'binance', 'binance', 'binance', 'binance', 'binance', 'bitunix', 'binance', 'binance']
 assert env['VENUE_SOURCES']['bitunix'] == ('bitunix',) and 'bitunix' not in env['VENUE_SOURCES']['binance'] and 'binance' not in env['VENUE_SOURCES']['bitunix']
 print('1 venue by mode ok')
 

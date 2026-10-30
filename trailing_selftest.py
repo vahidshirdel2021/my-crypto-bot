@@ -83,6 +83,6 @@ assert apply_(1, {}, p, act, 103) is True and p['sl'] == moves[-1] and p['trail_
 act2 = step(p, 105, 'balanced'); act2 = step(p, 105, 'balanced')
 assert act2 and apply_(1, {}, p, act2, 105) is False                # حداقل فاصله‌ی ۱۵ ثانیه بین دو جابه‌جایی REAL
 # --- منو و تنظیمات ---
-for needle in ["'trail_enabled': False", "'/toggle_trail'", "'/trail_profile_next'", "trailing_scan_once()", "'exit': ['trail',"]:
+for needle in ["'trail_enabled': True", "'/toggle_trail'", "'/trail_profile_next'", "trailing_scan_once()", "'exit': ['trail',"]:
     assert needle in src, needle
 print('ALL OK')

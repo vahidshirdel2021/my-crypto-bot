@@ -33,6 +33,7 @@ g = dict(os=os, logger=logging.getLogger('t'), time=time, FAV_CONFIRM_MIN_RR=0.0
          _touch_register=lambda *a, **k: (calls.__setitem__('flip', calls['flip'] + 1) or ('touch_wait', 'x')))
 exec(src[src.index("_FINAL_REGIME_FA = "):src.index("def _final_regime_check(")], g)
 exec(src[a:b], g)
+g['_fn_hold_tick'] = lambda *a, **k: None      # V3.44.107: ثبت نگه‌داشتن‌های صف برای قیف؛ در این تست بی‌اثر است
 g['_final_regime_check'] = lambda tf, sig: g['_final_regime_verdict'](calls['regime'], sig)   # جایگزین نسخه‌ی شبکه‌ای
 
 def mk(expires=600):

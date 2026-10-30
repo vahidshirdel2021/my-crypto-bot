@@ -171,6 +171,7 @@ gf = dict(os=os, logger=log, time=time, FAV_CONFIRM_MIN_RR=0.0, FAV_CONFIRM_CANC
           _touch_register=lambda *a, **k: (calls.__setitem__('flip', calls['flip'] + 1) or ('touch_wait', 'x')))
 exec(src[src.index("_FINAL_REGIME_FA = "):src.index("def _final_regime_check(")], gf)
 exec(src[a2:b2], gf)
+gf['_fn_hold_tick'] = lambda *a, **k: None      # V3.44.107: ثبت نگه‌داشتن‌های صف برای قیف؛ در این تست بی‌اثر است
 
 def mkr(expires=600):
     return {'id': 'r1', 'symbol': 'AAA', 'sig': 'BUY', 'side_label': 'BUY (Long)', 'entry': 100.0, 'sl': 98.0, 'tp': 110.0,
