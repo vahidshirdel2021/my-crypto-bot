@@ -222,7 +222,7 @@ assert penv(['binance'], boomp, 80990.0)['latest_price']('BTC') == 80990.0
 a5 = src.index("def tradingview_symbol(symbol, chat_id=None):"); b5 = src.index("def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):")
 ctx = {'v': 'binance'}; by_chat = {1: 'binance', 2: 'bitunix'}
 tv = dict(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), TRADINGVIEW_EXCHANGE='', _venue=lambda: ctx['v'], data_venue_for=lambda c: by_chat.get(c, 'binance'),
-          TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
+          TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'}, _bitunix_scale=lambda b: 1)
 exec(src[a5:b5], tv)
 assert tv['tradingview_symbol']('BTC') == 'BINANCE:BTCUSDT' and tv['tradingview_symbol']('BTC', 1) == 'BINANCE:BTCUSDT' and tv['tradingview_symbol']('BTC', 2) == 'BITUNIX:BTCUSDT.P'
 ctx['v'] = 'bitunix'; assert tv['tradingview_symbol']('ETH') == 'BITUNIX:ETHUSDT.P'

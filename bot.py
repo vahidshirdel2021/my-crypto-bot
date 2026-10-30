@@ -2704,11 +2704,45 @@ def _bitunix_refresh_symbol_map():
         _BITUNIX_SYMBOLS['next_try'] = time.time() + 60
 
 
-def _bitunix_symbol_from_cache(base):
+_BITUNIX_PREFIX_SCALES = (1000, 10000, 100000, 1000000)
+
+
+def _bitunix_resolve(base):
+    """V3.44.112: (نمادِ فیوچرز بیتیونیکس, scale) برای نامِ «اسپات‌گونه»‌ی ربات.
+    نمادهای ربات اسپات‌گونه‌اند (PEPE, SHIB, BONK, ...) ولی بیتیونیکس بعضی را با پیشوند ۱۰۰۰ (یا بیشتر) لیست می‌کند
+    (1000PEPE, 1000SHIB, 1000BONK, ...) و قیمتشان ۱۰۰۰ برابرِ اسپات است. اول نام عیناً، بعد با پیشوندها جست‌وجو می‌شود.
+    scale = ضریب پیشوند (۱ برای نمادهای عادی)؛ قیمتِ ربات = قیمت فیوچرز / scale ، حجم (کوین) = حجم فیوچرز × scale.
+    (None, 1) = روی فیوچرز بیتیونیکس لیست نیست (یا OPEN نیست)؛ اگر لیست نمادها هنوز نیامده حدس ساده (BASEUSDT, 1)."""
+    base = str(base).upper()
     m = _BITUNIX_SYMBOLS['map']
-    if m:
-        return m.get(base)          # None = روی فیوچرز بیتیونیکس لیست نیست (یا OPEN نیست)
-    return f'{base}USDT'            # لیست نمادها در دسترس نبود: حدس ساده
+    if not m:
+        return f'{base}USDT', 1
+    if base in m:
+        return m[base], 1
+    for pref in _BITUNIX_PREFIX_SCALES:
+        sym = m.get(f'{pref}{base}')
+        if sym:
+            return sym, pref
+    return None, 1
+
+
+def _bitunix_symbol_from_cache(base):
+    return _bitunix_resolve(base)[0]
+
+
+def _bitunix_scale(base):
+    return _bitunix_resolve(base)[1]
+
+
+def _bitunix_unscale_df(df, scale):
+    """کندل‌های فیوچرزِ «واحد ۱۰۰۰تایی» را به واحد کوین (هم‌مقیاس با اسپات و سطوح ربات) برمی‌گرداند."""
+    if df is None or getattr(df, 'empty', True) or not scale or scale == 1:
+        return df
+    df = df.copy()
+    for c in ('open', 'high', 'low', 'close'):
+        df[c] = df[c] / scale
+    df['volume'] = df['volume'] * scale
+    return df
 
 
 def _parse_bitunix_tickers(payload):
@@ -2748,16 +2782,17 @@ def _bitunix_prices():
 
 
 def _bitunix_price(base):
-    sym = _bitunix_symbol_from_cache(base)
+    sym, scale = _bitunix_resolve(base)
     if not sym:
         return None
     px = _bitunix_prices().get(sym)
     if px:
-        return px
+        return px / scale                    # V3.44.112: نمادهای ۱۰۰۰تایی => قیمتِ هم‌مقیاس با اسپات
     try:                                     # فهرست کلی خالی/ناقص بود: فقط همین نماد
         r = _bitunix_get('/api/v1/futures/market/tickers', {'symbols': sym}, timeout=5)
         if r.ok:
-            return _parse_bitunix_tickers(r.json()).get(sym)
+            v = _parse_bitunix_tickers(r.json()).get(sym)
+            return (v / scale) if v else None
     except Exception as exc:
         logger.debug('bitunix ticker %s: %s', sym, exc)
     return None
@@ -2791,7 +2826,7 @@ def _bitunix_fetch_klines(symbol, tf, limit):
     """(df, http_status, payload) یا None اگر این نماد/تایم‌فریم روی بیتیونیکس نیست. حداکثر ۲۰۰ کندل در هر درخواست؛
     اگر بیشتر خواسته شود صفحه‌ی بعدی با endTime گرفته می‌شود (حداکثر ۵ صفحه)."""
     base = _base_asset(symbol)
-    interval = BITUNIX_INTERVAL_MAP.get(tf); sym = _bitunix_symbol_from_cache(base)
+    interval = BITUNIX_INTERVAL_MAP.get(tf); sym, scale = _bitunix_resolve(base)
     if not interval or not sym:
         return None
     need = max(int(limit), 60); frames = []; end = None; payload = None; status = 200
@@ -2817,6 +2852,7 @@ def _bitunix_fetch_klines(symbol, tf, limit):
     if not frames:
         return pd.DataFrame(), status, payload
     df = pd.concat(frames[::-1]).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    df = _bitunix_unscale_df(df, scale)          # V3.44.112: 1000PEPE => قیمت PEPE (÷۱۰۰۰)
     return _bitunix_add_forming_candle(df, tf, _bitunix_price(base)), status, payload
 
 
@@ -3657,6 +3693,8 @@ def tradingview_symbol(symbol, chat_id=None):
     venue = data_venue_for(chat_id) if chat_id is not None else _venue()
     exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(venue, 'BINANCE')
     suffix = '.P' if (not TRADINGVIEW_EXCHANGE and venue == 'bitunix') else ''
+    if suffix and _bitunix_scale(base) != 1:
+        suffix = ''     # V3.44.112: نمادِ ۱۰۰۰تایی (1000PEPE) در فیوچرز با قیمت ×۱۰۰۰ است و با سطوح ربات نمی‌خواند => چارت از «اسپات» همان نام (BITUNIX:PEPEUSDT)
     return f'{exchange}:{base}USDT{suffix}'
 
 
@@ -5729,7 +5767,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.111'
+BOT_VERSION = '3.44.112'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
@@ -6885,7 +6923,7 @@ def _bitunix_hist_range_sync(symbol):
             _bitunix_refresh_symbol_map()
         except Exception as exc:
             logger.debug('bitunix symbol map refresh: %s', exc)
-    sym = _bitunix_symbol_from_cache(base)
+    sym, scale = _bitunix_resolve(base)
     if not sym or not _source_available('bitunix'):
         return None
     for interval in ('1w', '1d'):
@@ -6914,7 +6952,7 @@ def _bitunix_hist_range_sync(symbol):
         if not frames:
             continue
         _source_ok('bitunix')
-        rng = _halving_range_from_df(pd.concat(frames[::-1]).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True))
+        rng = _halving_range_from_df(_bitunix_unscale_df(pd.concat(frames[::-1]).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True), scale))
         if rng:
             logger.info('halving range %s from bitunix/%s: high=%s low=%s', symbol, interval, rng[0], rng[1])
             _HIST_RANGE_SRC[symbol] = ('Bitunix', tuple(rng))
@@ -18687,7 +18725,7 @@ def refresh_watchlists_from_spot():
                         report['long']['removed'], report['long']['added'], report['sources_ok'])
     if 'bitunix' in per:
         # V3.44.56: نمادهای واچ‌لیست که فیوچرز بیتیونیکس ندارد (داده‌ی آن‌ها از باینانس می‌آید)
-        report['not_on_bitunix'] = {name: [x for x in lst if x not in per['bitunix']] for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}
+        report['not_on_bitunix'] = {name: [x for x in lst if not watchlist_tools.on_bitunix(x, per['bitunix'])] for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}   # V3.44.112: PEPE ≡ 1000PEPE
         logger.info('Watchlist vs Bitunix: long missing=%s', report['not_on_bitunix']['long'])
     try:
         with open(WATCHLIST_REPORT_PATH, 'w', encoding='utf-8') as fh:

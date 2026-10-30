@@ -67,6 +67,15 @@ def fetch_bitunix_futures(timeout=12):
             if str(s.get('quote', '')).upper() == 'USDT' and str(s.get('symbolStatus', 'OPEN')).upper() == 'OPEN'}
 
 
+BITUNIX_PREFIXES = (1000, 10000, 100000, 1000000)
+
+
+def on_bitunix(base, bitunix_bases):
+    """V3.44.112: آیا نمادِ اسپات‌گونه‌ی ربات (PEPE) روی فیوچرز بیتیونیکس هست؟ بیتیونیکس بعضی‌ها را با پیشوند ۱۰۰۰ لیست می‌کند (1000PEPE)."""
+    base = str(base).upper()
+    return base in bitunix_bases or any(f'{p}{base}' in bitunix_bases for p in BITUNIX_PREFIXES)
+
+
 def fetch_available(timeout=12):
     """(union, per_source, errors). منبعِ خراب نادیده گرفته می‌شود و خطایش در errors می‌آید."""
     per, errors = {}, {}
@@ -117,7 +126,8 @@ def main(argv=None):
     report.update(removed=plan['removed'], added=plan['added'], kept_count=len(plan['kept']), final_count=len(plan['final']))
     report['per_source_missing'] = {k: [s for s in plan['final'] if s not in v] for k, v in per.items()}
     if 'bitunix' in per:
-        report['not_on_bitunix'] = [s for s in candidates if s not in per['bitunix']]     # نمادهای واچ‌لیست فعلی که بیتیونیکس ندارد (داده‌شان از باینانس می‌آید)
+        report['not_on_bitunix'] = [s for s in candidates if not on_bitunix(s, per['bitunix'])]
+        report['bitunix_1000'] = {s: next(f'{p}{s}' for p in BITUNIX_PREFIXES if f'{p}{s}' in per['bitunix']) for s in candidates if s not in per['bitunix'] and on_bitunix(s, per['bitunix'])}   # نام ربات -> نام بیتیونیکس     # نمادهای واچ‌لیست فعلی که بیتیونیکس ندارد (داده‌شان از باینانس می‌آید)
     if '--json' in argv:
         report['final'] = plan['final']
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 0
@@ -128,6 +138,8 @@ def main(argv=None):
     if 'not_on_bitunix' in report:
         nb = report['not_on_bitunix']
         print(f"روی بیتیونیکس نیست ({len(nb)} از {len(candidates)}؛ داده‌ی این‌ها از باینانس می‌آید):", ', '.join(nb) or '-')
+        if report.get('bitunix_1000'):
+            print('با پیشوند ۱۰۰۰ روی بیتیونیکس هست (ربات خودکار نگاشت می‌کند و قیمت را ÷۱۰۰۰ می‌کند):', ', '.join(f'{k}→{v}' for k, v in report['bitunix_1000'].items()))
     elif 'bitunix' in errors:
         print('بیتیونیکس در دسترس نبود:', errors['bitunix'])
     return 0

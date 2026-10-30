@@ -108,7 +108,7 @@ henv = dict(pd=pd, math=math, time=time, asyncio=asyncio, json=json, os=os, logg
             _binance_symbol_from_cache=lambda base: base + 'USDT', _BINANCE_SOURCES=('binance',), _binance_base_url=lambda s_: 'https://api.binance.com',
             _source_available=lambda s_: True, _source_trip=lambda *a, **k: None, _source_fail=lambda s_: None, _source_ok=lambda s_: None,
             _status_trips_source=lambda st: False, Dict=dict, Any=object, _venue=lambda: henv['_v'], _v='binance',
-            _bitunix_map_needs_refresh=lambda: False, _bitunix_refresh_symbol_map=lambda: None, _bitunix_symbol_from_cache=lambda base: base + 'USDT', _bitunix_get=fake_bx_get,
+            _bitunix_map_needs_refresh=lambda: False, _bitunix_refresh_symbol_map=lambda: None, _bitunix_symbol_from_cache=lambda base: base + 'USDT', _bitunix_resolve=lambda base: (base + 'USDT', 1), _bitunix_unscale_df=lambda df, sc: df, _bitunix_get=fake_bx_get,
             get_klines=lambda *a: None)
 async def _ak(*a): return None
 henv['get_klines_async'] = _ak
@@ -137,7 +137,7 @@ print('4 historical range per venue ok')
 
 # ---------------------------------------------------------------- ۵) لینک TradingView
 ta = src.index("def tradingview_symbol(symbol, chat_id=None):"); tb = src.index("def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):")
-tv = dict(env); tv.update(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), TRADINGVIEW_EXCHANGE='', TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
+tv = dict(env); tv.update(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), _bitunix_scale=lambda b: 1, TRADINGVIEW_EXCHANGE='', TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
 exec(src[ta:tb], tv)
 assert tv['tradingview_symbol']('SOL', 1) == 'BINANCE:SOLUSDT'            # PAPER
 assert tv['tradingview_symbol']('SOL', 3) == 'BINANCE:SOLUSDT'            # REAL + Binance
