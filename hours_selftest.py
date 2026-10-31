@@ -22,7 +22,7 @@ assert 'watchlist = []' in seg and "pw = s.get('priority_watch')" in src[src.ind
 # منو
 fn = next(n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == 'trade_filter_management_keyboard')
 G = dict(get_session=lambda c: {'strategy_config': {}}, GATE_REGISTRY={}, gate_on=lambda s, k: False, _fav_cfg=lambda s: (0.3, 1.0, 900),
-         _fav_max_label=lambda s: '', _fav_max_mode=lambda s: 'r', regime_advanced_on=lambda: False, _filter_info=lambda k: (k, ''),
+         _fav_max_label=lambda s: '', _fav_max_mode=lambda s: 'r', regime_advanced_on=lambda: False, _filter_info=lambda k, s=None: (k, ''),
          TOUCH_AUTO_LABELS={'all': ''}, _be_cfg=lambda s: (1.0, 0.5), TRAIL_PROFILES={'balanced': ('م',)}, _trail_profile_key=lambda s: 'balanced',
          TRADE_HOURS_PROFILES=g['TRADE_HOURS_PROFILES'], _hours_profile_key=g['_hours_profile_key'])
 exec(ast.get_source_segment(src, fn), G)

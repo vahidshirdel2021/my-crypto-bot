@@ -9,8 +9,9 @@ REG = {m.group(1): (m.group(2), m.group(3) == 'True', m.group(4), '') for m in
 S = {'strategy_config': {}, 'touch_auto_mode': 'all', 'fav_confirm_enabled': False}
 g = dict(get_session=lambda c: S, GATE_REGISTRY=REG, gate_on=lambda s, k: REG[k][1], _fav_cfg=lambda s: (0.3, 1.0, 900),
          _fav_max_label=lambda s: '1R', _fav_max_mode=lambda s: 'r', regime_advanced_on=lambda: False,
-         _filter_info=lambda k: (k, ''), TOUCH_AUTO_LABELS={'all': 'همه'}, _be_cfg=lambda s: (1.0, 0.5),
-         TRAIL_PROFILES={'balanced': ('متعادل',)}, _trail_profile_key=lambda s: 'balanced')
+         _filter_info=lambda k, s=None: (k, ''), TOUCH_AUTO_LABELS={'all': 'همه'}, _be_cfg=lambda s: (1.0, 0.5),
+         TRAIL_PROFILES={'balanced': ('متعادل',)}, _trail_profile_key=lambda s: 'balanced',
+         _profit_thr=lambda s, k: 5.0, is_restricted_user=lambda c: False)
 exec(ast.get_source_segment(src, fn), g)
 kb = g['trade_filter_management_keyboard']
 

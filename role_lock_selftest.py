@@ -29,20 +29,22 @@ DENY = ['/admin_panel', '/admin_access', '/admin_tests', '/admin_users_list', '/
         '/menu_reports', '/menu_trading', '/manual_trade', '/pending_order_start', '/backtest_start', '/scan_signal_start',
         '/manage_watchlist', '/add_long_symbol', '/remove_short_symbol', '/watchlist_list', '/assist_ind_ab12', '/assist_menu',
         '/assist_stats', '/assist_expiry_cycle', '/toggle_halving_model', '/toggle_gate_x', '/toggle_scenario_x', '/toggle_setup_daily',
-        '/toggle_signal_all3', '/toggle_regime_adv', '/toggle_btc_guard', '/halving_depth_cycle', '/halving_k_cycle', '/sl_up', '/tp_down',
+        '/toggle_signal_all3', '/toggle_regime_adv', '/halving_depth_cycle', '/halving_k_cycle', '/sl_up', '/tp_down',
         '/adx_up', '/set_max_same_2', '/set_dir_cooldown_60', '/profile_advanced', '/profile_balanced', '/apply_my_profile', '/save_my_profile',
         '/learn_menu', '/same_dir_menu',
-        '/chreg', '/chlist', '/chind_5', '/fq_flt_r1', '/rvclear', '/touch_auto_next', '/hours_profile_next', '/trail_profile_next',
+        '/chreg', '/chlist', '/chind_5', '/fq_flt_r1', '/rvclear', '/touch_auto_next', '/hours_profile_next',
         '/back:/admin_panel', '/back:/trade_filter_management', '/set_tf_30m', '/set_lev_abc', '/manage_watchlist', '/unknown_new_command', '', None,
         'BTC', 'تحلیل', '/ADMIN_PANEL']
 for c in DENY:
     assert not ap.user_command_allowed(c), ('should be denied', c)
 
 # 3) هر دستوری که در process_command هست و به لیست مجاز نرسیده، پیش‌فرض بسته است (بررسی نمونه‌ای از کل کد)
+# V3.44.113: منوی «خروج و حفظ سود» عمداً برای کاربر عادی باز است
+_PROFIT_USER_OK = {'/toggle_trail', '/toggle_profit_autoclose', '/toggle_total_profit_autoclose', '/toggle_profit_alert', '/toggle_profit_fade_alert', '/toggle_be_auto'}
 a = src.index('def process_command(')
 pc = src[a:a + 220000]
 lits = set(re.findall(r"'(/[a-z0-9_]+)'", pc))
-admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c) and c != '/fav_queue']   # V3.44.91: /fav_queue عمداً برای کاربر عادی باز است
+admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c) and c != '/fav_queue' and c not in _PROFIT_USER_OK]   # V3.44.91: /fav_queue عمداً برای کاربر عادی باز است
 assert len(admin_like) > 30, len(admin_like)
 for c in admin_like:
     assert not ap.user_command_allowed(c + 'x' if c.endswith('_') else c), c
@@ -59,7 +61,7 @@ for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list'
     assert hidden not in cbs, hidden
 
 settings = callbacks(ap.filter_markup(ui.get_settings_menu_keyboard()))
-assert settings == ['/check_wizard', '/trade_mode_menu', '/menu'], settings      # V3.44.62: «🎯 حالت معامله» اضافه شد
+assert settings == ['/check_wizard', '/trade_mode_menu', '/profit_menu', '/menu'], settings      # V3.44.62: «🎯 حالت معامله» اضافه شد
 
 perf = callbacks(ap.filter_markup(ui.get_performance_keyboard()))
 assert set(perf) == {'/performance_today', '/performance_week', '/performance_month', '/performance', '/today_trades', '/menu'}, perf
@@ -122,7 +124,7 @@ assert not ap.is_restricted('abc', {111})
 # 6) سیم‌کشی در bot.py
 for needle in ("def is_restricted_user(", "def _deny_restricted(", "not _ap.user_command_allowed(cmd, paper=_paper_account(chat_id))",
                "_ap.filter_markup(payload['reply_markup'], paper=_paper_account(payload.get('chat_id')))", "if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))",
-               "current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET')", "startswith(('/chind_', '/assist_ind_', '/fq_flt_'))",
+               "current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET', 'WAIT_PROFIT_AMT_SINGLE', 'WAIT_PROFIT_AMT_TOTAL')", "startswith(('/chind_', '/assist_ind_', '/fq_flt_'))",
                "if is_restricted_user(chat_id):\n        # V3.44.59: کاربر عادی فقط خطوط ورود"):
     assert needle in src, needle
 assert src.count("if is_restricted_user(chat_id): markup = _ap.filter_markup(markup, paper=_paper_account(chat_id))") == 2

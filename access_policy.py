@@ -42,6 +42,10 @@ USER_EXACT = frozenset({
     '/assist_main_toggle',
     # V3.44.76: پشتیبان ربات
     '/support',
+    # V3.44.113: منوی «🚪 خروج و حفظ سود» برای کاربر عادی (کلیدها + مقدار سود هر معامله / مجموع سود)
+    '/profit_menu', '/profit_amt_single', '/profit_amt_total',
+    '/toggle_trail', '/toggle_profit_autoclose', '/toggle_total_profit_autoclose',
+    '/toggle_profit_alert', '/toggle_profit_fade_alert', '/toggle_be_auto',
     # V3.44.84: دکمه‌ی برگشتِ مراحل ویزارد تنظیمات معامله
     '/wiz_lev', '/wiz_max', '/wiz_same',
     # V3.44.85: مرحله‌ی «حالت معامله» در ویزارد
@@ -62,6 +66,8 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/set_tf_(5m|15m|1h|4h)$',
     # اتصال صرافی (REAL)
     r'^/real_(pick|use|new|del)_[a-z0-9_]+$',
+    # V3.44.113: انتخاب مقدار سود (دکمه‌های آماده / عدد دلخواه)
+    r'^/set_profit_(single|total)_\d+(\.\d+)?$', r'^/profit_amt_custom_(single|total)$',
     # V3.44.108: انتخاب صرافی حساب کاغذی (اولین مرحله‌ی ویزارد کاغذی) و بازگشت به صفحه‌ی موجودی
     r'^/paper_pick_(binance|bitunix)$',
     # پوزیشن‌های خود کاربر

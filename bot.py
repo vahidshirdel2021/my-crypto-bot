@@ -5767,10 +5767,10 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.112'
+BOT_VERSION = '3.44.114'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
-                  'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled',
+                  'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
                   'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled', 'touch_auto_mode', 'timeframe', 'active_strategy',
                   'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
@@ -8202,7 +8202,7 @@ _FN_CFG_LAST = {}       # chat -> (hash, day) آخرین عکسی که نوشت�
 _FN_SYM_CACHE = {}      # (symbol, tf) -> (ts, dict)
 _FN_MKT_CACHE = {}      # tf -> (ts, dict)
 _FN_REG_LETTER = {'BULLISH': 'B', 'BEARISH': 'S', 'RANGE': 'R'}
-_FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r',
+_FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt', 'fav_confirm_enabled', 'fav_confirm_min_r',
                 'fav_confirm_max_r', 'fav_confirm_max_mode', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled',
                 'touch_auto_mode', 'assist_mode_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled',
                 'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'max_open_positions', 'max_same_direction_positions',
@@ -9101,6 +9101,35 @@ PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('PROFIT_AUTOCLOSE_USDT', '
 # V3.43.24: بستن همه‌ی پوزیشن‌های باز وقتی «مجموع» سود/زیان لحظه‌ای آن‌ها (ناخالص، بدون کارمزد؛ همان عددی که بالای کارت پوزیشن‌ها
 # نمایش داده می‌شود) به این مقدار (USDT) برسد. کلید روشن/خاموش جدا در «مدیریت خروج». پیش‌فرض روشن. 0 = کاملاً غیرفعال.
 TOTAL_PROFIT_AUTOCLOSE_USDT = max(0.0, float(os.environ.get('TOTAL_PROFIT_AUTOCLOSE_USDT', '5')))
+# V3.44.113: مقدار «سودِ هر معامله» و «مجموع سود» را هر کاربر خودش تعیین می‌کند (کلیدهای سشن profit_autoclose_usdt / total_profit_autoclose_usdt)؛
+# اگر چیزی ست نشده باشد همان پیش‌فرض بالا (env، ۵$) اعمال می‌شود.
+PROFIT_AMOUNT_MIN = 0.5
+PROFIT_AMOUNT_MAX = 100000.0
+PROFIT_AMOUNT_PRESETS = (3, 5, 7, 10, 15, 20)
+_PROFIT_DIGITS = str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩', '01234567890123456789')
+
+
+def _profit_thr(s, kind):
+    """آستانه‌ی بستن خودکار (USDT) برای این کاربر؛ kind: 'single' (هر معامله) | 'total' (مجموع پوزیشن‌ها)."""
+    key, default = (('profit_autoclose_usdt', PROFIT_AUTOCLOSE_USDT) if kind == 'single'
+                    else ('total_profit_autoclose_usdt', TOTAL_PROFIT_AUTOCLOSE_USDT))
+    try:
+        v = float((s or {}).get(key))
+    except (TypeError, ValueError):
+        return default
+    return round(v, 2) if (v == v and PROFIT_AMOUNT_MIN <= v <= PROFIT_AMOUNT_MAX) else default
+
+
+def parse_profit_amount(text):
+    """عدد تایپ‌شده‌ی کاربر (۵ / 5.5 / ۵٫۵ / 7$ / ۱۰ دلار) -> float یا None اگر نامعتبر/خارج از بازه."""
+    t = str(text or '').strip().translate(_PROFIT_DIGITS).replace('٫', '.').replace(',', '.').replace('$', '').replace('دلار', '').strip()
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    if v != v or v < PROFIT_AMOUNT_MIN or v > PROFIT_AMOUNT_MAX:
+        return None
+    return round(v, 2)
 # V3.42: هشدار ضعف سود - بعد از اینکه سود به حداقل یک پله‌ی هشدار (۵$) رسید، اگر از اوجِ دیده‌شده
 # حداقل max(PROFIT_FADE_MIN_USDT, PROFIT_FADE_PCT × اوج) پایین بیاید، یک پیام «مشاهده ضعف» می‌فرستد.
 # بعد از هر هشدار، فقط وقتی اوجِ تازه‌ای بالاتر از اوجِ قبلی ثبت شود دوباره فعال می‌شود (پشت‌سرهم تکرار نمی‌شود).
@@ -9200,12 +9229,12 @@ def handle_profit_alert_close(chat_id, pct, symbol):
 
 def profit_autoclose_scan_once():
     """V3.43.21: اگر کلید روشن باشد و سود ناخالص یک معامله‌ی باز به PROFIT_AUTOCLOSE_USDT برسد، با قیمت بازار بسته می‌شود."""
-    thr = PROFIT_AUTOCLOSE_USDT
-    if thr <= 0:
-        return
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
             if not bool(s.get('profit_autoclose_enabled', False)):
+                continue
+            thr = _profit_thr(s, 'single')      # V3.44.113: مقدارِ تنظیم‌شده‌ی خود کاربر
+            if thr <= 0:
                 continue
             for p in list(s.get('paper_positions') or []):
                 try:
@@ -9229,12 +9258,12 @@ def total_profit_autoclose_scan_once():
     """V3.43.24: اگر کلید روشن باشد و «مجموع» سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز (ناخالص، بدون کارمزد)
     به TOTAL_PROFIT_AUTOCLOSE_USDT برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند (سود ثبت/ذخیره می‌شود).
     اگر قیمت حتی یکی از پوزیشن‌ها در دسترس نباشد، تصمیم گرفته نمی‌شود (مجموع ناقص نباید ماشه بزند)."""
-    thr = TOTAL_PROFIT_AUTOCLOSE_USDT
-    if thr <= 0:
-        return
     for chat_id, s in list(USER_SESSIONS.items()):
         try:
             if not bool(s.get('total_profit_autoclose_enabled', False)):
+                continue
+            thr = _profit_thr(s, 'total')       # V3.44.113: مقدارِ تنظیم‌شده‌ی خود کاربر
+            if thr <= 0:
                 continue
             positions = []
             for p in list(s.get('paper_positions') or []):
@@ -14693,9 +14722,10 @@ GATE_REGISTRY = {
 }
 
 
-def _filter_info(key):
+def _filter_info(key, s=None):
     """(نام ساده‌ی دکمه, توضیح) برای دکمه‌های «قوانین معامله» که در GATE_REGISTRY نیستند."""
     pa = PROFIT_ALERT_USDT
+    pt = _profit_thr(s, 'single'); tt = _profit_thr(s, 'total')      # V3.44.113: مقدار تنظیم‌شده‌ی کاربر (یا پیش‌فرض)
     static = {
         'regime_adv': ('تشخیص رژیم دقیق‌تر',
             f'خاموش (پیش‌فرض): رژیم مثل قبل فقط از EMA20 و EMA50 ساخته می‌شود. روشن: برای «صعودی/نزولی» علاوه بر EMA، ADX ≥ {REGIME_ADX_MIN:g}، هم‌جهت بودن DI و هم‌جهت بودن شیب EMA50 هم لازم است و فاصله‌ی قیمت از EMA50 نباید خیلی کم باشد؛ وگرنه «رنج». روی همه‌ی بخش‌هایی که رژیم می‌سنجند اثر دارد (رژیم BTC/ETH، رژیم نماد، گیت جهت بازار) و برای کل ربات است. روشن کردنش معمولاً سیگنال کمتری می‌دهد.'),
@@ -14720,10 +14750,10 @@ def _filter_info(key):
             'قبل از ورود، اگر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، یا هیچ‌کدام از معامله پشتیبانی نکنند (همه خنثی)، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). نبود داده مانع نمی‌شود. پیش‌فرض روشن.'),
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
-        'profit_autoclose': (f'معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند',
-            f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {PROFIT_AUTOCLOSE_USDT:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش نگه دار. پیش‌فرض: خاموش.'),
-        'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$',
-            f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {TOTAL_PROFIT_AUTOCLOSE_USDT:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {PROFIT_AUTOCLOSE_USDT:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {PROFIT_AUTOCLOSE_USDT:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: خاموش.'),
+        'profit_autoclose': (f'معاملات با {pt:g}$ سود بسته شوند',
+            f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {pt:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش نگه دار. پیش‌فرض: خاموش.'),
+        'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {tt:g}$',
+            f'سود/زیان لحظه‌ای همه‌ی پوزیشن‌های باز با هم جمع می‌شود (همان «مجموع سود/زیان لحظه‌ای» بالای کارت پوزیشن‌ها، ناخالص و بدون کارمزد). وقتی این مجموع به {tt:g}$ برسد، همه‌ی پوزیشن‌ها با قیمت بازار بسته می‌شوند و سود ثبت می‌شود. پوزیشن‌های ضررده هم در مجموع حساب می‌شوند. اگر کلید «معاملات با {pt:g}$ سود بسته شوند» هم روشن باشد، هر پوزیشنی که تنهایی به {pt:g}$ برسد زودتر بسته می‌شود. پیش‌فرض: خاموش.'),
         'profit_alert': (f'هشدار رسیدن به سود هر {pa:g}$',
             f'هر بار که سود یک معامله‌ی باز به {pa:g}$ و مضرب‌هایش ({pa*2:g}$ و {pa*3:g}$ و ...) برسد، یک پیام می‌گیری. معامله بسته نمی‌شود.'),
         'profit_fade_alert': ('هشدار کم شدن سود',
@@ -14785,15 +14815,23 @@ _FILTER_SECTION_TITLES = {
 _FILTER_HOW_TO = '🟢 یعنی روشن و 🔴 یعنی خاموش؛ با لمس هر دکمه وضعیتش عوض می‌شود.'
 
 
-def filter_section_text(section):
+# V3.44.113: کاربر عادی فقط این ۶ مورد «خروج و حفظ سود» را می‌بیند (بقیه فنی‌اند و فقط ادمین)
+USER_EXIT_KEYS = ('trail', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert', 'be_auto')
+USER_EXIT_CBS = frozenset({'/toggle_trail', '/toggle_profit_autoclose', '/toggle_total_profit_autoclose', '/toggle_profit_alert',
+                           '/toggle_profit_fade_alert', '/toggle_be_auto', '/profit_amt_single', '/profit_amt_total', '/menu_settings', '/menu'})
+
+
+def filter_section_text(section, s=None, user=False):
     """متن بالای هر دسته‌ی «قوانین معامله»: توضیح ساده‌ی هر دکمه، قبل از لمس کردنش."""
     title, intro = _FILTER_SECTION_TITLES[section]
     items = []
     for k in _FILTER_SECTION_KEYS.get(section, []):
-        lbl, note = _filter_info(k)
+        if user and section == 'exit' and k not in USER_EXIT_KEYS:
+            continue
+        lbl, note = _filter_info(k, s)
         items.append(f'• {lbl}: {note}')
     for k, v in GATE_REGISTRY.items():
-        if v[2] == section:
+        if v[2] == section and not (user and section == 'exit'):
             items.append(f'• {v[0]}: {v[3]}')
     has_toggles = section in ('level', 'structure', 'momentum', 'btceth', 'regime', 'entry_rules', 'timing', 'quality', 'entry_warn', 'experimental', 'exit', 'limits')
     head = f'{title}\n\n{intro}' + (f'\n{_FILTER_HOW_TO}' if has_toggles else '') + '\n\n'
@@ -14899,7 +14937,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         return {'text': f'{icon} {on_label}', 'callback_data': cb}
 
     def fcell(flag_val, key, cb):
-        return cell(flag_val, _filter_info(key)[0], cb)
+        return cell(flag_val, _filter_info(key, s)[0], cb)
 
     def gate_rows(sec):
         keys = [k for k, v in GATE_REGISTRY.items() if v[2] == sec]
@@ -14956,11 +14994,13 @@ def trade_filter_management_keyboard(chat_id, section=None):
 
     if section == 'exit':
         _tp_name = TRAIL_PROFILES[_trail_profile_key(s)][0]
-        return {'inline_keyboard': [
+        _kb = {'inline_keyboard': [
             [fcell(bool(s.get('trail_enabled', True)), 'trail', '/toggle_trail')],
             [{'text': f"🛡 نوع تریلینگ: {_tp_name} (تغییر)", 'callback_data': '/trail_profile_next'}],
             [fcell(bool(s.get('profit_autoclose_enabled', False)), 'profit_autoclose', '/toggle_profit_autoclose')],
             [fcell(bool(s.get('total_profit_autoclose_enabled', False)), 'total_profit_autoclose', '/toggle_total_profit_autoclose')],
+            [{'text': f"✏️ سود هر معامله: {_profit_thr(s, 'single'):g}$", 'callback_data': '/profit_amt_single'},
+             {'text': f"✏️ مجموع سود: {_profit_thr(s, 'total'):g}$", 'callback_data': '/profit_amt_total'}],
             [fcell(bool(s.get('profit_alert_enabled', False)), 'profit_alert', '/toggle_profit_alert')],
             [fcell(bool(s.get('profit_fade_alert_enabled', False)), 'profit_fade_alert', '/toggle_profit_fade_alert')],
             [fcell(bool(s.get('be_close_alert_enabled', False)), 'be_alert', '/toggle_be_alert')],
@@ -14969,8 +15009,12 @@ def trade_filter_management_keyboard(chat_id, section=None):
              {'text': f"📉 آستانه‌ی ضرر: -{_be_cfg(s)[1]:g}R (تغییر)", 'callback_data': '/be_loss_next'}],
             [cell(bool(s.get('btc_guard_enabled', True)), '🛡 محافظ BTC (بستن بخشی + سر به سر)', '/toggle_btc_guard')],
             [{'text': f"✂️ سهم بستن محافظ BTC: {int(round(float(s.get('btc_guard_frac', 0.5)) * 100))}٪ (تغییر)", 'callback_data': '/btc_guard_frac_next'}],
-            back_row,
+            ([{'text': '🔙 بازگشت', 'callback_data': '/menu_settings'}, {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]
+             if is_restricted_user(chat_id) else back_row),      # V3.44.113: کاربر عادی از «تنظیمات» می‌آید، نه از منوی فیلترها
         ]}
+        if is_restricted_user(chat_id):       # V3.44.114: کاربر عادی فقط ۶ مورد اصلی
+            _kb['inline_keyboard'] = [r for r in _kb['inline_keyboard'] if all(b.get('callback_data') in USER_EXIT_CBS for b in r)]
+        return _kb
 
     if section == 'limits':
         block_buy = bool(s.get('manual_block_buy_entries', False))
@@ -17152,6 +17196,43 @@ def process_command(cmd,chat_id,message_id=None):
         _hk = s['hours_profile']
         send_message(chat_id, f"🕐 بازه‌ی ساعت: *{TRADE_HOURS_PROFILES[_hk][0]}*\n`{_trade_hours_ranges_text(_hk)}`\n\n" + ('(کلید فعلاً خاموش است؛ از همین صفحه روشنش کن.)' if not s.get('hours_filter_enabled') else 'از اسکن بعدی اعمال می‌شود.'), trade_filter_management_keyboard(chat_id, 'limits'))
         return
+    if cl == '/profit_menu':           # V3.44.113: «🚪 خروج و حفظ سود» برای همه‌ی کاربران (از «تنظیمات و مدیریت»)
+        s['user_state'] = None; save_session(chat_id)
+        send_message(chat_id, filter_section_text('exit', s, is_restricted_user(chat_id)), trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl in ('/profit_amt_single', '/profit_amt_total'):
+        _pk = 'single' if cl.endswith('single') else 'total'
+        _cur = _profit_thr(s, _pk)
+        _what = ('سودِ هر معامله (بسته‌شدن همان معامله وقتی سودش به این مقدار برسد)' if _pk == 'single'
+                 else 'مجموع سودِ همه‌ی پوزیشن‌های باز (وقتی جمعشان به این مقدار برسد همه بسته می‌شوند)')
+        _on = bool(s.get('profit_autoclose_enabled' if _pk == 'single' else 'total_profit_autoclose_enabled', False))
+        _rows = [[{'text': ('✅ ' if abs(_cur - n) < 1e-9 else '') + f'{n}$', 'callback_data': f'/set_profit_{_pk}_{n}'} for n in PROFIT_AMOUNT_PRESETS[i:i + 3]]
+                 for i in range(0, len(PROFIT_AMOUNT_PRESETS), 3)]
+        _rows.append([{'text': '⌨️ عدد دلخواه', 'callback_data': f'/profit_amt_custom_{_pk}'}])
+        _rows.append([{'text': '🔙 بازگشت', 'callback_data': '/profit_menu'}])
+        send_message(chat_id, f"✏️ *مقدار {_what}*\n\nمقدار فعلی: `{_cur:g}$` (ناخالص، بدون کارمزد)\n"
+                              + ('' if _on else '⚠️ کلید مربوطه فعلاً خاموش است؛ بعد از انتخاب مقدار، آن را روشن کن.\n')
+                              + f"یکی از مقدارها را بزن یا «عدد دلخواه» را بزن (از {PROFIT_AMOUNT_MIN:g} تا {PROFIT_AMOUNT_MAX:g} دلار).",
+                     {'inline_keyboard': _rows})
+        return
+    _m_set = re.match(r'^/set_profit_(single|total)_(\d+(?:\.\d+)?)$', cl)
+    if _m_set:
+        _pk = _m_set.group(1); _v = parse_profit_amount(_m_set.group(2))
+        if _v is None:
+            send_message(chat_id, f'⚠️ مقدار معتبر نیست (از {PROFIT_AMOUNT_MIN:g} تا {PROFIT_AMOUNT_MAX:g} دلار).', trade_filter_management_keyboard(chat_id, 'exit')); return
+        s['profit_autoclose_usdt' if _pk == 'single' else 'total_profit_autoclose_usdt'] = _v
+        s['user_state'] = None; save_session(chat_id)
+        _on = bool(s.get('profit_autoclose_enabled' if _pk == 'single' else 'total_profit_autoclose_enabled', False))
+        send_message(chat_id, f"✅ {'سودِ هر معامله' if _pk == 'single' else 'مجموع سود'}: `{_v:g}$`\n"
+                              + ('از همین الان روی معامله‌های باز هم اعمال می‌شود.' if _on else '⚠️ کلید مربوطه خاموش است؛ برای اعمال، آن را روشن کن.'),
+                     trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl in ('/profit_amt_custom_single', '/profit_amt_custom_total'):
+        _pk = 'single' if cl.endswith('single') else 'total'
+        s['user_state'] = 'WAIT_PROFIT_AMT_SINGLE' if _pk == 'single' else 'WAIT_PROFIT_AMT_TOTAL'; save_session(chat_id)
+        send_message(chat_id, f"⌨️ مقدار دلخواه را به دلار بفرست (فقط عدد، مثلاً `6` یا `7.5`؛ از {PROFIT_AMOUNT_MIN:g} تا {PROFIT_AMOUNT_MAX:g}).",
+                     {'inline_keyboard': [[{'text': '🔙 انصراف', 'callback_data': f'/profit_amt_{_pk}'}]]})
+        return
     if cl == '/toggle_trail':
         s['trail_enabled'] = not bool(s.get('trail_enabled', True))
         save_session(chat_id)
@@ -17280,11 +17361,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            _filter_info('profit_autoclose')[1]
+            _filter_info('profit_autoclose', s)[1]
             if not current else
             'بستن خودکار در سود خاموش شد؛ معامله‌ها فقط با SL/TP یا دستی بسته می‌شوند.'
         )
-        send_message(chat_id, f"🎯 {_filter_info('profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"🎯 {_filter_info('profit_autoclose', s)[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_total_profit_autoclose':
         current = bool(s.get('total_profit_autoclose_enabled', False))
@@ -17292,11 +17373,11 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
         note = (
-            _filter_info('total_profit_autoclose')[1]
+            _filter_info('total_profit_autoclose', s)[1]
             if not current else
             'بستن خودکار با مجموع سود خاموش شد.'
         )
-        send_message(chat_id, f"💵 {_filter_info('total_profit_autoclose')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        send_message(chat_id, f"💵 {_filter_info('total_profit_autoclose', s)[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl=='/toggle_profit_alert':
         current = bool(s.get('profit_alert_enabled', False))
@@ -17411,7 +17492,7 @@ def process_command(cmd,chat_id,message_id=None):
               '/trade_filter_limits', '/trade_filter_tools'):
         _sec = cl[len('/trade_filter_'):]
         _kb_sec = _sec
-        send_message(chat_id, filter_section_text(_sec), trade_filter_management_keyboard(chat_id, _kb_sec))
+        send_message(chat_id, filter_section_text(_sec, s, is_restricted_user(chat_id)), trade_filter_management_keyboard(chat_id, _kb_sec))
         return
     if cl == '/touch_auto_next':
         _cur_m = s.get('touch_auto_mode', 'all')
@@ -17824,7 +17905,7 @@ def handle_text(chat_id,text,message_id=None):
 
     s=get_session(chat_id); val=raw.upper()
     current_state = str(s.get('user_state') or '')
-    if is_restricted_user(chat_id) and current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET'):
+    if is_restricted_user(chat_id) and current_state not in ('WAIT_REAL_API_KEY', 'WAIT_REAL_API_SECRET', 'WAIT_PROFIT_AMT_SINGLE', 'WAIT_PROFIT_AMT_TOTAL'):
         # V3.44.59: کاربر عادی فقط ورودی کلید API را می‌تواند تایپ کند؛ نام نماد (تحلیل)، بک‌تست، واچ‌لیست،
         # اوردر دستی و ... همه ممنوع. هر وضعیت انتظارِ باقی‌مانده هم پاک می‌شود.
         if current_state:
@@ -17833,6 +17914,23 @@ def handle_text(chat_id,text,message_id=None):
             process_command(text, chat_id)          # از قفل دستورها رد می‌شود
         else:
             _deny_restricted(chat_id)
+        return
+    if current_state in ('WAIT_PROFIT_AMT_SINGLE', 'WAIT_PROFIT_AMT_TOTAL'):      # V3.44.113: مقدار دلخواهِ سود
+        if raw.startswith('/'):
+            s['user_state'] = None; save_session(chat_id)
+            process_command(text, chat_id); return
+        _pk = 'single' if current_state.endswith('SINGLE') else 'total'
+        _v = parse_profit_amount(raw)
+        if _v is None:
+            send_message(chat_id, f'⚠️ عدد معتبر نیست. فقط عدد بفرست (از {PROFIT_AMOUNT_MIN:g} تا {PROFIT_AMOUNT_MAX:g} دلار)، مثلاً `6` یا `7.5`.',
+                         {'inline_keyboard': [[{'text': '🔙 انصراف', 'callback_data': f'/profit_amt_{_pk}'}]]})
+            return
+        s['profit_autoclose_usdt' if _pk == 'single' else 'total_profit_autoclose_usdt'] = _v
+        s['user_state'] = None; save_session(chat_id)
+        _on = bool(s.get('profit_autoclose_enabled' if _pk == 'single' else 'total_profit_autoclose_enabled', False))
+        send_message(chat_id, f"✅ {'سودِ هر معامله' if _pk == 'single' else 'مجموع سود'}: `{_v:g}$`\n"
+                              + ('از همین الان روی معامله‌های باز هم اعمال می‌شود.' if _on else '⚠️ کلید مربوطه خاموش است؛ برای اعمال، آن را روشن کن.'),
+                     trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if current_state in ('WAIT_REAL_API_KEY','WAIT_REAL_API_SECRET'):      # V3.44.57: کلید/Secret صرافی (پیام بلافاصله پاک می‌شود)
         real_handle_credentials_text(chat_id, raw, message_id); return
