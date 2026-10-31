@@ -286,7 +286,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         # V3.44.75: حالت دستیار برای همه‌ی کاربران (روشن = ورود فقط با تایید خود کاربر)
         {"text": ("🟢" if assist_on else "🔴") + " حالت دستیار", "callback_data": "/assist_main_toggle"},
         # V3.44.115: کلید مستقل «توقف معاملات در بلاتکلیفی جهت BTC» برای همه‌ی کاربران
-        {"text": ("🟢" if btc_undecided_on else "🔴") + " توقف در بلاتکلیفی BTC", "callback_data": "/btc_undecided_toggle"},
+        *([] if restricted else [{"text": ("🟢" if btc_undecided_on else "🔴") + " توقف در بلاتکلیفی BTC", "callback_data": "/btc_undecided_toggle"}]),   # V3.44.117: در منوی اصلی فقط ادمین
         # V3.44.76: پشتیبان ربات
         {"text": "👨‍💻 پشتیبان ربات", "callback_data": "/support"},
     ]
