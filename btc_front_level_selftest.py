@@ -229,6 +229,7 @@ g4 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_sessio
           side_long=lambda side: 'BUY' in str(side).upper() or 'LONG' in str(side).upper(),
           btc_candle_verdict=lambda tf, sig: (True, ''), _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC', _blk=blk, _btc_front_gate=fake_gate,
           latest_price=lambda s: 100.0, get_entry_lock=lambda c: _L(),
+          _btc_undecided_precheck=lambda *a, **k: True,      # V3.44.115: تست جدا در btc_undecided_selftest.py
           _execute_trade_unlocked=lambda *a, **k: (ex.__setitem__('unlocked', ex['unlocked'] + 1) or True))
 exec(src[a3:b3], g4)
 et2, em2 = g4['execute_trade'], g4['execute_manual_trade']

@@ -1781,6 +1781,9 @@ def _message_protected(chat_id, message_id):
                 return True
         if message_id in fee_protected_ids(chat_id):      # V3.44.61: پیام فاکتور کارمزد تا تسویه حذف نشود
             return True
+        _bu = ((USER_SESSIONS.get(chat_id) or {}).get('btc_undecided_msg') or {})      # V3.44.115: هشدار «بلاتکلیفی جهت BTC» تا باز شدن معامله حذف نشود
+        if _bu.get('mid') and _bu.get('mid') == message_id:
+            return True
         sess = USER_SESSIONS.get(chat_id)
         for _tr in ((sess or {}).get('touch_wait') or {}).values():      # V3.44.18: کارتِ مورد در انتظار تا وقتی منتظر است حذف نشود
             if _tr.get('msg_id') == message_id and _tr.get('status') == 'waiting':
@@ -1828,6 +1831,9 @@ def _after_message_deleted(chat_id, message_id):
         if sess.get('positions_message_id') == message_id:
             sess['positions_message_id'] = None
         changed = False
+        _bu = sess.get('btc_undecided_msg') or {}                 # V3.44.115: اگر کاربر خودش پیام هشدار را پاک کرد، اشاره‌گر پاک می‌شود (هشدار بعدی پیام تازه می‌سازد)
+        if _bu.get('mid') == message_id:
+            sess.pop('btc_undecided_msg', None); changed = True
         for rec in (sess.get('assist_log') or []):
             mids = [rec.get('message_id')] + list(rec.get('old_mids') or [])
             if message_id in mids:
@@ -4499,6 +4505,205 @@ def btc_eth_regime_text(tf, popup=False, plain=False):
     return '\n'.join(lines)
 
 
+# ===================== V3.44.115: «توقف همه‌ی معاملات وقتی جهت BTC بلاتکلیف است» =====================
+# کلید مستقل gate_btc_undecided_enabled (پیش‌فرض خاموش؛ جزو پریست‌ها نیست و با تعویض پریست دست نمی‌خورد).
+# روشن: اگر رژیم BTC و ETH روی تایم‌فریم فعال کاربر «هر دو صعودی» یا «هر دو نزولی» نباشد (رنج، ناهم‌جهت یا نبود داده)،
+# ورود به معامله در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته است. سیگنال رد نمی‌شود؛
+# در صف می‌ماند و با هر بررسی دوباره سنجیده می‌شود. برای هر چت یک پیام هشدار ماندگار (با دکمه‌ی TradingView بیت‌کوین و کلید
+# روشن/خاموش) فرستاده می‌شود که تا باز شدن یک معامله حذف نمی‌شود؛ اگر وضعیت BTC مشخص شود همان پیام «مشخص شد» می‌شود.
+BTC_UNDECIDED_KEY = 'gate_btc_undecided_enabled'
+_BTC_UNDECIDED_PREFIX = '⛔ جهت BTC بلاتکلیف است'
+_BTC_UNDECIDED_SIMPLE = 'جهت بیت‌کوین هنوز مشخص نیست؛ در این شرایط ورود به همه‌ی معاملات (خرید و فروش) متوقف است. لطفاً صبور باشید.'
+_BTC_UNDECIDED_LOCK = _threading.RLock()
+
+
+def btc_undecided_verdict(tf):
+    """(ok, توضیح، info). ok=True وقتی رژیم BTC و ETH روی تایم‌فریم tf هر دو صعودی یا هر دو نزولی باشند؛
+    رنج، ناهم‌جهت یا نبود داده = بلاتکلیف (ok=False)."""
+    tf_fa = TF_DISPLAY.get(tf, tf)
+    try:
+        ok, why = btc_eth_aligned(tf)
+    except Exception:
+        logger.exception('btc undecided verdict failed tf=%s', tf)
+        ok, why = False, 'بررسی رژیم BTC/ETH با خطا روبه‌رو شد'
+    info = {'tf': tf, 'tf_fa': tf_fa, 'why': why, 'undecided': not ok}
+    if ok:
+        return True, '', info
+    return False, (f"{_BTC_UNDECIDED_PREFIX}: به دلیل بلاتکلیفی جهت معاملاتی BTC تمام معاملات خرید و فروش متوقف می‌شوند تا وضعیت BTC مشخص شود "
+                   f"({why} · {tf_fa})" + _btc_gate_key_line(BTC_UNDECIDED_KEY)), info
+
+
+def _btc_undecided_text(chat_id, state, info=None):
+    if state == 'warn':
+        lines = ['⚠️ *هشدار: بلاتکلیفی جهت BTC*', '',
+                 'به دلیل بلاتکلیفی جهت معاملاتی BTC تمام معاملات خرید و فروش متوقف می‌شوند تا وضعیت BTC مشخص شود.']
+        if not is_restricted_user(chat_id) and info:
+            lines += ['', f"🧭 {info.get('why')} · {info.get('tf_fa')}", _btc_gate_key_line(BTC_UNDECIDED_KEY).strip()]
+    elif state == 'ok':
+        lines = ['✅ *وضعیت BTC مشخص شد*', '', 'ورود معاملات دوباره مجاز است.']
+    else:
+        lines = ['🔕 *توقف معاملات در بلاتکلیفی BTC خاموش است*', '', 'ورود معاملات به‌خاطر بلاتکلیفی جهت BTC متوقف نمی‌شود.']
+    return '\n'.join(lines)
+
+
+def _btc_undecided_markup(chat_id, tf, on):
+    """زیر هشدار: چارت TradingView بیت‌کوین (روی تایم‌فریم فعال) + کلید مستقل روشن/خاموش (برای همه‌ی کاربران)."""
+    return {'inline_keyboard': [
+        [{'text': '📈 چارت BTC در TradingView', 'url': tradingview_chart_url('BTC', tf, chat_id)}],
+        [{'text': ('🟢' if on else '🔴') + ' توقف معاملات در بلاتکلیفی BTC', 'callback_data': '/btc_undecided_toggle'}],
+    ]}
+
+
+def _btc_undecided_set_msg(chat_id, state, info=None, tf=None):
+    """یک پیام ماندگار برای هر چت: اگر وجود دارد ویرایش می‌شود (warn/ok/off)، وگرنه فقط برای warn پیام تازه (keep) ارسال می‌شود."""
+    s = get_session(chat_id)
+    tf = tf or s.get('timeframe', '5min')
+    with _BTC_UNDECIDED_LOCK:
+        rec = dict(s.get('btc_undecided_msg') or {})
+        text = _btc_undecided_text(chat_id, state, info)
+        markup = _btc_undecided_markup(chat_id, tf, state != 'off')
+        sig = f'{state}|{tf}|{text}'
+        mid = rec.get('mid')
+        if mid and rec.get('sig') == sig:
+            return True
+        if mid:
+            res = tg('editMessageText', {'chat_id': chat_id, 'message_id': mid, 'text': text, 'parse_mode': 'Markdown', 'reply_markup': markup}, 10)
+            ok = bool(res and res.get('ok'))
+            err = getattr(_TG_ERR, 'last', None)
+            if not ok and err and 'not modified' in str(err[1]).lower():
+                ok = True
+            elif not ok and err and err[0] == 400 and 'parse' in str(err[1]).lower():
+                res = tg('editMessageText', {'chat_id': chat_id, 'message_id': mid, 'text': text.replace('*', '').replace('`', ''), 'reply_markup': markup}, 10)
+                ok = bool(res and res.get('ok'))
+            if ok:
+                rec.update({'state': state, 'sig': sig, 'tf': tf})
+                s['btc_undecided_msg'] = rec
+                save_session(chat_id)
+                return True
+            s.pop('btc_undecided_msg', None)       # پیام دیگر وجود ندارد (دستی پاک شده)
+            save_session(chat_id)
+        if state != 'warn':
+            return False
+        _LAST_SENT.mid = None
+        send_message(chat_id, text, markup, keep=True)
+        new_mid = getattr(_LAST_SENT, 'mid', None)
+        if new_mid:
+            s['btc_undecided_msg'] = {'mid': int(new_mid), 'state': state, 'sig': sig, 'tf': tf, 'ts': time.time()}
+            save_session(chat_id)
+            return True
+    return False
+
+
+def _btc_undecided_warn(chat_id, tf, info):
+    try:
+        _btc_undecided_set_msg(chat_id, 'warn', info, tf)
+    except Exception:
+        logger.exception('btc undecided: warning failed chat=%s', chat_id)
+
+
+def _btc_undecided_resolve(chat_id):
+    """وضعیت BTC مشخص شد: پیام هشدار (اگر هست) به «مشخص شد» تغییر می‌کند و تا باز شدن معامله می‌ماند."""
+    try:
+        rec = (get_session(chat_id).get('btc_undecided_msg') or {})
+        if rec.get('mid') and rec.get('state') == 'warn':
+            _btc_undecided_set_msg(chat_id, 'ok')
+    except Exception:
+        logger.exception('btc undecided: resolve failed chat=%s', chat_id)
+
+
+def _btc_undecided_on_trade_open(chat_id):
+    """یک معامله باز شد: پیام هشدار این چت حذف می‌شود."""
+    try:
+        s = get_session(chat_id)
+        with _BTC_UNDECIDED_LOCK:
+            rec = s.pop('btc_undecided_msg', None)
+        if rec and rec.get('mid'):
+            tg('deleteMessage', {'chat_id': chat_id, 'message_id': rec['mid']}, 10)
+            save_session(chat_id)
+    except Exception:
+        logger.exception('btc undecided: cleanup after trade open failed chat=%s', chat_id)
+
+
+def _btc_undecided_gate(chat_id, s, symbol, sig, tf, warn=True):
+    """(ok, توضیح). فقط وقتی کلید روشن است سنجیده می‌شود. جهت معامله اهمیتی ندارد؛ بلاتکلیفی هر دو جهت را می‌بندد."""
+    if not gate_on(s, BTC_UNDECIDED_KEY):
+        return True, ''
+    try:
+        ok, txt, info = btc_undecided_verdict(tf)
+    except Exception:
+        logger.exception('btc undecided gate failed symbol=%s', symbol)
+        ok, txt, info = False, f'{_BTC_UNDECIDED_PREFIX}: خطا در بررسی رژیم BTC/ETH؛ منتظر ورود می‌مانیم' + _btc_gate_key_line(BTC_UNDECIDED_KEY), None
+    if ok:
+        _btc_undecided_resolve(chat_id)
+        return True, ''
+    _block_simple_register(txt, _BTC_UNDECIDED_SIMPLE)
+    if warn and info:
+        _btc_undecided_warn(chat_id, tf, info)
+    return False, txt
+
+
+def _btc_undecided_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inverse=True):
+    """True = اجازه‌ی ادامه. روی همه‌ی مسیرهای ورود (از execute_trade/execute_manual_trade) اعمال می‌شود و با force=True هم دور زده نمی‌شود."""
+    s = get_session(chat_id)
+    if not gate_on(s, BTC_UNDECIDED_KEY):
+        return True
+    try:
+        _BLK_CTX[chat_id] = {'ts': time.time(), 'symbol': symbol, 'side': side, 'signal_price': float(price), 'sl': float(sl), 'tp': float(tp),
+                             'scenario': None, 'force': bool(force)}
+    except Exception:
+        pass
+    sig = 'BUY' if side_long(side) else 'SELL'
+    ok, txt = _btc_undecided_gate(chat_id, s, symbol, sig, s.get('timeframe', '5min'), warn=not force)
+    if ok:
+        return True
+    _blk(chat_id, txt)
+    return False
+
+
+def btc_undecided_refresh_once():
+    """حلقه‌ی پس‌زمینه: فقط برای چت‌هایی که پیام هشدار ماندگار دارند، وضعیت پیام را با وضعیت فعلی BTC/ETH و کلید هماهنگ می‌کند."""
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            rec = s.get('btc_undecided_msg')
+            if not rec or not rec.get('mid'):
+                continue
+            tf = s.get('timeframe', '5min')
+            st = rec.get('state')
+            if not gate_on(s, BTC_UNDECIDED_KEY):
+                if st != 'off':
+                    _btc_undecided_set_msg(chat_id, 'off', None, tf)
+                continue
+            ok, _txt, info = btc_undecided_verdict(tf)
+            if ok:
+                if st != 'ok':
+                    _btc_undecided_set_msg(chat_id, 'ok', None, tf)
+            else:
+                _btc_undecided_set_msg(chat_id, 'warn', info, tf)
+        except Exception:
+            logger.exception('btc undecided refresh failed chat=%s', chat_id)
+
+
+def btc_undecided_toggle(chat_id):
+    """کلید مستقل روشن/خاموش (منوی اصلی و زیر پیام هشدار). خروجی: وضعیت جدید (True = روشن)."""
+    s = get_session(chat_id)
+    s.setdefault('strategy_config', {})
+    new = not gate_on(s, BTC_UNDECIDED_KEY)
+    s['strategy_config'][BTC_UNDECIDED_KEY] = new
+    save_session(chat_id)
+    try:
+        rec = s.get('btc_undecided_msg') or {}
+        if rec.get('mid'):
+            tf = s.get('timeframe', '5min')
+            if not new:
+                _btc_undecided_set_msg(chat_id, 'off', None, tf)
+            else:
+                ok, _txt, info = btc_undecided_verdict(tf)
+                _btc_undecided_set_msg(chat_id, 'ok' if ok else 'warn', None if ok else info, tf)
+    except Exception:
+        logger.exception('btc undecided toggle sync failed chat=%s', chat_id)
+    return new
+
+
 def _channel_fixed_row():
     return [{'text': '📋 لیست بررسی‌های آتی', 'callback_data': '/chlist'},
             {'text': '🧭 رژیم BTC/ETH', 'callback_data': '/chreg'}]
@@ -5767,7 +5972,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.114'
+BOT_VERSION = '3.44.116'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -6630,6 +6835,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     trade['tp_level_name'] = tp_level_name
     save_session(chat_id)
     audit_event(chat_id, trade_id, 'position_opened', audit_trade_record(trade))
+    _btc_undecided_on_trade_open(chat_id)      # V3.44.115: هشدار «بلاتکلیفی جهت BTC» با باز شدن معامله حذف می‌شود
     chart_tf = s['timeframe']
     df = get_klines(symbol, chart_tf, 650 if chart_tf in ('5min', '15min', '1hour') else 200)
     if not df.empty:
@@ -6779,6 +6985,8 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
             return _blk(chat_id, 'ربات امروز به‌خاطر حد ضرر روزانه متوقف شده است', key='gate_risk_guard_enabled', simple='به\u200cخاطر ضرر امروز، ورود جدید فعلاً متوقف است.')
     if not _btc_candle_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
         return False
+    if not _btc_undecided_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):      # V3.44.115
+        return False
     if not _btc_front_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
         return False
     lock=get_entry_lock(chat_id)
@@ -6803,6 +7011,8 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
     price=float(entry_price) if entry_price else live_price
     if not _btc_candle_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):
         return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (کندل BTC با جهت معامله نمی‌خواند).'
+    if not _btc_undecided_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):      # V3.44.115
+        return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (جهت BTC بلاتکلیف است؛ تا مشخص شدن وضعیت BTC منتظر بمانید).'
     if not _btc_front_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):
         return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (BTC به سطح نزدیک است؛ تا واکنش به سطح منتظر بمانید).'
     generation=int(s.get('scan_generation',0))
@@ -8147,7 +8357,7 @@ _FN_TLS = _threading.local()
 _FN_GATE_RULES = (
     (r'R:R', 'min_rr'), (r'از لحظه.?ی برخورد دور', 'drift'), (r'از حد ضرر/سود طرح گذشته', 'price_crossed'),
     (r'سقف|کف دیروز|PDH|PDL', 'pd_level'), (r'کندل BTC|کندل در حال تشکیل', 'btc_candle'),
-    (r'رژیم', 'final_regime'), (r'کلوز BTC|سطح جلویی|فاصله.*BTC|BTC.*فاصله', 'btc_front'),
+    (r'بلاتکلیفی جهت معاملاتی BTC', 'btc_undecided'), (r'رژیم', 'final_regime'), (r'کلوز BTC|سطح جلویی|فاصله.*BTC|BTC.*فاصله', 'btc_front'),
     (r'بلاک دستی', 'manual_block'), (r'ریسک|ظرفیت|سقف پوزیشن|کول|cooldown|دوره انتظار', 'risk_limits'),
 )
 
@@ -8479,7 +8689,7 @@ def _fn_fav_final(chat_id, rec, status):
     _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
              why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
              # V3.44.82: برای تشخیص «چرا باز نشد»: متن دقیق مانعِ بعد از تایید، تعداد کلوزهای سنجیده‌شده و حرکت آخرین کلوز (R)
-             hold=str(rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
+             hold=str(rec.get('undecided_hold') or rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
              eval_n=rec.get('eval_n', 0), last_x=rec.get('last_x'),
              # V3.44.107: هر گیتِ بعد از تایید چند بار و چند دقیقه سیگنال را نگه داشت؛ تاخیرِ ورود به‌خاطر گیت‌ها؛ نوع و R لغو
              hold_ticks=_hs, hold_delay_min=_hd, cancel_kind=rec.get('cancel_kind'), cancel_r=rec.get('cancel_r'),
@@ -9767,6 +9977,49 @@ def trailing_scan_once():
             logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'trailing_scan_once', chat_id)
 
 
+def paper_hard_stop_scan_once():
+    """V3.44.116: محافظ حد ضرر PAPER مستقل از کندل و از چرخه‌ی اسکن (هر چرخه‌ی پس‌زمینه، ۵ ثانیه).
+    قبلاً SL پوزیشن PAPER فقط داخل update_positions (یک‌بار در هر چرخه‌ی اسکنِ ۴۵ ثانیه‌ای به‌علاوه‌ی زمان اسکن) و فقط وقتی
+    کندل‌ها با موفقیت می‌آمدند سنجیده می‌شد؛ اگر دریافت کندل یک نماد شکست می‌خورد (primary_df خالی) پوزیشن کلاً رد می‌شد و قیمت می‌توانست
+    خیلی دورتر از SL برود. این تابع فقط از قیمت لحظه‌ای صرافیِ داده‌ی خود کاربر استفاده می‌کند و اگر قیمت از SL گذشته باشد پوزیشن را
+    با همان مدل اسلیپیج PAPER می‌بندد. close_position با قفل چت جلوی بسته‌شدن دوباره را می‌گیرد."""
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if s.get('trading_mode') != 'PAPER':
+                continue
+            plist = [p for p in (s.get('paper_positions') or []) if not p.get('is_real')]
+            if not plist:
+                continue
+            tok = _DATA_VENUE_CTX.set(data_venue_for(chat_id))
+            try:
+                for p in plist:
+                    try:
+                        sl = float(p.get('sl') or 0)
+                        if sl <= 0:
+                            continue
+                        live = latest_price(p['symbol'])
+                        if not live:
+                            continue
+                        price = float(live)
+                        is_long = side_long(p['side'])
+                        if not ((price <= sl) if is_long else (price >= sl)):
+                            continue
+                        entry = float(p['entry_price'])
+                        risk_distance = float(p.get('risk_distance') or 0.0) or abs(entry - sl)
+                        exit_price = _paper_stop_fill_price(p, price, price, risk_distance)
+                        _tag = f" trailing {float(p.get('trail_lock_r') or 0):+.2f}R" if p.get('trail_active') else ''
+                        if risk_distance > 0:
+                            p['sl_slippage_r'] = round(abs(float(exit_price) - sl) / risk_distance, 4)
+                        logger.warning('paper hard stop (live price) chat=%s %s price=%s sl=%s', chat_id, p['symbol'], price, sl)
+                        close_position(chat_id, p, exit_price, f'SL (live price{_tag})')
+                    except Exception:
+                        logger.exception('paper hard stop failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+            finally:
+                _DATA_VENUE_CTX.reset(tok)
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'paper_hard_stop_scan_once', chat_id)
+
+
 BACKGROUND_SCAN_SECONDS = max(2, int(os.environ.get('BACKGROUND_SCAN_SECONDS', '5')))
 
 
@@ -9957,6 +10210,14 @@ def _background_scan_loop():
         except Exception:
             logger.exception('btc guard loop failed')
         try:
+            btc_undecided_refresh_once()
+        except Exception:
+            logger.exception('btc undecided refresh loop failed')
+        try:
+            paper_hard_stop_scan_once()
+        except Exception:
+            logger.exception('paper hard stop loop failed')
+        try:
             trailing_scan_once()
         except Exception:
             logger.exception('trailing stop loop failed')
@@ -10039,7 +10300,7 @@ def update_positions(chat_id):
         # Hard SL/TP is always checked before any discretionary stop movement.
         exit_price=None; reason=None
         if s['trading_mode']=='PAPER' and not primary_df.empty:
-            sl_low, sl_high = low, high
+            sl_low, sl_high = min(low, price), max(high, price)      # V3.44.116: قیمت لحظه‌ای هم در سنجش SL حساب می‌شود (کندلِ کش‌شده/ناقص نباید SL را از دست بدهد)
             if p.get('trail_active'):
                 # V3.44.33: بعد از جابه‌جایی SL توسط تریلینگ، ویکِ کندل «قبل از جابه‌جایی» نباید SL جدید را بزند؛
                 # فقط قیمت‌های لحظه‌ای دیده‌شده بعد از آخرین جابه‌جایی سنجیده می‌شوند (مثل REAL که صرافی روی قیمت واقعی تریگر می‌کند).
@@ -11634,7 +11895,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
+    rec['why'] = ('undecided' if rec.get('undecided_blocked') else 'btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     try:
         _fn_fav_final(chat_id, rec, status)
@@ -11790,6 +12051,17 @@ def _fav_process_one_core(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('pd_blocked', None); rec.pop('pd_hold', None)
+        if gate_on(s, 'gate_btc_undecided_enabled'):
+            # V3.44.115: آخرین مرحله‌ی خروج از صف: وقتی جهت BTC بلاتکلیف است سیگنال در صف می‌ماند (رد نمی‌شود) و با هر کندل دوباره سنجیده می‌شود.
+            un_ok, un_txt = _btc_undecided_gate(chat_id, s, symbol, sig, tf)
+            if not un_ok:
+                rec['undecided_blocked'] = True; rec['undecided_hold'] = un_txt; _fn_hold_tick(rec, 'undecided', un_txt)
+                if now >= float(rec.get('expires_at', 0)):
+                    return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی جهت BTC بلاتکلیف بود؛ بدون ورود.")
+                rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+                save_session(chat_id)
+                return
+            rec.pop('undecided_blocked', None); rec.pop('undecided_hold', None)
         _ff, _fc = _btc_front_flags(s)
         if _ff or _fc:
             # V3.44.44: آخرین مرحله‌ی خروج از صف: فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید و سیگنال (رد نمی‌شود) در صف می‌ماند.
@@ -11849,9 +12121,9 @@ def _fav_process_one_core(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('undecided_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = ('کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+        why_txt = ('جهت BTC تا پایان مهلت بلاتکلیف ماند' if rec.get('undecided_blocked') else 'کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
                    ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -11891,6 +12163,8 @@ def _fav_card_payload(r, now=None):
         lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
     if r.get('regime_hold') and r.get('status') == 'waiting':
         lines.append(f"    🧭 {r['regime_hold']}")
+    if r.get('undecided_hold') and r.get('status') == 'waiting':
+        lines.append(f"    ⛔ {r['undecided_hold']}")
     if r.get('btc_hold') and r.get('status') == 'waiting':
         lines.append(f"    ₿ {r['btc_hold']}")
     if r.get('front_hold') and r.get('status') == 'waiting':
@@ -13391,6 +13665,12 @@ def _touch_auto_enter_core(chat_id, rec):
         if not _pd_ok:
             rec['block_note'] = _pd_txt[:120]
             return False
+    if gate_on(s, 'gate_btc_undecided_enabled'):
+        # V3.44.115: لیست انتظار: وقتی جهت BTC بلاتکلیف است مورد (رد نمی‌شود) در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
+        _un_ok, _un_txt = _btc_undecided_gate(chat_id, s, symbol, side, tf)
+        if not _un_ok:
+            rec['block_note'] = _un_txt[:120]
+            return False
     _ff, _fc = _btc_front_flags(s)
     if _ff or _fc:
         # V3.44.44: لیست انتظار: فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید و مورد (رد نمی‌شود) در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
@@ -14394,6 +14674,11 @@ async def scan_symbol(http,chat_id,symbol):
         _fr_ok, _fr_txt = _final_regime_verdict(_fr_gate, sig)
         if not _fr_ok:
             return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «رژیم بازار در مرحله‌ی آخر»: {_fr_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'final_regime', sig, diagnostics=diagnostics)
+    if gate_on(s, 'gate_btc_undecided_enabled'):
+        # V3.44.115: مسیر مستقیم (بدون صف): وقتی جهت BTC بلاتکلیف است هیچ ورودی انجام نمی‌شود؛ سیگنال رد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
+        _un_ok, _un_txt = await asyncio.to_thread(_btc_undecided_gate, chat_id, s, symbol, sig, tf)
+        if not _un_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «توقف معاملات در بلاتکلیفی BTC»: {_un_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'btc_undecided', sig, diagnostics=diagnostics)
     _ff, _fc = _btc_front_flags(s)
     if _ff or _fc:
         # V3.44.44: مسیر مستقیم (بدون صف): فاصله‌ی کلوز BTC تا سطح جلویی باید معقول باشد؛ وگرنه هشدار ورود می‌آید، سیگنال رد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
@@ -14688,6 +14973,7 @@ GATE_REGISTRY = {
     'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'btceth', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_fc_btcside_enabled':    ('رأی‌گیری: سمت BTC نسبت به نزدیک‌ترین سطح', False, 'btceth', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): نزدیک‌ترین سطح BTC (از هر دو طرف) به کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال مرجع است. کلوز BTC بالای آن سطح = رأی خرید؛ پایین آن = رأی فروش؛ روی سطح یا نبود داده = بدون رأی. برخلاف «📏 فاصله معقول تا سطح جلویی BTC» که ورود را می‌بندد، این کلید فقط رأی می‌دهد و جلوی ورود را نمی‌گیرد. برای خودِ BTC رأی نمی‌دهد.'),
     'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
+    'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', False, 'btceth', 'کلید مستقل (پیش‌فرض خاموش؛ با پریست‌ها عوض نمی‌شود و برای همه‌ی کاربران در منوی اصلی هم هست). روشن: اگر رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی نباشند (رنج، ناهم‌جهت یا نبود داده = بلاتکلیف)، ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا وضعیت BTC مشخص شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیت‌کوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود.'),
     'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
@@ -15873,7 +16159,7 @@ def menu(chat_id,message_id=None):
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
                 f"🤝 حالت دستیار: `{'روشن (ورود فقط با تایید شما)' if s.get('assist_mode_enabled') else 'خاموش (ورود خودکار)'}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
-    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER'), bool(s.get('assist_mode_enabled', False)), is_restricted_user(chat_id)),message_id)
+    send_message(chat_id,text,get_main_menu_keyboard(s['is_bot_active'], s.get('entry_diag_enabled', True), is_admin(chat_id), s.get('trading_mode', 'PAPER'), bool(s.get('assist_mode_enabled', False)), is_restricted_user(chat_id), btc_undecided_on=gate_on(s, BTC_UNDECIDED_KEY)),message_id)
 
 
 def stop_scan(chat_id, reason='manual'):
@@ -17593,6 +17879,14 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/assist_menu':
         st = 'روشن 🟢' if s.get('assist_mode_enabled') else 'خاموش 🔴'
         send_message(chat_id, f"🤝 *حالت دستیار معاملاتی*\n\nوضعیت: {st}\n\nوقتی روشن باشد، ربات همه‌چیز را مثل قبل اسکن و تحلیل می‌کند ولی به‌جای ورود خودکار، هر سیگنال را با دکمه‌ی ✅ ورود / ❌ رد برای شما می‌فرستد. ورود بعد از تایید با قیمت لحظه‌ای انجام می‌شود. سیگنال‌های ردشده هم پیگیری می‌شوند تا معلوم شود تشخیص شما ارزش افزوده دارد یا نه.", assist_keyboard(chat_id))
+        return
+    if cl=='/btc_undecided_toggle':
+        # V3.44.115: کلید مستقل «توقف معاملات در بلاتکلیفی جهت BTC» برای همه‌ی کاربران؛ زیر پیام هشدار همان پیام، در منوی اصلی منو در جا بازسازی می‌شود
+        btc_undecided_toggle(chat_id)
+        _bu_rec = s.get('btc_undecided_msg') or {}
+        if message_id and _bu_rec.get('mid') == message_id:
+            return
+        menu(chat_id, message_id)
         return
     if cl=='/assist_main_toggle':
         # V3.44.75: کلید حالت دستیار در منوی اصلی؛ تغییر روی همان پیام نمایش داده می‌شود (منوی اصلی در جا بازسازی می‌شود)
