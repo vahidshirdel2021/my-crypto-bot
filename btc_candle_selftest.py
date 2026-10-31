@@ -105,6 +105,7 @@ def blk(chat_id, reason):
 g3 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_session=lambda c: S, gate_on=lambda s, k: bool(S['cfg'].get(k, False)),
           side_long=lambda side: 'BUY' in str(side).upper() or 'LONG' in str(side).upper(),
           btc_candle_verdict=v, _BTC_CANDLE_BLOCK_PREFIX=P, _blk=blk, latest_price=lambda s: 100.0, get_entry_lock=lambda c: _L(),
+          _btc_undecided_precheck=lambda *a, **k: True,      # V3.44.115: کلید جدید «بلاتکلیفی جهت BTC» جدا تست می‌شود (btc_undecided_selftest.py)
           _execute_trade_unlocked=lambda *a, **k: (ex.__setitem__('unlocked', ex['unlocked'] + 1) or True))
 exec(src[a:b], g3)
 et, em = g3['execute_trade'], g3['execute_manual_trade']

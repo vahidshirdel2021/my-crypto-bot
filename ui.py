@@ -266,7 +266,7 @@ def _pair_buttons(buttons):
     return [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
 
 
-def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER', assist_on=False, restricted=None):
+def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False, trading_mode='PAPER', assist_on=False, restricted=None, btc_undecided_on=False):
     # V3.44.80: همه‌ی دکمه‌های منوی اصلی دوتا‌دوتا کنار هم‌اند. برای کاربر عادی اول دکمه‌های ممنوع کنار گذاشته می‌شوند
     # (همان فیلتر قفل نقش‌ها) و بعد چیده می‌شوند تا ردیفِ تک‌دکمه‌ایِ ناخواسته درست نشود.
     if restricted is None:
@@ -285,6 +285,8 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
         {"text": "💰 کارمزد من", "callback_data": "/fee_menu"},
         # V3.44.75: حالت دستیار برای همه‌ی کاربران (روشن = ورود فقط با تایید خود کاربر)
         {"text": ("🟢" if assist_on else "🔴") + " حالت دستیار", "callback_data": "/assist_main_toggle"},
+        # V3.44.115: کلید مستقل «توقف معاملات در بلاتکلیفی جهت BTC» برای همه‌ی کاربران
+        {"text": ("🟢" if btc_undecided_on else "🔴") + " توقف در بلاتکلیفی BTC", "callback_data": "/btc_undecided_toggle"},
         # V3.44.76: پشتیبان ربات
         {"text": "👨‍💻 پشتیبان ربات", "callback_data": "/support"},
     ]

@@ -32,7 +32,7 @@ EXPECT = {
     'level': ['gate_fc_level_enabled', 'gate_fc_ylevel_enabled', 'gate_pd_level_enabled', 'gate_traded_level_enabled'],
     'structure': ['gate_touch_pattern_vote_enabled', 'gate_touch_dir_fixed_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation'],
     'momentum': ['gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_adx_enabled', 'gate_fc_vol_enabled'],
-    'btceth': ['gate_fc_btceth_enabled', 'gate_fc_btcpat_enabled', 'gate_fc_btcside_enabled', 'gate_btceth_aligned_enabled', 'gate_btc_candle_enabled', 'gate_btc_front_level_enabled', 'gate_btc_chop_enabled'],
+    'btceth': ['gate_fc_btceth_enabled', 'gate_fc_btcpat_enabled', 'gate_fc_btcside_enabled', 'gate_btceth_aligned_enabled', 'gate_btc_candle_enabled', 'gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_btc_undecided_enabled'],
     'regime': ['gate_symbol_structure_block_enabled', 'gate_fc_symreg_enabled', 'gate_fc_tf_enabled', 'gate_fc_h4_enabled', 'gate_final_regime_enabled', 'gate_h4_tier_enabled'],
     'timing': ['gate_4h_close_block_enabled', 'gate_cooldown_enabled', 'gate_risk_guard_enabled'],
     'quality': ['gate_min_score_enabled', 'gate_min_rr_enabled', 'gate_max_sl_atr_enabled', 'gate_fee_ratio_enabled', 'use_edge_proxy_gate', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled'],
