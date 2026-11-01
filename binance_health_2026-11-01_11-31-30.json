@@ -1,0 +1,2663 @@
+{
+ "ts": 1793532685,
+ "bot_version": "3.44.121",
+ "base_url": "https://fapi.binance.com",
+ "versions": {
+  "python": "3.14.4",
+  "platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.43",
+  "requests": "2.34.2",
+  "urllib3": "2.7.0",
+  "aiohttp": "3.14.3",
+  "pandas": "2.3.3",
+  "ccxt": "4.5.77",
+  "certifi": "2026.06.17",
+  "openssl": "OpenSSL 3.5.5 27 Jan 2026"
+ },
+ "timings_s": {
+  "versions": 0.02,
+  "env": 0.0,
+  "dns_tcp": 0.03,
+  "sync_basic": 0.53,
+  "exchange_info": 0.32,
+  "sync_concurrent": 1.23,
+  "aiohttp_scan_path": 0.96,
+  "hist_range": 0.54,
+  "real_get_klines": 0.82,
+  "state": 0.0
+ },
+ "env": {},
+ "dns_tcp": {
+  "host": "fapi.binance.com",
+  "port": 443,
+  "addresses": [
+   {
+    "family": "IPv4",
+    "ip": "18.64.211.22",
+    "connect_ms": 6.2
+   },
+   {
+    "family": "IPv4",
+    "ip": "18.64.211.13",
+    "connect_ms": 6.0
+   },
+   {
+    "family": "IPv4",
+    "ip": "18.64.211.85",
+    "connect_ms": 6.2
+   },
+   {
+    "family": "IPv4",
+    "ip": "18.64.211.25",
+    "connect_ms": 6.4
+   }
+  ],
+  "dns_ms": 7.0
+ },
+ "sync_basic": {
+  "ping": {
+   "status": 200,
+   "ms": 267.7
+  },
+  "time": {
+   "status": 200,
+   "ms": 265.2
+  }
+ },
+ "exchange_info": {
+  "status": 200,
+  "ms": 296.5,
+  "bytes": 1169563,
+  "accepted_symbols": 522
+ },
+ "sync_concurrent": {
+  "total_s": 1.23,
+  "ok": 20,
+  "n": 20,
+  "rows": [
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "ms": 284.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "ETHUSDT",
+    "status": 200,
+    "ms": 288.8,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "BTCUSDT",
+    "status": 200,
+    "ms": 290.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "ms": 289.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "ms": 298.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "ms": 292.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "ETHUSDT",
+    "status": 200,
+    "ms": 278.2,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "AAVEUSDT",
+    "status": 200,
+    "ms": 279.4,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "ms": 292.4,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "ms": 290.5,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "ms": 291.8,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "ms": 290.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "SUIUSDT",
+    "status": 200,
+    "ms": 294.1,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "AAVEUSDT",
+    "status": 200,
+    "ms": 305.9,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "ms": 294.6,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "ms": 290.4,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "AAVEUSDT",
+    "status": 200,
+    "ms": 294.4,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "SUIUSDT",
+    "status": 200,
+    "ms": 283.2,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "ms": 304.2,
+    "rows": 300,
+    "ok": true
+   },
+   {
+    "sym": "XRPUSDT",
+    "status": 200,
+    "ms": 307.9,
+    "rows": 300,
+    "ok": true
+   }
+  ]
+ },
+ "aiohttp_scan_path": {
+  "total_s": 0.96,
+  "ok": 20,
+  "n": 20,
+  "rows": [
+   {
+    "sym": "BTCUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 957.7
+   },
+   {
+    "sym": "ETHUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 269.0
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 277.3
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 282.8
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 280.7
+   },
+   {
+    "sym": "AAVEUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 286.6
+   },
+   {
+    "sym": "SUIUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 288.5
+   },
+   {
+    "sym": "XRPUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 290.3
+   },
+   {
+    "sym": "BTCUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 284.5
+   },
+   {
+    "sym": "ETHUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 274.3
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 515.2
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 520.4
+   },
+   {
+    "sym": "LINKUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 528.7
+   },
+   {
+    "sym": "AAVEUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 551.7
+   },
+   {
+    "sym": "SUIUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 542.9
+   },
+   {
+    "sym": "XRPUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 538.7
+   },
+   {
+    "sym": "BTCUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 534.3
+   },
+   {
+    "sym": "ETHUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 549.2
+   },
+   {
+    "sym": "SOLUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 546.7
+   },
+   {
+    "sym": "DOGEUSDT",
+    "status": 200,
+    "rows": 300,
+    "ok": true,
+    "ms": 758.7
+   }
+  ]
+ },
+ "hist_range": [
+  {
+   "sym": "BTCUSDT",
+   "status": 200,
+   "ms": 266.9,
+   "rows": 374
+  },
+  {
+   "sym": "DOGEUSDT",
+   "status": 200,
+   "ms": 269.5,
+   "rows": 330
+  }
+ ],
+ "real_get_klines": {
+  "before": {
+   "now": 1793532689,
+   "sources": {
+    "binance": {
+     "down_remaining_s": 0,
+     "fails": 0
+    },
+    "bitunix": {
+     "down_remaining_s": 0,
+     "fails": 0
+    }
+   },
+   "cooldown_s": 60,
+   "binance_symbol_map": {
+    "size": 522,
+    "age_s": 4709.1,
+    "next_try_in_s": 0
+   },
+   "missing_symbols_active": {
+    "count": 1,
+    "sample": [
+     "bitunix:CELO"
+    ]
+   },
+   "data_notes_sample": {
+    "WIN": [
+     "binance:not_listed"
+    ],
+    "RAY": [
+     "binance:not_listed"
+    ],
+    "LIT": [
+     "bitunix:not_listed"
+    ],
+    "LUNA": [
+     "bitunix:not_listed"
+    ],
+    "DODO": [
+     "binance:not_listed"
+    ],
+    "JUP": [
+     "binance:down"
+    ],
+    "WLD": [
+     "binance:down"
+    ],
+    "ONDO": [
+     "binance:down"
+    ],
+    "STRK": [
+     "binance:down"
+    ],
+    "TAO": [
+     "binance:down"
+    ],
+    "PYTH": [
+     "binance:down"
+    ],
+    "JTO": [
+     "binance:down"
+    ],
+    "FLOKI": [
+     "binance:down"
+    ],
+    "BONK": [
+     "binance:down"
+    ],
+    "W": [
+     "binance:down"
+    ],
+    "EIGEN": [
+     "binance:down"
+    ],
+    "ZK": [
+     "binance:down"
+    ],
+    "XLM": [
+     "binance:down"
+    ],
+    "ICP": [
+     "binance:down"
+    ],
+    "POL": [
+     "binance:down"
+    ],
+    "PENDLE": [
+     "binance:down"
+    ],
+    "LDO": [
+     "binance:down"
+    ],
+    "STX": [
+     "binance:down"
+    ],
+    "CAKE": [
+     "binance:down"
+    ],
+    "ENS": [
+     "binance:down"
+    ]
+   },
+   "data_cache_entries": 972,
+   "net_events": [
+    {
+     "ts": 1793531780.668,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531780.727,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531780.727,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531780.791,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.525,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.576,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.577,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531781.635,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.129,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.194,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.248,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.311,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.311,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531993.367,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.421,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.475,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.475,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531993.528,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.395,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.455,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.455,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532199.876,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.928,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.983,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.983,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532200.033,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.083,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.133,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.133,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532200.196,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.253,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532201.081,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532201.081,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532201.14,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.123,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.169,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.222,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.223,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532406.273,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.327,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.397,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.397,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532406.457,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.51,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532407.464,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532407.464,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532407.522,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532613.927,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.262,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.319,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.387,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.387,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532614.489,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.547,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.6,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.6,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532614.654,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.713,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.769,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.769,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    }
+   ],
+   "net_events_total": 120
+  },
+  "calls": [
+   {
+    "sym": "BTCUSDT",
+    "rows": 233,
+    "ms": 273.0,
+    "notes": ""
+   },
+   {
+    "sym": "ETHUSDT",
+    "rows": 234,
+    "ms": 273.6,
+    "notes": ""
+   },
+   {
+    "sym": "SOLUSDT",
+    "rows": 235,
+    "ms": 272.1,
+    "notes": ""
+   }
+  ],
+  "after": {
+   "now": 1793532690,
+   "sources": {
+    "binance": {
+     "down_remaining_s": 0,
+     "fails": 0
+    },
+    "bitunix": {
+     "down_remaining_s": 0,
+     "fails": 0
+    }
+   },
+   "cooldown_s": 60,
+   "binance_symbol_map": {
+    "size": 522,
+    "age_s": 4709.9,
+    "next_try_in_s": 0
+   },
+   "missing_symbols_active": {
+    "count": 1,
+    "sample": [
+     "bitunix:CELO"
+    ]
+   },
+   "data_notes_sample": {
+    "WIN": [
+     "binance:not_listed"
+    ],
+    "RAY": [
+     "binance:not_listed"
+    ],
+    "LIT": [
+     "bitunix:not_listed"
+    ],
+    "LUNA": [
+     "bitunix:not_listed"
+    ],
+    "DODO": [
+     "binance:not_listed"
+    ],
+    "JUP": [
+     "binance:down"
+    ],
+    "WLD": [
+     "binance:down"
+    ],
+    "ONDO": [
+     "binance:down"
+    ],
+    "STRK": [
+     "binance:down"
+    ],
+    "TAO": [
+     "binance:down"
+    ],
+    "PYTH": [
+     "binance:down"
+    ],
+    "JTO": [
+     "binance:down"
+    ],
+    "FLOKI": [
+     "binance:down"
+    ],
+    "BONK": [
+     "binance:down"
+    ],
+    "W": [
+     "binance:down"
+    ],
+    "EIGEN": [
+     "binance:down"
+    ],
+    "ZK": [
+     "binance:down"
+    ],
+    "XLM": [
+     "binance:down"
+    ],
+    "ICP": [
+     "binance:down"
+    ],
+    "POL": [
+     "binance:down"
+    ],
+    "PENDLE": [
+     "binance:down"
+    ],
+    "LDO": [
+     "binance:down"
+    ],
+    "STX": [
+     "binance:down"
+    ],
+    "CAKE": [
+     "binance:down"
+    ],
+    "ENS": [
+     "binance:down"
+    ]
+   },
+   "data_cache_entries": 975,
+   "net_events": [
+    {
+     "ts": 1793531780.668,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531780.727,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531780.727,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531780.791,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.525,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.576,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531781.577,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531781.635,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.129,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.194,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.248,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.311,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.311,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531993.367,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.421,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.475,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531993.475,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793531993.528,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.395,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.455,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793531994.455,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532199.876,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.928,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.983,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532199.983,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532200.033,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.083,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.133,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.133,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532200.196,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532200.253,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532201.081,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532201.081,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532201.14,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.123,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.169,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.222,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.223,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532406.273,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.327,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.397,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.397,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532406.457,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532406.51,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532407.464,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532407.464,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532407.522,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BNB",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532613.927,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.262,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ETH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.319,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "YFI",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.387,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "BCH",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.387,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532614.489,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "COMP",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.547,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "KSM",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.6,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "LTC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.6,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    },
+    {
+     "ts": 1793532614.654,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "AAVE",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.713,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "ZEC",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.769,
+     "kind": "fail",
+     "source": "binance",
+     "where": "get_klines_async",
+     "symbol": "EGLD",
+     "status": null,
+     "thread": "scanner",
+     "exc": "TimeoutError",
+     "msg": ""
+    },
+    {
+     "ts": 1793532614.769,
+     "kind": "trip",
+     "source": "binance",
+     "where": "",
+     "symbol": "",
+     "status": null,
+     "thread": "scanner",
+     "seconds": 60
+    }
+   ],
+   "net_events_total": 120
+  }
+ },
+ "state": {
+  "now": 1793532690,
+  "sources": {
+   "binance": {
+    "down_remaining_s": 0,
+    "fails": 0
+   },
+   "bitunix": {
+    "down_remaining_s": 0,
+    "fails": 0
+   }
+  },
+  "cooldown_s": 60,
+  "binance_symbol_map": {
+   "size": 522,
+   "age_s": 4709.9,
+   "next_try_in_s": 0
+  },
+  "missing_symbols_active": {
+   "count": 1,
+   "sample": [
+    "bitunix:CELO"
+   ]
+  },
+  "data_notes_sample": {
+   "WIN": [
+    "binance:not_listed"
+   ],
+   "RAY": [
+    "binance:not_listed"
+   ],
+   "LIT": [
+    "bitunix:not_listed"
+   ],
+   "LUNA": [
+    "bitunix:not_listed"
+   ],
+   "DODO": [
+    "binance:not_listed"
+   ],
+   "JUP": [
+    "binance:down"
+   ],
+   "WLD": [
+    "binance:down"
+   ],
+   "ONDO": [
+    "binance:down"
+   ],
+   "STRK": [
+    "binance:down"
+   ],
+   "TAO": [
+    "binance:down"
+   ],
+   "PYTH": [
+    "binance:down"
+   ],
+   "JTO": [
+    "binance:down"
+   ],
+   "FLOKI": [
+    "binance:down"
+   ],
+   "BONK": [
+    "binance:down"
+   ],
+   "W": [
+    "binance:down"
+   ],
+   "EIGEN": [
+    "binance:down"
+   ],
+   "ZK": [
+    "binance:down"
+   ],
+   "XLM": [
+    "binance:down"
+   ],
+   "ICP": [
+    "binance:down"
+   ],
+   "POL": [
+    "binance:down"
+   ],
+   "PENDLE": [
+    "binance:down"
+   ],
+   "LDO": [
+    "binance:down"
+   ],
+   "STX": [
+    "binance:down"
+   ],
+   "CAKE": [
+    "binance:down"
+   ],
+   "ENS": [
+    "binance:down"
+   ]
+  },
+  "data_cache_entries": 975,
+  "net_events": [
+   {
+    "ts": 1793531780.668,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "KSM",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531780.727,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "LTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531780.727,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793531780.791,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "AAVE",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531781.525,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "EGLD",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531781.576,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BNB",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531781.577,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793531781.635,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ZEC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.129,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ETH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.194,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "YFI",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.248,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BCH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.311,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "COMP",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.311,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793531993.367,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "KSM",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.421,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "LTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.475,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "AAVE",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531993.475,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793531993.528,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ZEC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531994.395,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "EGLD",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531994.455,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BNB",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793531994.455,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532199.876,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ETH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532199.928,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "YFI",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532199.983,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BCH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532199.983,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532200.033,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "COMP",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532200.083,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "KSM",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532200.133,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "LTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532200.133,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532200.196,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "AAVE",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532200.253,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ZEC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532201.081,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "EGLD",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532201.081,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532201.14,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BNB",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.123,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ETH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.169,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "YFI",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.222,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BCH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.223,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532406.273,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "COMP",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.327,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "KSM",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.397,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "LTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.397,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532406.457,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "AAVE",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532406.51,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ZEC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532407.464,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "EGLD",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532407.464,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532407.522,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BNB",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532613.927,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.262,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ETH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.319,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "YFI",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.387,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "BCH",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.387,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532614.489,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "COMP",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.547,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "KSM",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.6,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "LTC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.6,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   },
+   {
+    "ts": 1793532614.654,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "AAVE",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.713,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "ZEC",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.769,
+    "kind": "fail",
+    "source": "binance",
+    "where": "get_klines_async",
+    "symbol": "EGLD",
+    "status": null,
+    "thread": "scanner",
+    "exc": "TimeoutError",
+    "msg": ""
+   },
+   {
+    "ts": 1793532614.769,
+    "kind": "trip",
+    "source": "binance",
+    "where": "",
+    "symbol": "",
+    "status": null,
+    "thread": "scanner",
+    "seconds": 60
+   }
+  ],
+  "net_events_total": 120
+ },
+ "verdict": [
+  "requests هم‌زمان: 20/20 موفق",
+  "aiohttp مثل اسکنر: 20/20 موفق",
+  "رویدادهای واقعی اخیر ربات: {\"fail:TimeoutError\": 46, \"trip:None\": 14}"
+ ]
+}

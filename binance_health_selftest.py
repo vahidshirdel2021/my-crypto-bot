@@ -14,7 +14,7 @@ src = open('bot.py', encoding='utf-8').read()
 code = '\n'.join(l for l in src.split('\n') if not l.lstrip().startswith('#'))
 
 # ---------------------------------------------------------------- ۰) سیم‌کشی در bot.py
-assert "BOT_VERSION = '3.44.121'" in src
+assert "BOT_VERSION = '3.44.122'" in src
 assert "cl == '/binance_health'" in src
 i = src.index("cl == '/binance_health'"); blk = src[i:i + 700]
 assert 'is_admin(chat_id)' in blk and 'فقط برای ادمین' in blk and 'Thread(target=_run_binance_health_and_send' in blk, 'دستور باید ادمین‌محور و غیرمسدودکننده باشد'

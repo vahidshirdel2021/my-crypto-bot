@@ -532,12 +532,33 @@ LONG_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAV
 # صرافی - چون این محیط اینترنت ندارد نمی‌توانم قبل از افزودن، وجودشان را روی
 # فیوچرز Binance تایید کنم. حتماً بعد از دیپلوی، یک گزارش تازه‌ی «ردیابی معاملات»
 # بگیرید و اگر یکی از این‌ها هم الگوی مشابه (نیمی خطا) نشان داد، همان‌طور حذفش کنید.
+# V3.44.122: نمادهایی که گزارش سلامت واقعی نشان داد روی یکی از دو صرافی نیستند (WIN, RAY, DODO روی Binance فیوچرز؛ LIT, LUNA, CELO روی Bitunix)
+# بدون نیاز به شبکه از لیست‌ها حذف و با نمادهای برتر موجود روی هر دو صرافی جایگزین می‌شوند (اندازه‌ی لیست ثابت می‌ماند).
+# پاکسازی زنده (refresh_watchlists_from_spot) علاوه بر این، هر بوت و هر ۲۴ ساعت بقیه را با فهرست زنده‌ی هر دو صرافی چک می‌کند.
+STATIC_UNAVAILABLE_SYMBOLS = ('WIN', 'RAY', 'DODO', 'LIT', 'LUNA', 'CELO')
+STATIC_REPLACEMENT_SYMBOLS = ('XLM', 'ICP', 'POL', 'PENDLE', 'LDO', 'STX')
+
+
+def _static_swap_unavailable(lst):
+    repl = [x for x in STATIC_REPLACEMENT_SYMBOLS if x not in lst]
+    out = []
+    for x in lst:
+        if x in STATIC_UNAVAILABLE_SYMBOLS:
+            if repl:
+                out.append(repl.pop(0))
+            continue
+        out.append(x)
+    return out
+
+
+LONG_WATCHLIST[:] = _static_swap_unavailable(LONG_WATCHLIST)
 WINNING_WATCHLISTS = {tf: LONG_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 SUPPORTED_TRADING_TIMEFRAMES = tuple(WINNING_WATCHLISTS.keys())
 
 # لیست Short جدا و اختصاصی: نمادهایی که رفتار خوبی هنگام افت قیمت/روند نزولی نشان می‌دهند،
 # لزوماً همان نمادهای مناسب Long نیستند (طبق بک‌تست جداگانه هر جهت).
 SHORT_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC', 'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL', 'LIT', 'BAND', 'SUSHI', 'SNX', 'AVAX', 'ATOM', 'TRB', 'ETC', 'NEO', 'SFP', 'IOTA', 'AXS', 'RLC', 'GRT', 'RUNE', 'ONT', 'KAVA', '1INCH', 'KNC', 'HNT', 'ENJ', 'ICX', 'CRV', 'NEAR', 'LUNA', 'THETA', 'QTUM', 'MANA', 'SAND', 'ADA', 'RVN', 'MTL', 'STORJ', 'ZIL', 'SLP', 'XRP', 'BLZ', 'FET', 'ALGO', 'DODO', 'CHR', 'CVC', 'CELR', 'HBAR', 'SKL', 'RSR', 'CHZ', 'LINK', 'ALICE', 'ZRX', 'COTI', 'ONE', 'XTZ', 'ANKR', 'HOT', 'LRC', 'DOGE', 'DENT', 'DGB', 'WIN', 'IOST', 'TRX', 'BTT', 'BAT', 'VET', 'SHIB', 'ARPA', 'AR', 'C98', 'DYDX', 'TLM', 'GALA', 'MASK', 'OGN', 'RAY', 'ATA', 'GTC', 'CELO', 'CTSI', 'TON', 'APT', 'ARB', 'OP', 'SUI', 'INJ', 'TIA', 'SEI', 'PEPE', 'WIF', 'RENDER', 'JUP', 'WLD', 'ONDO', 'ENA', 'STRK', 'TAO', 'PYTH', 'JTO', 'FLOKI', 'BONK', 'NOT', 'W', 'EIGEN', 'ZK']
+SHORT_WATCHLIST[:] = _static_swap_unavailable(SHORT_WATCHLIST)
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
 # اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
@@ -560,6 +581,14 @@ if ('bybit' in _MDS_RAW or 'kucoin' in _MDS_RAW) and 'bitunix' not in _MDS_RAW:
     _MDS_RAW = []     # V3.44.56: مقدار قدیمی .env (binance,binancevision,bybit,kucoin) => ترتیب پیش‌فرض جدید (bitunix اول)
 MARKET_DATA_SOURCES = list(_ALL_DATA_SOURCES)   # V3.44.98: دیگر با env محدود/مرتب نمی‌شود؛ منبع داده را «صرافیِ حالت» تعیین می‌کند (VENUE_SOURCES)
 SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOWN_SECONDS', '60')))   # مدت کنارگذاشتن منبعِ بلاک/rate-limit/خراب
+# V3.44.122: تایم‌اوتِ سمت کلاینت (TimeoutError) دیگر منبع را فوراً خاموش نمی‌کند: هر درخواست یک‌بار دوباره تلاش می‌شود و فقط وقتی
+# تعداد زیادی تایم‌اوت در پنجره‌ی کوتاه جمع شود *و* درخواست ping سالم هم شکست بخورد، منبع trip می‌شود.
+KLINE_REQUEST_TIMEOUT_S = max(8, int(os.environ.get('KLINE_REQUEST_TIMEOUT_S', '15')))
+KLINE_TIMEOUT_RETRIES = max(0, min(3, int(os.environ.get('KLINE_TIMEOUT_RETRIES', '1'))))
+SOFT_FAIL_TRIP_COUNT = max(4, int(os.environ.get('SOFT_FAIL_TRIP_COUNT', '12')))
+SOFT_FAIL_WINDOW_S = max(10, int(os.environ.get('SOFT_FAIL_WINDOW_S', '60')))
+SOURCE_DOWN_WAIT_MAX_S = max(0, int(os.environ.get('SOURCE_DOWN_WAIT_MAX_S', '20')))     # اگر منبع کمتر از این مدت خاموش است، نماد صبر می‌کند نه اینکه رد شود
+SCAN_TASK_CONCURRENCY = max(2, int(os.environ.get('SCAN_TASK_CONCURRENCY', '12')))        # حداکثر نمادهای هم‌زمان در حال اسکن (جلوگیری از اشباع event loop)
 SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
 BINANCE_SYMBOLS_TTL = 6 * 3600
 WATCHLIST_AUTO_PRUNE = os.environ.get('WATCHLIST_AUTO_PRUNE', '1').strip().lower() not in ('0', 'false', 'no', 'off')
@@ -2580,8 +2609,52 @@ def _source_fail(source):
         _source_trip(source)
 
 
+_SOURCE_SOFT_FAILS = {}      # source -> [زمان تایم‌اوت‌های اخیر]
+_SOURCE_PROBING = set()
+
+
+def _source_soft_fail_count(source, now=None):
+    now = time.time() if now is None else now
+    lst = _SOURCE_SOFT_FAILS.setdefault(source, [])
+    lst[:] = [t for t in lst if now - t < SOFT_FAIL_WINDOW_S]
+    return len(lst)
+
+
+async def _source_fail_async(http, source, soft=False):
+    """V3.44.122: شکست سخت (خطای اتصال/…) مثل قبل؛ تایم‌اوتِ نرم فقط وقتی منبع را trip می‌کند که SOFT_FAIL_TRIP_COUNT تایم‌اوت در
+    SOFT_FAIL_WINDOW_S ثانیه جمع شود و ping سالمِ همان منبع هم شکست بخورد (اگر ping سالم باشد، مشکل از شلوغیِ خودِ ربات است نه صرافی)."""
+    if not soft:
+        _source_fail(source); return
+    now = time.time()
+    _SOURCE_SOFT_FAILS.setdefault(source, []).append(now)
+    n = _source_soft_fail_count(source, now)
+    _SOURCE_FAILS[source] = n      # فقط برای نمایش در /binance_health
+    if n < SOFT_FAIL_TRIP_COUNT or source in _SOURCE_PROBING:
+        return
+    _SOURCE_PROBING.add(source)
+    try:
+        ok = False
+        if source in _BINANCE_SOURCES:
+            try:
+                async with http.get(f'{_binance_base_url(source)}/fapi/v1/ping', timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    ok = (r.status == 200)
+            except Exception as exc:  # noqa: BLE001
+                _net_event('fail', source, 'probe_ping', '', exc)
+        if ok:
+            _net_event('probe_ok', source, 'probe_ping', '', n=n)
+            logger.warning('source %s: %s timeouts but ping is fine -> not tripping (bot-side load?)', source, n)
+            _SOURCE_SOFT_FAILS[source] = []; _SOURCE_FAILS[source] = 0
+        else:
+            _SOURCE_SOFT_FAILS[source] = []
+            _source_trip(source)
+    finally:
+        _SOURCE_PROBING.discard(source)
+
+
 def _source_ok(source):
     _SOURCE_FAILS[source] = 0
+    if _SOURCE_SOFT_FAILS.get(source):
+        _SOURCE_SOFT_FAILS[source] = []
 
 
 def _status_trips_source(status):
@@ -3021,6 +3094,25 @@ def get_klines_for(chat_id, symbol, tf='5min', limit=200):
         _DATA_VENUE_CTX.reset(tok)
 
 
+async def _fetch_kline_http(http, url, params, parse, source, symbol):
+    """V3.44.122: درخواست کندل با تایم‌اوت بلندتر و یک‌بار تلاش دوباره روی TimeoutError. خروجی: (status, payload, df)؛
+    برای کدهای trip کننده بدنه خوانده نمی‌شود."""
+    for attempt in range(KLINE_TIMEOUT_RETRIES + 1):
+        try:
+            async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=KLINE_REQUEST_TIMEOUT_S, connect=8)) as r:
+                status = r.status
+                if _status_trips_source(status):
+                    return status, None, None
+                payload = await r.json(content_type=None) if status == 200 else None
+                df = parse(payload) if status == 200 else pd.DataFrame()
+                return status, payload, df
+        except asyncio.TimeoutError as exc:
+            _net_event('timeout_retry' if attempt < KLINE_TIMEOUT_RETRIES else 'fail', source, 'get_klines_async', symbol, exc, attempt=attempt)
+            if attempt >= KLINE_TIMEOUT_RETRIES:
+                raise
+            await asyncio.sleep(0.5 * (attempt + 1))
+
+
 async def get_klines_async(http, symbol, tf='5min', limit=200):
     """نسخه‌ی async با همان ترتیب منابع get_klines."""
     period = TIMEFRAME_MAP.get(tf, tf); key = f'{_venue()}:{symbol}:{period}:{limit}'; now = time.time()
@@ -3039,7 +3131,11 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
     await ASYNC_SEMAPHORE.acquire()
     try:
         for source in _srcs:
-            if not _source_available(source): notes.append(f'{source}:down'); continue
+            if not _source_available(source):
+                _rem = _SOURCE_DOWN_UNTIL.get(source, 0.0) - time.time()
+                if 0 < _rem <= SOURCE_DOWN_WAIT_MAX_S:
+                    await asyncio.sleep(_rem + 0.05)      # V3.44.122: خاموشیِ کوتاه؛ نماد رد نمی‌شود، منتظر می‌ماند
+                if not _source_available(source): notes.append(f'{source}:down'); continue
             if _symbol_missing(source, base): notes.append(f'{source}:skipped_missing'); continue
             payload = None
             if source == 'bitunix':
@@ -3057,16 +3153,15 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
                 if not req: notes.append(f'{source}:not_listed'); continue
                 url, params, parse = req
                 try:
-                    async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=7)) as r:
-                        status = r.status
-                        if _status_trips_source(status):
-                            _net_event('http', source, 'get_klines_async', symbol, status=status)      # V3.44.121
-                            _source_trip(source); notes.append(f'{source}:http_{status}'); continue
-                        payload = await r.json(content_type=None) if status == 200 else None
-                        df = parse(payload) if status == 200 else pd.DataFrame()
+                    status, payload, df = await _fetch_kline_http(http, url, params, parse, source, symbol)
+                    if _status_trips_source(status):
+                        _net_event('http', source, 'get_klines_async', symbol, status=status)      # V3.44.121
+                        _source_trip(source); notes.append(f'{source}:http_{status}'); continue
                     _source_ok(source)
                 except Exception as exc:
-                    logger.debug('async %s kline %s: %s', source, symbol, exc); _net_event('fail', source, 'get_klines_async', symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+                    logger.debug('async %s kline %s: %s', source, symbol, exc); _net_event('fail', source, 'get_klines_async', symbol, exc)
+                    await _source_fail_async(http, source, soft=isinstance(exc, asyncio.TimeoutError))      # V3.44.122
+                    notes.append(f'{source}:timeout' if isinstance(exc, asyncio.TimeoutError) else f'{source}:network_error'); continue
             if _klines_usable(df):
                 df = df.tail(max(int(limit), 60)).reset_index(drop=True)
                 with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
@@ -6089,7 +6184,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.121'
+BOT_VERSION = '3.44.122'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -18888,9 +18983,23 @@ def telegram_listener():
             logger.exception('Telegram listener: %s',exc); time.sleep(2)
 
 
+_SCAN_TASK_SEM = None
+
+
+async def _bounded_scan(http, cid, sym):
+    """V3.44.122: همه‌ی ~۱۲۴ تسک هم‌زمان شروع نمی‌شدند؛ مقدمه‌ی sync هر تسک event loop را پر می‌کرد و پاسخ ۱۰ درخواست اول از تایم‌اوت
+    رد می‌شد. حالا فقط SCAN_TASK_CONCURRENCY نماد هم‌زمان اسکن می‌شوند."""
+    sem = _SCAN_TASK_SEM
+    if sem is None:
+        return await scan_symbol(http, cid, sym)
+    async with sem:
+        return await scan_symbol(http, cid, sym)
+
+
 async def scan_loop():
-    global ASYNC_SEMAPHORE, SCANNER_LOOP
+    global ASYNC_SEMAPHORE, SCANNER_LOOP, _SCAN_TASK_SEM
     ASYNC_SEMAPHORE=asyncio.Semaphore(MAX_ASYNC_REQUESTS)
+    _SCAN_TASK_SEM=asyncio.Semaphore(SCAN_TASK_CONCURRENCY)
     SCANNER_LOOP=asyncio.get_running_loop()
     while True:
         try:
@@ -18939,7 +19048,7 @@ async def scan_loop():
                             watchlist = []
                             _entry_diag_batch_update(cid, [{'status':'blocked','reason':_hrs_why}])
                         for sym in watchlist:
-                            tasks.append(scan_symbol(http,cid,sym))
+                            tasks.append(_bounded_scan(http,cid,sym))
                         # صف بررسی اولویت‌دار: نمادهایی که کاربر با دکمه‌ی «بررسی و ورود سریع»
                         # درخواست کرده و آن لحظه آماده نبودند. تا وقتی حذف نشوند یا منقضی
                         # شوند، مستقل از واچ‌لیست معمولی و با همان قوانین ریسک/رژیم، هر چرخه
@@ -18951,7 +19060,7 @@ async def scan_loop():
                                 if float((meta or {}).get('added_at', 0)) < stale_cutoff:
                                     pw.pop(sym, None); continue
                                 if sym in watchlist: continue
-                                tasks.append(scan_symbol(http,cid,sym))
+                                tasks.append(_bounded_scan(http,cid,sym))
                     except Exception:
                         logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'scan_loop', cid)  # خطای یک کاربر بقیه را متوقف نکند
                 if tasks:
@@ -19260,19 +19369,21 @@ WATCHLIST_REPORT_PATH = os.environ.get('WATCHLIST_REPORT_PATH', 'watchlist_repor
 
 
 def refresh_watchlists_from_spot():
-    """V3.44.97/120: نمادهای غیرموجود روی Binance فیوچرز (USDⓈ-M, USDT) را از LONG/SHORT حذف و با نمادهای برتر موجود روی Binance جایگزین می‌کند
-    (in-place؛ همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند). اگر فهرست Binance قابل‌اعتماد نباشد چیزی حذف نمی‌شود."""
+    """V3.44.97/120/122: نمادهایی که روی هر یک از دو صرافی (Binance فیوچرز USDⓈ-M و Bitunix فیوچرز USDT) نیستند را از LONG/SHORT حذف و
+    با نمادهای برتر موجود روی *هر دو* جایگزین می‌کند (in-place؛ همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند).
+    اگر فهرست هیچ منبعی قابل‌اعتماد نباشد یا حذف‌ها مشکوکاً زیاد باشد چیزی حذف نمی‌شود."""
     if not WATCHLIST_AUTO_PRUNE:
         return None
     union, per, errors = watchlist_tools.fetch_available()
     report = {'generated_at': int(time.time()), 'sources_ok': {k: len(v) for k, v in per.items()}, 'sources_error': errors}
-    # V3.44.97: فقط Binance معیار است؛ نمادی که روی Binance فیوچرز نیست اسکن نمی‌شود (حتی اگر روی Bitunix باشد)
-    binance_set = per.get('binance') or set()
-    if not watchlist_tools.availability_is_sane({'binance': binance_set}):
-        report['note'] = 'فهرست Binance در دسترس/معتبر نبود؛ واچ‌لیست دست‌نخورده ماند.'
-        logger.warning('watchlist prune skipped (no sane Binance listing): %s', errors)
+    avail = watchlist_tools.AvailableOnAll(per)
+    if not avail:
+        report['note'] = 'فهرست هیچ صرافی در دسترس/معتبر نبود؛ واچ‌لیست دست‌نخورده ماند.'
+        logger.warning('watchlist prune skipped (no sane exchange listing): %s', errors)
     else:
-        plans = {name: watchlist_tools.plan_watchlist(list(lst), watchlist_tools.RESERVE_TOP_SYMBOLS, binance_set)
+        if len(avail.per) < 2:
+            report['warning'] = 'فقط یکی از دو صرافی فهرست معتبر داد؛ معیار فقط همان صرافی بود.'
+        plans = {name: watchlist_tools.plan_watchlist(list(lst), watchlist_tools.RESERVE_TOP_SYMBOLS, avail)
                  for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}
         if any(watchlist_tools.plan_is_suspicious(p, len(lst)) for p, lst in ((plans['long'], LONG_WATCHLIST), (plans['short'], SHORT_WATCHLIST))):
             report['note'] = 'تعداد نمادهای غایب مشکوکاً زیاد است (فهرست صرافی ناقص؟)؛ واچ‌لیست دست‌نخورده ماند.'
@@ -19280,11 +19391,11 @@ def refresh_watchlists_from_spot():
         else:
             for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST)):
                 lst[:] = plans[name]['final']
-                report[name] = {'removed': plans[name]['removed'], 'added': plans[name]['added'], 'final_count': len(plans[name]['final'])}
-            logger.info('Watchlist Binance-check: long removed=%s added=%s | sources=%s',
+                report[name] = {'removed': plans[name]['removed'], 'added': plans[name]['added'], 'final_count': len(plans[name]['final']),
+                                'removed_detail': {x: avail.missing_on(x) for x in plans[name]['removed']}}
+            logger.info('Watchlist both-exchanges check: long removed=%s added=%s | sources=%s',
                         report['long']['removed'], report['long']['added'], report['sources_ok'])
     if 'bitunix' in per:
-        # V3.44.56: نمادهای واچ‌لیست که فیوچرز بیتیونیکس ندارد (داده‌ی آن‌ها از باینانس می‌آید)
         report['not_on_bitunix'] = {name: [x for x in lst if not watchlist_tools.on_bitunix(x, per['bitunix'])] for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}   # V3.44.112: PEPE ≡ 1000PEPE
         logger.info('Watchlist vs Bitunix: long missing=%s', report['not_on_bitunix']['long'])
     try:
@@ -19297,11 +19408,15 @@ def refresh_watchlists_from_spot():
 
 def _watchlist_refresh_loop():
     while True:
+        wait = 24 * 3600
         try:
-            refresh_watchlists_from_spot()
+            rep = refresh_watchlists_from_spot()
+            if rep is not None and 'note' in rep and 'long' not in rep:
+                wait = 600       # V3.44.122: فهرست صرافی نیامد/مشکوک بود؛ ۱۰ دقیقه‌ی بعد دوباره تلاش کن (نه ۲۴ ساعت بعد)
         except Exception:
             logger.exception('watchlist spot refresh failed')
-        time.sleep(24 * 3600)
+            wait = 600
+        time.sleep(wait)
 
 
 _DATA_VENUE_WRAPPED = _install_data_venue_wrappers()

@@ -185,8 +185,11 @@ e7 = kenv(['binance'], boom); assert len(e7['get_klines']('BTC', '5min', 120)) =
 async def run_async():
     def aenv(order, bres):
         env = kenv(order, bres)
-        env.update(asyncio=asyncio, aiohttp=type('A', (), {'ClientTimeout': staticmethod(lambda total=None: None)}), ASYNC_SEMAPHORE=asyncio.Semaphore(2),
-                   _BITUNIX_POOL=ThreadPoolExecutor(max_workers=2))
+        async def _fail_async(http, source, soft=False): pass       # V3.44.122
+        env.update(asyncio=asyncio, aiohttp=type('A', (), {'ClientTimeout': staticmethod(lambda **kw: None)}), ASYNC_SEMAPHORE=asyncio.Semaphore(2),
+                   _BITUNIX_POOL=ThreadPoolExecutor(max_workers=2), _net_event=lambda *a, **k: None, _source_fail_async=_fail_async,
+                   KLINE_REQUEST_TIMEOUT_S=15, KLINE_TIMEOUT_RETRIES=1, SOURCE_DOWN_WAIT_MAX_S=20)
+        exec(src[src.index("async def _fetch_kline_http("):a3], env)      # V3.44.122: helper درخواست کندل
         exec(src[a3:b3], env); return env
     ea = aenv(ORDER, lambda sy, tf, lim: (binance_df(140), 200, {'code': 0}))
     d = await ea['get_klines_async'](None, 'BTC', '5min', 120); assert len(d) == 120 and ea['_DATA_SOURCE_USED']['BTC'] == 'bitunix'

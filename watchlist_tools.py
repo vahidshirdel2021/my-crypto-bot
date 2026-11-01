@@ -91,6 +91,31 @@ def on_bitunix(base, bitunix_bases):
     return base in bitunix_bases or any(f'{p}{base}' in bitunix_bases for p in BITUNIX_PREFIXES)
 
 
+class AvailableOnAll:
+    """V3.44.122: «موجود» یعنی نماد روی *همه‌ی* منابعِ سالم (Binance فیوچرز و Bitunix فیوچرز) باشد، تا هیچ نمادی با
+    not_listed / تایم‌اوت اسکن نشود. منبعِ ناقص/خراب (کمتر از MIN_SANE_SYMBOLS نماد) در معیار حساب نمی‌شود."""
+
+    def __init__(self, per_source):
+        self.per = {k: set(v) for k, v in (per_source or {}).items() if len(v) >= MIN_SANE_SYMBOLS}
+
+    def __bool__(self):
+        return bool(self.per)
+
+    def __contains__(self, base):
+        if not self.per:
+            return False
+        base = str(base).upper()
+        for name, bases in self.per.items():
+            ok = on_bitunix(base, bases) if name == 'bitunix' else base in bases
+            if not ok:
+                return False
+        return True
+
+    def missing_on(self, base):
+        base = str(base).upper()
+        return [n for n, b in self.per.items() if not (on_bitunix(base, b) if n == 'bitunix' else base in b)]
+
+
 def fetch_available(timeout=12):
     """(union, per_source, errors). منبعِ خراب نادیده گرفته می‌شود و خطایش در errors می‌آید."""
     per, errors = {}, {}
@@ -131,10 +156,11 @@ def main(argv=None):
     candidates = _read_long_watchlist_from_bot()
     union, per, errors = fetch_available()
     report = {'generated_at': int(time.time()), 'sources_ok': {k: len(v) for k, v in per.items()}, 'sources_error': errors}
-    if not availability_is_sane({'binance': per.get('binance') or set()}):
+    avail = AvailableOnAll(per)
+    if not avail:
         report['note'] = 'فهرست Binance معتبر نبود؛ هیچ چیزی فهرست معتبر نداد؛ چیزی حذف نمی‌شود (احتمالاً بلاک جغرافیایی یا قطعی شبکه).'
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
-    plan = plan_watchlist(candidates, RESERVE_TOP_SYMBOLS, per.get('binance') or set())      # V3.44.97: فقط Binance معیار است
+    plan = plan_watchlist(candidates, RESERVE_TOP_SYMBOLS, avail)      # V3.44.122: نماد باید روی همه‌ی منابعِ سالم (Binance و Bitunix) باشد
     if plan_is_suspicious(plan, len(candidates)):
         report['note'] = f"بیش از {int(MAX_REMOVE_FRACTION * 100)}٪ لیست غایب بود ({len(plan['removed'])} از {len(candidates)})؛ داده‌ی صرافی مشکوک است و حذفی انجام نمی‌شود."
         print(json.dumps(report, ensure_ascii=False, indent=2)); return 1
