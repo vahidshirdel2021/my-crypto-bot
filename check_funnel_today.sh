@@ -5,7 +5,8 @@
 
 DIR="${1:-}"
 if [ -z "$DIR" ]; then
-  DIR=$(find /root/my-crypto-bot -maxdepth 3 -type d -name funnel 2>/dev/null | head -n 1)
+  for c in /root/trader_bot_data/funnel /root/my-crypto-bot/funnel; do [ -d "$c" ] && DIR="$c" && break; done
+  [ -z "$DIR" ] && DIR=$(find /root -maxdepth 4 -type d -name funnel 2>/dev/null | head -n 1)
 fi
 if [ -z "$DIR" ] || [ ! -d "$DIR" ]; then
   echo "پوشه‌ی funnel پیدا نشد. با مسیر دستی اجرا کن:  bash check_funnel_today.sh /مسیر/funnel"
