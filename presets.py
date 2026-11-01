@@ -405,6 +405,7 @@ def keyboard(s):
             row.append({'text': '↩️ پیش‌فرض', 'callback_data': f'/preset_reset_{n}'})
         rows.append(row)
     rows.append([{'text': '📊 نتیجه‌ی هر کلید', 'callback_data': '/preset_stats'}])
+    rows.append([{'text': '🧭 گزارش بلاتکلیفی BTC (روشن یا خاموش؟)', 'callback_data': '/undecided_report'}])
     rows.append([{'text': '📤 ارسال فایل ژورنال معاملات', 'callback_data': '/preset_export'}])
     rows.append([{'text': '🧬 گزارش قیف کلیدها', 'callback_data': '/funnel_report'}, {'text': '📦 داده‌ی قیف', 'callback_data': '/funnel_export'}])
     rows.append([{'text': '🔙 قوانین معامله (فیلترها)', 'callback_data': '/trade_filter_management'}])

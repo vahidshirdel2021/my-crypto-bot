@@ -53,18 +53,18 @@ bot.btc_front_level_info = fake_front
 
 # ---- ۱) رجیستری و پریست ----
 row = bot.GATE_REGISTRY[KEY]
-check('رجیستری: پیش‌فرض روشن، صفحه‌ی BTC/ETH', row[1] is True and row[2] == 'btceth')
+check('رجیستری: پیش‌فرض خاموش (V3.44.124)، صفحه‌ی BTC/ETH', row[1] is False and row[2] == 'btceth')
 import presets
 check('کلید جزو پریست‌ها نیست (مستقل)', KEY not in presets.managed_keys())
 a = bot.get_session(ADMIN); u = bot.get_session(USER)
 a['timeframe'] = u['timeframe'] = '15min'
-check('پیش‌فرض سشن تازه: روشن (ادمین و کاربر)', bot.gate_on(a, KEY) is True and bot.gate_on(u, KEY) is True)
+check('پیش‌فرض سشن تازه: خاموش (ادمین و کاربر)', bot.gate_on(a, KEY) is False and bot.gate_on(u, KEY) is False)
 # V3.44.117: مهاجرت یک‌باره‌ی سشن‌های قدیمی که خاموش ذخیره شده بودند
-_old = bot.normalize_session({'strategy_config': {KEY: False}})
-check('سشن قدیمی خاموش: یک‌بار روشن می‌شود', bot.gate_on(_old, KEY) is True and _old.get('btc_undecided_default_on_v117') is True)
-_old['strategy_config'][KEY] = False
+_old = bot.normalize_session({'strategy_config': {KEY: True}})
+check('سشن قدیمی روشن: یک‌بار خاموش می‌شود (V3.44.124)', bot.gate_on(_old, KEY) is False and _old.get('btc_undecided_default_off_v124') is True)
+_old['strategy_config'][KEY] = True
 _old2 = bot.normalize_session(dict(_old))
-check('انتخاب دستی بعد از مهاجرت حفظ می‌شود', bot.gate_on(_old2, KEY) is False)
+check('انتخاب دستی (روشن) بعد از مهاجرت حفظ می‌شود', bot.gate_on(_old2, KEY) is True)
 # ادمین که خودش خاموش کرده: گیت رد نمی‌کند
 a['strategy_config'][KEY] = False
 check('ادمین خاموش: گیت رد نمی‌کند', bot._btc_undecided_gate(ADMIN, a, 'AAA', 'BUY', '15min') == (True, ''))
@@ -125,6 +125,7 @@ check('تغییر جزئیات = ویرایش نه پیام تازه', not sent 
 check('mid ثابت ماند', u['btc_undecided_msg']['mid'] == mid)
 
 # ---- ۵) همه‌ی مسیرهای ورود (حتی force=True) ----
+_REAL_UNLOCKED = bot._execute_trade_unlocked      # V3.44.124: برای تست سرتاسری در انتها بازگردانی می‌شود
 bot._execute_trade_unlocked = lambda *a, **k: (_ for _ in ()).throw(AssertionError('trade must not open'))
 bot.get_entry_lock = lambda c: __import__('contextlib').nullcontext()
 bot.latest_price = lambda s: 100.0
@@ -196,6 +197,76 @@ sent.clear(); D.update(up=9.0, dn=11.0)
 bot._btc_undecided_gate(USER, u, 'AAA', 'BUY', '15min')
 m2 = u['btc_undecided_msg']['mid']; bot._after_message_deleted(USER, m2)
 check('حذف دستی: اشاره‌گر پاک شد', 'btc_undecided_msg' not in u)
+
+
+# ---- ۹) V3.44.124: ثبت سایه‌ای در ژورنال + گزارش ----
+a['strategy_config'][KEY] = False
+D.update(up=9.0, dn=11.0)
+sh = bot._btc_undecided_shadow(ADMIN, a)
+check('کلید خاموش + وسط راهرو: would_block=True', isinstance(sh, dict) and sh['would_block'] is True and sh['dist_atr'] is not None and sh['gap_frac'] is not None, sh)
+D.update(up=3.0, dn=17.0)
+sh = bot._btc_undecided_shadow(ADMIN, a)
+check('کلید خاموش + نزدیک سطح: would_block=False', isinstance(sh, dict) and sh['would_block'] is False, sh)
+a['strategy_config'][KEY] = True
+check('کلید روشن: ثبت سایه‌ای None (معامله‌ی بلاتکلیف اصلاً باز نمی‌شود)', bot._btc_undecided_shadow(ADMIN, a) is None)
+a['strategy_config'][KEY] = False
+D['nodata'] = True
+sh = bot._btc_undecided_shadow(ADMIN, a)
+check('نبود داده BTC: would_block=True ولی جلوی معامله را نمی‌گیرد (فقط ثبت)', isinstance(sh, dict) and sh['would_block'] is True, sh)
+D['nodata'] = False
+_orig_v = bot.btc_undecided_verdict
+bot.btc_undecided_verdict = lambda *x, **k: (_ for _ in ()).throw(RuntimeError('boom'))
+check('خطا در سنجش: None و استثنا بیرون نمی‌آید', bot._btc_undecided_shadow(ADMIN, a) is None)
+bot.btc_undecided_verdict = _orig_v
+check('فیلد در لیست کلیدهای ژورنال', 'undecided_shadow' in bot._JOURNAL_EXTRA_KEYS)
+_ex = bot._journal_extra_fields({'undecided_shadow': {'would_block': True, 'gap_frac': 0.5}})
+check('ژورنال فیلد را نگه می‌دارد', _ex.get('undecided_shadow', {}).get('would_block') is True)
+check('audit_trade_record فیلد را دارد', 'undecided_shadow' in bot.audit_trade_record({'undecided_shadow': {'would_block': False}}))
+
+def T(blk, pnl, r=None, sym='X', gp=0.5):
+    return {'symbol': sym, 'side': 'BUY', 'pnl_usdt': pnl, 'realized_r': r, 'undecided_shadow': {'would_block': blk, 'gap_frac': gp}}
+rep = bot.undecided_report_text([T(True, -3.0, -1), T(True, -2.0, -1), T(True, 1.0, 0.5), T(False, 4.0, 1), T(False, -1.0, -1), {'pnl_usdt': 5.0}])
+check('گزارش: مسدودشده‌ها ۳ تا و جمع -۴', '`3`' in rep and '-4.00$' in rep, rep)
+check('گزارش: نتیجه = روشن بودن بهتر بود', 'بهتر' in rep and '4.00$' in rep and 'بدتر' not in rep)
+check('گزارش: هشدار نمونه‌ی کم', 'نمونه کم' in rep)
+check('گزارش: معامله‌ی بدون برچسب شمرده نمی‌شود', '`5.00' not in rep and '+5.00' not in rep)
+rep2 = bot.undecided_report_text([T(True, 6.0, 1.0)] * 25 + [T(False, 1.0)] * 3)
+check('گزارش: مسدودشده‌ها سودده = روشن بودن بدتر بود', 'بدتر' in rep2 and 'نمونه کم' not in rep2, rep2)
+rep3 = bot.undecided_report_text([T(False, 2.0), T(False, -1.0)])
+check('گزارش: هیچ معامله‌ی مسدودشونده‌ای نبود', 'هیچ معامله‌ای نبوده' in rep3)
+check('گزارش خالی: توضیح', 'هنوز' in bot.undecided_report_text([]) and 'هنوز' in bot.undecided_report_text([{'pnl_usdt': 1.0}]))
+check('گزارش کوتاه‌تر از حد تلگرام', len(rep2) < 4000 and len(rep) < 4000)
+# دستور فقط ادمین
+sent.clear()
+bot.process_command('/undecided_report', USER, 1)
+check('کاربر عادی: دستور گزارش بسته است', not any('گزارش بلاتکلیفی' in x[1] for x in sent))
+sent.clear()
+bot.process_command('/undecided_report', ADMIN, 1)
+check('ادمین: گزارش ارسال شد', any('گزارش بلاتکلیفی' in x[1] for x in sent), [x[1][:60] for x in sent])
+check('دکمه‌ی گزارش در صفحه‌ی کلیدها', any(b.get('callback_data') == '/undecided_report' for r in presets.keyboard(a)['inline_keyboard'] for b in r))
+
+# ---- ۱۰) V3.44.124: سرتاسری، باز شدن واقعی معامله‌ی کاغذی و برچسب ژورنال ----
+bot._execute_trade_unlocked = _REAL_UNLOCKED
+bot._btc_front_precheck = lambda *x, **k: True
+bot._btc_candle_precheck = lambda *x, **k: True
+bot.latest_price = lambda sym: 100.0
+a['is_bot_active'] = True; a['paper_positions'] = []
+def _open(up, dn, flag, sym, side='BUY'):
+    a['strategy_config'][KEY] = flag
+    D.update(up=up, dn=dn)
+    n0 = len(a.get('paper_positions', []))
+    sl, tp = (99.0, 103.0) if side == 'BUY' else (101.0, 97.0)
+    ok = bot.execute_trade(ADMIN, sym, side, 100.0, sl, tp, reason='e2e', force=True)
+    ps = a.get('paper_positions', [])
+    return ok, (ps[-1] if len(ps) > n0 else None)
+ok, pos = _open(9.0, 11.0, False, 'AAA')
+check('سرتاسری: کلید خاموش + وسط راهرو: معامله باز شد و would_block=True ثبت شد', ok and pos and (pos.get('undecided_shadow') or {}).get('would_block') is True, pos and pos.get('undecided_shadow'))
+ok, pos = _open(3.0, 17.0, False, 'BBB')
+check('سرتاسری: کلید خاموش + نزدیک سطح: باز شد و would_block=False', ok and pos and (pos.get('undecided_shadow') or {}).get('would_block') is False)
+ok, pos = _open(9.0, 11.0, True, 'CCC', 'SELL')
+check('سرتاسری: کلید روشن + وسط راهرو: باز نشد', not ok and pos is None)
+ok, pos = _open(3.0, 17.0, True, 'DDD', 'SELL')
+check('سرتاسری: کلید روشن + نزدیک سطح: باز شد و برچسبی نخورد', ok and pos and pos.get('undecided_shadow') is None)
 
 print('btc_undecided_selftest:', 'ALL OK' if ok_all else 'FAILED')
 sys.exit(0 if ok_all else 1)

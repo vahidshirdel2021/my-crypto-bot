@@ -990,6 +990,7 @@ def audit_trade_record(p):
         'symbol_adx_at_entry': p.get('symbol_adx_at_entry'),
         'regime_filter_exempt': p.get('regime_filter_exempt'),
         'entry_warnings': p.get('entry_warnings'),
+        'undecided_shadow': p.get('undecided_shadow'),
         'sl_slippage_r': p.get('sl_slippage_r'),
         'pnl_usdt': p.get('pnl_usdt'), 'close_reason': p.get('close_reason'),
         'is_real': p.get('is_real', False), 'order_id': p.get('order_id'),
@@ -1300,6 +1301,10 @@ def normalize_session(data):
     if not data.get('btc_undecided_default_on_v117'):
         s['strategy_config']['gate_btc_undecided_enabled'] = True
     s['btc_undecided_default_on_v117'] = True
+    # V3.44.124: پیش‌فرض کلید «توقف در بلاتکلیفی BTC» خاموش شد (با ثبت سایه‌ای در ژورنال)؛ مقدار قبلی یک‌بار خاموش می‌شود و بعدش انتخاب دستیِ ادمین حفظ می‌شود.
+    if not data.get('btc_undecided_default_off_v124'):
+        s['strategy_config']['gate_btc_undecided_enabled'] = False
+    s['btc_undecided_default_off_v124'] = True
     # V3.43.31: کلید قدیمی «هم‌جهتی: RSI و MACD و ADX» به سه کلید مستقل تبدیل شد؛ انتخاب قبلی کاربر برای هر سه حفظ می‌شود.
     if 'gate_fc_ind_enabled' in _stored_scfg:
         for _nk in ('gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_adx_enabled'):
@@ -4886,6 +4891,27 @@ def _btc_undecided_precheck(chat_id, symbol, side, price, sl, tp, force, allow_i
     return False
 
 
+def _btc_undecided_shadow(chat_id, s):
+    """V3.44.124: ثبت سایه‌ای برای ژورنال. فقط وقتی کلید «توقف در بلاتکلیفی BTC» خاموش است سنجیده می‌شود (روشن = معاملات بلاتکلیف اصلاً باز نمی‌شوند).
+    خروجی: None (کلید روشن است یا سنجش ممکن نشد) | {'would_block': bool, 'dist_atr', 'gap_frac', 'why', 'tf'}. هیچ‌وقت جلوی معامله را نمی‌گیرد."""
+    try:
+        if btc_undecided_enabled(chat_id, s):
+            return None
+        tf = s.get('timeframe', '5min')
+        ok, _txt, info = btc_undecided_verdict(tf, s)
+        info = info or {}
+        def _r(v, n):
+            try:
+                return None if v is None else round(float(v), n)
+            except Exception:
+                return None
+        return {'would_block': bool(not ok), 'dist_atr': _r(info.get('dist_atr'), 2), 'gap_frac': _r(info.get('gap_frac'), 3),
+                'why': str(info.get('why') or '')[:160], 'tf': tf}
+    except Exception:
+        logger.debug('btc undecided shadow failed chat=%s', chat_id, exc_info=True)
+        return None
+
+
 def btc_undecided_refresh_once():
     """حلقه‌ی پس‌زمینه: فقط برای چت‌هایی که پیام هشدار ماندگار دارند، وضعیت پیام را با وضعیت فعلی BTC/ETH و کلید هماهنگ می‌کند."""
     for chat_id, s in list(USER_SESSIONS.items()):
@@ -6198,7 +6224,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.123'
+BOT_VERSION = '3.44.124'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -6887,8 +6913,9 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         _entry_warns = _entry_warning_tags(chat_id, symbol, side, s['timeframe'])
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
+    _und_shadow = _btc_undecided_shadow(chat_id, s)      # V3.44.124
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'undecided_shadow':_und_shadow,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
     if inverse_applied and _shadow_spec:
@@ -9070,7 +9097,7 @@ _JOURNAL_EXTRA_KEYS = (
     'pnl_gross_usdt', 'pnl_before_platform_fee_usdt', 'pnl_is_estimate', 'sl_slippage_r', 'partial_exits', 'partial_pnl_usdt',
     'partial_fee_usdt', 'market_adx_at_entry', 'timeframe_bull_pct_at_entry', 'timeframe_bear_pct_at_entry', 'symbol_adx_at_entry',
     'entry_warnings', 'bot_version', 'settings_hash', 'path', 'path_max_r', 'path_max_t', 'path_min_r', 'path_min_t',
-    'mfe_usdt', 'mae_usdt', 'paper_slippage_bps', 'paper_funding_rate_pct_8h', 'setup_id', 'h4_tier')
+    'mfe_usdt', 'mae_usdt', 'paper_slippage_bps', 'paper_funding_rate_pct_8h', 'setup_id', 'h4_tier', 'undecided_shadow')
 
 
 def _journal_extra_fields(pos):
@@ -15244,7 +15271,7 @@ GATE_REGISTRY = {
     'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'btceth', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_fc_btcside_enabled':    ('رأی‌گیری: سمت BTC نسبت به نزدیک‌ترین سطح', False, 'btceth', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): نزدیک‌ترین سطح BTC (از هر دو طرف) به کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال مرجع است. کلوز BTC بالای آن سطح = رأی خرید؛ پایین آن = رأی فروش؛ روی سطح یا نبود داده = بدون رأی. برخلاف «📏 فاصله معقول تا سطح جلویی BTC» که ورود را می‌بندد، این کلید فقط رأی می‌دهد و جلوی ورود را نمی‌گیرد. برای خودِ BTC رأی نمی‌دهد.'),
     'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
-    'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', True, 'btceth', 'پیش‌فرض روشن (مستقل از پریست‌ها). روشن: اگر BTC وسطِ راهروی دو سطح خودش باشد، یعنی کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال هم بیش از ۵×ATR و هم بیش از ۴۰٪ فاصله‌ی دو سطح (بالا و پایین) از نزدیک‌ترین سطح دور باشد، جهت BTC مشخص نیست؛ ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا BTC به یکی از سطوح نزدیک شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیتکوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود. حدها با متغیرهای BTC_UNDECIDED_FAR_ATR و BTC_UNDECIDED_FAR_GAP (یا کلیدهای btc_undecided_far_atr / btc_undecided_far_gap) عوض می‌شوند. در منوی اصلی فقط ادمین کلید را می‌بیند؛ کاربر عادی فقط زیر پیام هشدار آن را دارد.'),
+    'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', False, 'btceth', 'پیش‌فرض خاموش (مستقل از پریست‌ها). حتی وقتی خاموش است، هر معامله‌ای که باز می‌شود در ژورنال برچسب می‌خورد که «اگر این کلید روشن بود، این معامله بسته می‌شد یا نه» و گزارش مقایسه‌ی نتیجه با /undecided_report ساخته می‌شود. روشن: اگر BTC وسطِ راهروی دو سطح خودش باشد، یعنی کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال هم بیش از ۵×ATR و هم بیش از ۴۰٪ فاصله‌ی دو سطح (بالا و پایین) از نزدیک‌ترین سطح دور باشد، جهت BTC مشخص نیست؛ ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا BTC به یکی از سطوح نزدیک شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیتکوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود. حدها با متغیرهای BTC_UNDECIDED_FAR_ATR و BTC_UNDECIDED_FAR_GAP (یا کلیدهای btc_undecided_far_atr / btc_undecided_far_gap) عوض می‌شوند. در منوی اصلی فقط ادمین کلید را می‌بیند؛ کاربر عادی فقط زیر پیام هشدار آن را دارد.'),
     'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
@@ -15801,6 +15828,64 @@ def _journal_trades_for(chat_id, real=None):
     except Exception:
         logger.exception('journal read failed')
         return []
+
+
+def undecided_report_text(trades):
+    """V3.44.124: گزارش مقایسه‌ی «کلید بلاتکلیفی BTC روشن بود یا خاموش» از ژورنال.
+    trades = رکوردهای بسته‌شده‌ی ژورنال. فقط معاملاتی که فیلد undecided_shadow دارند (یعنی وقتی کلید خاموش بود باز شده‌اند) شمرده می‌شوند.
+    گروه A = اگر کلید روشن بود بسته می‌شدند | گروه B = اگر کلید روشن بود هم باز می‌شدند."""
+    def _f(v):
+        try:
+            x = float(v)
+            return x if math.isfinite(x) else None
+        except (TypeError, ValueError):
+            return None
+    A, B = [], []
+    for t in trades or []:
+        sh = t.get('undecided_shadow')
+        pnl = _f(t.get('pnl_usdt'))
+        if not isinstance(sh, dict) or pnl is None:
+            continue
+        (A if sh.get('would_block') else B).append(t)
+    def _stat(ts):
+        pn = [_f(t.get('pnl_usdt')) for t in ts]
+        rs = [r for r in (_f(t.get('realized_r')) for t in ts) if r is not None]
+        wins = sum(1 for x in pn if x > 0)
+        return {'n': len(ts), 'wins': wins, 'wr': (wins / len(ts) * 100.0) if ts else 0.0, 'pnl': sum(pn),
+                'avg_r': (sum(rs) / len(rs)) if rs else None}
+    a, b = _stat(A), _stat(B)
+    if not A and not B:
+        return ('🧭 *گزارش بلاتکلیفی BTC*\n\nهنوز معامله‌ی بسته‌شده‌ای با ثبت سایه‌ای نیست. '
+                'این ثبت فقط برای معاملاتی است که وقتی کلید «توقف در بلاتکلیفی BTC» خاموش بوده باز شده‌اند (نسخه‌ی ۳.۴۴.۱۲۴ به بعد).')
+    def _line(title, st):
+        r = f" · میانگین R: `{st['avg_r']:+.2f}`" if st['avg_r'] is not None else ''
+        return (f"{title}\n• تعداد: `{st['n']}` · برد: `{st['wr']:.0f}٪`\n"
+                f"• جمع سود/زیان: `{st['pnl']:+.2f}$`{r}")
+    lines = ['🧭 *گزارش بلاتکلیفی BTC (کلید خاموش، ثبت سایه‌ای)*', '',
+             _line('🔴 *اگر کلید روشن بود، این‌ها باز نمی‌شدند:*', a), '',
+             _line('🟢 *اگر کلید روشن بود، این‌ها هم باز می‌شدند:*', b), '']
+    if a['n']:
+        if a['pnl'] < 0:
+            lines.append(f"✅ *نتیجه:* روشن بودن کلید *بهتر* بود؛ از ضرر `{abs(a['pnl']):.2f}$` جلوگیری می‌کرد.")
+        elif a['pnl'] > 0:
+            lines.append(f"❌ *نتیجه:* روشن بودن کلید *بدتر* بود؛ سود `{a['pnl']:.2f}$` را از دست می‌دادیم.")
+        else:
+            lines.append('➖ *نتیجه:* تفاوتی نداشت (جمع سود/زیان گروه مسدودشده صفر است).')
+        if a['n'] < 20:
+            lines.append(f"⚠️ نمونه کم است ({a['n']} معامله)؛ هنوز نتیجه‌گیری نکنید (حداقل ۲۰ معامله).")
+        if b['n'] and a['n']:
+            lines.append(f"ℹ️ میانگین هر معامله: مسدودشده‌ها `{a['pnl'] / a['n']:+.2f}$` در برابر بقیه `{b['pnl'] / b['n']:+.2f}$`.")
+        last = A[-5:]
+        lines += ['', '*آخرین معاملات مسدودشونده:*']
+        for t in reversed(last):
+            sh = t.get('undecided_shadow') or {}
+            gp = sh.get('gap_frac')
+            gtxt = f" · {gp * 100:.0f}٪ فاصله‌ی دو سطح" if isinstance(gp, (int, float)) else ''
+            lines.append(f"• {t.get('symbol')} {t.get('side')} → `{_f(t.get('pnl_usdt')):+.2f}$`{gtxt}")
+    else:
+        lines.append('🟰 تا الان هیچ معامله‌ای نبوده که این کلید جلویش را بگیرد (یا همه نمونه‌ها بدون بلاتکلیفی بوده‌اند).')
+    lines += ['', 'توجه: مقایسه تقریبی است؛ اگر معامله‌ای باز نمی‌شد، سقف پوزیشن/موجودی و معاملات بعدی هم تغییر می‌کرد.']
+    return '\n'.join(lines)
 
 
 def preset_stats_text(chat_id):
@@ -18039,6 +18124,11 @@ def process_command(cmd,chat_id,message_id=None):
         except Exception as _e:
             logger.exception('funnel report failed')
             send_message(chat_id, f'❌ خطا در ساخت گزارش قیف: {_e}', presets_mod.keyboard(s))
+        return
+    if cl == '/undecided_report':      # V3.44.124
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        send_message(chat_id, undecided_report_text(_journal_trades_for(chat_id)), presets_mod.keyboard(s))
         return
     if cl == '/preset_stats':
         send_message(chat_id, preset_stats_text(chat_id), presets_mod.keyboard(s))
