@@ -519,7 +519,7 @@ LEGACY_DEFAULT_ACTIVE_SYMBOLS = ['BTC','ETH','SOL','BNB','XRP','ADA','DOGE','LTC
 TIMEFRAME_MAP = {'5min':'5min','15min':'15min','1hour':'1hour','4hour':'4hour','1day':'1day'}
 TF_DISPLAY = {'5min':'5م','15min':'15م','1hour':'1س','4hour':'4س','1day':'روزانه'}
 
-# V20: داده‌ی بازار از *اسپات* گرفته می‌شود. این لیست‌ها «نامزد» هستند: در هر بوت و سپس هر ۲۴ ساعت
+# V20 (از V3.44.120: فیوچرز): داده‌ی بازار از *فیوچرز* گرفته می‌شود. این لیست‌ها «نامزد» هستند: در هر بوت و سپس هر ۲۴ ساعت
 # refresh_watchlists_from_spot() نمادهای غیرموجود روی بیتیونیکس (فیوچرز) و اسپات Binance را حذف و با نمادهای
 # برتر موجود (watchlist_tools.RESERVE_TOP_SYMBOLS) جایگزین می‌کند و گزارشش را در watchlist_report.json می‌نویسد.
 LONG_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AAVE', 'ZEC', 'EGLD', 'BNB', 'DASH', 'FIL', 'ZEN', 'WAVES', 'SOL', 'UNI', 'DOT', 'BAL', 'LIT', 'BAND', 'SUSHI', 'SNX', 'AVAX', 'ATOM', 'TRB', 'ETC', 'NEO', 'SFP', 'IOTA', 'AXS', 'RLC', 'GRT', 'RUNE', 'ONT', 'KAVA', '1INCH', 'KNC', 'HNT', 'ENJ', 'ICX', 'CRV', 'NEAR', 'LUNA', 'THETA', 'QTUM', 'MANA', 'SAND', 'ADA', 'RVN', 'MTL', 'STORJ', 'ZIL', 'SLP', 'XRP', 'BLZ', 'FET', 'ALGO', 'DODO', 'CHR', 'CVC', 'CELR', 'HBAR', 'SKL', 'RSR', 'CHZ', 'LINK', 'ALICE', 'ZRX', 'COTI', 'ONE', 'XTZ', 'ANKR', 'HOT', 'LRC', 'DOGE', 'DENT', 'DGB', 'WIN', 'IOST', 'TRX', 'BTT', 'BAT', 'VET', 'SHIB', 'ARPA', 'AR', 'C98', 'DYDX', 'TLM', 'GALA', 'MASK', 'OGN', 'RAY', 'ATA', 'GTC', 'CELO', 'CTSI', 'TON', 'APT', 'ARB', 'OP', 'SUI', 'INJ', 'TIA', 'SEI', 'PEPE', 'WIF', 'RENDER', 'JUP', 'WLD', 'ONDO', 'ENA', 'STRK', 'TAO', 'PYTH', 'JTO', 'FLOKI', 'BONK', 'NOT', 'W', 'EIGEN', 'ZK']
@@ -547,7 +547,9 @@ LEADER_SYMBOLS = ('BTC','ETH')
 # منابع داده‌ی بازار: V3.44.56: بیتیونیکس (فیوچرز USDT، منبع اول) + باینانس اسپات و آینه‌ی Binance Vision (کمکی). Bybit و KuCoin حذف شدند.
 # (CoinEx بسته شد؛ معاملات REAL از V3.44.0 روی فیوچرز USDⓈ-M باینانس است.)
 BINANCE_SPOT = os.environ.get('BINANCE_SPOT_URL', 'https://api.binance.com').rstrip('/')
-BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')   # آینه‌ی فقط-داده‌ی عمومی باینانس
+BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')   # (دیگر برای داده‌ی بازار استفاده نمی‌شود؛ آینه‌ی اسپات است)
+# V3.44.120: داده‌ی بازارِ صرافی Binance (کندل، قیمت، فهرست نمادها، سقف/کف تاریخی) فقط از «فیوچرز USDⓈ-M» (fapi) است، نه اسپات؛ در PAPER هم همین.
+BINANCE_FUTURES = os.environ.get('BINANCE_FUTURES_URL', 'https://fapi.binance.com').rstrip('/')
 BITUNIX_PUBLIC = os.environ.get('BITUNIX_PUBLIC_URL', 'https://fapi.bitunix.com').rstrip('/')   # فیوچرز USDT؛ داده‌ی عمومی بدون API key
 BITUNIX_MIN_GAP = max(0.05, float(os.environ.get('BITUNIX_MIN_REQUEST_GAP', '0.125') or 0.125))   # ≈۸ درخواست در ثانیه (سقف رسمی: ۱۰ در ثانیه برای هر IP)
 BITUNIX_SYMBOLS_TTL = 6 * 3600
@@ -561,7 +563,7 @@ SOURCE_COOLDOWN_SECONDS = max(10, int(os.environ.get('MARKET_DATA_SOURCE_COOLDOW
 SYMBOL_MISS_TTL_SECONDS = max(60, int(os.environ.get('MARKET_DATA_SYMBOL_MISS_TTL_SECONDS', '600')))   # مدت نپرسیدن نمادی که یک منبع ندارد
 BINANCE_SYMBOLS_TTL = 6 * 3600
 WATCHLIST_AUTO_PRUNE = os.environ.get('WATCHLIST_AUTO_PRUNE', '1').strip().lower() not in ('0', 'false', 'no', 'off')
-# لینک TradingView همیشه *اسپات* است (بدون .P). صرافی: همانی که داده‌ی آن نماد از آن آمده؛ با TRADINGVIEW_EXCHANGE می‌شود اجبارش کرد.
+# V3.44.120: لینک TradingView برای Binance و Bitunix هر دو *فیوچرز* است (پسوند .P). صرافی: همانی که داده‌ی آن نماد از آن آمده؛ با TRADINGVIEW_EXCHANGE می‌شود اجبارش کرد.
 TRADINGVIEW_EXCHANGE = os.environ.get('TRADINGVIEW_EXCHANGE', '').strip().upper()
 TV_EXCHANGE_MAP = {'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'}
 BINANCE_INTERVAL_MAP = {'1min':'1m','5min':'5m','15min':'15m','30min':'30m','1hour':'1h','4hour':'4h','1day':'1d','1week':'1w','1month':'1M'}
@@ -2438,21 +2440,21 @@ def _base_asset(symbol):
 
 
 # --- منابع داده‌ی بازار: عمومی و بدون API key ---------------------------------
-# V3.44.56 ترتیب پیش‌فرض: Bitunix Futures (اول) -> Binance Spot -> آینه‌ی data-api.binance.vision (کمکی).
+# V3.44.120: Binance = فقط فیوچرز USDⓈ-M (بدون fallback اسپات)؛ Bitunix = فیوچرز Bitunix.
 # با MARKET_DATA_SOURCES (مثلاً "binance,bitunix") می‌شود ترتیب/لیست را عوض کرد.
 _SOURCE_DOWN_UNTIL = {}
 _SOURCE_FAILS = {}
 _SYMBOL_MISS_UNTIL = {}
 _DATA_SOURCE_USED = {}      # base -> منبعی که آخرین کندل موفق از آن آمد (برای لینک TradingView)
 _DATA_NOTES = {}            # base -> آخرین دلایل شکست به تفکیک منبع (در گزارش «داده بازار خالی» می‌آید)
-_BINANCE_SYMBOLS = {'map': {}, 'ts': 0.0, 'next_try': 0.0}
+_BINANCE_SYMBOLS = {'map': {}, 'scale': {}, 'ts': 0.0, 'next_try': 0.0}
 _BINANCE_REFRESH_LOCK = RLock()
-_BINANCE_SOURCES = ('binance', 'binancevision')
+_BINANCE_SOURCES = ('binance',)   # V3.44.120: آینه‌ی binancevision فقط اسپات است و کنار گذاشته شد (fallback اسپات سطوح را جابه‌جا می‌کند)
 
 # ===================== V3.44.98: صرافیِ داده = صرافیِ حالت =====================
 # V3.44.108: هم PAPER و هم REAL: همه‌ی داده (کندل، قیمت، سطوح تاریخی سقف/کف، PDH/PDL)، معامله و چارت TradingView از صرافیِ انتخابیِ کاربر
 # (PAPER: paper_exchange که اولِ ویزارد انتخاب می‌شود؛ REAL: real_exchange)؛ هیچ fallback‌ی بین دو صرافی نیست.
-VENUE_SOURCES = {'binance': ('binance', 'binancevision'), 'bitunix': ('bitunix',)}
+VENUE_SOURCES = {'binance': ('binance',), 'bitunix': ('bitunix',)}
 _DATA_VENUE_CTX = contextvars.ContextVar('data_venue', default='binance')
 
 
@@ -2541,7 +2543,7 @@ def _install_data_venue_wrappers():
 
 
 def _binance_base_url(source):
-    return BINANCE_VISION if source == 'binancevision' else BINANCE_SPOT
+    return BINANCE_FUTURES      # V3.44.120: فقط فیوچرز USDⓈ-M (fapi.binance.com)
 
 
 def _source_available(source):
@@ -2585,16 +2587,37 @@ def data_failure_notes(symbol):
     return ' | '.join(notes) if notes else ''
 
 
-def _parse_binance_exchange_info(payload):
-    """نقشه‌ی {نام پایه -> نماد اسپات باینانس} فقط برای جفت‌های USDT با وضعیت TRADING."""
-    m = {}
-    for s in (payload or {}).get('symbols') or []:
-        if s.get('quoteAsset') != 'USDT' or s.get('status') != 'TRADING' or s.get('isSpotTradingAllowed') is False:
+def _binance_futures_entries(payload):
+    """V3.44.120: [(نام پایه‌ی ربات, نماد فیوچرز, scale)] فقط برای قراردادهای دائمی (PERPETUAL) USDT با وضعیت TRADING.
+    نام فیوچرز 1000PEPE => (PEPE, 1000PEPEUSDT, 1000)؛ LUNA2 => LUNA. قرارداد بدون پیشوند اولویت دارد."""
+    out = []
+    for s_ in (payload or {}).get('symbols') or []:
+        if s_.get('quoteAsset') != 'USDT' or s_.get('contractType') != 'PERPETUAL':
             continue
-        base = str(s.get('baseAsset', '')).upper(); sym = s.get('symbol')
-        if base and sym:
-            m[base] = sym
+        if (s_.get('status') or s_.get('contractStatus')) != 'TRADING':
+            continue
+        raw = str(s_.get('baseAsset', '')).upper(); sym = s_.get('symbol')
+        if not raw or not sym:
+            continue
+        scale, base = _split_futures_base(raw)
+        out.append((base, sym, scale))
+    return out
+
+
+def _parse_binance_exchange_info(payload):
+    """{نام پایه‌ی ربات -> نماد فیوچرز باینانس}؛ اگر هم X و هم 1000X لیست بود، X (بدون پیشوند) می‌ماند."""
+    m = {}
+    for base, sym, scale in sorted(_binance_futures_entries(payload), key=lambda e: e[2] == 1):
+        m[base] = sym
     return m
+
+
+def _parse_binance_scales(payload):
+    """{نام پایه‌ی ربات -> scale} هم‌ترازِ _parse_binance_exchange_info."""
+    sc = {}
+    for base, sym, scale in sorted(_binance_futures_entries(payload), key=lambda e: e[2] == 1):
+        sc[base] = scale
+    return sc
 
 
 def _binance_map_needs_refresh():
@@ -2611,13 +2634,14 @@ def _binance_refresh_symbol_map():
             if source not in MARKET_DATA_SOURCES or not _source_available(source):
                 continue
             try:
-                r = requests.get(f'{_binance_base_url(source)}/api/v3/exchangeInfo', params={'symbolStatus': 'TRADING'}, timeout=12)
+                r = requests.get(f'{_binance_base_url(source)}/fapi/v1/exchangeInfo', timeout=12)
                 if _status_trips_source(r.status_code):
                     _source_trip(source); continue
                 if r.ok:
-                    parsed = _parse_binance_exchange_info(r.json())
+                    _payload = r.json()
+                    parsed = _parse_binance_exchange_info(_payload)
                     if parsed:
-                        _BINANCE_SYMBOLS.update(map=parsed, ts=time.time(), next_try=0.0)
+                        _BINANCE_SYMBOLS.update(map=parsed, scale=_parse_binance_scales(_payload), ts=time.time(), next_try=0.0)
                         _source_ok(source)
                         return
             except Exception as exc:
@@ -2629,8 +2653,13 @@ def _binance_refresh_symbol_map():
 def _binance_symbol_from_cache(base):
     m = _BINANCE_SYMBOLS['map']
     if m:
-        return m.get(base)          # None = روی اسپات باینانس لیست نیست
+        return m.get(base)          # None = روی فیوچرز باینانس لیست نیست
     return f'{base}USDT'            # exchangeInfo در دسترس نبود: حدس ساده
+
+
+def _binance_scale_from_cache(base):
+    """ضریب پیشوند ۱۰۰۰تایی فیوچرز باینانس (۱ برای نمادهای عادی): قیمت ربات = قیمت فیوچرز / scale."""
+    return _BINANCE_SYMBOLS.get('scale', {}).get(str(base).upper(), 1) or 1
 
 
 def _ohlcv_df(rows):
@@ -2881,8 +2910,10 @@ def _kline_request(source, symbol, tf, limit):
     if source in _BINANCE_SOURCES:
         interval = BINANCE_INTERVAL_MAP.get(tf); sym = _binance_symbol_from_cache(base)
         if not interval or not sym: return None
-        return (f'{_binance_base_url(source)}/api/v3/klines',
-                {'symbol': sym, 'interval': interval, 'limit': min(max(int(limit), 60), 1000)}, _binance_kline_df)
+        scale = _binance_scale_from_cache(base)
+        return (f'{_binance_base_url(source)}/fapi/v1/klines',
+                {'symbol': sym, 'interval': interval, 'limit': min(max(int(limit), 60), 1000)},
+                (lambda payload, _sc=scale: _bitunix_unscale_df(_binance_kline_df(payload), _sc)))
     return None            # بیتیونیکس مسیر جدا دارد (_bitunix_fetch_klines)
 
 
@@ -2899,7 +2930,7 @@ def _price_request(source, symbol):
     base = _base_asset(symbol)
     if source in _BINANCE_SOURCES:
         sym = _binance_symbol_from_cache(base)
-        return (f'{_binance_base_url(source)}/api/v3/ticker/price', {'symbol': sym}) if sym else None
+        return (f'{_binance_base_url(source)}/fapi/v1/ticker/price', {'symbol': sym}) if sym else None
     return None            # بیتیونیکس مسیر جدا دارد (_bitunix_price)
 
 
@@ -2913,7 +2944,7 @@ def _fail_note(source, status, payload):
 
 
 def get_klines(symbol, tf='5min', limit=200):
-    """کندل‌ها را از اولین منبع سالم می‌گیرد (Bitunix Futures -> Binance Spot -> Binance Vision).
+    """کندل‌ها را از منبع صرافیِ حالت می‌گیرد (Binance Futures یا Bitunix Futures؛ بدون fallback بین صرافی‌ها).
     آخرین ردیف کندلِ در حال تشکیل است (استراتژی از iloc[-2] استفاده می‌کند)."""
     period = TIMEFRAME_MAP.get(tf, tf); key = f'{_venue()}:{symbol}:{period}:{limit}'; now = time.time()
     with DATA_LOCK:
@@ -3054,6 +3085,8 @@ def latest_price(symbol):
             if _status_trips_source(r.status_code):
                 _source_trip(source); continue
             price = _price_from_payload(source, r.json()) if r.ok else None
+            if price and source in _BINANCE_SOURCES:
+                price = price / _binance_scale_from_cache(base)      # V3.44.120: نمادهای ۱۰۰۰تایی فیوچرز => واحد ربات
             _source_ok(source)
         except Exception as exc:
             logger.debug('price %s %s: %s', source, symbol, exc); _source_fail(source); continue
@@ -3696,21 +3729,24 @@ _TV_INTERVALS = {'1min': '1', '3min': '3', '5min': '5', '15min': '15', '30min': 
 
 
 def tradingview_symbol(symbol, chat_id=None):
-    """نماد برای TradingView. V3.44.98: صرافی = صرافیِ حالتِ کاربر (نه «آخرین منبعی که داده داد»):
-    صرافی Binance (PAPER یا REAL) → BINANCE:XUSDT؛ صرافی Bitunix (PAPER یا REAL) → BITUNIX:XUSDT.P (فیوچرز).
+    """نماد برای TradingView. V3.44.120: همیشه *فیوچرز* (.P) از صرافیِ حالتِ کاربر:
+    Binance (PAPER یا REAL) → BINANCE:XUSDT.P (نمادهای ×۱۰۰۰ مثل BINANCE:1000PEPEUSDT.P)؛ Bitunix → BITUNIX:XUSDT.P.
     chat_id اگر داده نشود، همان صرافیِ زمینه‌ی جاری (contextvar) خوانده می‌شود."""
     base = _base_asset(symbol)
     venue = data_venue_for(chat_id) if chat_id is not None else _venue()
     exchange = TRADINGVIEW_EXCHANGE or TV_EXCHANGE_MAP.get(venue, 'BINANCE')
-    suffix = '.P' if (not TRADINGVIEW_EXCHANGE and venue == 'bitunix') else ''
-    if suffix and _bitunix_scale(base) != 1:
-        suffix = ''     # V3.44.112: نمادِ ۱۰۰۰تایی (1000PEPE) در فیوچرز با قیمت ×۱۰۰۰ است و با سطوح ربات نمی‌خواند => چارت از «اسپات» همان نام (BITUNIX:PEPEUSDT)
+    if venue == 'binance':
+        # نام واقعیِ قرارداد فیوچرز (PEPE → 1000PEPEUSDT)؛ اگر فهرست هنوز نیامده، همان نام ربات
+        return f'{exchange}:{_binance_symbol_from_cache(base) or (base + "USDT")}.P'
+    suffix = '.P'
+    if _bitunix_scale(base) != 1:
+        suffix = ''     # V3.44.112: نمادِ ۱۰۰۰تایی (1000PEPE) در فیوچرز بیتیونیکس با سطوح ربات نمی‌خواند => چارت از «اسپات» همان نام (BITUNIX:PEPEUSDT)
     return f'{exchange}:{base}USDT{suffix}'
 
 
 def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):
     """
-    لینک چارت TradingView برای نماد/تایم‌فریم فعال (بازار اسپات، هم‌جنس با داده‌ی اسکنر).
+    لینک چارت TradingView برای نماد/تایم‌فریم فعال (V3.44.120: بازار فیوچرز .P، هم‌جنس با داده‌ی اسکنر).
     این یک لینک معمولی tradingview.com است؛ تلگرام و سیستم‌عامل موبایل به‌صورت خودکار
     اگر اپلیکیشن TradingView نصب باشد آن را در اپ باز می‌کنند (universal/app link)،
     وگرنه در مرورگر پیش‌فرض باز می‌شود - نیازی به منطق تشخیص اپ در سمت سرور نیست.
@@ -6033,7 +6069,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.119'
+BOT_VERSION = '3.44.120'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7236,11 +7272,10 @@ def _hist_range_sync_for_venue(symbol):
 
 
 def _binance_hist_range_sync(symbol):
-    """سقف/کف تاریخیِ واقعی نماد از Binance Spot (سایه‌ها: high/low) یا None.
+    """سقف/کف تاریخیِ واقعی نماد از Binance Futures (سایه‌ها: high/low) یا None. (V3.44.120: فیوچرز، هم‌جنس با چارت TradingView .P)
     کندل هفتگی تا ۱۰۰۰ عدد (≈۱۹ سال، یعنی کل تاریخچه‌ی Binance) در یک درخواست؛ اگر نماد خیلی تازه بود
     (کمتر از ۸ هفته) کندل روزانه. اول api.binance.com و بعد آینه‌ی data-api.binance.vision.
-    اگر نماد روی اسپات Binance نبود (مثلاً نام‌های ×۱۰۰۰ فیوچرز) None برمی‌گردد تا مقیاس قیمت
-    با منبع معاملاتی یکی بماند و تابع صدا‌زننده به منبع قبلی برگردد."""
+    اگر نماد روی فیوچرز Binance نبود None برمی‌گردد. نمادهای ×۱۰۰۰ (1000PEPE) با scale به واحد ربات برمی‌گردند."""
     base = _base_asset(symbol)
     if _binance_map_needs_refresh():
         try:
@@ -7255,7 +7290,7 @@ def _binance_hist_range_sync(symbol):
             continue
         for interval in ('1w', '1d'):
             try:
-                r = requests.get(f'{_binance_base_url(source)}/api/v3/klines',
+                r = requests.get(f'{_binance_base_url(source)}/fapi/v1/klines',
                                  params={'symbol': sym, 'interval': interval, 'limit': 1000}, timeout=10)
             except Exception as exc:
                 logger.debug('%s hist range %s: %s', source, symbol, exc)
@@ -7268,7 +7303,7 @@ def _binance_hist_range_sync(symbol):
                 continue
             _source_ok(source)
             try:
-                rng = _halving_range_from_df(_binance_kline_df(r.json()))
+                rng = _halving_range_from_df(_bitunix_unscale_df(_binance_kline_df(r.json()), _binance_scale_from_cache(base)))
             except Exception:
                 rng = None
             if rng:
@@ -19153,13 +19188,13 @@ WATCHLIST_REPORT_PATH = os.environ.get('WATCHLIST_REPORT_PATH', 'watchlist_repor
 
 
 def refresh_watchlists_from_spot():
-    """V3.44.97: نمادهای غیرموجود روی Binance اسپات (USDT) را از LONG/SHORT حذف و با نمادهای برتر موجود روی Binance جایگزین می‌کند
+    """V3.44.97/120: نمادهای غیرموجود روی Binance فیوچرز (USDⓈ-M, USDT) را از LONG/SHORT حذف و با نمادهای برتر موجود روی Binance جایگزین می‌کند
     (in-place؛ همه‌ی ارجاع‌های WINNING_*/SHARED_* همان شیء لیست را می‌بینند). اگر فهرست Binance قابل‌اعتماد نباشد چیزی حذف نمی‌شود."""
     if not WATCHLIST_AUTO_PRUNE:
         return None
     union, per, errors = watchlist_tools.fetch_available()
     report = {'generated_at': int(time.time()), 'sources_ok': {k: len(v) for k, v in per.items()}, 'sources_error': errors}
-    # V3.44.97: فقط Binance معیار است؛ نمادی که روی Binance اسپات نیست اسکن نمی‌شود (حتی اگر روی Bitunix باشد)
+    # V3.44.97: فقط Binance معیار است؛ نمادی که روی Binance فیوچرز نیست اسکن نمی‌شود (حتی اگر روی Bitunix باشد)
     binance_set = per.get('binance') or set()
     if not watchlist_tools.availability_is_sane({'binance': binance_set}):
         report['note'] = 'فهرست Binance در دسترس/معتبر نبود؛ واچ‌لیست دست‌نخورده ماند.'

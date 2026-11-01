@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-اعتبارسنجی واچ‌لیست با فهرست نمادهای صرافی‌ها (Bitunix فیوچرز USDT + Binance اسپات) - بدون API key و
+اعتبارسنجی واچ‌لیست با فهرست نمادهای صرافی‌ها (Bitunix فیوچرز USDT + Binance فیوچرز USDⓈ-M) - بدون API key و
 بدون وابستگی به bot.py. هم داخل ربات استفاده می‌شود و هم به‌صورت CLI:
 
     python watchlist_tools.py            # گزارش: کدام نمادها روی هیچ منبعی نیستند، چه جایگزینی پیشنهاد می‌شود و کدام‌ها روی بیتیونیکس نیستند
     python watchlist_tools.py --json     # همان گزارش به‌صورت JSON
 
-منطق: نمادی که روی هیچ‌کدام از منابع (بیتیونیکس: USDT با وضعیت OPEN، باینانس اسپات: USDT با وضعیت Trading) نیست حذف می‌شود و به‌جایش از
+منطق: نمادی که روی هیچ‌کدام از منابع (بیتیونیکس: USDT با وضعیت OPEN، باینانس فیوچرز: قرارداد دائمی USDT با وضعیت TRADING) نیست حذف می‌شود و به‌جایش از
 RESERVE_TOP_SYMBOLS (به ترتیب اولویت) نماد موجود اضافه می‌شود تا اندازه‌ی لیست حفظ شود.
 اگر هیچ منبعی فهرست قابل‌اعتماد (≥ MIN_SANE_SYMBOLS نماد) برنگرداند، هیچ چیزی حذف نمی‌شود.
 """
 import json
 import os
+import re
 import sys
 import time
 
 import requests
 
-BINANCE_SPOT = os.environ.get('BINANCE_SPOT_URL', 'https://api.binance.com').rstrip('/')
-BINANCE_VISION = os.environ.get('BINANCE_VISION_URL', 'https://data-api.binance.vision').rstrip('/')
+BINANCE_FUTURES = os.environ.get('BINANCE_FUTURES_URL', 'https://fapi.binance.com').rstrip('/')
 BITUNIX_PUBLIC = os.environ.get('BITUNIX_PUBLIC_URL', 'https://fapi.bitunix.com').rstrip('/')
 
 MIN_SANE_SYMBOLS = 100
@@ -43,19 +43,34 @@ def _get(url, params=None, timeout=12):
     return r.json()
 
 
-def fetch_binance_spot(timeout=12):
-    """{'binance': bases, ...}؛ اول api.binance.com و اگر نشد آینه‌ی data-api.binance.vision."""
-    last = None
-    for base_url in (BINANCE_SPOT, BINANCE_VISION):
-        try:
-            j = _get(f'{base_url}/api/v3/exchangeInfo', {'symbolStatus': 'TRADING'}, timeout)
-            out = {str(s.get('baseAsset', '')).upper() for s in j.get('symbols') or []
-                   if s.get('quoteAsset') == 'USDT' and s.get('status') == 'TRADING' and s.get('isSpotTradingAllowed') is not False}
-            if out:
-                return out
-        except Exception as exc:  # noqa: BLE001
-            last = exc
-    raise RuntimeError(f'binance spot: {last}')
+def fetch_binance_futures(timeout=12):
+    """V3.44.120: نام پایه‌ی (به شکل ربات) همه‌ی قراردادهای دائمی USDT فیوچرز USDⓈ-M باینانس با وضعیت TRADING.
+    1000PEPE => PEPE ، LUNA2 => LUNA (هم‌نام‌گذاری نمادهای ربات)."""
+    try:
+        j = _get(f'{BINANCE_FUTURES}/fapi/v1/exchangeInfo', None, timeout)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f'binance futures: {exc}')
+    out = set()
+    for s in j.get('symbols') or []:
+        if s.get('quoteAsset') != 'USDT' or s.get('contractType') != 'PERPETUAL':
+            continue
+        if (s.get('status') or s.get('contractStatus')) != 'TRADING':
+            continue
+        raw = str(s.get('baseAsset', '')).upper()
+        if not raw:
+            continue
+        out.add(raw)
+        m = re.match(r'^(1000000|100000|10000|1000)([A-Z0-9]+)$', raw)
+        if m:
+            out.add(m.group(2))
+        if raw == 'LUNA2':
+            out.add('LUNA')
+    if not out:
+        raise RuntimeError('binance futures: empty')
+    return out
+
+
+fetch_binance_spot = fetch_binance_futures     # نام قدیمی (سازگاری)
 
 
 def fetch_bitunix_futures(timeout=12):
@@ -79,7 +94,7 @@ def on_bitunix(base, bitunix_bases):
 def fetch_available(timeout=12):
     """(union, per_source, errors). منبعِ خراب نادیده گرفته می‌شود و خطایش در errors می‌آید."""
     per, errors = {}, {}
-    for name, fn in (('bitunix', fetch_bitunix_futures), ('binance', fetch_binance_spot)):
+    for name, fn in (('bitunix', fetch_bitunix_futures), ('binance', fetch_binance_futures)):
         try:
             per[name] = fn(timeout)
         except Exception as exc:  # noqa: BLE001

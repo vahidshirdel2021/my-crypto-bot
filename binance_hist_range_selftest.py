@@ -27,7 +27,7 @@ def kl(n, hi0=100.0, lo0=50.0):
 class Fake:
     def __init__(self): self.calls = []; self.script = {}; self.fallback_calls = []
 FK = Fake()
-state = {'down': set(), 'fails': {}, 'map': {'BTC': 'BTCUSDT', 'ABC': 'ABCUSDT'}}
+state = {'down': set(), 'fails': {}, 'map': {'BTC': 'BTCUSDT', 'ABC': 'ABCUSDT', 'PEPE': '1000PEPEUSDT'}, 'scale': {'PEPE': 1000}}
 
 def fake_get(url, params=None, timeout=None):
     FK.calls.append((url, dict(params or {})))
@@ -43,8 +43,9 @@ g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, pd=pd, math=math, time=ti
          _base_asset=lambda s: str(s).upper().replace('USDT', '').replace('/', ''),
          _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None,
          _binance_symbol_from_cache=lambda base: state['map'].get(base),
-         _BINANCE_SOURCES=('binance', 'binancevision'),
-         _binance_base_url=lambda s: 'https://data-api.binance.vision' if s == 'binancevision' else 'https://api.binance.com',
+         _BINANCE_SOURCES=('binance',),      # V3.44.120: فقط فیوچرز (بدون آینه‌ی اسپات)
+         _binance_base_url=lambda s: 'https://fapi.binance.com',
+         _binance_scale_from_cache=lambda base: state['scale'].get(base, 1),
          _source_available=lambda s: s not in state['down'], _source_trip=trip, _source_fail=lambda s: None, _source_ok=lambda s: None,
          _status_trips_source=lambda st: st in (403, 418, 429, 451) or st >= 500,
          os=os, json=json, Dict=dict, Any=object)
@@ -54,6 +55,7 @@ def _df(rows):
     return pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
 async def old_klines_async(http, sym, tf, lim): return old_klines(sym, tf, lim)
 g.update(get_klines=old_klines, get_klines_async=old_klines_async)
+exec(src[src.index("def _bitunix_unscale_df(df, scale):"):src.index("def _parse_bitunix_tickers(payload):")], g)   # unscale واقعی ربات
 exec(block, g)
 sync, asyn, cache = g['get_halving_range_sync'], g['get_halving_range'], g['HALVING_RANGE_CACHE']
 
@@ -63,7 +65,7 @@ def reset():
 # 1) Binance جواب بدهد: سقف/کف از سایه‌ها، بدون تماس با منبع قبلی
 reset(); FK.script[('api', '1w')] = (200, kl(40, 123.5, 7.25))
 assert sync('ABCUSDT') == (123.5, 7.25), sync('ABCUSDT')
-assert not FK.fallback_calls and FK.calls[0][0].endswith('/api/v3/klines')
+assert not FK.fallback_calls and FK.calls[0][0].endswith('/fapi/v1/klines')
 assert FK.calls[0][1] == {'symbol': 'ABCUSDT', 'interval': '1w', 'limit': 1000}
 print('1 binance primary ok')
 
@@ -75,10 +77,11 @@ print('2 cache ok')
 reset(); r = sync('1000SHIBUSDT'); assert r is None and not FK.fallback_calls and not FK.calls      # V3.44.97: نماد غیرموجود روی Binance = بدون سقف/کف (بدون جایگزین)
 print('3 not-listed -> no range ok')
 
-# 4) ۴۵۱ روی api.binance.com → آینه‌ی vision جواب بدهد
+# 4) ۴۵۱ روی fapi.binance.com → V3.44.120: هیچ fallback به آینه‌ی اسپات (vision) نیست؛ سقف/کف None
 reset(); FK.script[('api', '1w')] = (451, None); FK.script[('vision', '1w')] = (200, kl(40, 55.0, 5.0))
-assert sync('ABCUSDT') == (55.0, 5.0) and 'binance' in state['down'] and not FK.fallback_calls
-print('4 vision mirror ok')
+assert sync('ABCUSDT') is None and 'binance' in state['down'] and not FK.fallback_calls
+assert all('binance.vision' not in c[0] and '/api/v3/' not in c[0] for c in FK.calls), FK.calls
+print('4 no spot-mirror fallback ok')
 
 # 5) هر دو شبکه‌خطا → برگشت به منبع قبلی
 reset(); assert sync('ABCUSDT') is None and not FK.fallback_calls      # V3.44.97: قطع شبکه = None (بدون کندل ربات)
@@ -98,4 +101,9 @@ print('7 async ok')
 reset(); FK.script[('api', '1w')] = (200, kl(40, 3.0, 10.0)); FK.script[('vision', '1w')] = (200, kl(40, 3.0, 10.0))
 assert sync('ABCUSDT') is None and not FK.fallback_calls      # V3.44.97: داده‌ی خراب Binance = None
 print('8 bad-data -> none ok')
+# 9) V3.44.120: نماد ×۱۰۰۰ فیوچرز (1000PEPE) => درخواست با نام واقعی و سقف/کف ÷۱۰۰۰ (واحد ربات)
+reset(); FK.script[('api', '1w')] = (200, kl(40, 12.0, 4.0))
+assert sync('PEPEUSDT') == (0.012, 0.004), sync('PEPEUSDT')
+assert FK.calls[0][1]['symbol'] == '1000PEPEUSDT' and FK.calls[0][0].endswith('/fapi/v1/klines')
+print('9 scaled 1000x symbol ok')
 print('ALL OK')

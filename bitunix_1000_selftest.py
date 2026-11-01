@@ -59,15 +59,16 @@ assert g['_bitunix_fetch_klines']('NOPE', '5min', 60) is None
 x = pd.DataFrame({'open': [2.0], 'high': [3.0], 'low': [1.0], 'close': [2.0], 'volume': [7.0]})
 assert g['_bitunix_unscale_df'](x, 1) is x and g['_bitunix_unscale_df'](pd.DataFrame(), 1000).empty
 y = g['_bitunix_unscale_df'](x, 1000); assert y['close'].iloc[0] == 0.002 and y['volume'].iloc[0] == 7000.0 and x['close'].iloc[0] == 2.0   # df اصلی تغییر نمی‌کند
-# ۵) TradingView: ۱۰۰۰تایی => اسپات (بدون .P)، بقیه فیوچرز
+# ۵) TradingView: بیتیونیکس ۱۰۰۰تایی => اسپات (بدون .P)، بقیه فیوچرز؛ Binance همیشه فیوچرز (.P، نام واقعی قرارداد)
 a5 = src.index("def tradingview_symbol(symbol, chat_id=None):"); b5 = src.index("def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):")
 ctx = {'v': 'bitunix'}
 tv = dict(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), TRADINGVIEW_EXCHANGE='', _venue=lambda: ctx['v'], data_venue_for=lambda c: ctx['v'],
-          TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'}, _bitunix_scale=g['_bitunix_scale'])
+          TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'}, _bitunix_scale=g['_bitunix_scale'],
+          _binance_symbol_from_cache=lambda b: {'PEPE': '1000PEPEUSDT', 'BTC': 'BTCUSDT'}.get(b))
 exec(src[a5:b5], tv)
 assert tv['tradingview_symbol']('PEPE') == 'BITUNIX:PEPEUSDT' and tv['tradingview_symbol']('BTC') == 'BITUNIX:BTCUSDT.P' and tv['tradingview_symbol']('1INCH') == 'BITUNIX:1INCHUSDT.P'
-ctx['v'] = 'binance'; assert tv['tradingview_symbol']('PEPE') == 'BINANCE:PEPEUSDT'
-ctx['v'] = 'bitunix'; tv['TRADINGVIEW_EXCHANGE'] = 'OKX'; assert tv['tradingview_symbol']('PEPE') == 'OKX:PEPEUSDT'
+ctx['v'] = 'binance'; assert tv['tradingview_symbol']('PEPE') == 'BINANCE:1000PEPEUSDT.P' and tv['tradingview_symbol']('BTC') == 'BINANCE:BTCUSDT.P' and tv['tradingview_symbol']('NOPE') == 'BINANCE:NOPEUSDT.P'
+ctx['v'] = 'bitunix'; tv['TRADINGVIEW_EXCHANGE'] = 'OKX'; assert tv['tradingview_symbol']('PEPE') == 'OKX:PEPEUSDT' and tv['tradingview_symbol']('BTC') == 'OKX:BTCUSDT.P'
 # ۶) سقف/کف تاریخی ÷۱۰۰۰ (کد منبع)
 assert re.search(r"_halving_range_from_df\(_bitunix_unscale_df\(", src) and "sym, scale = _bitunix_resolve(base)" in src
 # ۷) واچ‌لیست

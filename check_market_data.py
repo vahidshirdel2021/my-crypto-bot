@@ -6,7 +6,7 @@
     python check_market_data.py            # BTC و SOL
     python check_market_data.py ETH XRP    # نمادهای دلخواه
 
-برای هر منبع (Bitunix فیوچرز / Binance اسپات / آینه‌ی Binance Vision) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
+برای هر منبع (Bitunix فیوچرز / Binance فیوچرز USDⓈ-M) وضعیت HTTP، تعداد کندل، ۳ کندل آخر
 و مقدار ATRx (نسبت ATR کندل آخرِ بسته‌شده به میانه‌ی ATRهای قبل؛ در حالت سالم حدود ۱ است) را چاپ می‌کند.
 """
 import sys
@@ -27,15 +27,12 @@ def _df(rows):
     return df.dropna(subset=["open", "high", "low", "close"]).sort_values("timestamp").reset_index(drop=True)
 
 
-def binance(base, host="https://api.binance.com"):
-    r = requests.get(f"{host}/api/v3/klines",
+def binance(base, host="https://fapi.binance.com"):
+    """V3.44.120: فیوچرز USDⓈ-M باینانس (همان منبع داده‌ی ربات). نمادهای ×۱۰۰۰ را با ۱۰۰۰ تقسیم نمی‌کند (قیمت خام فیوچرز)."""
+    r = requests.get(f"{host}/fapi/v1/klines",
                      params={"symbol": f"{base}USDT", "interval": "5m", "limit": 650}, timeout=TIMEOUT)
     j = r.json() if r.ok else None
     return r.status_code, (_df(j) if isinstance(j, list) and j else None), r.text[:120]
-
-
-def binance_vision(base):
-    return binance(base, "https://data-api.binance.vision")
 
 
 def bitunix(base):
@@ -51,7 +48,7 @@ def bitunix(base):
 def main(symbols):
     for base in symbols:
         print(f"\n===== {base} =====")
-        for name, fn in (("bitunix-futures", bitunix), ("binance-spot", binance), ("binance-vision", binance_vision)):
+        for name, fn in (("bitunix-futures", bitunix), ("binance-futures", binance)):
             try:
                 status, df, body = fn(base)
             except Exception as exc:

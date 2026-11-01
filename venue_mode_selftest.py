@@ -67,7 +67,7 @@ def fake_get(url, params=None, timeout=None): hits['binance'] += 1; return Resp(
 def _bpx(base): hits['price_bitunix'] += 1; return 1234.0
 genv = dict(env)
 genv.update(time=time, pd=pd, logger=logging.getLogger('v'), DATA_LOCK=RLock(), DATA_CACHE={}, PRICE_CACHE={}, DATA_CACHE_SECONDS=20, TIMEFRAME_MAP={'5min': '5min'},
-            _BINANCE_SOURCES=('binance', 'binancevision'), _DATA_NOTES={}, _DATA_SOURCE_USED={}, _base_asset=lambda sy: str(sy).upper().replace('USDT', ''),
+            _BINANCE_SOURCES=('binance',), _binance_scale_from_cache=lambda b_: 1, _DATA_NOTES={}, _DATA_SOURCE_USED={}, _base_asset=lambda sy: str(sy).upper().replace('USDT', ''),
             _source_available=lambda s_: True, _symbol_missing=lambda s_, b_: False, _mark_symbol_missing=lambda *a: None,
             _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None, _bitunix_map_needs_refresh=lambda: False, _bitunix_refresh_symbol_map=lambda: None,
             _bitunix_fetch_klines=fake_bitunix_klines, _bitunix_price=_bpx, _status_trips_source=lambda st: False, _source_trip=lambda *a: None, _source_ok=lambda s_: None, _source_fail=lambda s_: None,
@@ -105,7 +105,7 @@ def fake_bx_get(path, params=None, timeout=7):
     return Resp(200, {'code': 0, 'data': rows})
 henv = dict(pd=pd, math=math, time=time, asyncio=asyncio, json=json, os=os, logger=logging.getLogger('h'), requests=type('R', (), {'get': staticmethod(fake_req_get)}),
             _base_asset=lambda s_: str(s_).upper().replace('USDT', '').replace('/', ''), _binance_map_needs_refresh=lambda: False, _binance_refresh_symbol_map=lambda: None,
-            _binance_symbol_from_cache=lambda base: base + 'USDT', _BINANCE_SOURCES=('binance',), _binance_base_url=lambda s_: 'https://api.binance.com',
+            _binance_symbol_from_cache=lambda base: base + 'USDT', _BINANCE_SOURCES=('binance',), _binance_base_url=lambda s_: 'https://fapi.binance.com', _binance_scale_from_cache=lambda b_: 1,
             _source_available=lambda s_: True, _source_trip=lambda *a, **k: None, _source_fail=lambda s_: None, _source_ok=lambda s_: None,
             _status_trips_source=lambda st: False, Dict=dict, Any=object, _venue=lambda: henv['_v'], _v='binance',
             _bitunix_map_needs_refresh=lambda: False, _bitunix_refresh_symbol_map=lambda: None, _bitunix_symbol_from_cache=lambda base: base + 'USDT', _bitunix_resolve=lambda base: (base + 'USDT', 1), _bitunix_unscale_df=lambda df, sc: df, _bitunix_get=fake_bx_get,
@@ -137,10 +137,10 @@ print('4 historical range per venue ok')
 
 # ---------------------------------------------------------------- ۵) لینک TradingView
 ta = src.index("def tradingview_symbol(symbol, chat_id=None):"); tb = src.index("def tradingview_chart_url(symbol, timeframe='5min', chat_id=None):")
-tv = dict(env); tv.update(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), _bitunix_scale=lambda b: 1, TRADINGVIEW_EXCHANGE='', TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
+tv = dict(env); tv.update(_base_asset=lambda sy: str(sy).upper().replace('USDT', ''), _bitunix_scale=lambda b: 1, _binance_symbol_from_cache=lambda b: b + 'USDT', TRADINGVIEW_EXCHANGE='', TV_EXCHANGE_MAP={'bitunix': 'BITUNIX', 'binance': 'BINANCE', 'binancevision': 'BINANCE'})
 exec(src[ta:tb], tv)
-assert tv['tradingview_symbol']('SOL', 1) == 'BINANCE:SOLUSDT'            # PAPER
-assert tv['tradingview_symbol']('SOL', 3) == 'BINANCE:SOLUSDT'            # REAL + Binance
+assert tv['tradingview_symbol']('SOL', 1) == 'BINANCE:SOLUSDT.P'          # PAPER (V3.44.120: فیوچرز)
+assert tv['tradingview_symbol']('SOL', 3) == 'BINANCE:SOLUSDT.P'          # REAL + Binance
 assert tv['tradingview_symbol']('SOL', 2) == 'BITUNIX:SOLUSDT.P'          # REAL + Bitunix
 tok = env['_DATA_VENUE_CTX'].set('bitunix'); assert tv['tradingview_symbol']('SOL') == 'BITUNIX:SOLUSDT.P'; env['_DATA_VENUE_CTX'].reset(tok)
 print('5 tradingview symbol ok')
