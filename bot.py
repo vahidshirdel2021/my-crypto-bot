@@ -2449,6 +2449,21 @@ _DATA_SOURCE_USED = {}      # base -> منبعی که آخرین کندل موف
 _DATA_NOTES = {}            # base -> آخرین دلایل شکست به تفکیک منبع (در گزارش «داده بازار خالی» می‌آید)
 _BINANCE_SYMBOLS = {'map': {}, 'scale': {}, 'ts': 0.0, 'next_try': 0.0}
 _BINANCE_REFRESH_LOCK = RLock()
+# V3.44.121: حلقه‌ی آخرین رویدادهای شبکه‌ی منابع داده (exception واقعی، کد HTTP، trip) برای /binance_health؛ فقط در حافظه.
+from collections import deque as _deque
+_NET_EVENTS = _deque(maxlen=120)
+
+
+def _net_event(kind, source, where='', symbol='', exc=None, status=None, **extra):
+    try:
+        ev = {'ts': round(time.time(), 3), 'kind': kind, 'source': source, 'where': where, 'symbol': str(symbol or ''),
+              'status': status, 'thread': threading.current_thread().name}
+        if exc is not None:
+            ev['exc'] = type(exc).__name__; ev['msg'] = str(exc)[:200]
+        ev.update(extra)
+        _NET_EVENTS.append(ev)
+    except Exception:
+        pass
 _BINANCE_SOURCES = ('binance',)   # V3.44.120: آینه‌ی binancevision فقط اسپات است و کنار گذاشته شد (fallback اسپات سطوح را جابه‌جا می‌کند)
 
 # ===================== V3.44.98: صرافیِ داده = صرافیِ حالت =====================
@@ -2552,6 +2567,7 @@ def _source_available(source):
 
 def _source_trip(source, seconds=None):
     seconds = SOURCE_COOLDOWN_SECONDS if seconds is None else seconds
+    _net_event('trip', source, seconds=seconds)      # V3.44.121
     _SOURCE_DOWN_UNTIL[source] = time.time() + seconds
     _SOURCE_FAILS[source] = 0
     logger.warning('market data source %s temporarily disabled for %ss', source, seconds)
@@ -2636,6 +2652,7 @@ def _binance_refresh_symbol_map():
             try:
                 r = requests.get(f'{_binance_base_url(source)}/fapi/v1/exchangeInfo', timeout=12)
                 if _status_trips_source(r.status_code):
+                    _net_event('http', source, 'exchangeInfo', status=r.status_code)      # V3.44.121
                     _source_trip(source); continue
                 if r.ok:
                     _payload = r.json()
@@ -2646,6 +2663,7 @@ def _binance_refresh_symbol_map():
                         return
             except Exception as exc:
                 logger.debug('%s exchangeInfo: %s', source, exc)
+                _net_event('fail', source, 'exchangeInfo', exc=exc)      # V3.44.121
                 _source_fail(source)
         _BINANCE_SYMBOLS['next_try'] = time.time() + 60
 
@@ -2975,12 +2993,13 @@ def get_klines(symbol, tf='5min', limit=200):
                 r = requests.get(url, params=params, timeout=7)
                 status = r.status_code
                 if _status_trips_source(status):
+                    _net_event('http', source, 'get_klines', symbol, status=status)      # V3.44.121
                     _source_trip(source); notes.append(f'{source}:http_{status}'); continue
                 payload = r.json() if r.ok else None
                 df = parse(payload) if r.ok else pd.DataFrame()
                 _source_ok(source)
             except Exception as exc:
-                logger.debug('%s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+                logger.debug('%s kline %s: %s', source, symbol, exc); _net_event('fail', source, 'get_klines', symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
         if _klines_usable(df):
             df = df.tail(max(int(limit), 60)).reset_index(drop=True)
             with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
@@ -3041,12 +3060,13 @@ async def get_klines_async(http, symbol, tf='5min', limit=200):
                     async with http.get(url, params=params, timeout=aiohttp.ClientTimeout(total=7)) as r:
                         status = r.status
                         if _status_trips_source(status):
+                            _net_event('http', source, 'get_klines_async', symbol, status=status)      # V3.44.121
                             _source_trip(source); notes.append(f'{source}:http_{status}'); continue
                         payload = await r.json(content_type=None) if status == 200 else None
                         df = parse(payload) if status == 200 else pd.DataFrame()
                     _source_ok(source)
                 except Exception as exc:
-                    logger.debug('async %s kline %s: %s', source, symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
+                    logger.debug('async %s kline %s: %s', source, symbol, exc); _net_event('fail', source, 'get_klines_async', symbol, exc); _source_fail(source); notes.append(f'{source}:network_error'); continue
             if _klines_usable(df):
                 df = df.tail(max(int(limit), 60)).reset_index(drop=True)
                 with DATA_LOCK: DATA_CACHE[key] = {'ts': now, 'df': df.copy()}
@@ -6069,7 +6089,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.120'
+BOT_VERSION = '3.44.121'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7294,9 +7314,11 @@ def _binance_hist_range_sync(symbol):
                                  params={'symbol': sym, 'interval': interval, 'limit': 1000}, timeout=10)
             except Exception as exc:
                 logger.debug('%s hist range %s: %s', source, symbol, exc)
+                _net_event('fail', source, 'hist_range', symbol, exc)      # V3.44.121
                 _source_fail(source)
                 break
             if _status_trips_source(r.status_code):
+                _net_event('http', source, 'hist_range', symbol, status=r.status_code)      # V3.44.121
                 _source_trip(source)
                 break
             if not r.ok:
@@ -7473,6 +7495,50 @@ def realized_history_value(chat_id,symbol,opened_at):
 
 def is_admin(chat_id):
     return int(chat_id) in ADMIN_CHAT_IDS
+
+
+# ===== V3.44.121: سلامت‌سنجی مسیر داده‌ی Binance Futures از داخل ربات (فقط ادمین: /binance_health) =====
+def _binance_health_state():
+    """عکس لحظه‌ای وضعیت درونی منابع داده (قابل JSON)."""
+    now = time.time(); srcs = {}
+    for src_ in sorted(set(list(_SOURCE_DOWN_UNTIL) + list(_SOURCE_FAILS) + ['binance', 'bitunix'])):
+        du = _SOURCE_DOWN_UNTIL.get(src_, 0.0)
+        srcs[src_] = {'down_remaining_s': max(0, round(du - now, 1)), 'fails': _SOURCE_FAILS.get(src_, 0)}
+    m = _BINANCE_SYMBOLS
+    miss = [k for k, v in _SYMBOL_MISS_UNTIL.items() if v > now]
+    notes = {k: v for k, v in list(_DATA_NOTES.items())[:25]}
+    return {
+        'now': int(now), 'sources': srcs, 'cooldown_s': SOURCE_COOLDOWN_SECONDS,
+        'binance_symbol_map': {'size': len(m.get('map') or {}), 'age_s': round(now - m.get('ts', 0.0), 1) if m.get('ts') else None,
+                               'next_try_in_s': max(0, round(m.get('next_try', 0.0) - now, 1))},
+        'missing_symbols_active': {'count': len(miss), 'sample': [f'{a}:{b}' for a, b in miss[:15]]},
+        'data_notes_sample': notes,
+        'data_cache_entries': len(DATA_CACHE),
+        'net_events': list(_NET_EVENTS)[-60:],
+        'net_events_total': len(_NET_EVENTS),
+    }
+
+
+def _run_binance_health_and_send(chat_id):
+    try:
+        import binance_health
+        ctx = {'requests': requests, 'base_url': BINANCE_FUTURES, 'bot_version': BOT_VERSION,
+               'kline_request': _kline_request, 'parse_exchange_info': _parse_binance_exchange_info,
+               'get_klines': get_klines, 'failure_notes': data_failure_notes, 'state_fn': _binance_health_state,
+               'max_async': MAX_ASYNC_REQUESTS}
+        rep = binance_health.run(ctx)
+        data = binance_health.to_json_bytes(rep)
+        name = f'binance_health_{time.strftime("%Y-%m-%d_%H-%M-%S", time.gmtime())}.json'
+        cap = '🩺 سلامت مسیر داده‌ی Binance Futures\n' + '\n'.join('• ' + x for x in rep.get('verdict', [])[:6])
+        requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
+                      data={'chat_id': chat_id, 'caption': cap[:1000]},
+                      files={'document': (name, io.BytesIO(data), 'application/json')}, timeout=60)
+    except Exception as exc:
+        logger.exception('binance_health failed')
+        try:
+            send_message(chat_id, f'❌ خطا در سلامت‌سنجی: {exc}', parse_mode=None)
+        except Exception:
+            pass
 
 # ===== V3.44.51: اجرای تست‌ها از داخل ربات (فقط ادمین) =====
 ADMIN_TESTS_TIMEOUT_SEC = 180
@@ -17832,6 +17898,12 @@ def process_command(cmd,chat_id,message_id=None):
                                   f"{presets_mod._fa(_ns)} کاربر روی این کلید خودکار به‌روز شدند.{_own}", presets_mod.keyboard(s))
         else:
             send_message(chat_id, 'این کلید نسخه‌ی ذخیره‌شده ندارد.', presets_mod.keyboard(s))
+        return
+    if cl == '/binance_health':      # V3.44.121
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        send_message(chat_id, '⏳ سلامت‌سنجی مسیر Binance Futures شروع شد؛ حدود ۳۰ تا ۶۰ ثانیه بعد فایل JSON ارسال می‌شود.', presets_mod.keyboard(s))
+        Thread(target=_run_binance_health_and_send, args=(chat_id,), daemon=True, name='binance-health').start()
         return
     if cl in ('/funnel_report', '/funnel_export') or cl.startswith('/funnel_report_'):      # V3.44.72
         if not is_admin(chat_id):

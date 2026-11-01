@@ -46,7 +46,7 @@ g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, pd=pd, math=math, time=ti
          _BINANCE_SOURCES=('binance',),      # V3.44.120: فقط فیوچرز (بدون آینه‌ی اسپات)
          _binance_base_url=lambda s: 'https://fapi.binance.com',
          _binance_scale_from_cache=lambda base: state['scale'].get(base, 1),
-         _source_available=lambda s: s not in state['down'], _source_trip=trip, _source_fail=lambda s: None, _source_ok=lambda s: None,
+         _source_available=lambda s: s not in state['down'], _source_trip=trip, _source_fail=lambda s: None, _source_ok=lambda s: None, _net_event=lambda *a, **k: None,
          _status_trips_source=lambda st: st in (403, 418, 429, 451) or st >= 500,
          os=os, json=json, Dict=dict, Any=object)
 def old_klines(sym, tf, lim):
