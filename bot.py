@@ -2496,7 +2496,8 @@ def _net_event(kind, source, where='', symbol='', exc=None, status=None, **extra
 _BINANCE_SOURCES = ('binance',)   # V3.44.120: آینه‌ی binancevision فقط اسپات است و کنار گذاشته شد (fallback اسپات سطوح را جابه‌جا می‌کند)
 
 # ===================== V3.44.98: صرافیِ داده = صرافیِ حالت =====================
-# V3.44.108: هم PAPER و هم REAL: همه‌ی داده (کندل، قیمت، سطوح تاریخی سقف/کف، PDH/PDL)، معامله و چارت TradingView از صرافیِ انتخابیِ کاربر
+# V3.44.123: داده (کندل، قیمت، سطوح تاریخی، رژیم، چارت TradingView) همیشه از Binance Futures؛ معامله‌ی PAPER و REAL روی صرافیِ انتخابیِ کاربر (trade_venue_for)
+# (قبلاً V3.44.108: داده هم از صرافیِ انتخابیِ کاربر بود)
 # (PAPER: paper_exchange که اولِ ویزارد انتخاب می‌شود؛ REAL: real_exchange)؛ هیچ fallback‌ی بین دو صرافی نیست.
 VENUE_SOURCES = {'binance': ('binance',), 'bitunix': ('bitunix',)}
 _DATA_VENUE_CTX = contextvars.ContextVar('data_venue', default='binance')
@@ -2517,8 +2518,11 @@ def _tfk(tf):
     return tf if v == 'binance' else f'{tf}@{v}'
 
 
-def _session_venue(s):
-    """از روی خودِ session: REAL → real_exchange کاربر؛ PAPER → paper_exchange کاربر (V3.44.108؛ پیش‌فرض binance)."""
+DATA_VENUE = 'binance'     # V3.44.123: «داده» (کندل، قیمت، سطوح تاریخی، رژیم، چارت) برای همه‌ی کاربران و هر دو صرافی فقط از Binance Futures می‌آید
+
+
+def _session_trade_venue(s):
+    """V3.44.123: صرافیِ *معامله* از روی session: REAL → real_exchange؛ PAPER → paper_exchange (پیش‌فرض binance). فقط برای معامله/کارمزد/قوانین صرافی؛ داده همیشه Binance است."""
     try:
         if isinstance(s, dict):
             key = 'real_exchange' if s.get('trading_mode') == 'REAL' else 'paper_exchange'
@@ -2529,12 +2533,22 @@ def _session_venue(s):
     return 'binance'
 
 
-def data_venue_for(chat_id):
-    """صرافیِ انتخابیِ کاربر ('binance' | 'bitunix')؛ در PAPER از paper_exchange و در REAL از real_exchange."""
+def trade_venue_for(chat_id):
+    """V3.44.123: صرافیِ معاملاتیِ کاربر ('binance' | 'bitunix') — کاغذی روی paper_exchange و واقعی روی real_exchange."""
     try:
-        return _session_venue(USER_SESSIONS.get(chat_id))
+        return _session_trade_venue(USER_SESSIONS.get(chat_id))
     except Exception:
         return 'binance'
+
+
+def _session_venue(s):
+    """V3.44.123: صرافیِ *داده*: همیشه Binance (صرافیِ معامله‌ی کاربر روی داده اثری ندارد)."""
+    return DATA_VENUE
+
+
+def data_venue_for(chat_id):
+    """V3.44.123: صرافیِ *داده* برای این کاربر: همیشه Binance؛ صرافیِ معامله را trade_venue_for(chat_id) می‌دهد."""
+    return DATA_VENUE
 
 
 def _with_data_venue(fn, kind, idx):
@@ -2573,7 +2587,7 @@ def _install_data_venue_wrappers():
     g = globals(); n = 0
     for name, fn in list(g.items()):
         if name.startswith('__') or not inspect.isfunction(fn) or fn.__module__ != __name__: continue
-        if getattr(fn, '_venue_wrapped', False) or name in ('_with_data_venue', '_install_data_venue_wrappers', 'data_venue_for', '_session_venue', '_venue', '_sources_now'):
+        if getattr(fn, '_venue_wrapped', False) or name in ('_with_data_venue', '_install_data_venue_wrappers', 'data_venue_for', '_session_venue', '_venue', '_sources_now', 'trade_venue_for', '_session_trade_venue'):
             continue
         if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn): continue
         params = list(fn.__code__.co_varnames[:fn.__code__.co_argcount])
@@ -6184,7 +6198,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.122'
+BOT_VERSION = '3.44.123'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16245,7 +16259,7 @@ def paper_exchange_keyboard(chat_id):
 
 
 def paper_exchange_text(chat_id):
-    return '📄 *حساب کاغذی*\n\nرباتِ کاغذی با داده‌ی کدام صرافی کار کند؟'
+    return '📄 *حساب کاغذی*\n\nرباتِ کاغذی روی کدام صرافی معامله کند؟'
 
 
 def real_start_picker(chat_id, message_id=None):

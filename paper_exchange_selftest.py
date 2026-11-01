@@ -27,12 +27,12 @@ for cid in (222, 111):
     out.clear(); bot.process_command('/paper_pick_bitunix', cid)
     t, m = out[-1]
     assert s['paper_exchange'] == 'bitunix' and s['trading_mode'] == 'PAPER' and '/set_bal_1000' in cbs(m), (s['paper_exchange'], cbs(m))
-    assert bot.data_venue_for(cid) == 'bitunix'
-    assert bot.tradingview_symbol('BTCUSDT', cid).startswith('BITUNIX:') and bot.tradingview_symbol('BTCUSDT', cid).endswith('.P')
+    assert bot.trade_venue_for(cid) == 'bitunix' and bot.data_venue_for(cid) == 'binance'     # V3.44.123: معامله روی Bitunix، داده/چارت از Binance
+    assert bot.tradingview_symbol('BTCUSDT', cid).startswith('BINANCE:') and bot.tradingview_symbol('BTCUSDT', cid).endswith('.P')
     out.clear(); bot.process_command('/set_bal_500', cid)
     assert '/paper_bal' in cbs(out[-1][1])                              # «بازگشت» از مبلغ → صفحه‌ی موجودی (نه انتخاب صرافی)
     out.clear(); bot.process_command('/paper_pick_binance', cid)
-    assert s['paper_exchange'] == 'binance' and bot.data_venue_for(cid) == 'binance'
+    assert s['paper_exchange'] == 'binance' and bot.trade_venue_for(cid) == 'binance' and bot.data_venue_for(cid) == 'binance'
     assert bot.tradingview_symbol('BTCUSDT', cid).startswith('BINANCE:')
     # با پوزیشن باز نمی‌شود صرافی را عوض کرد
     s['paper_positions'] = {'X': {}}

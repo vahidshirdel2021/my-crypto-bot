@@ -21,7 +21,10 @@ SESS = {1: {'trading_mode': 'PAPER', 'real_exchange': 'bitunix'},      # PAPER �
 env = dict(contextvars=contextvars, USER_SESSIONS=SESS, inspect=inspect, functools=functools)
 exec(src[a:b], env)
 dv = env['data_venue_for']
-assert [dv(c) for c in (1, 2, 3, 4, 5, 999, None, 6, 7, 8)] == ['binance', 'bitunix', 'binance', 'binance', 'binance', 'binance', 'binance', 'bitunix', 'binance', 'binance']
+# V3.44.123: «داده» همیشه Binance است؛ صرافیِ معامله جداست (trade_venue_for)
+assert [dv(c) for c in (1, 2, 3, 4, 5, 999, None, 6, 7, 8)] == ['binance'] * 10
+tv = env['trade_venue_for']
+assert [tv(c) for c in (1, 2, 3, 4, 5, 999, None, 6, 7, 8)] == ['binance', 'bitunix', 'binance', 'binance', 'binance', 'binance', 'binance', 'bitunix', 'binance', 'binance']
 assert env['VENUE_SOURCES']['bitunix'] == ('bitunix',) and 'bitunix' not in env['VENUE_SOURCES']['binance'] and 'binance' not in env['VENUE_SOURCES']['bitunix']
 print('1 venue by mode ok')
 
@@ -43,11 +46,11 @@ n = env['_install_data_venue_wrappers']()
 assert n == 5, n   # f_chat, f_sess, f_rec, f_async, f_nested
 for name in ('f_chat', 'f_sess', 'f_rec', 'f_async', 'f_nested'): assert getattr(env[name], '_venue_wrapped', False), name
 assert not getattr(env['f_none'], '_venue_wrapped', False) and not getattr(env['f_gen'], '_venue_wrapped', False)
-assert env['f_chat'](0, 2) == 'bitunix' and env['f_chat'](0, chat_id=3) == 'binance' and env['f_chat'](0, 1) == 'binance'
-assert env['f_sess'](SESS[2]) == 'bitunix' and env['f_sess'](SESS[1]) == 'binance' and env['f_sess']('not-a-dict') == 'binance'
-assert env['f_rec']({'chat_id': 2}) == 'bitunix' and env['f_rec']({'chat_id': 1}) == 'binance' and env['f_rec']({'x': 1}) == 'binance'
-assert asyncio.run(env['f_async'](None, 2)) == 'bitunix' and asyncio.run(env['f_async'](None, 3)) == 'binance'
-assert env['f_nested'](2) == 'bitunix'                      # فراخوانی‌های داخلی همان صرافی را به ارث می‌برند
+assert env['f_chat'](0, 2) == 'binance' and env['f_chat'](0, chat_id=3) == 'binance' and env['f_chat'](0, 1) == 'binance'
+assert env['f_sess'](SESS[2]) == 'binance' and env['f_sess'](SESS[1]) == 'binance' and env['f_sess']('not-a-dict') == 'binance'
+assert env['f_rec']({'chat_id': 2}) == 'binance' and env['f_rec']({'chat_id': 1}) == 'binance' and env['f_rec']({'x': 1}) == 'binance'
+assert asyncio.run(env['f_async'](None, 2)) == 'binance' and asyncio.run(env['f_async'](None, 3)) == 'binance'
+assert env['f_nested'](2) == 'binance'                      # فراخوانی‌های داخلی همان صرافی را به ارث می‌برند
 assert env['f_none'](0) == 'binance'                        # بیرون از هر زمینه → Binance
 # بعد از خروج زمینه برمی‌گردد
 env['f_chat'](0, 2); assert env['_venue']() == 'binance'
@@ -141,7 +144,7 @@ tv = dict(env); tv.update(_base_asset=lambda sy: str(sy).upper().replace('USDT',
 exec(src[ta:tb], tv)
 assert tv['tradingview_symbol']('SOL', 1) == 'BINANCE:SOLUSDT.P'          # PAPER (V3.44.120: فیوچرز)
 assert tv['tradingview_symbol']('SOL', 3) == 'BINANCE:SOLUSDT.P'          # REAL + Binance
-assert tv['tradingview_symbol']('SOL', 2) == 'BITUNIX:SOLUSDT.P'          # REAL + Bitunix
+assert tv['tradingview_symbol']('SOL', 2) == 'BINANCE:SOLUSDT.P'          # REAL + Bitunix: V3.44.123 داده/چارت همیشه Binance
 tok = env['_DATA_VENUE_CTX'].set('bitunix'); assert tv['tradingview_symbol']('SOL') == 'BITUNIX:SOLUSDT.P'; env['_DATA_VENUE_CTX'].reset(tok)
 print('5 tradingview symbol ok')
 
