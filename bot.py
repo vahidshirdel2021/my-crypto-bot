@@ -15994,6 +15994,7 @@ def _bt_period_keyboard():
 def _bt_run_keyboard():
     return {'inline_keyboard': [
         [{'text': '▶️ خروجی (اجرا با پریست فعال)', 'callback_data': '/bt_run'}],
+        [{'text': '📄 ارسال فایل CSV داده', 'callback_data': '/bt_csv'}],
         [{'text': '📅 دوره‌ی دیگر', 'callback_data': '/bt_periods'}, {'text': '🔁 نماد دیگر', 'callback_data': '/backtest_start'}],
         [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}
 
@@ -16034,6 +16035,37 @@ def _bt_meta(s):
     return None
 
 
+def _bt_send_csv(chat_id):
+    """V3.44.128: فایل CSV داده‌ی نگه‌داری‌شده‌ی همین کاربر را به‌صورت سند در تلگرام می‌فرستد (فایل روی سرور هم می‌ماند)."""
+    s = get_session(chat_id)
+    m = _bt_meta(s)
+    if not m:
+        send_message(chat_id, 'داده‌ای نگه‌داری نشده؛ اول نماد و دوره را انتخاب و دانلود کنید.', parse_mode=None)
+        return False
+    try:
+        path = m['path']
+        size = os.path.getsize(path)
+        if size > 49 * 1024 * 1024:
+            send_message(chat_id, f'⚠️ فایل برای ارسال در تلگرام بزرگ است ({size // (1024 * 1024)}MB). روی سرور اینجاست:\n{path}', parse_mode=None)
+            return False
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        cap = (f"📄 داده‌ی بک‌تست {m.get('base')} | {TF_DISPLAY.get(m.get('tf'), m.get('tf'))} | "
+               f"{int(m.get('candles') or 0):,} کندل | {int(m.get('days') or 0)} روز")
+        resp = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument',
+                             data={'chat_id': chat_id, 'caption': cap},
+                             files={'document': (os.path.basename(path), io.BytesIO(raw), 'text/csv')}, timeout=120)
+        if not resp.ok or not (resp.json() or {}).get('ok', False):
+            logger.warning('backtest csv telegram send failed: %s', resp.text[:500])
+            send_message(chat_id, '⚠️ ارسال فایل CSV ناموفق بود؛ فایل روی سرور ذخیره است.', parse_mode=None)
+            return False
+        return True
+    except Exception:
+        logger.exception('backtest csv send failed')
+        send_message(chat_id, '⚠️ ارسال فایل CSV ناموفق بود؛ فایل روی سرور ذخیره است.', parse_mode=None)
+        return False
+
+
 def _bt_download_worker(chat_id, base, days):
     try:
         s = get_session(chat_id)
@@ -16067,6 +16099,7 @@ def _bt_download_worker(chat_id, base, days):
                f'{len(df):,} کندل (با {int(warm_ms // 86_400_000)} روز گرم‌شدن قبل از شروع)\n'
                f'برای اجرا با پریست/تنظیمات فعلی روی همین داده، «▶️ خروجی» را بزنید.')
         send_message(chat_id, msg, _bt_run_keyboard(), parse_mode=None)
+        _bt_send_csv(chat_id)                                   # V3.44.128: فایل CSV در تلگرام هم فرستاده می‌شود
     except Exception as exc:
         logger.exception('backtest download failed')
         send_message(chat_id, f'❌ دانلود ناموفق: {exc}', _bt_period_keyboard() if s_has_pending(chat_id) else None, parse_mode=None)
@@ -16210,7 +16243,7 @@ def _bt_guard(chat_id):
 
 
 def handle_bt_command(cmd, chat_id):
-    """/bt_p_<days> | /bt_run | /bt_periods"""
+    """/bt_p_<days> | /bt_run | /bt_periods | /bt_csv"""
     s = get_session(chat_id)
     if not is_admin(chat_id):
         send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s), parse_mode=None); return
@@ -16231,6 +16264,8 @@ def handle_bt_command(cmd, chat_id):
         send_message(chat_id, f'⏳ در حال دانلود {_BT_PERIODS[days]} داده‌ی {base} از Binance Futures…', parse_mode=None)
         Thread(target=_bt_download_worker, args=(chat_id, base, days), daemon=True, name='bt-download').start()
         return
+    if cmd == '/bt_csv':
+        _bt_send_csv(chat_id); return
     if cmd == '/bt_run':
         if not _bt_meta(s):
             send_message(chat_id, 'داده‌ای نگه‌داری نشده؛ اول نماد و دوره را انتخاب کنید.', parse_mode=None)
@@ -17425,7 +17460,7 @@ def process_command(cmd,chat_id,message_id=None):
         if not is_admin(chat_id):
             send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(get_session(chat_id)), parse_mode=None); return
         start_backtest_flow(chat_id); return
-    if str(cmd) in ('/bt_run', '/bt_periods') or re.match(r'^/bt_p_\d+$', str(cmd)):      # V3.44.126
+    if str(cmd) in ('/bt_run', '/bt_periods', '/bt_csv') or re.match(r'^/bt_p_\d+$', str(cmd)):      # V3.44.126
         handle_bt_command(str(cmd), chat_id); return
     # V3.44.89: سطوح نماد (سقف/کف تاریخی از Binance + سطوح نصف‌کردن)
     if cmd == '/levels_start':
