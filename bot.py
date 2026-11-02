@@ -32,7 +32,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from flask import Flask, request
 
-from backtest import run_backtest, fetch_ohlcv_binance
+# V3.44.126: جریان قدیمی بک‌تست (backtest.py) حذف شد؛ همه‌ی مسیرها با inbot_backtest کار می‌کنند
 
 from strategy import (
     FILTER_DEFAULTS, STRATEGY_DEFAULTS, calculate_indicators, get_signal_with_reason,
@@ -2163,7 +2163,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 _NEW_MESSAGE_PREFIXES = (
     '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
-    '/lv_', '/lvc_', '/an_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
+    '/lv_', '/lvc_', '/an_', '/bt_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
 
 
@@ -6224,7 +6224,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.124'
+BOT_VERSION = '3.44.127'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -15830,6 +15830,418 @@ def _journal_trades_for(chat_id, real=None):
         return []
 
 
+# ===================== V3.44.125: بک‌تست داخل ربات =====================
+# دکمه‌ی «🧪 بک‌تست BTC» (ادمین): ۶ ماه اول سال روی BTC، تایم‌فریم ۱۵ دقیقه، با تنظیمات فعلی همین کاربر
+# (کانفیگ استراتژی + مدل نصف‌کردن + مارجین/اهرم + تریلینگ). موتور: inbot_backtest.py (بدون نشت آینده).
+# فقط یک سطر نتیجه می‌فرستد. گیت‌های BTC/رأی‌گیری/صف تایید/فیلتر ساعت در این نسخه شبیه‌سازی نمی‌شوند.
+import inbot_backtest as _ibt
+import bt_btc_gates as _btg
+_BACKTEST_RUNNING = set()
+_BACKTEST_LOCK = threading.Lock()
+_BACKTEST_WARMUP_DAYS = 10          # >= ۷۰۰ کندل ۱۵دقیقه برای گرم‌شدن اندیکاتورها و درخت سطوح
+
+
+def _backtest_cache_path(symbol, tf, start_ms, end_ms):
+    d = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'backtest_cache')
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f'{_base_asset(symbol)}_{tf}_{int(start_ms)}_{int(end_ms)}.csv')
+
+
+def _backtest_fetch_history(symbol, tf, start_ms, end_ms):
+    """کندل‌های تاریخی Binance Futures با صفحه‌بندی (۱۰۰۰ تایی). بازه‌ی کاملِ گذشته روی دیسک کش می‌شود."""
+    now_ms = int(time.time() * 1000)
+    cache = _backtest_cache_path(symbol, tf, start_ms, end_ms)
+    if end_ms <= now_ms and os.path.exists(cache):
+        try:
+            c = pd.read_csv(cache)
+            if len(c) > 100:
+                return c
+        except Exception:
+            pass
+    if _binance_map_needs_refresh():
+        _binance_refresh_symbol_map()
+    req = _kline_request('binance', symbol, tf, 1000)
+    if not req:
+        raise RuntimeError('نماد یا تایم‌فریم در Binance Futures پیدا نشد')
+    url, params, parse = req
+    tf_ms = _ibt.TF_MS.get(tf, 900_000)
+    frames, cur = [], int(start_ms)
+    while cur < end_ms:
+        q = dict(params); q.update({'startTime': cur, 'endTime': int(end_ms), 'limit': 1000})
+        last_err = None
+        for attempt in range(4):
+            try:
+                r = requests.get(url, params=q, timeout=15)
+                if not r.ok:
+                    raise RuntimeError(f'HTTP {r.status_code}')
+                part = parse(r.json())
+                last_err = None
+                break
+            except Exception as exc:
+                last_err = exc
+                time.sleep(1.5 * (attempt + 1))
+        if last_err is not None:
+            raise RuntimeError(f'دریافت داده‌ی تاریخی Binance ناموفق بود: {last_err}')
+        if part is None or part.empty:
+            break
+        frames.append(part)
+        last_ts = int(part['timestamp'].iloc[-1])
+        if last_ts < cur:
+            break
+        cur = last_ts + 1
+        if len(part) < 1000:
+            break
+        time.sleep(0.12)
+    if not frames:
+        raise RuntimeError('داده‌ی تاریخی دریافت نشد')
+    df = pd.concat(frames, ignore_index=True).drop_duplicates('timestamp').sort_values('timestamp').reset_index(drop=True)
+    df = df[(df['timestamp'] >= start_ms) & (df['timestamp'] + tf_ms <= min(end_ms, now_ms))].reset_index(drop=True)   # کندل ناقص حذف
+    if end_ms <= now_ms and len(df) > 100:
+        try:
+            df.to_csv(cache, index=False)
+        except Exception:
+            logger.debug('backtest cache write failed', exc_info=True)
+    return df
+
+
+def _backtest_parse_args(cl):
+    """/backtest_btc [YYYY-MM-DD YYYY-MM-DD] -> (start, end) UTC؛ پیش‌فرض ۶ ماه اول سال جاری."""
+    now = datetime.now(timezone.utc)
+    m = re.match(r'^/backtest_btc(?:\s+(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2}))?\s*$', (cl or '').strip())
+    if m and m.group(1):
+        a = datetime.strptime(m.group(1), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        b = datetime.strptime(m.group(2), '%Y-%m-%d').replace(tzinfo=timezone.utc)
+    else:
+        a = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+        b = datetime(now.year, 7, 1, tzinfo=timezone.utc)
+    if b > now:
+        b = now
+    if b <= a:
+        raise RuntimeError('بازه‌ی تاریخ نامعتبر است')
+    if (b - a).days > 400:
+        raise RuntimeError('حداکثر بازه‌ی مجاز ۴۰۰ روز است')
+    return a, b
+
+
+def run_inbot_backtest(chat_id, cl='/backtest_btc'):
+    """متن یک‌سطریِ نتیجه‌ی بک‌تست BTC/15m با تنظیمات فعلی این کاربر (بدون ارسال؛ برای ریسه‌ی پس‌زمینه)."""
+    s = get_session(chat_id)
+    symbol, tf = 'BTCUSDT', '15min'
+    a, b = _backtest_parse_args(cl)
+    warm_ms = _BACKTEST_WARMUP_DAYS * 86_400_000
+    a_ms, b_ms = int(a.timestamp() * 1000), int(b.timestamp() * 1000)
+    df = _backtest_fetch_history(symbol, tf, a_ms - warm_ms, b_ms)
+    if len(df) < 800:
+        raise RuntimeError('داده‌ی تاریخی کافی نیست')
+    cfg = copy.deepcopy(s['strategy_config'])
+    _halving_tf_apply(cfg, tf)
+    if cfg.get('halving_model_enabled'):
+        rng = get_halving_range_sync(symbol)
+        if not rng:
+            raise RuntimeError('سقف/کف تاریخی مدل نصف‌کردن برای BTC در دسترس نیست')
+        cfg = _with_halving_cfg(cfg, rng)
+    start_balance = float(s.get('paper_start_balance') or 1000.0)
+    res = _ibt.simulate(df, cfg, dict(s['filters']), tf, start_ms=a_ms, end_ms=b_ms,
+                        margin=float(s.get('trade_amount_usdt') or 50.0), leverage=float(s.get('leverage') or 5),
+                        fee_pct=TAKER_FEE_PCT, start_balance=start_balance,
+                        trail_enabled=bool(s.get('trail_enabled')), trail_profile=_trail_profile_key(s),
+                        trail_fn=_trail_step, max_seconds=1500)
+    return _ibt.one_line(res, 'BTC', '15m', a.strftime('%m-%d'), b.strftime('%m-%d'), start_balance,
+                         note=('با ترلینگ' if s.get('trail_enabled') else 'بدون ترلینگ') + ' · بدون گیت‌های BTC/رأی‌گیری')
+
+
+def _backtest_worker(chat_id, cl):
+    try:
+        line = run_inbot_backtest(chat_id, cl)
+    except Exception as exc:
+        logger.exception('inbot backtest failed')
+        line = f'❌ بک‌تست ناموفق: {exc}'
+    finally:
+        with _BACKTEST_LOCK:
+            _BACKTEST_RUNNING.discard(chat_id)
+    send_message(chat_id, line, presets_mod.keyboard(get_session(chat_id)), parse_mode=None)
+
+
+# ===================== V3.44.126: بک‌تست دکمه‌ای (نماد ← دوره ← دانلود و نگه‌داری ← خروجی) =====================
+# جریان: «🧪 بک‌تست» ← نام نماد (مثلاً ETH) ← دکمه‌ی دوره (۱/۳/۶ ماه، ۱ سال اخیر) ← داده از Binance Futures
+# دانلود و روی دیسک نگه داشته می‌شود (تا دانلود بعدی همان کاربر) ← دکمه‌ی «▶️ خروجی» همان داده را با تنظیمات/پریست
+# فعلی کاربر اجرا می‌کند و نتیجه را در چند سطر می‌فرستد. چون داده ثابت می‌ماند، می‌شود پریست‌ها را عوض کرد و
+# روی «دقیقاً همان داده» دوباره خروجی گرفت.
+_BT_PERIODS = {30: '۱ ماه', 90: '۳ ماه', 180: '۶ ماه', 365: '۱ سال'}
+_BT_TFS = ('5min', '15min', '1hour', '4hour')
+
+
+def _bt_dir():
+    d = os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'backtest_data')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _bt_clean_symbol(raw):
+    """'eth' / 'ETHUSDT' / 'ETH/USDT:USDT' -> 'ETH' (یا '' اگر نامعتبر)."""
+    t = str(raw or '').upper().replace('USDT', '')
+    return re.sub(r'[^A-Z0-9]', '', t)[:20]
+
+
+def _bt_period_keyboard():
+    rows = [[{'text': f'📅 {lbl}', 'callback_data': f'/bt_p_{d}'} for d, lbl in list(_BT_PERIODS.items())[:2]],
+            [{'text': f'📅 {lbl}', 'callback_data': f'/bt_p_{d}'} for d, lbl in list(_BT_PERIODS.items())[2:]],
+            [{'text': '🔁 نماد دیگر', 'callback_data': '/backtest_start'}],
+            [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]
+    return {'inline_keyboard': rows}
+
+
+def _bt_run_keyboard():
+    return {'inline_keyboard': [
+        [{'text': '▶️ خروجی (اجرا با پریست فعال)', 'callback_data': '/bt_run'}],
+        [{'text': '📅 دوره‌ی دیگر', 'callback_data': '/bt_periods'}, {'text': '🔁 نماد دیگر', 'callback_data': '/backtest_start'}],
+        [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}
+
+
+def start_backtest_flow(chat_id):
+    """قدم ۱: نام نماد را می‌پرسد (جایگزین جریان قدیمیِ «تست استراتژی»)."""
+    s = get_session(chat_id)
+    s['user_state'] = 'WAIT_BACKTEST_SYMBOL'
+    save_session(chat_id)
+    send_message(chat_id, '🧪 بک‌تست\n\nنام نماد را بفرستید (مثلاً ETH یا BTC):', parse_mode=None)
+
+
+def backtest_symbol_received(chat_id, raw):
+    """قدم ۲: نماد را بررسی می‌کند و دکمه‌های دوره را نشان می‌دهد."""
+    s = get_session(chat_id)
+    base = _bt_clean_symbol(raw)
+    if not base:
+        send_message(chat_id, '❌ نام نماد معتبر نیست. دوباره بفرستید (مثلاً ETH):', parse_mode=None); return
+    try:
+        if _binance_map_needs_refresh():
+            _binance_refresh_symbol_map()
+    except Exception:
+        logger.debug('bt symbol map refresh failed', exc_info=True)
+    if not _binance_symbol_from_cache(base):
+        send_message(chat_id, f'❌ نماد {base} در Binance Futures پیدا نشد. نام دیگری بفرستید:', parse_mode=None); return
+    s['user_state'] = None
+    s['bt_pending_symbol'] = base
+    save_session(chat_id)
+    tf = s.get('timeframe', '15min')
+    send_message(chat_id, f'🧪 نماد: {base} | تایم‌فریم فعال: {TF_DISPLAY.get(tf, tf)}\nدوره‌ی بررسی را انتخاب کنید:',
+                 _bt_period_keyboard(), parse_mode=None)
+
+
+def _bt_meta(s):
+    m = s.get('bt_data')
+    if isinstance(m, dict) and m.get('path') and os.path.exists(m['path']):
+        return m
+    return None
+
+
+def _bt_download_worker(chat_id, base, days):
+    try:
+        s = get_session(chat_id)
+        tf = s.get('timeframe', '15min')
+        if tf not in _BT_TFS:
+            raise RuntimeError(f'تایم‌فریم فعال ({tf}) برای بک‌تست پشتیبانی نمی‌شود؛ یکی از ۵م/۱۵م/۱س/۴س را فعال کنید.')
+        tf_ms = _ibt.TF_MS[tf]
+        now_ms = int(time.time() * 1000)
+        end_ms = (now_ms // tf_ms) * tf_ms                       # فقط کندل‌های بسته‌شده
+        start_ms = end_ms - int(days) * 86_400_000
+        warm_ms = max(_BACKTEST_WARMUP_DAYS * 86_400_000, (_ibt.WARMUP + 20) * tf_ms)      # V3.44.127: برای ۱س/۴س ده روز کافی نبود
+        df = _backtest_fetch_history(base + 'USDT', tf, start_ms - warm_ms, end_ms)
+        if len(df) < 800:
+            raise RuntimeError('داده‌ی تاریخی کافی نیست (نماد جدید است یا دوره خیلی کوتاه).')
+        # فایل قبلیِ همین کاربر جایگزین می‌شود
+        old = s.get('bt_data')
+        if isinstance(old, dict) and old.get('path'):
+            try:
+                os.remove(old['path'])
+            except OSError:
+                pass
+        path = os.path.join(_bt_dir(), f'{chat_id}_{base}_{tf}_{int(days)}d.csv')
+        df.to_csv(path, index=False)
+        s['bt_data'] = {'base': base, 'tf': tf, 'days': int(days), 'start_ms': int(start_ms), 'end_ms': int(end_ms),
+                        'path': path, 'candles': int(len(df)), 'saved_at': int(time.time()), 'warm_ms': int(warm_ms)}
+        save_session(chat_id)
+        a = datetime.fromtimestamp(start_ms / 1000, timezone.utc).strftime('%Y-%m-%d')
+        b = datetime.fromtimestamp(end_ms / 1000, timezone.utc).strftime('%Y-%m-%d')
+        msg = (f'✅ داده‌ی {base} دانلود و نگه‌داری شد\n'
+               f'دوره: {_BT_PERIODS.get(int(days), str(days) + " روز")} ({a} → {b}) | تایم‌فریم: {TF_DISPLAY.get(tf, tf)} | '
+               f'{len(df):,} کندل (با {int(warm_ms // 86_400_000)} روز گرم‌شدن قبل از شروع)\n'
+               f'برای اجرا با پریست/تنظیمات فعلی روی همین داده، «▶️ خروجی» را بزنید.')
+        send_message(chat_id, msg, _bt_run_keyboard(), parse_mode=None)
+    except Exception as exc:
+        logger.exception('backtest download failed')
+        send_message(chat_id, f'❌ دانلود ناموفق: {exc}', _bt_period_keyboard() if s_has_pending(chat_id) else None, parse_mode=None)
+    finally:
+        with _BACKTEST_LOCK:
+            _BACKTEST_RUNNING.discard(chat_id)
+
+
+def s_has_pending(chat_id):
+    return bool(get_session(chat_id).get('bt_pending_symbol'))
+
+
+_BT_GATE_FA = {'aligned': 'هم‌جهتی BTC/ETH', 'undecided': 'بلاتکلیفی BTC', 'chop': 'کلاف BTC دور سطح',
+               'front': 'سطح جلویی BTC', 'candle': 'کندل BTC', 'nodata': 'نبود داده‌ی BTC'}
+
+
+_BT_GATE_KEYS = {'aligned': 'gate_btceth_aligned_enabled', 'undecided': 'gate_btc_undecided_enabled', 'chop': 'gate_btc_chop_enabled',
+                 'front': 'gate_btc_front' + '_level_enabled', 'candle': 'gate_btc_candle_enabled'}
+
+
+def _bt_gate_flags(s):
+    return {name: bool(gate_on(s, key)) for name, key in _BT_GATE_KEYS.items()}
+
+
+def _bt_build_gates(s, cfg, tf, base, df, m):
+    """گیت‌های BTC کاربر را برای شبیه‌ساز می‌سازد؛ None اگر هیچ‌کدام روشن نیست. داده‌ی BTC/ETH هر دو با همان بازه‌ی دانلود می‌آید."""
+    flags = _bt_gate_flags(s)
+    if not any(flags.values()):
+        return None
+    warm = int(m.get('warm_ms') or _BACKTEST_WARMUP_DAYS * 86_400_000)
+
+    def ref(sym):
+        if sym == base:
+            return df
+        return _backtest_fetch_history(sym + 'USDT', tf, m['start_ms'] - warm, m['end_ms'])
+    need_btc = flags['undecided'] or flags['chop'] or flags['front'] or flags['candle'] or flags['aligned']
+    btc_df = ref('BTC') if need_btc else None
+    eth_df = ref('ETH') if flags['aligned'] else None
+    rng = None
+    if cfg.get('halving_model_enabled') and (flags['undecided'] or flags['chop'] or flags['front']):
+        rng = get_halving_range_sync('BTCUSDT')
+        if not rng:
+            raise RuntimeError('سقف/کف تاریخی مدل نصف‌کردن برای BTC (لازم برای گیت‌های BTC) در دسترس نیست')
+    try:
+        grid = _log_grid_levels_sync('BTC') if (flags['undecided'] or flags['chop'] or flags['front']) else []
+    except Exception:
+        grid = []
+    helpers = {'calculate_indicators': calculate_indicators, 'quick_levels': _quick_opposing_levels,
+               'with_halving_cfg': _with_halving_cfg, 'regime': regime_from_ind_df, 'defaults': STRATEGY_DEFAULTS,
+               'front_min_atr': BTC_FRONT_MIN_ATR, 'chop': (BTC_CHOP_FLIPS, BTC_CHOP_WINDOW, BTC_CHOP_CLEAR_CLOSES, BTC_CHOP_CLEAR_ATR),
+               'far_atr': BTC_UNDECIDED_FAR_ATR, 'far_gap': BTC_UNDECIDED_FAR_GAP, 'candle_min_body': BTC_CANDLE_MIN_BODY_PCT}
+    return _btg.BtcGates(btc_df, eth_df, cfg, flags, helpers, btc_halving_range=rng, grid_levels=grid)
+
+
+def _bt_gate_line(gates, res):
+    if gates is None:
+        return '₿ هیچ‌کدام از گیت‌های BTC/ETH در تنظیمات فعلی روشن نیست؛ بدون گیت اجرا شد.'
+    names = '، '.join(_BT_GATE_FA[k] for k in gates.active)
+    gb = (res.get('stats') or {}).get('gate_blocked') or {}
+    tot = sum(gb.values())
+    sigs = (res.get('stats') or {}).get('signals', 0)
+    det = ' | '.join(f"{_BT_GATE_FA.get(k, k)} {v}" for k, v in sorted(gb.items(), key=lambda kv: -kv[1])) if gb else ''
+    return f"₿ گیت‌های BTC فعال: {names} | رد شده: {tot} از {sigs} سیگنال" + (f' ({det})' if det else '')
+
+
+def _bt_extra_line(res, s, tf, truncated_note=''):
+    tl = res.get('trade_list') or []
+    st = res.get('stats') or {}
+    act = s.get('active_preset')
+    pre = presets_mod.PRESETS.get(act, {}).get('label') if act else None
+    parts = [f"پریست: {('کلید ' + str(act) + ' — ' + pre) if pre else 'تنظیمات دستی/بدون کلید'}",
+             'با ترلینگ' if s.get('trail_enabled') else 'بدون ترلینگ']
+    if tl:
+        w = [t['pnl'] for t in tl if t['pnl'] > 0]
+        l = [t['pnl'] for t in tl if t['pnl'] <= 0]
+        if w:
+            parts.append(f'میانگین سود {sum(w) / len(w):+.2f}$')
+        if l:
+            parts.append(f'میانگین ضرر {sum(l) / len(l):+.2f}$')
+        parts.append(f'بهترین {max(t["pnl"] for t in tl):+.2f}$ / بدترین {min(t["pnl"] for t in tl):+.2f}$')
+    parts.append(f"سیگنال {st.get('signals', 0)} (پلن ناموفق {st.get('plan_failed', 0)})")
+    return ' | '.join(parts)
+
+
+def _bt_run_worker(chat_id):
+    try:
+        s = get_session(chat_id)
+        m = _bt_meta(s)
+        if not m:
+            raise RuntimeError('داده‌ای نگه‌داری نشده؛ اول نماد و دوره را انتخاب و دانلود کنید.')
+        tf, base = m['tf'], m['base']
+        if s.get('timeframe') != tf:
+            raise RuntimeError(f'داده با تایم‌فریم {TF_DISPLAY.get(tf, tf)} دانلود شده ولی تایم‌فریم فعال الان '
+                               f'{TF_DISPLAY.get(s.get("timeframe"), s.get("timeframe"))} است؛ نتیجه گمراه‌کننده می‌شد. '
+                               f'تایم‌فریم را برگردانید یا دوباره دانلود کنید.')
+        df = pd.read_csv(m['path'])
+        if len(df) < 800:
+            raise RuntimeError('فایل داده‌ی نگه‌داری‌شده ناقص است؛ دوباره دانلود کنید.')
+        cfg = copy.deepcopy(s['strategy_config'])
+        _halving_tf_apply(cfg, tf)
+        if cfg.get('halving_model_enabled'):
+            rng = get_halving_range_sync(base + 'USDT')
+            if not rng:
+                raise RuntimeError(f'سقف/کف تاریخی مدل نصف‌کردن برای {base} در دسترس نیست')
+            cfg = _with_halving_cfg(cfg, rng)
+        start_balance = float(s.get('paper_start_balance') or 1000.0)
+        gates = _bt_build_gates(s, cfg, tf, base, df, m)          # V3.44.127
+        res = _ibt.simulate(df, cfg, dict(s['filters']), tf, start_ms=m['start_ms'], end_ms=m['end_ms'],
+                            margin=float(s.get('trade_amount_usdt') or 50.0), leverage=float(s.get('leverage') or 5),
+                            fee_pct=TAKER_FEE_PCT, start_balance=start_balance,
+                            trail_enabled=bool(s.get('trail_enabled')), trail_profile=_trail_profile_key(s),
+                            trail_fn=_trail_step, max_seconds=1500,
+                            entry_gate=(gates.check if gates is not None else None))
+        a = datetime.fromtimestamp(m['start_ms'] / 1000, timezone.utc).strftime('%m-%d')
+        b = datetime.fromtimestamp(m['end_ms'] / 1000, timezone.utc).strftime('%m-%d')
+        l1 = _ibt.one_line(res, base, TF_DISPLAY.get(tf, tf), a, b, start_balance)
+        l2 = _bt_extra_line(res, s, tf)
+        l3 = _bt_gate_line(gates, res)
+        l4 = 'ℹ️ شبیه‌سازی نشده: رأی‌گیری فیلترها، صف تایید، فیلتر ساعت، خروج پله‌ای، محافظ BTC (بعد از ورود)، هم‌جهتی با بازار (۱۰ شاخص).'
+        send_message(chat_id, '\n'.join([l1, l2, l3, l4]), _bt_run_keyboard(), parse_mode=None)
+    except Exception as exc:
+        logger.exception('backtest run failed')
+        send_message(chat_id, f'❌ بک‌تست ناموفق: {exc}', _bt_run_keyboard() if _bt_meta(get_session(chat_id)) else None, parse_mode=None)
+    finally:
+        with _BACKTEST_LOCK:
+            _BACKTEST_RUNNING.discard(chat_id)
+
+
+def _bt_guard(chat_id):
+    """ادمین بودن + قفل اجرای همزمان؛ True یعنی می‌شود ادامه داد (و قفل گرفته شده)."""
+    s = get_session(chat_id)
+    if not is_admin(chat_id):
+        send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s), parse_mode=None); return False
+    with _BACKTEST_LOCK:
+        busy = chat_id in _BACKTEST_RUNNING
+        if not busy:
+            _BACKTEST_RUNNING.add(chat_id)
+    if busy:
+        send_message(chat_id, '⏳ یک عملیات بک‌تست هنوز در حال اجراست.', parse_mode=None); return False
+    return True
+
+
+def handle_bt_command(cmd, chat_id):
+    """/bt_p_<days> | /bt_run | /bt_periods"""
+    s = get_session(chat_id)
+    if not is_admin(chat_id):
+        send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s), parse_mode=None); return
+    if cmd == '/bt_periods':
+        base = s.get('bt_pending_symbol') or (_bt_meta(s) or {}).get('base')
+        if not base:
+            start_backtest_flow(chat_id); return
+        s['bt_pending_symbol'] = base; save_session(chat_id)
+        send_message(chat_id, f'🧪 نماد: {base}\nدوره‌ی بررسی را انتخاب کنید:', _bt_period_keyboard(), parse_mode=None); return
+    m = re.match(r'^/bt_p_(\d+)$', cmd)
+    if m:
+        days = int(m.group(1))
+        base = s.get('bt_pending_symbol') or (_bt_meta(s) or {}).get('base')
+        if days not in _BT_PERIODS or not base:
+            start_backtest_flow(chat_id); return
+        if not _bt_guard(chat_id):
+            return
+        send_message(chat_id, f'⏳ در حال دانلود {_BT_PERIODS[days]} داده‌ی {base} از Binance Futures…', parse_mode=None)
+        Thread(target=_bt_download_worker, args=(chat_id, base, days), daemon=True, name='bt-download').start()
+        return
+    if cmd == '/bt_run':
+        if not _bt_meta(s):
+            send_message(chat_id, 'داده‌ای نگه‌داری نشده؛ اول نماد و دوره را انتخاب کنید.', parse_mode=None)
+            start_backtest_flow(chat_id); return
+        if not _bt_guard(chat_id):
+            return
+        send_message(chat_id, '⏳ در حال اجرای بک‌تست روی داده‌ی نگه‌داری‌شده؛ چند دقیقه طول می‌کشد…', parse_mode=None)
+        Thread(target=_bt_run_worker, args=(chat_id,), daemon=True, name='bt-run').start()
+        return
+
+
 def undecided_report_text(trades):
     """V3.44.124: گزارش مقایسه‌ی «کلید بلاتکلیفی BTC روشن بود یا خاموش» از ژورنال.
     trades = رکوردهای بسته‌شده‌ی ژورنال. فقط معاملاتی که فیلد undecided_shadow دارند (یعنی وقتی کلید خاموش بود باز شده‌اند) شمرده می‌شوند.
@@ -17010,7 +17422,11 @@ def process_command(cmd,chat_id,message_id=None):
             pass
         return process_command(str(cmd)[len('/back:'):] or '/menu', chat_id, message_id)
     if cmd == '/backtest_start':
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(get_session(chat_id)), parse_mode=None); return
         start_backtest_flow(chat_id); return
+    if str(cmd) in ('/bt_run', '/bt_periods') or re.match(r'^/bt_p_\d+$', str(cmd)):      # V3.44.126
+        handle_bt_command(str(cmd), chat_id); return
     # V3.44.89: سطوح نماد (سقف/کف تاریخی از Binance + سطوح نصف‌کردن)
     if cmd == '/levels_start':
         s=get_session(chat_id); s['user_state']='WAIT_LEVELS_SYMBOL'; save_session(chat_id)
@@ -18125,6 +18541,18 @@ def process_command(cmd,chat_id,message_id=None):
             logger.exception('funnel report failed')
             send_message(chat_id, f'❌ خطا در ساخت گزارش قیف: {_e}', presets_mod.keyboard(s))
         return
+    if cl == '/backtest_btc' or cl.startswith('/backtest_btc '):      # V3.44.125
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        with _BACKTEST_LOCK:
+            _already = chat_id in _BACKTEST_RUNNING
+            if not _already:
+                _BACKTEST_RUNNING.add(chat_id)
+        if _already:
+            send_message(chat_id, '⏳ بک‌تست قبلی هنوز در حال اجراست.', presets_mod.keyboard(s)); return
+        send_message(chat_id, '⏳ بک‌تست BTC شروع شد؛ چند دقیقه طول می‌کشد…', presets_mod.keyboard(s))
+        Thread(target=_backtest_worker, args=(chat_id, cl), daemon=True, name='inbot-backtest').start()
+        return
     if cl == '/undecided_report':      # V3.44.124
         if not is_admin(chat_id):
             send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
@@ -18460,26 +18888,6 @@ def process_command(cmd,chat_id,message_id=None):
         return
 
 
-def start_backtest_flow(chat_id):
-    s=get_session(chat_id)
-    s['user_state']='WAIT_BACKTEST_SYMBOL'
-    save_session(chat_id)
-    send_message(chat_id,'🧪 تست استراتژی\n\nنماد را وارد کنید (مثال: BTC/USDT:USDT):')
-
-
-def run_user_backtest(chat_id):
-    s=get_session(chat_id)
-    try:
-        send_message(chat_id,'⏳ لطفاً منتظر بمانید...\nدر حال دریافت داده‌های تاریخی از سرور و آماده‌سازی تست.')
-        df=fetch_ohlcv_binance(s['backtest_symbol'], s['backtest_tf'], s['backtest_start'], s['backtest_end'])
-        send_message(chat_id,'✅ داده‌ها دریافت شد.\nدر حال اجرای تست استراتژی...')
-        result=run_backtest(df, strategy_type=s.get('active_strategy','dynamic'), side='both', strategy_timeframe=s.get('timeframe','1hour'))
-        send_message(chat_id, f'🧪 نتیجه تست\n\nنماد: {s["backtest_symbol"]}\nتعداد معاملات: {len(result.get("trades",[])) if isinstance(result,dict) else "انجام شد"}')
-    except Exception as e:
-        send_message(chat_id,f'❌ خطا در تست: {e}')
-    finally:
-        s['user_state']=None
-        save_session(chat_id)
 
 
 _ADMIN_POST_SYMBOL_RE = re.compile(r'^[A-Za-z0-9]{2,12}$')
@@ -18618,28 +19026,10 @@ def handle_text(chat_id,text,message_id=None):
         manual_signal_scan(chat_id, sym)
         return
 
-    if current_state == 'WAIT_BACKTEST_SYMBOL':
-        s['backtest_symbol']=raw.upper()
-        s['user_state']='WAIT_BACKTEST_TF'
-        save_session(chat_id)
-        send_message(chat_id,'⏱ تایم‌فریم را وارد کنید (5m / 15m / 1h / 4h):')
-        return
-    if current_state == 'WAIT_BACKTEST_TF':
-        s['backtest_tf']=raw
-        s['user_state']='WAIT_BACKTEST_START'
-        save_session(chat_id)
-        send_message(chat_id,'📅 تاریخ شروع را وارد کنید (YYYY-MM-DD):')
-        return
-    if current_state == 'WAIT_BACKTEST_START':
-        s['backtest_start']=raw
-        s['user_state']='WAIT_BACKTEST_END'
-        save_session(chat_id)
-        send_message(chat_id,'📅 تاریخ پایان را وارد کنید (YYYY-MM-DD):')
-        return
-    if current_state == 'WAIT_BACKTEST_END':
-        s['backtest_end']=raw
-        save_session(chat_id)
-        run_user_backtest(chat_id)
+    if current_state == 'WAIT_BACKTEST_SYMBOL':      # V3.44.126
+        if not is_admin(chat_id):
+            s['user_state']=None; save_session(chat_id); return
+        backtest_symbol_received(chat_id, raw)
         return
 
     if current_state == 'WAIT_ADMIN_ADMIN_ADD':          # V3.44.103

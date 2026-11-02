@@ -426,7 +426,7 @@ def get_watchlist_manage_keyboard():
     return {"inline_keyboard": [
         [{"text":"➕ افزودن Long","callback_data":"/add_long_symbol"},{"text":"➖ حذف Long","callback_data":"/remove_long_symbol"}],
         [{"text":"➕ افزودن Short","callback_data":"/add_short_symbol"},{"text":"➖ حذف Short","callback_data":"/remove_short_symbol"}],
-        [{"text":"🧪 تست استراتژی","callback_data":"/backtest_start"}],
+        [{"text":"🧪 بک‌تست","callback_data":"/backtest_start"}],
         [{"text":"🔍 پیشنهاد نماد با استراتژی فعال","callback_data":"/scan_signal_start"}],
         [{"text": "🔙 بازگشت", "callback_data": "/menu_settings"}],
         [{"text":"🏠 منوی اصلی","callback_data":"/menu"}]
