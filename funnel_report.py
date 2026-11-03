@@ -27,7 +27,7 @@ KEY_FA = {'btcpat': 'الگوی BTC', 'btceth': 'رژیم BTC/ETH', 'h4': 'رژ�
 
 FAV_FA = {'opened': 'باز شد', 'card_sent': 'کارت دستیار', 'handed_to_warning': 'کارت هشدار', 'expired': 'منقضی', 'cancelled': 'کنسل',
           'skipped': 'پوزیشن باز شد', 'blocked': 'مسدود بعد از تایید', 'rejected': 'رد دستی', 'entered_manual': 'ورود دستی',
-          'timeout': 'مهلت تمام شد', 'overrun': 'قیمت از سقف گذشت', 'regime': 'رژیم', 'btc': 'کندل BTC', 'front': 'سطح جلوی BTC', 'pdlevel': 'سقف/کف دیروز'}
+          'timeout': 'مهلت تمام شد', 'overrun': 'قیمت از سقف گذشت', 'regime': 'رژیم', 'btc': 'کندل BTC', 'front': 'سطح جلوی BTC', 'pdlevel': 'سقف/کف دیروز', 'dominance': 'جهت غالب بازار'}
 
 
 def _fav_label(status, why=None):

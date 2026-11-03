@@ -27,7 +27,7 @@ KB = 'gate_touch_bias_block_enabled'
 # ثبت کلید: پیش‌فرض خاموش، بخش قوانین ورود، در پریست‌ها مدیریت می‌شود
 assert bot.GATE_REGISTRY[K][1] is False and bot.GATE_REGISTRY[K][2] == 'entry_rules'
 import presets; assert presets.BASE_CFG.get(K) is False
-assert bot.BOT_VERSION == '3.44.133'
+assert bot.BOT_VERSION == '3.44.134'
 
 bot.save_session = lambda *a, **k: None
 bot._touch_update_card = lambda *a, **k: True

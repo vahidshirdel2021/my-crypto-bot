@@ -6439,7 +6439,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.133'
+BOT_VERSION = '3.44.134'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -9207,7 +9207,7 @@ def _fn_fav_final(chat_id, rec, status):
     _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
              why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
              # V3.44.82: برای تشخیص «چرا باز نشد»: متن دقیق مانعِ بعد از تایید، تعداد کلوزهای سنجیده‌شده و حرکت آخرین کلوز (R)
-             hold=str(rec.get('daily_hold') or rec.get('undecided_hold') or rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
+             hold=str(rec.get('domin_hold') or rec.get('daily_hold') or rec.get('undecided_hold') or rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
              eval_n=rec.get('eval_n', 0), last_x=rec.get('last_x'),
              # V3.44.107: هر گیتِ بعد از تایید چند بار و چند دقیقه سیگنال را نگه داشت؛ تاخیرِ ورود به‌خاطر گیت‌ها؛ نوع و R لغو
              hold_ticks=_hs, hold_delay_min=_hd, cancel_kind=rec.get('cancel_kind'), cancel_r=rec.get('cancel_r'),
@@ -12417,7 +12417,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('btcdaily' if rec.get('daily_blocked') else 'undecided' if rec.get('undecided_blocked') else 'btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
+    rec['why'] = ('dominance' if rec.get('domin_blocked') else 'btcdaily' if rec.get('daily_blocked') else 'undecided' if rec.get('undecided_blocked') else 'btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     try:
         _fn_fav_final(chat_id, rec, status)
@@ -12624,6 +12624,19 @@ def _fav_process_one_core(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('btc_blocked', None); rec.pop('btc_hold', None)
+        try:        # V3.44.133: جهت غالب بازار در لحظه‌ی خروج از صف دوباره سنجیده می‌شود
+            dm_ok, dm_txt = _fav_dominance_gate(s, sig)
+        except Exception:
+            logger.exception('fav confirm: dominance gate failed symbol=%s', symbol)
+            dm_ok, dm_txt = True, ''
+        if not dm_ok:
+            rec['domin_blocked'] = True; rec['domin_hold'] = dm_txt; _fn_hold_tick(rec, 'domin', dm_txt)
+            if now >= float(rec.get('expires_at', 0)):
+                return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی {dm_txt}؛ بدون ورود.")
+            rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+            save_session(chat_id)
+            return
+        rec.pop('domin_blocked', None); rec.pop('domin_hold', None)
         rec['confirmed_at'] = now; rec['confirm_px'] = float(live)
         p_stub = {'structural_target': rec.get('structural_tp'), 'score': rec.get('score'), 'rr': rec.get('rr'),
                   'quality_label': rec.get('quality_label'), 'tp_level_name': rec.get('tp_level_name'), 'tp_stages': rec.get('tp_stages')}
@@ -12654,9 +12667,9 @@ def _fav_process_one_core(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('daily_blocked') and not rec.get('undecided_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('daily_blocked') and not rec.get('undecided_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked') and not rec.get('domin_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = ('رژیم روزانه‌ی BTC تا پایان مهلت جلوی این جهت را گرفت' if rec.get('daily_blocked') else 'جهت BTC تا پایان مهلت بلاتکلیف ماند' if rec.get('undecided_blocked') else 'کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+        why_txt = ('جهت غالب بازار تا پایان مهلت اجازه‌ی این ورود را نداد' if rec.get('domin_blocked') else 'رژیم روزانه‌ی BTC تا پایان مهلت جلوی این جهت را گرفت' if rec.get('daily_blocked') else 'جهت BTC تا پایان مهلت بلاتکلیف ماند' if rec.get('undecided_blocked') else 'کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
                    ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -12698,6 +12711,8 @@ def _fav_card_payload(r, now=None):
         lines.append(f"    🧭 {r['regime_hold']}")
     if r.get('daily_hold') and r.get('status') == 'waiting':
         lines.append(f"    🌅 {r['daily_hold']}")
+    if r.get('domin_hold') and r.get('status') == 'waiting':
+        lines.append(f"    {r['domin_hold']}")
     if r.get('undecided_hold') and r.get('status') == 'waiting':
         lines.append(f"    ⛔ {r['undecided_hold']}")
     if r.get('btc_hold') and r.get('status') == 'waiting':
@@ -13133,7 +13148,7 @@ def fav_stats_text(s):
     if o_imm:
         w = sum(1 for r in o_imm if r['imm']['outcome'] == 'tp')
         lines.append(f"• تعیین‌تکلیف: `{len(o_imm)}` | می‌برد: `{w / len(o_imm) * 100:.0f}%` | میانگین R فرضی: `{avg([r['imm']['r'] for r in o_imm]):+.2f}`")
-        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'btc': 'کندل BTC هم‌جهت معامله نشد', 'front': 'فاصله‌ی BTC تا سطح جلویی معقول نشد', 'pdlevel': 'سقف/کف دیروز جلوی معامله بود', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
+        names = {'overrun': 'قیمت از سقف گذشت و برنگشت', 'timeout': 'مهلت تمام شد (تایید نگرفت)', 'regime': 'رژیم بازار به نفع معامله نشد', 'btc': 'کندل BTC هم‌جهت معامله نشد', 'front': 'فاصله‌ی BTC تا سطح جلویی معقول نشد', 'pdlevel': 'سقف/کف دیروز جلوی معامله بود', 'dominance': 'جهت غالب بازار اجازه نداد', 'cancelled': 'خلاف جهت رفت / به SL رسید'}
         for why, nm in names.items():
             g = [r for r in o_imm if r.get('why') == why]
             if g:
@@ -14109,6 +14124,24 @@ def _touch_bias_apply(chat_id, s, only_rec=None):
     if out:
         logger.info('touch bias: %s dominant buy=%s sell=%s -> blocked %s item(s): %s', dom_fa, buy, sell, len(out), ','.join(str(r.get('symbol')) for r in out))
     return out
+
+
+def _fav_dominance_gate(s, sig):
+    """V3.44.133: آخرین مرحله‌ی خروج از «صف تایید حرکت»: جهت غالب بازار (همان شمارش لیست انتظار) دوباره سنجیده می‌شود.
+    (۱) کلید «مانع جهت مخالف بازار» روشن و غلبه خلاف جهت سیگنال → ورود نگه داشته می‌شود.
+    (۲) کلید «بدون جهت غالب = بدون معامله» روشن و غلبه مشخص نیست → ورود نگه داشته می‌شود.
+    خروجی: (ok, متن). سیگنال از صف رد نمی‌شود؛ در صف می‌ماند و با هر تیک دوباره سنجیده می‌شود (مثل بقیه‌ی گیت‌های بعد از تایید)."""
+    bias_on, need_on = gate_on(s, TOUCH_BIAS_KEY), gate_on(s, TOUCH_NEED_DOMINANT_KEY)
+    if not (bias_on or need_on):
+        return True, ''
+    blocked, b, sl = _touch_bias_verdict(s)
+    side_fa = 'خرید' if sig == 'BUY' else 'فروش'
+    if bias_on and blocked == sig:
+        dom_fa = 'فروش' if sig == 'BUY' else 'خرید'
+        return False, f"🚦 جهت بازار {dom_fa} است ({b} خرید / {sl} فروش)؛ ورود {side_fa} نگه داشته شد"
+    if need_on and not blocked:
+        return False, f"🚦 جهت غالب بازار مشخص نیست ({b} خرید / {sl} فروش)؛ ورود {side_fa} نگه داشته شد"
+    return True, ''
 
 
 def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from=None):
