@@ -92,6 +92,84 @@ fut = up.copy(); fut.loc[K + 1:, ['high', 'low', 'close']] = [999.0, 1.0, 500.0]
 fut.loc[K + 2:, 'open'] = 777.0
 check('بدون نشت آینده (BTC)', verdicts(fut, up) == base_v, (base_v, verdicts(fut, up)))
 check('بدون نشت آینده (ETH)', verdicts(up, fut) == base_v)
+# --- رژیم روزانه‌ی BTC (V3.44.131): خرید در رژیم نزولی رد، فروش در رژیم صعودی رد، رنج آزاد، نبود داده آزاد، بدون نشت آینده
+DAY = G.DAY_MS; ND = 320; TD0 = T0 - 280 * DAY            # روزها هم‌تراز UTC؛ روز T0 هنوز در داده هست
+TSD = TD0 + np.arange(ND) * DAY
+def mkd(close, rng=0.5):
+    c = np.asarray(close, float); o = np.concatenate([[c[0]], c[:-1]])
+    return pd.DataFrame({'timestamp': TSD, 'open': o, 'high': np.maximum(o, c) + rng, 'low': np.minimum(o, c) - rng, 'close': c, 'volume': np.full(ND, 1000.0)})
+d_up = mkd(100 + np.arange(ND) * 1.0)
+d_dn = mkd(500 - np.arange(ND) * 1.0)
+d_rg = mkd(300 + np.where(np.arange(ND) % 2 == 0, 0.6, -0.6) + np.sin(np.arange(ND) / 7.0) * 0.5, rng=0.2)
+mk_g = lambda dd, **k: G.BtcGates(None, None, cfg, F(daily=True), H(), daily_df=dd, tf_ms=TF)
+g = mk_g(d_up)
+check('daily: رژیم صعودی -> فروش رد با تگ daily، خرید آزاد', g.check(TSK, 'SELL') == (False, 'daily') and g.check(TSK, 'BUY')[0], (g.check(TSK, 'SELL'), g.daily_regime(TSK + TF)))
+g = mk_g(d_dn)
+check('daily: رژیم نزولی -> خرید رد با تگ daily، فروش آزاد', g.check(TSK, 'BUY') == (False, 'daily') and g.check(TSK, 'SELL')[0], (g.check(TSK, 'BUY'), g.daily_regime(TSK + TF)))
+g = mk_g(d_rg)
+check('daily: رنج -> هر دو جهت آزاد', g.check(TSK, 'BUY')[0] and g.check(TSK, 'SELL')[0], g.daily_regime(TSK + TF))
+check('daily: بدون داده‌ی روزانه -> آزاد (fail-open)', G.BtcGates(None, None, cfg, F(daily=True), H(), daily_df=None, tf_ms=TF).check(TSK, 'BUY')[0])
+g = mk_g(d_up)
+check('daily: ورود بعد از پایان داده (شکاف >۱ روز) -> آزاد', g.check(int(TSD[-1]) + 5 * DAY, 'SELL')[0])
+check('daily: دادهٔ کمتر از ۶۰ کندل -> آزاد', mk_g(d_up.iloc[:50]).check(int(TSD[48]) + DAY + TF, 'SELL')[0])
+# مرز روز: رژیم روز D با کندل بسته‌ی D-1 تعیین می‌شود؛ ورود دقیقاً در ۰۰:۰۰ UTC روز جدید از کندل روز قبل استفاده می‌کند
+g = mk_g(d_up); kday = 200
+e_mid = int(TSD[kday]) + 12 * 3_600_000
+r_mid = g.daily_regime(e_mid); r_next0 = g.daily_regime(int(TSD[kday + 1]))
+check('daily: وسط روز و ابتدای روز بعد هر دو از کندل بسته‌شده‌ی روز قبل', r_mid is not None and r_next0 is not None)
+# بدون نشت آینده: عوض کردن کندل «امروز» و روزهای بعد رژیم را عوض نمی‌کند
+fd = d_up.copy(); fd.loc[kday:, ['open', 'high', 'low', 'close']] = [1.0, 1.0, 1.0, 1.0]
+a = mk_g(d_up).daily_regime(e_mid); b = mk_g(fd).daily_regime(e_mid)
+check('daily: بدون نشت آینده (تغییر کندل امروز و بعد)', a == b, (a, b))
+# تغییر کندل بسته‌شده‌ی دیروز واقعاً اثر دارد (سقوط دیروز -> دیگر صعودی نیست)
+fy = d_up.copy(); fy.loc[kday - 1, ['open', 'high', 'low', 'close']] = [1.0, 1.0, 1.0, 1.0]
+check('daily: به کندل بسته‌شده‌ی دیروز حساس است', a == 'BULLISH' and mk_g(fy).daily_regime(e_mid) != 'BULLISH', (a, mk_g(fy).daily_regime(e_mid)))
+# هم‌ارزی با ربات زنده: رژیم بک‌تست == regime_from_ind_df(advanced=True) روی ۲۰۰ کندل روزانه‌ی منتهی به «امروز» (۱۹۹ بسته + ۱ در حال تشکیل)
+rs = np.random.RandomState(7)
+d_rw = mkd(300 + np.cumsum(rs.normal(0.0, 6.0, ND)) + np.sin(np.arange(ND) / 25.0) * 80, rng=3.0)
+seen = set(); mism = []
+for dfx in (d_up, d_dn, d_rg, d_rw):
+    gx = mk_g(dfx)
+    for kd in range(120, 300, 9):
+        live_df = dfx.iloc[max(0, kd - 199):kd + 1].reset_index(drop=True)          # آخرین ردیف = امروز (در حال تشکیل)
+        want = bot.regime_from_ind_df(bot.calculate_indicators(live_df), advanced=True)
+        got = gx.daily_regime(int(TSD[kd]) + 6 * 3_600_000)
+        seen.add(want)
+        if want != got:
+            mism.append((kd, want, got))
+check('daily: هم‌ارز رژیم زنده (۴ سری × ۲۰ روز)', not mism, mism[:5])
+check('daily: تست هم‌ارزی هر سه رژیم را پوشش داد', {'BULLISH', 'BEARISH', 'RANGE'} <= seen, seen)
+# همراه با گیت‌های دیگر: daily اول سنجیده می‌شود و فقط وقتی روشن است اثر دارد
+g = G.BtcGates(up, None, cfg, F(candle=True, daily=False), H(), daily_df=d_up, tf_ms=TF)
+check('daily خاموش: داده‌ی روزانه نادیده گرفته می‌شود', g.check(TSK, 'BUY')[0])
+check('daily در active وقتی روشن است', 'daily' in mk_g(d_up).active and 'daily' not in G.BtcGates(None, None, cfg, F(), H()).active)
+# --- اتصال در bot.py: کلید رژیم روزانه روی سشن -> گیت ساخته می‌شود و داده‌ی روزانه‌ی BTC دانلود می‌شود
+calls_h = []
+def fake_fetch(sym, tf_, a_ms, b_ms):
+    calls_h.append((sym, tf_)); return d_up.copy() if tf_ == '1day' else up.copy()
+_orig_fetch = bot._backtest_fetch_history; bot._backtest_fetch_history = fake_fetch
+try:
+    S_on = {'strategy_config': {k: False for k in bot._BT_GATE_KEYS.values()}}
+    S_on['strategy_config'][bot.BTC_DAILY_KEY] = True
+    m_ = {'start_ms': int(TS[200]), 'end_ms': int(TS[N - 5]), 'warm_ms': 10 * DAY}
+    check('bot: daily در _BT_GATE_KEYS و نام فارسی', bot._BT_GATE_KEYS.get('daily') == 'gate_btc_daily_regime_enabled' and 'daily' in bot._BT_GATE_FA)
+    check('bot: پرچم‌ها فقط daily روشن', [k for k, v in bot._bt_gate_flags(S_on).items() if v] == ['daily'])
+    gg = bot._bt_build_gates(S_on, {'halving_model_enabled': False}, '15min', 'ETH', up, m_)
+    check('bot: گیت ساخته شد، فقط داده‌ی روزانه‌ی BTC دانلود شد', gg is not None and gg.active == ['daily'] and calls_h == [('BTCUSDT', '1day')], calls_h)
+    check('bot: گیت ساخته‌شده نتیجه‌ی درست می‌دهد (صعودی: فروش رد)', gg.check(TSK, 'SELL') == (False, 'daily') and gg.check(TSK, 'BUY')[0])
+    line_ = bot._bt_gate_line(gg, {'stats': {'gate_blocked': {'daily': 7}, 'signals': 20}})
+    check('bot: خط خروجی گیت‌ها «رژیم روزانه BTC» را نشان می‌دهد', 'رژیم روزانه BTC' in line_ and 'رد شده: 7 از 20' in line_, line_)
+    S_off = {'strategy_config': {k: False for k in bot._BT_GATE_KEYS.values()}}
+    check('bot: همه خاموش -> بدون گیت', bot._bt_build_gates(S_off, {}, '15min', 'ETH', up, m_) is None)
+    bot._backtest_fetch_history = lambda *a, **k: d_up.iloc[:30].copy()
+    try:
+        bot._bt_build_gates(S_on, {'halving_model_enabled': False}, '15min', 'ETH', up, m_); raised = False
+    except RuntimeError:
+        raised = True
+    check('bot: داده‌ی روزانه‌ی ناکافی -> خطای صریح (نه اجرای بی‌صدا بدون گیت)', raised)
+finally:
+    bot._backtest_fetch_history = _orig_fetch
+check('inbot_backtest: TF_MS شامل 1day', __import__('inbot_backtest').TF_MS.get('1day') == 86_400_000)
 # --- ادغام با simulate: رد شدن‌ها شمرده می‌شوند و ورودی نمی‌سازند
 import inbot_backtest as ib, strategy as st
 calls = []

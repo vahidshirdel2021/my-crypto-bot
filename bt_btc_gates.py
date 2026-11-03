@@ -7,6 +7,8 @@
   undecided : BTC وسطِ راهروی دو سطح و دور از هر دو (gate_btc_undecided_enabled)
   chop      : کلاف دور سطح (gate_btc_chop_enabled)
   front     : سمت درستِ سطح + فاصله‌ی معقول تا سطح جلویی (gate_btc_front_level_enabled)
+  daily     : رژیم روزانه‌ی BTC (gate_btc_daily_regime_enabled، V3.44.131): خرید وقتی رژیم روزانه نزولی است و فروش وقتی صعودی است رد می‌شود؛ رنج = آزاد.
+              مثل ربات زنده از آخرین کندل «بسته‌شده»ی روزانه‌ی UTC با معیار دقیق (advanced) سنجیده می‌شود و در طول روز ثابت است؛ نبود داده = آزاد (fail-open).
   candle    : کندل BTC هم‌جهت معامله (gate_btc_candle_enabled) — تقریب: در ربات زنده «کندل در حال تشکیل» سنجیده می‌شود
               که در بک‌تست (ورود روی open کندل بعد) هنوز بدنه ندارد؛ پس بدنه‌ی «آخرین کندل بسته‌شده‌ی BTC» جایگزین است.
 توابع وابسته به ربات (اندیکاتور، سطوح، رژیم) از بیرون تزریق می‌شوند تا این ماژول مستقل و قابل تست باشد.
@@ -22,13 +24,19 @@ import pandas as pd
 
 FRONT_WINDOW = 649      # live: get_klines(BTC, tf, 650) -> 649 بسته + ۱ در حال تشکیل
 REGIME_WINDOW = 159     # live: get_klines(sym, tf, 160)
-GATE_KEYS = ('aligned', 'undecided', 'chop', 'front', 'candle')
+DAILY_WINDOW = 199      # live: get_klines(BTC, '1day', 200) -> 199 بسته + ۱ در حال تشکیل
+DAY_MS = 86_400_000
+GATE_KEYS = ('aligned', 'undecided', 'chop', 'front', 'candle', 'daily')
 
 
 class BtcGates:
     def __init__(self, btc_df: Optional[pd.DataFrame], eth_df: Optional[pd.DataFrame], cfg: dict, flags: Dict[str, bool],
-                 helpers: dict, btc_halving_range=None, grid_levels=None):
+                 helpers: dict, btc_halving_range=None, grid_levels=None, daily_df: Optional[pd.DataFrame] = None,
+                 tf_ms: int = 900_000):
         self.h = helpers
+        self.tf_ms = int(tf_ms)                                # طول کندل نماد بک‌تست؛ زمان ورود = بسته‌شدن کندل سیگنال + یک کندل
+        self.daily = self._prep(daily_df)
+        self._daily_cache: Dict[int, Optional[str]] = {}
         self.flags = {k: bool(flags.get(k)) for k in GATE_KEYS}
         self.btc = self._prep(btc_df)
         self.eth = self._prep(eth_df)
@@ -115,6 +123,40 @@ class BtcGates:
         except Exception:
             r = None
         self._reg_cache[key] = r
+        return r
+
+    # ---------------- رژیم روزانه‌ی BTC (V3.44.131) ----------------
+    def daily_regime(self, entry_ms: int) -> Optional[str]:
+        """رژیم روزانه‌ی BTC در لحظه‌ی ورود: آخرین کندل روزانه‌ای که تا آن لحظه کامل بسته شده (دیروزِ UTC).
+        کندل «امروز» فقط یک ردیف ساختگی است (مثل کندل در حال تشکیل در ربات زنده؛ رژیم روی iloc[-2] سنجیده می‌شود) تا نشت آینده نباشد.
+        None = داده‌ی ناکافی یا شکاف در داده (گیت آزاد می‌ماند)."""
+        ref = self.daily
+        if ref is None:
+            return None
+        ts = ref['ts']
+        k = int(np.searchsorted(ts + DAY_MS, int(entry_ms), side='right')) - 1
+        if k < 0 or int(entry_ms) - (int(ts[k]) + DAY_MS) >= DAY_MS:
+            return None                                       # دیروز در داده نیست (شکاف یا بعد از پایان داده)
+        if k in self._daily_cache:
+            return self._daily_cache[k]
+        r = None
+        try:
+            d = ref['df']
+            w = d.iloc[max(0, k - DAILY_WINDOW + 1):k + 1].copy().reset_index(drop=True)
+            if len(w) + 1 >= 60:
+                last = float(w['close'].iloc[-1])
+                row = pd.DataFrame([{'timestamp': int(ts[k]) + DAY_MS, 'open': last, 'high': last, 'low': last, 'close': last, 'volume': 0.0}])
+                w = pd.concat([w, row], ignore_index=True)
+                ind = self.h['calculate_indicators'](w)
+                try:
+                    r = self.h['regime'](ind, advanced=True)
+                except TypeError:
+                    r = self.h['regime'](ind)
+        except Exception:
+            r = None
+        if len(self._daily_cache) > 512:
+            self._daily_cache.clear()
+        self._daily_cache[k] = r
         return r
 
     # ---------------- سطح جلویی / کلاف ----------------
@@ -206,6 +248,10 @@ class BtcGates:
         if not any(f.values()):
             return True, ''
         is_long = (sig == 'BUY')
+        if f['daily']:
+            reg_d = self.daily_regime(int(closed_ts_ms) + self.tf_ms)
+            if (reg_d == 'BEARISH' and is_long) or (reg_d == 'BULLISH' and not is_long):
+                return False, 'daily'
         kb = self._idx(self.btc, closed_ts_ms)
         if f['aligned']:
             ke = self._idx(self.eth, closed_ts_ms)

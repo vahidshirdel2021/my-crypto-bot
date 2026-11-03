@@ -6435,7 +6435,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.130'
+BOT_VERSION = '3.44.131'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16358,11 +16358,12 @@ def s_has_pending(chat_id):
 
 
 _BT_GATE_FA = {'aligned': 'هم‌جهتی BTC/ETH', 'undecided': 'بلاتکلیفی BTC', 'chop': 'کلاف BTC دور سطح',
-               'front': 'سطح جلویی BTC', 'candle': 'کندل BTC', 'nodata': 'نبود داده‌ی BTC'}
+               'front': 'سطح جلویی BTC', 'candle': 'کندل BTC', 'daily': 'رژیم روزانه BTC', 'nodata': 'نبود داده‌ی BTC'}
 
 
 _BT_GATE_KEYS = {'aligned': 'gate_btceth_aligned_enabled', 'undecided': 'gate_btc_undecided_enabled', 'chop': 'gate_btc_chop_enabled',
-                 'front': 'gate_btc_front' + '_level_enabled', 'candle': 'gate_btc_candle_enabled'}
+                 'front': 'gate_btc_front' + '_level_enabled', 'candle': 'gate_btc_candle_enabled',
+                 'daily': BTC_DAILY_KEY}          # V3.44.131: رژیم روزانه‌ی BTC در بک‌تست
 
 
 def _bt_gate_flags(s):
@@ -16383,6 +16384,11 @@ def _bt_build_gates(s, cfg, tf, base, df, m):
     need_btc = flags['undecided'] or flags['chop'] or flags['front'] or flags['candle'] or flags['aligned']
     btc_df = ref('BTC') if need_btc else None
     eth_df = ref('ETH') if flags['aligned'] else None
+    daily_df = None
+    if flags['daily']:      # V3.44.131: کندل‌های روزانه‌ی BTC (۲۱۰ روز قبل از شروع برای گرم‌شدن EMA50/ADX؛ مثل ۲۰۰ کندل ربات زنده)؛ خطا = بک‌تست ناموفق، نه اجرای بی‌صدا بدون گیت
+        daily_df = _backtest_fetch_history('BTCUSDT', '1day', m['start_ms'] - 210 * 86_400_000, m['end_ms'])
+        if daily_df is None or len(daily_df) < 60:
+            raise RuntimeError('داده‌ی روزانه‌ی BTC برای گیت «رژیم روزانه» کافی نیست')
     rng = None
     if cfg.get('halving_model_enabled') and (flags['undecided'] or flags['chop'] or flags['front']):
         rng = get_halving_range_sync('BTCUSDT')
@@ -16396,7 +16402,8 @@ def _bt_build_gates(s, cfg, tf, base, df, m):
                'with_halving_cfg': _with_halving_cfg, 'regime': regime_from_ind_df, 'defaults': STRATEGY_DEFAULTS,
                'front_min_atr': BTC_FRONT_MIN_ATR, 'chop': (BTC_CHOP_FLIPS, BTC_CHOP_WINDOW, BTC_CHOP_CLEAR_CLOSES, BTC_CHOP_CLEAR_ATR),
                'far_atr': BTC_UNDECIDED_FAR_ATR, 'far_gap': BTC_UNDECIDED_FAR_GAP, 'candle_min_body': BTC_CANDLE_MIN_BODY_PCT}
-    return _btg.BtcGates(btc_df, eth_df, cfg, flags, helpers, btc_halving_range=rng, grid_levels=grid)
+    return _btg.BtcGates(btc_df, eth_df, cfg, flags, helpers, btc_halving_range=rng, grid_levels=grid,
+                         daily_df=daily_df, tf_ms=_ibt.TF_MS.get(tf, 900_000))
 
 
 def _bt_gate_line(gates, res):

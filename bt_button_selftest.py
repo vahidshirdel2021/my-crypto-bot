@@ -25,7 +25,9 @@ bot._binance_symbol_from_cache = lambda base: (base + 'USDT') if base in ('ETH',
 calls = []
 def fake_hist(symbol, tf, a, b):
     calls.append((symbol, tf, a, b)); n = 1500
-    tf_ms = {'15min': 900000}[tf]
+    tf_ms = {'15min': 900000, '1day': 86400000}[tf]
+    if tf == '1day':                         # V3.44.131: داده‌ی روزانه‌ی BTC برای گیت رژیم روزانه (روز UTC کامل)
+        n = 300; b = (b // tf_ms) * tf_ms
     ts = (b - n * tf_ms) + np.arange(n) * tf_ms
     c = 100 + np.sin(np.arange(n) / 20.0) * 2
     return pd.DataFrame({'timestamp': ts, 'open': c, 'high': c + .3, 'low': c - .3, 'close': c, 'volume': np.full(n, 50.0)})
@@ -58,11 +60,12 @@ check('خروجی اجرا شد', wait(lambda: any(t.startswith(('🧪', '❌'))
 out = sent[-1][1]
 check('نتیجه چهارسطری', out.startswith('🧪 ETH') and out.count('\n') == 3, out)
 check('سطر گیت BTC (پیش‌فرض: سطح جلویی/کلاف روشن)', out.split('\n')[2].startswith('₿ گیت‌های BTC فعال') and 'سطح جلویی BTC' in out.split('\n')[2], out.split('\n')[2])
+check('رژیم روزانه‌ی BTC پیش‌فرض روشن: در سطر گیت و داده‌ی روزانه دانلود شد', 'رژیم روزانه BTC' in out.split('\n')[2] and any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (out.split('\n')[2], calls[fetch_n:]))
 check('BTC برای گیت‌ها دانلود شد (نه ETH چون هم‌جهتی خاموش)', any(c[0] == 'BTCUSDT' for c in calls[fetch_n:]) and not any(c[0] == 'ETHUSDT' for c in calls[fetch_n:]), calls[fetch_n:])
 check('بدون Markdown', sent[-1][2] is not None and True)
 check('پریست در سطر دوم', 'پریست' in out.split('\n')[1], out)
 sent.clear(); sc = a['strategy_config']
-for k_ in ('gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_btc_undecided_enabled', 'gate_btc_candle_enabled', 'gate_btceth_aligned_enabled'): sc[k_] = False
+for k_ in ('gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_btc_undecided_enabled', 'gate_btc_candle_enabled', 'gate_btceth_aligned_enabled', 'gate_btc_daily_regime_enabled'): sc[k_] = False
 bot.process_command('/bt_run', ADMIN, 1)
 check('همه‌ی گیت‌ها خاموش: اعلام می‌کند بدون گیت', wait(lambda: any(t.startswith('🧪') for _, t, _ in sent)) and 'هیچ‌کدام از گیت‌های BTC/ETH' in sent[-1][1], sent[-1][1] if sent else sent)
 sent.clear(); sc['gate_btceth_aligned_enabled'] = True; sc['gate_btc_candle_enabled'] = True; fetch_n = len(calls)

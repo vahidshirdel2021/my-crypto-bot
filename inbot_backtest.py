@@ -25,7 +25,7 @@ import pandas as pd
 
 from strategy import calculate_indicators, get_signal_with_reason, build_trade_plan
 
-TF_MS = {'5min': 300_000, '15min': 900_000, '1hour': 3_600_000, '4hour': 14_400_000}
+TF_MS = {'5min': 300_000, '15min': 900_000, '1hour': 3_600_000, '4hour': 14_400_000, '1day': 86_400_000}
 WINDOW = 650          # همان klimit زنده برای 5m/15m/1h
 HTF_LIMIT = 160       # همان limit زنده برای 1h/4h
 WARMUP = 700          # حداقل کندل قبل از شروع بازه
