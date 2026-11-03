@@ -6435,7 +6435,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.131'
+BOT_VERSION = '3.44.132'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -14032,6 +14032,80 @@ def _touch_eval_one(chat_id, rec):
         logger.debug('funnel after_eval failed', exc_info=True)
 
 
+# ===================== V3.44.132: کلید «مانع جهت مخالف بازار» در لیست انتظار =====================
+# پیش‌فرض خاموش. روشن: همه‌ی برخوردهای ثبت‌شده در لیست انتظار (در انتظار + رد‌شده با همین کلید، تا پایان مهلتشان) شمرده می‌شوند؛
+# اگر سهم یک جهت (خرید یا فروش) به حد TOUCH_BIAS_PCT (پیش‌فرض ۷۰٪) برسد، جهت مخالف بلاک می‌شود: برخوردهای جهت مخالف از لیست
+# رد می‌شوند و برخورد تازه‌ی جهت مخالف اصلاً ثبت نمی‌شود؛ فقط جهت آزاد رأی‌گیری را ادامه می‌دهد و به صف تایید حرکت می‌رود.
+# جهت هر برخورد = جهت فعلی لیست (dir)، و اگر هنوز مشخص نبود جهت خودِ الگوی برخورد (touch_sig). کمتر از TOUCH_BIAS_MIN_TOTAL برخورد
+# جهت‌دار = نمونه‌ی کم، هیچ‌چیز بلاک نمی‌شود. «ورود سریع» دستی بلاک نمی‌شود.
+TOUCH_BIAS_KEY = 'gate_touch_bias_block_enabled'
+TOUCH_BIAS_PCT = min(1.0, max(0.51, float(os.environ.get('TOUCH_BIAS_PCT', '0.70'))))
+TOUCH_BIAS_MIN_TOTAL = max(2, int(float(os.environ.get('TOUCH_BIAS_MIN_TOTAL', '4'))))
+
+
+def _touch_eff_dir(r):
+    d = r.get('dir') or r.get('touch_sig')
+    return d if d in ('BUY', 'SELL') else None
+
+
+def _touch_bias_verdict(s, now=None):
+    """(جهتِ بلاک‌شده یا None, تعداد خرید, تعداد فروش). فقط برخوردهای منقضی‌نشده‌ی «waiting» و «bias_blocked» شمرده می‌شوند."""
+    now = now or time.time()
+    buy = sell = 0
+    with _TOUCH_LOCK:
+        recs = [r for r in (s.get('touch_wait') or {}).values()
+                if r.get('status') in ('waiting', 'bias_blocked') and float(r.get('expires_at', 0) or 0) > now]
+    for r in recs:
+        d = _touch_eff_dir(r)
+        if d == 'BUY':
+            buy += 1
+        elif d == 'SELL':
+            sell += 1
+    total = buy + sell
+    blocked = None
+    if total >= TOUCH_BIAS_MIN_TOTAL:
+        if buy / total >= TOUCH_BIAS_PCT - 1e-9:
+            blocked = 'SELL'
+        elif sell / total >= TOUCH_BIAS_PCT - 1e-9:
+            blocked = 'BUY'
+    return blocked, buy, sell
+
+
+def _touch_bias_apply(chat_id, s, only_rec=None):
+    """جهت مخالفِ بازار را از لیست انتظار رد می‌کند (status='bias_blocked'). خروجی: لیست رکوردهای رد‌شده."""
+    if not gate_on(s, TOUCH_BIAS_KEY):
+        return []
+    blocked_side, buy, sell = _touch_bias_verdict(s)
+    if not blocked_side:
+        return []
+    total = buy + sell
+    dom_fa, dom_n = ('خرید', buy) if blocked_side == 'SELL' else ('فروش', sell)
+    blk_fa = 'فروش' if blocked_side == 'SELL' else 'خرید'
+    note = (f"🚦 جهت بازار {dom_fa} است ({dom_n} از {total} برخورد ثبت‌شده، حداقل {int(round(TOUCH_BIAS_PCT * 100))}٪)؛ "
+            f"جهت {blk_fa} بلاک است و این مورد رد شد" + _btc_gate_key_line(TOUCH_BIAS_KEY))
+    _block_simple_register(note, 'جهت غالب بازار الان خلاف این معامله است؛ این مورد رد شد.')
+    out = []
+    now = time.time()
+    with _TOUCH_LOCK:
+        cands = [r for r in (s.get('touch_wait') or {}).values()
+                 if r.get('status') == 'waiting' and _touch_eff_dir(r) == blocked_side and (only_rec is None or r is only_rec)]
+        for r in cands:
+            r['status'] = 'bias_blocked'; r['finished_at'] = now; r['bias_note'] = note; r['block_note'] = note[:120]
+            out.append(r)
+    for r in out:
+        try:
+            _fn_touch_final(chat_id, r)
+        except Exception:
+            pass
+        try:
+            _touch_update_card(chat_id, r, force=True)
+        except Exception:
+            pass
+    if out:
+        logger.info('touch bias: %s dominant buy=%s sell=%s -> blocked %s item(s): %s', dom_fa, buy, sell, len(out), ','.join(str(r.get('symbol')) for r in out))
+    return out
+
+
 def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from=None):
     """برخورد با سطح را در لیست انتظار ثبت می‌کند (بدون صدور سیگنال). خروجی: (status, متن).
     V3.44.23: flip_from = جهتِ سیگنالی که در «صف تایید حرکت» رد شد و حالا در جهت مخالف از اول بررسی می‌شود؛ بررسی‌های «قبلاً ثبت/معامله شده» برایش کنار می‌رود."""
@@ -14082,6 +14156,14 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
     except Exception:
         logger.debug('funnel touch_created failed', exc_info=True)
     _touch_eval_one(chat_id, rec)
+    if gate_on(s, TOUCH_BIAS_KEY):
+        try:
+            _touch_bias_apply(chat_id, s)
+        except Exception:
+            logger.exception('touch bias apply failed symbol=%s', symbol)
+        if rec.get('status') == 'bias_blocked':
+            save_session(chat_id)
+            return 'blocked', rec.get('bias_note') or 'جهت مخالف بازار'
     outcome = False
     if rec.get('auto_ok') and gate_on(s, 'gate_touch_vote_enabled'):
         outcome = _touch_auto_enter(chat_id, rec)
@@ -14108,6 +14190,13 @@ def _touch_auto_enter_core(chat_id, rec):
     rec.pop('block_note', None)
     if side not in ('BUY', 'SELL'):
         return False
+    if gate_on(s, TOUCH_BIAS_KEY):      # V3.44.132: آخرین سد پیش از صف تایید؛ جهت مخالف بازار هرگز به صف تایید نمی‌رود
+        try:
+            _touch_bias_apply(chat_id, s, only_rec=rec)
+        except Exception:
+            logger.exception('touch bias guard failed symbol=%s', symbol)
+        if rec.get('status') == 'bias_blocked':
+            return False
     if not s.get('is_bot_active') or s.get('daily_stopped'):
         return False
     if s.get('manual_block_all_entries') or (side == 'BUY' and s.get('manual_block_buy_entries')) or (side == 'SELL' and s.get('manual_block_sell_entries')):
@@ -14334,7 +14423,8 @@ def _touch_buttons(r):
 _TOUCH_FINAL_TXT = {'opened': '✅ ربات بعد از تایید فیلترها وارد شد.',
                     'queued': '⏳ فیلترها تایید شدند و سیگنال به «⏳ صف تایید حرکت» رفت؛ ورود نهایی فقط بعد از اینکه قیمت به نفع معامله حرکت کند و دوباره بررسی شود انجام می‌شود.',
                     'card_sent': '🤝 فیلترها تایید شدند و کارت حالت دستیار (✅ ورود / ❌ رد) برایتان آمد؛ ورود با تصمیم شماست.', 'entered_manual': '✅ با ورود سریع دستی وارد شدید.',
-                    'expired': '⌛ مهلت تمام شد؛ ورودی انجام نشد.', 'skipped': '⏭ روی این نماد پوزیشن باز شد؛ از لیست خارج شد.'}
+                    'expired': '⌛ مهلت تمام شد؛ ورودی انجام نشد.', 'skipped': '⏭ روی این نماد پوزیشن باز شد؛ از لیست خارج شد.',
+                    'bias_blocked': '🚦 جهت این مورد خلاف جهتِ غالب بازار بود؛ از لیست رد شد و وارد صف تایید نمی‌شود.'}
 
 
 def _touch_card_payload(r, now=None):
@@ -14343,6 +14433,8 @@ def _touch_card_payload(r, now=None):
     lines = ['🎯 *برخورد با سطح — رأی‌گیری فیلترها*'] + _touch_block_lines(r, None, now)
     if r.get('status') != 'waiting':
         lines += ['', _TOUCH_FINAL_TXT.get(r.get('status'), 'پایان')]
+        if r.get('status') == 'bias_blocked' and r.get('bias_note'):
+            lines.append(str(r['bias_note']))
         return '\n'.join(lines), {'inline_keyboard': []}
     rows = _touch_buttons(r) + [[{'text': '🔄 بروزرسانی', 'callback_data': f"/tw_ref_{r['id']}"}]]
     return '\n'.join(lines), {'inline_keyboard': rows}
@@ -14420,6 +14512,12 @@ def _touch_tick(chat_id):
     s = get_session(chat_id)
     now = time.time()
     changed = False
+    if gate_on(s, TOUCH_BIAS_KEY):      # V3.44.132: با تغییر ترکیب لیست، جهت مخالفِ جدید هم از لیست رد می‌شود
+        try:
+            if _touch_bias_apply(chat_id, s):
+                changed = True
+        except Exception:
+            logger.exception('touch bias tick failed chat=%s', chat_id)
     for r in [r for r in (s.get('touch_wait') or {}).values() if r.get('status') == 'waiting']:
         try:
             if any(p.get('symbol') == r['symbol'] for p in s.get('paper_positions', [])):
@@ -14578,6 +14676,15 @@ def assist_pending_list(chat_id, message_id=None):
         lines.extend(_pending_pressure_lines(recs, t_all))
     except Exception:
         logger.exception('pending pressure line failed')
+    try:
+        if gate_on(s, TOUCH_BIAS_KEY):      # V3.44.132: وضعیت مانع جهت مخالف بازار (فقط اطلاع‌رسانی)
+            _bb, _bn, _sn = _touch_bias_verdict(s)
+            if _bb:
+                lines.append(f"🚦 جهت بازار: {'خرید' if _bb == 'SELL' else 'فروش'} ({_bn} خرید / {_sn} فروش) — جهت {'فروش' if _bb == 'SELL' else 'خرید'} بلاک است")
+            else:
+                lines.append(f"🚦 جهت بازار: بدون غلبه‌ی واضح ({_bn} خرید / {_sn} فروش) — هر دو جهت آزاد")
+    except Exception:
+        logger.exception('pending bias line failed')
     lines.append("")
     if vf != 'all':
         lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
@@ -15507,6 +15614,7 @@ GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
     'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'structure', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت ثابت از الگو', True, 'structure', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_touch_bias_block_enabled': ('🚦 مانع جهت مخالف بازار در لیست انتظار', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: برخوردهای ثبت‌شده در «📋 سیگنال‌های در انتظار» شمرده می‌شوند (خرید در برابر فروش). اگر یک جهت به ۷۰٪ برسد (مثلاً ۷ فروش و ۳ خرید) جهتِ بازار همان است و جهت مخالف بلاک می‌شود: برخوردهای جهت مخالف از لیست رد می‌شوند، برخورد تازه‌ی جهت مخالف اصلاً ثبت نمی‌شود، و فقط جهتِ آزاد رأی‌گیری را ادامه می‌دهد و به «صف تایید حرکت» می‌رود. حداقل ۴ برخورد جهت‌دار لازم است (نمونه‌ی کم = بلاک نمی‌شود). با هر بروزرسانی لیست دوباره سنجیده می‌شود. «ورود سریع» دستی بلاک نمی‌شود.'),
     'gate_reversal_contra_enabled': ('رأی برگشت (آزمایشی): مومنتوم معکوس', False, 'experimental', 'پیش‌فرض خاموش و آزمایشی. فقط رأی‌دهنده است و جلوی هیچ معامله‌ای را نمی‌گیرد؛ فقط «موافق/مخالف» را در رأی‌گیری عوض می‌کند. فقط روی حالت‌های برگشتی (۱ و ۲: برگشت از سطح، ۵ و ۶: شکست کاذب) و فقط وقتی «جهت ثابت از الگو» روشن است اثر دارد. روشن: رأی‌دهنده‌های «رژیم BTC و ETH»، «رژیم ۵ و ۱۵ دقیقه»، «RSI» و «روند ADX» برعکس حساب می‌شوند؛ یعنی وقتی بازار هنوز خلاف جهت برگشت است (فرسودگی حرکت قبلی) این رأی‌ها «موافق» شمرده می‌شوند. «رژیم ۴ ساعته»، MACD، کلوز سطح و سقف/کف دیروز عادی می‌مانند. نتیجه‌ی هر دو حالت (با و بدون معکوس) همیشه در ثبت قیف نوشته می‌شود تا بعداً سنجیده شود.'),
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد. (از V3.44.47: اگر «جهت فقط از الگوی برخورد» روشن باشد جهت از رأی‌ها عوض نمی‌شود و فقط تعداد رأی‌های موافق برای ورود خودکار سنجیده می‌شود.)'),
     'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'timing', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),

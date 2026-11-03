@@ -50,11 +50,11 @@ assert '/toggle_regime_adv' in cbs('regime')
 
 # صفحه‌ی «رأی‌گیری و ورود»: فقط کلید رأی‌گیری + ورود خودکار + تایید حرکت (بدون کلیدهای دسته‌های دیگر)
 rul = cbs('entry_rules')
-need = {'/toggle_gate_gate_touch_vote_enabled', '/touch_auto_next', '/toggle_sweep_confirm', '/toggle_fav_confirm', '/toggle_fav_close5m', '/toggle_fav_close15m', '/fav_min_r_next',
+need = {'/toggle_gate_gate_touch_vote_enabled', '/toggle_gate_gate_touch_bias_block_enabled', '/touch_auto_next', '/toggle_sweep_confirm', '/toggle_fav_confirm', '/toggle_fav_close5m', '/toggle_fav_close15m', '/fav_min_r_next',
         '/fav_max_r_next', '/fav_wait_next', '/fav_max_mode_toggle', '/fav_queue', '/fav_stats', '/trade_filter_management', '/menu'}
 assert set(rul) == need, set(rul) ^ need
 assert rul.index('/toggle_gate_gate_touch_vote_enabled') < rul.index('/touch_auto_next') < rul.index('/toggle_fav_confirm')
-seen += ['gate_touch_vote_enabled']
+seen += ['gate_touch_vote_enabled', 'gate_touch_bias_block_enabled']
 
 # هر کلید رجیستری دقیقاً در یک دسته است؛ چیزی گم یا تکراری نمی‌شود
 assert sorted(seen) == sorted(REG), set(seen) ^ set(REG)
