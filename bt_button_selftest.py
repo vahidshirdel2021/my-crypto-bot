@@ -60,10 +60,16 @@ check('خروجی اجرا شد', wait(lambda: any(t.startswith(('🧪', '❌'))
 out = sent[-1][1]
 check('نتیجه چهارسطری', out.startswith('🧪 ETH') and out.count('\n') == 3, out)
 check('سطر گیت BTC (پیش‌فرض: سطح جلویی/کلاف روشن)', out.split('\n')[2].startswith('₿ گیت‌های BTC فعال') and 'سطح جلویی BTC' in out.split('\n')[2], out.split('\n')[2])
-check('رژیم روزانه‌ی BTC پیش‌فرض روشن: در سطر گیت و داده‌ی روزانه دانلود شد', 'رژیم روزانه BTC' in out.split('\n')[2] and any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (out.split('\n')[2], calls[fetch_n:]))
+check('رژیم روزانه‌ی BTC پیش‌فرض خاموش (V3.44.132): نه در سطر گیت، نه دانلود داده‌ی روزانه', 'رژیم روزانه BTC' not in out.split('\n')[2] and not any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (out.split('\n')[2], calls[fetch_n:]))
 check('BTC برای گیت‌ها دانلود شد (نه ETH چون هم‌جهتی خاموش)', any(c[0] == 'BTCUSDT' for c in calls[fetch_n:]) and not any(c[0] == 'ETHUSDT' for c in calls[fetch_n:]), calls[fetch_n:])
 check('بدون Markdown', sent[-1][2] is not None and True)
 check('پریست در سطر دوم', 'پریست' in out.split('\n')[1], out)
+# روشن‌کردن دستیِ رژیم روزانه‌ی BTC: در سطر گیت می‌آید و داده‌ی روزانه دانلود می‌شود
+wait(lambda: ADMIN not in bot._BACKTEST_RUNNING)
+sent.clear(); fetch_n = len(calls); a['strategy_config']['gate_btc_daily_regime_enabled'] = True
+bot.process_command('/bt_run', ADMIN, 1)
+check('رژیم روزانه‌ی BTC روشنِ دستی: در سطر گیت و داده‌ی روزانه دانلود شد', wait(lambda: any(t_.startswith(('🧪', '❌')) for _, t_, _ in sent)) and 'رژیم روزانه BTC' in sent[-1][1].split('\n')[2] and any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (sent[-1][1] if sent else sent, calls[fetch_n:]))
+wait(lambda: ADMIN not in bot._BACKTEST_RUNNING)
 sent.clear(); sc = a['strategy_config']
 for k_ in ('gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_btc_undecided_enabled', 'gate_btc_candle_enabled', 'gate_btceth_aligned_enabled', 'gate_btc_daily_regime_enabled'): sc[k_] = False
 bot.process_command('/bt_run', ADMIN, 1)
