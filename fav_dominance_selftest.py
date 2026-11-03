@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.134'
+assert bot.BOT_VERSION == '3.44.136'
 
 CID = 111
 s = bot.get_session(CID)

@@ -87,7 +87,9 @@ for r in s['touch_wait'].values():
     r['dir'] = None
 assert bot._touch_bias_verdict(s) == ('BUY', 3, 7)
 s['touch_wait']['S2']['touch_sig'] = None
-assert bot._touch_bias_verdict(s) == (None, 3, 6)
+assert bot._touch_bias_verdict(s) == ('BUY', 3, 6)      # ۶۷٪ ≥ آستانه‌ی ۶۵٪ (V3.44.135)
+s['touch_wait']['S3']['touch_sig'] = None
+assert bot._touch_bias_verdict(s) == (None, 3, 5)       # ۶۲٫۵٪ < ۶۵٪ → غلبه ندارد
 
 # ۸) ثبت برخورد تازه (مسیر واقعی _touch_register): جهت مخالفِ غالب ثبت نمی‌شود، جهت آزاد ثبت می‌شود
 load(0, 6); s['touch_wait_seen'] = {}; s['paper_positions'] = []
@@ -136,7 +138,7 @@ bot.send_message = lambda chat_id, text, markup=None, message_id=None, **k: sent
 bot.is_restricted_user = lambda c: False
 load(3, 7)
 bot.assist_pending_list(CID)
-assert sent and 'جهت بازار: فروش' in sent[-1] and 'جهت خرید بلاک است' in sent[-1], sent[-1][:400]
+assert sent and 'جهت بازار' not in sent[-1] and 'فشار' not in sent[-1] and '📊' not in sent[-1], sent[-1][:400]   # V3.44.136: خطوط بالای لیست حذف شد
 cfg[K] = False; sent.clear(); bot.assist_pending_list(CID)
 assert 'جهت بازار' not in sent[-1]
 print('touch_bias_selftest ALL OK')

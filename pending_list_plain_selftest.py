@@ -39,5 +39,5 @@ for cid in (222, 111):
         assert '`' not in text and 'INJ' not in text, text                             # لیست متنی حذف شده
         assert text.strip().startswith('📋'), text
     else:
-        assert 'رأی' in text and 'فشار' in text, 'admin lost detail'
+        assert 'رأی' in text and 'فشار' not in text and '📊 خرید' not in text, 'admin detail wrong'   # V3.44.136: خط فشار بازار حذف شد
 print('PENDING LIST PLAIN OK')
