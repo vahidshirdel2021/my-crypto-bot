@@ -42,7 +42,7 @@ def bias(row):
 
 
 g = dict(re=re, time=time, hashlib=hashlib, pd=pd, RLock=RLock, logger=logging.getLogger('t'),
-         get_session=lambda c: S, save_session=lambda c: None, _btc_front_flags=lambda s: (False, False), btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: ON.get(k, k in ('gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled', 'gate_min_rr_enabled')),
+         get_session=lambda c: S, save_session=lambda c: None, _btc_front_flags=lambda s: (False, False), btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: ON.get(k, k in ('gate_touch_vote_enabled', 'gate_touch_pattern_vote_enabled', 'gate_min_rr_enabled')),
          extract_setup_level=lambda r: ('t', 'HVL', '100.0'), extract_scenario_tag=lambda r: '1', ASSIST_SEEN_TTL_SECONDS=21600,
          _trend_snapshot_cached=lambda sym, tf: {'score': st['btc'] if sym == 'BTC' else st['eth']},
          _symbol_h4_regime=lambda sym: st['h4'], _symbol_tf_regimes=lambda sym: dict(st['tf']), _TFR_TIMEFRAMES=('5min', '15min'),

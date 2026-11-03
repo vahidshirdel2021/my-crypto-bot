@@ -47,7 +47,7 @@ g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, os=os, time=time, math=ma
          _with_halving_cfg=lambda cfg, rng: ({**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])} if (cfg or {}).get('halving_model_enabled') and rng else cfg),
          _log_grid_levels_sync=lambda sym: [],
          send_message=lambda c, t, *a, **k: st['sent'].append((c, t)), send_detail_message=lambda c, t, *a, **k: st['sent'].append((c, t)),
-         btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: bool((s.get('cfg') or {}).get(k, False)))
+         btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool((s.get('cfg') or {}).get(k, False)))
 exec(HELPERS, g)
 _real_info = g['btc_front_level_info']
 def _info_noside(s, tf, is_long):
@@ -162,7 +162,7 @@ gf = dict(os=os, logger=log, time=time, FAV_CONFIRM_MIN_RR=0.0, FAV_CONFIRM_CANC
           exchange_latest_price=lambda c, s: 100.8, latest_price=lambda s: 100.8,
           get_klines=lambda sym, tf, n: pd.DataFrame(rows),
           get_session=lambda c: SF, save_session=lambda c: None, _fav_update_card=lambda *a, **k: None,
-          btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC',
+          btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC',
           btc_candle_verdict=lambda tf, sig: (True, ''),
           _btc_front_gate=lambda chat_id, s, sym, sig, tf, *a, **k: (True, '') if calls['front_ok'] else (False, FRONT_TXT),
           _btc_front_flags=lambda s: (bool(SF['cfg'].get('gate_btc_front_level_enabled', False)), bool(SF['cfg'].get('gate_btc_chop_enabled', False))),
@@ -225,7 +225,7 @@ def fake_gate(chat_id, s, symbol, sig, tf, warn=True, allow_inverse=True, front=
     fg['calls'].append((sig, warn, allow_inverse))
     return (True, '') if fg['ok'] else (False, f'{PFX}: بیتکوین (BTC) به سطح مقاومتی نزدیک است و تا واکنش به سطح منتظر ورود می‌مانیم؛ لطفاً صبور باشید')
 
-g4 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_session=lambda c: SX, btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: bool(SX['cfg'].get(k, False)),
+g4 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_session=lambda c: SX, btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool(SX['cfg'].get(k, False)),
           side_long=lambda side: 'BUY' in str(side).upper() or 'LONG' in str(side).upper(),
           btc_candle_verdict=lambda tf, sig: (True, ''), _BTC_CANDLE_BLOCK_PREFIX='⛔ کندل BTC', _blk=blk, _btc_front_gate=fake_gate,
           latest_price=lambda s: 100.0, get_entry_lock=lambda c: _L(),

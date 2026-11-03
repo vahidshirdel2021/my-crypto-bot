@@ -422,9 +422,10 @@ def _rg_num(v):
         return None
 
 
-def regime_from_ind_df(ind):
+def regime_from_ind_df(ind, advanced=None):
     """'BULLISH' / 'BEARISH' / 'RANGE' یا None (داده‌ی ناکافی). ind = دیتافریم خروجی calculate_indicators؛
-    رژیم روی آخرین کندل «بسته‌شده» (iloc[-2]) سنجیده می‌شود، نه کندل در حال تشکیل."""
+    رژیم روی آخرین کندل «بسته‌شده» (iloc[-2]) سنجیده می‌شود، نه کندل در حال تشکیل.
+    V3.44.130: advanced=True معیار دقیق (EMA + ADX + DI + شیب EMA50 + فاصله) را مستقل از کلید سراسری اجبار می‌کند (برای رژیم روزانه BTC)."""
     try:
         if ind is None or len(ind) < 3:
             return None
@@ -438,7 +439,7 @@ def regime_from_ind_df(ind):
             direction = 'BEARISH'
         else:
             return 'RANGE'
-        if not _REGIME_ADV['on']:
+        if not (_REGIME_ADV['on'] if advanced is None else bool(advanced)):
             return direction
         bull = (direction == 'BULLISH')
         adx = _rg_num(c.get('adx'))
@@ -1824,6 +1825,8 @@ def _message_protected(chat_id, message_id):
         _bu = ((USER_SESSIONS.get(chat_id) or {}).get('btc_undecided_msg') or {})      # V3.44.115: هشدار «بلاتکلیفی جهت BTC» تا باز شدن معامله حذف نشود
         if _bu.get('mid') and _bu.get('mid') == message_id:
             return True
+        if message_id and (USER_SESSIONS.get(chat_id) or {}).get('btc_daily_mid') == message_id:      # V3.44.130: پیام اول روز «رژیم روزانه BTC» تا پیام روز بعد می‌ماند
+            return True
         sess = USER_SESSIONS.get(chat_id)
         for _tr in ((sess or {}).get('touch_wait') or {}).values():      # V3.44.18: کارتِ مورد در انتظار تا وقتی منتظر است حذف نشود
             if _tr.get('msg_id') == message_id and _tr.get('status') == 'waiting':
@@ -1874,6 +1877,8 @@ def _after_message_deleted(chat_id, message_id):
         _bu = sess.get('btc_undecided_msg') or {}                 # V3.44.115: اگر کاربر خودش پیام هشدار را پاک کرد، اشاره‌گر پاک می‌شود (هشدار بعدی پیام تازه می‌سازد)
         if _bu.get('mid') == message_id:
             sess.pop('btc_undecided_msg', None); changed = True
+        if sess.get('btc_daily_mid') == message_id:
+            sess.pop('btc_daily_mid', None); sess.pop('btc_daily_sent', None); changed = True      # V3.44.130: کاربر پیام را پاک کرد؛ اعلام بعدی دوباره می‌آید
         for rec in (sess.get('assist_log') or []):
             mids = [rec.get('message_id')] + list(rec.get('old_mids') or [])
             if message_id in mids:
@@ -4663,6 +4668,7 @@ def btc_eth_regime_text(tf, popup=False, plain=False):
         lines = [f'🧭 رژیم BTC/ETH ({tf_label})']
         for sym, reg, adx, rsi in rows:
             lines.append(f"{icons[sym]} {sym}: {_REGIME_FA.get(reg, '⏳ نامشخص')}" + (f' (ADX {adx:.0f})' if adx is not None else ''))
+        lines += _btc_eth_daily_lines(popup=True)
         return '\n'.join(lines)
     lines = [f'🧭 *رژیم BTC و ETH — تایم‌فریم فعال ({tf_label})*', '━━━━━━━━━━━━━━━━━━━━']
     for sym, reg, adx, rsi in rows:
@@ -4673,10 +4679,215 @@ def btc_eth_regime_text(tf, popup=False, plain=False):
         lines.append(f"\n✅ هر دو هم‌جهت: {_REGIME_FA[regs[0]]}")
     elif all(regs):
         lines.append('\n⚠️ دو رژیم هم‌جهت نیستند.')
+    lines += _btc_eth_daily_lines(plain=plain)
     if regime_advanced_on() and not plain:
         lines.append(f"ℹ️ صعودی/نزولی یعنی: EMA20/50 هم‌جهت + ADX ≥ {REGIME_ADX_MIN:g} + DI هم‌جهت + شیب EMA50 هم‌جهت؛ وگرنه رنج.")
     lines.append(f"🕒 {datetime.now().strftime('%H:%M:%S')}")
     return '\n'.join(lines)
+
+
+# ===================== V3.44.130: «رژیم روزانه BTC» =====================
+# رژیم روزانه‌ی BTC (و ETH برای نمایش) از آخرین کندل «بسته‌شده»ی روزانه با معیار دقیق (EMA20/50 + ADX + DI + شیب EMA50 + فاصله از EMA50)
+# سنجیده می‌شود؛ پس در طول روز (UTC؛ ۰۳:۳۰ به وقت ایران) ثابت می‌ماند و فقط با بسته‌شدن کندل روزانه‌ی بعدی عوض می‌شود.
+#   نزولی => ورود خرید متوقف، فقط فروش | صعودی => ورود فروش متوقف، فقط خرید | رنج => خرید و فروش آزاد.
+# کلید gate_btc_daily_regime_enabled (پیش‌فرض روشن). اول هر روز یک پیام به کاربر اعلام می‌کند. نبود داده = آزاد (fail-open).
+# پوزیشن‌های باز دست‌نخورده می‌مانند؛ روی همه‌ی مسیرهای ورود (خودکار، صف، لیست انتظار، دستی، ورود سریع، کارت دستیار، اوردر معلق) اعمال می‌شود.
+BTC_DAILY_KEY = 'gate_btc_daily_regime_enabled'
+_BTC_DAILY_PREFIX = '🌅 رژیم روزانه BTC'
+_BTC_DAILY_TTL = 300.0
+_BTC_DAILY_CACHE = {}
+_BTC_DAILY_LOCK = _threading.RLock()
+_BTC_DAILY_SIMPLE = {'BUY': 'بیت‌کوین امروز نزولی است؛ امروز فقط دنبال فروش هستیم و ورود خرید انجام نمی‌شود.',
+                     'SELL': 'بیت‌کوین امروز صعودی است؛ امروز فقط دنبال خرید هستیم و ورود فروش انجام نمی‌شود.'}
+
+
+def _utc_day(ts=None):
+    return time.strftime('%Y-%m-%d', time.gmtime(time.time() if ts is None else ts))
+
+
+def daily_regime_info(sym):
+    """رژیم روزانه‌ی یک نماد: {'sym','regime','day','adx','close','ema50'} یا None (داده‌ی ناکافی).
+    'day' = روز UTC کندل در حال تشکیل (یعنی همین «امروز»). نتیجه چند دقیقه کش می‌شود؛ بعد از شروع روز جدید سریع‌تر تازه می‌شود."""
+    sym = str(sym).upper()
+    key = (_venue(), sym)
+    now = time.time()
+    with _BTC_DAILY_LOCK:
+        c = _BTC_DAILY_CACHE.get(key)
+    if c:
+        stale_day = bool(c.get('info')) and c['info'].get('day') != _utc_day(now)
+        if now - c['ts'] < (60.0 if stale_day else _BTC_DAILY_TTL):
+            return c['info']
+    info = None
+    try:
+        df = get_klines(sym, '1day', 200)
+        if df is not None and not df.empty and len(df) >= 60:
+            ind = calculate_indicators(df)
+            reg = regime_from_ind_df(ind, advanced=True)
+            if reg:
+                r = ind.iloc[-2]
+                try:
+                    ts = float(df['timestamp'].iloc[-1])
+                    if ts > 1e11:
+                        ts /= 1000.0
+                    day = _utc_day(ts)
+                except Exception:
+                    day = _utc_day(now)
+                info = {'sym': sym, 'regime': reg, 'day': day, 'adx': _rg_num(r.get('adx')),
+                        'close': _rg_num(r.get('close')), 'ema50': _rg_num(r.get('ema50'))}
+    except Exception:
+        logger.exception('daily regime failed sym=%s', sym)
+        info = None
+    if info is None and c and c.get('info') and now - c['ts'] < 6 * 3600:
+        info = c['info']         # خطای لحظه‌ای شبکه: آخرین مقدار سالم تا ۶ ساعت نگه داشته می‌شود
+    with _BTC_DAILY_LOCK:
+        _BTC_DAILY_CACHE[key] = {'ts': now, 'info': info}
+    return info
+
+
+def _btc_eth_daily_lines(plain=False, popup=False):
+    """V3.44.130: رژیم روزانه‌ی BTC و ETH (آخرین کندل بسته‌شده‌ی روزانه، معیار دقیق) برای نمایش زیر رژیم تایم‌فریم فعال."""
+    icons = {'BTC': '₿', 'ETH': 'Ξ'}
+    infos = {}
+    for sym in ('BTC', 'ETH'):
+        try:
+            infos[sym] = daily_regime_info(sym)
+        except Exception:
+            logger.exception('daily regime lines failed sym=%s', sym)
+            infos[sym] = None
+    if popup:
+        return ['📅 روزانه: ' + ' · '.join(f"{icons[x]} {_REGIME_FA.get((infos[x] or {}).get('regime'), '⏳ نامشخص')}" for x in ('BTC', 'ETH'))]
+    lines = ['', '📅 *رژیم روزانه*']
+    for sym in ('BTC', 'ETH'):
+        i = infos[sym] or {}
+        adx = i.get('adx')
+        extra = f" · ADX `{adx:.0f}`" if (not plain and adx is not None) else ''
+        lines.append(f"{icons[sym]} {sym}: *{_REGIME_FA.get(i.get('regime'), '⏳ نامشخص')}*{extra}")
+    breg = (infos['BTC'] or {}).get('regime')
+    if breg == 'BEARISH':
+        lines.append('امروز فقط دنبال فروش هستیم.')
+    elif breg == 'BULLISH':
+        lines.append('امروز فقط دنبال خرید هستیم.')
+    elif breg == 'RANGE':
+        lines.append('امروز بیتکوین رنج است؛ خرید و فروش آزاد است.')
+    return lines
+
+
+def btc_daily_enabled(s):
+    return bool(gate_on(s if isinstance(s, dict) else {}, BTC_DAILY_KEY))
+
+
+def btc_daily_verdict(sig):
+    """(ok, توضیح, info). sig = جهت نهایی معامله ('BUY'/'SELL'). خرید فقط وقتی رژیم روزانه‌ی BTC نزولی نیست، فروش فقط وقتی صعودی نیست."""
+    info = daily_regime_info('BTC')
+    reg = (info or {}).get('regime')
+    if reg == 'BEARISH' and sig == 'BUY':
+        return False, f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز نزولی است و فقط دنبال فروش هستیم؛ ورود خرید انجام نمی‌شود' + _btc_gate_key_line(BTC_DAILY_KEY), info
+    if reg == 'BULLISH' and sig == 'SELL':
+        return False, f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز صعودی است و فقط دنبال خرید هستیم؛ ورود فروش انجام نمی‌شود' + _btc_gate_key_line(BTC_DAILY_KEY), info
+    return True, '', info
+
+
+def _btc_daily_gate(chat_id, s, symbol, sig, allow_inverse=True):
+    """(ok, توضیح). جهتِ سنجیده‌شده جهتِ نهایی معامله است (با «معاملات معکوس» روشن و allow_inverse برعکس می‌شود)."""
+    if not btc_daily_enabled(s):
+        return True, ''
+    eff = sig
+    if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
+        eff = 'SELL' if sig == 'BUY' else 'BUY'
+    try:
+        ok, txt, _info = btc_daily_verdict(eff)
+    except Exception:
+        logger.exception('btc daily gate failed symbol=%s', symbol)
+        return True, ''
+    if ok:
+        return True, ''
+    _block_simple_register(txt, _BTC_DAILY_SIMPLE.get(eff, _BTC_DAILY_SIMPLE['BUY']))
+    return False, txt
+
+
+def _btc_daily_precheck(chat_id, symbol, side, price, sl, tp, force, allow_inverse=True):
+    """True = اجازه‌ی ادامه. از execute_trade/execute_manual_trade می‌گذرد و با force=True هم دور زده نمی‌شود."""
+    s = get_session(chat_id)
+    if not btc_daily_enabled(s):
+        return True
+    try:
+        _BLK_CTX[chat_id] = {'ts': time.time(), 'symbol': symbol, 'side': side, 'signal_price': float(price), 'sl': float(sl), 'tp': float(tp),
+                             'scenario': None, 'force': bool(force)}
+    except Exception:
+        pass
+    sig = 'BUY' if side_long(side) else 'SELL'
+    ok, txt = _btc_daily_gate(chat_id, s, symbol, sig, allow_inverse)
+    if ok:
+        return True
+    _blk(chat_id, txt)
+    return False
+
+
+def _btc_daily_text(chat_id, info):
+    reg = (info or {}).get('regime')
+    day = (info or {}).get('day') or _utc_day()
+    lines = [f'🌅 *رژیم روزانه‌ی بیت‌کوین — {day}*', '']
+    if reg == 'BEARISH':
+        lines += ['🔴 *امروز بیتکوین نزولیه و ما فقط دنبال موقعیت‌های فروش می‌گردیم.*', 'ورود معاملات خرید امروز متوقف است.']
+    elif reg == 'BULLISH':
+        lines += ['🟢 *امروز بیتکوین صعودیه و ما فقط دنبال موقعیت‌های خرید می‌گردیم.*', 'ورود معاملات فروش امروز متوقف است.']
+    else:
+        lines += ['⚪️ *امروز بیتکوین در رنجه؛ هم خرید و هم فروش آزاده.*']
+    if not is_restricted_user(chat_id):
+        adx = info.get('adx') if info else None
+        if adx is not None:
+            lines += ['', f'ℹ️ رژیم از آخرین کندل بسته‌شده‌ی روزانه سنجیده شد (ADX {adx:.0f}). کندل روزانه ساعت ۰۳:۳۰ به وقت ایران عوض می‌شود.']
+        lines.append(_btc_gate_key_line(BTC_DAILY_KEY).strip())
+    return '\n'.join([x for x in lines if x is not None])
+
+
+def _btc_daily_markup(chat_id, on):
+    rows = [[{'text': '🧭 رژیم BTC/ETH', 'callback_data': '/btc_eth_regime'}]]
+    if is_admin(chat_id):
+        rows.append([{'text': ('🟢' if on else '🔴') + ' رژیم روزانه BTC', 'callback_data': '/btc_daily_toggle'}])
+    return {'inline_keyboard': rows}
+
+
+def btc_daily_announce_once():
+    """حلقه‌ی پس‌زمینه: اول هر روز (بعد از بسته‌شدن کندل روزانه) به هر چتی که کلید برایش روشن است یک پیام ماندگار می‌فرستد؛ پیام روز قبل پاک می‌شود."""
+    info = daily_regime_info('BTC')
+    if not info or not info.get('regime'):
+        return
+    sig_now = f"{info.get('day')}|{info.get('regime')}"
+    now = time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not btc_daily_enabled(s) or s.get('btc_daily_sent') == sig_now:
+                continue
+            if now - float(s.get('btc_daily_try', 0) or 0) < 600:
+                continue
+            s['btc_daily_try'] = now
+            _LAST_SENT.mid = None
+            ok = send_message(chat_id, _btc_daily_text(chat_id, info), _btc_daily_markup(chat_id, True), keep=True)
+            if not ok:
+                continue
+            new_mid = getattr(_LAST_SENT, 'mid', None)
+            old_mid = s.get('btc_daily_mid')
+            if old_mid and new_mid and old_mid != new_mid:
+                tg('deleteMessage', {'chat_id': chat_id, 'message_id': old_mid}, 10)
+            s['btc_daily_sent'] = sig_now
+            if new_mid:
+                s['btc_daily_mid'] = int(new_mid)
+            save_session(chat_id)
+        except Exception:
+            logger.exception('btc daily announce failed chat=%s', chat_id)
+
+
+def btc_daily_toggle(chat_id):
+    s = get_session(chat_id)
+    s.setdefault('strategy_config', {})
+    new = not gate_on(s, BTC_DAILY_KEY)
+    s['strategy_config'][BTC_DAILY_KEY] = new
+    if new:
+        s.pop('btc_daily_sent', None)        # با روشن‌شدن، اعلام امروز دوباره فرستاده می‌شود
+        s.pop('btc_daily_try', None)
+    save_session(chat_id)
+    return new
 
 
 # ===================== V3.44.115/118: «توقف همه‌ی معاملات وقتی جهت BTC بلاتکلیف است» =====================
@@ -6224,7 +6435,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.127'
+BOT_VERSION = '3.44.130'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7240,6 +7451,8 @@ def execute_trade(chat_id,symbol,side,signal_price,sl,tp,reason='',structural_tp
         return False
     if not _btc_undecided_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):      # V3.44.115
         return False
+    if not _btc_daily_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):          # V3.44.130
+        return False
     if not _btc_front_precheck(chat_id, symbol, side, signal_price, sl, tp, force, True):
         return False
     lock=get_entry_lock(chat_id)
@@ -7266,6 +7479,8 @@ def execute_manual_trade(chat_id,symbol,side,sl,tp,entry_price=None,reason='مع
         return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (کندل BTC با جهت معامله نمی‌خواند).'
     if not _btc_undecided_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):      # V3.44.115
         return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (جهت BTC بلاتکلیف است؛ تا مشخص شدن وضعیت BTC منتظر بمانید).'
+    if not _btc_daily_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):          # V3.44.130
+        return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (رژیم روزانه‌ی BTC جلوی این جهت را گرفته است).'
     if not _btc_front_precheck(chat_id, symbol, side, price, sl, tp, force, bool(force)):
         return False, _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود دستی رد شد (BTC به سطح نزدیک است؛ تا واکنش به سطح منتظر بمانید).'
     generation=int(s.get('scan_generation',0))
@@ -8653,6 +8868,7 @@ def _sync_preset_users(name, skip_chat_id=None):
 funnel_log.configure(os.environ.get('FUNNEL_DIR', '').strip() or os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), 'funnel'))
 _FN_TLS = _threading.local()
 _FN_GATE_RULES = (
+    (r'رژیم روزانه BTC|رژیم روزانه‌ی BTC', 'btc_daily_regime'),
     (r'R:R', 'min_rr'), (r'از لحظه.?ی برخورد دور', 'drift'), (r'از حد ضرر/سود طرح گذشته', 'price_crossed'),
     (r'سقف|کف دیروز|PDH|PDL', 'pd_level'), (r'کندل BTC|کندل در حال تشکیل', 'btc_candle'),
     (r'بلاتکلیفی جهت معاملاتی BTC', 'btc_undecided'), (r'رژیم', 'final_regime'), (r'کلوز BTC|سطح جلویی|فاصله.*BTC|BTC.*فاصله', 'btc_front'),
@@ -8987,7 +9203,7 @@ def _fn_fav_final(chat_id, rec, status):
     _fn_emit(chat_id, 'fav_final', rid=rec.get('id'), tid=rec.get('tid'), symbol=rec.get('symbol'), sig=rec.get('sig'), status=status,
              why=rec.get('why'), confirm_px=rec.get('confirm_px'), entry=rec.get('entry'), min_r=rec.get('min_r'), max_r=rec.get('max_r'),
              # V3.44.82: برای تشخیص «چرا باز نشد»: متن دقیق مانعِ بعد از تایید، تعداد کلوزهای سنجیده‌شده و حرکت آخرین کلوز (R)
-             hold=str(rec.get('undecided_hold') or rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
+             hold=str(rec.get('daily_hold') or rec.get('undecided_hold') or rec.get('front_hold') or rec.get('pd_hold') or rec.get('regime_hold') or rec.get('btc_hold') or '')[:200] or None,
              eval_n=rec.get('eval_n', 0), last_x=rec.get('last_x'),
              # V3.44.107: هر گیتِ بعد از تایید چند بار و چند دقیقه سیگنال را نگه داشت؛ تاخیرِ ورود به‌خاطر گیت‌ها؛ نوع و R لغو
              hold_ticks=_hs, hold_delay_min=_hd, cancel_kind=rec.get('cancel_kind'), cancel_r=rec.get('cancel_r'),
@@ -10511,6 +10727,10 @@ def _background_scan_loop():
             btc_undecided_refresh_once()
         except Exception:
             logger.exception('btc undecided refresh loop failed')
+        try:
+            btc_daily_announce_once()
+        except Exception:
+            logger.exception('btc daily announce loop failed')
         try:
             paper_hard_stop_scan_once()
         except Exception:
@@ -12193,7 +12413,7 @@ def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
 def _fav_finish(chat_id, s, rec, status, text):
     rec['status'] = status
     # علت پایان برای آمار: منقضی = یا «مهلت تمام شد» (timeout) یا «قیمت از سقف گذشت» (overrun)
-    rec['why'] = ('undecided' if rec.get('undecided_blocked') else 'btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
+    rec['why'] = ('btcdaily' if rec.get('daily_blocked') else 'undecided' if rec.get('undecided_blocked') else 'btc' if rec.get('btc_blocked') else ('front' if rec.get('front_blocked') else ('pdlevel' if rec.get('pd_blocked') else ('regime' if rec.get('regime_blocked') else ('overrun' if rec.get('overran') else 'timeout'))))) if status == 'expired' else status
     rec[f'{status}_at'] = time.time()
     try:
         _fn_fav_final(chat_id, rec, status)
@@ -12349,6 +12569,17 @@ def _fav_process_one_core(chat_id, s, rec):
                 save_session(chat_id)
                 return
             rec.pop('pd_blocked', None); rec.pop('pd_hold', None)
+        if btc_daily_enabled(s):
+            # V3.44.130: رژیم روزانه‌ی BTC: جهتِ مخالف رژیم در صف می‌ماند (رد نمی‌شود) و با هر کندل دوباره سنجیده می‌شود.
+            dy_ok, dy_txt = _btc_daily_gate(chat_id, s, symbol, sig)
+            if not dy_ok:
+                rec['daily_blocked'] = True; rec['daily_hold'] = dy_txt; _fn_hold_tick(rec, 'daily', dy_txt)
+                if now >= float(rec.get('expires_at', 0)):
+                    return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد؛ تایید حرکت برقرار بود ولی رژیم روزانه‌ی BTC جلوی این جهت را گرفته بود؛ بدون ورود.")
+                rec['last_eval_ts'] = float(rec.get('last_eval_ts', 0) or 0) - tf_s     # همین کندل در تیک بعدی دوباره سنجیده می‌شود
+                save_session(chat_id)
+                return
+            rec.pop('daily_blocked', None); rec.pop('daily_hold', None)
         if btc_undecided_enabled(chat_id, s):
             # V3.44.115: آخرین مرحله‌ی خروج از صف: وقتی جهت BTC بلاتکلیف است سیگنال در صف می‌ماند (رد نمی‌شود) و با هر کندل دوباره سنجیده می‌شود.
             un_ok, un_txt = _btc_undecided_gate(chat_id, s, symbol, sig, tf)
@@ -12419,9 +12650,9 @@ def _fav_process_one_core(chat_id, s, rec):
         detail = _LAST_BLOCK_REASON.pop(chat_id, None) or 'ورود رد شد'
         return _fav_finish(chat_id, s, rec, 'blocked', f"ورود بعد از تایید باز نشد: {detail}")
     if now >= float(rec.get('expires_at', 0)):
-        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('undecided_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
+        if not rec.get('overran') and not rec.get('regime_blocked') and not rec.get('btc_blocked') and not rec.get('daily_blocked') and not rec.get('undecided_blocked') and not rec.get('front_blocked') and not rec.get('pd_blocked'):          # ورود دیرهنگام (قیمت به نفع سیگنال از سقف گذشته) یا مسدود‌شده با رژیم برعکس نمی‌شود؛ فقط «حرکت نکرد» برعکس می‌شود
             _fav_flip_to_touch(chat_id, s, rec, live, require_adverse=False)
-        why_txt = ('جهت BTC تا پایان مهلت بلاتکلیف ماند' if rec.get('undecided_blocked') else 'کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
+        why_txt = ('رژیم روزانه‌ی BTC تا پایان مهلت جلوی این جهت را گرفت' if rec.get('daily_blocked') else 'جهت BTC تا پایان مهلت بلاتکلیف ماند' if rec.get('undecided_blocked') else 'کندل BTC تا پایان مهلت هم‌جهت معامله نشد' if rec.get('btc_blocked') else 'فاصله‌ی BTC تا سطح جلویی تا پایان مهلت معقول نشد' if rec.get('front_blocked') else 'سقف/کف دیروز تا پایان مهلت جلوی معامله ماند یا واکنش قیمت به آن مشخص نشد' if rec.get('pd_blocked') else 'رژیم بازار تا پایان مهلت به نفع معامله نشد' if rec.get('regime_blocked') else
                    ('قیمت از سقف گذشت و تا پایان مهلت به محدوده برنگشت' if rec.get('overran') else 'تایید نگرفت'))
         return _fav_finish(chat_id, s, rec, 'expired', f"⌛ مهلت صبر `{symbol}` ({side_txt}) تمام شد و {why_txt}؛ بدون ورود.")
     save_session(chat_id)
@@ -12461,6 +12692,8 @@ def _fav_card_payload(r, now=None):
         lines.append(f"    سقف این نماد: `+{float(r['max_r']):.2f}R`")
     if r.get('regime_hold') and r.get('status') == 'waiting':
         lines.append(f"    🧭 {r['regime_hold']}")
+    if r.get('daily_hold') and r.get('status') == 'waiting':
+        lines.append(f"    🌅 {r['daily_hold']}")
     if r.get('undecided_hold') and r.get('status') == 'waiting':
         lines.append(f"    ⛔ {r['undecided_hold']}")
     if r.get('btc_hold') and r.get('status') == 'waiting':
@@ -13963,6 +14196,12 @@ def _touch_auto_enter_core(chat_id, rec):
         if not _pd_ok:
             rec['block_note'] = _pd_txt[:120]
             return False
+    if btc_daily_enabled(s):
+        # V3.44.130: لیست انتظار: جهتِ مخالف رژیم روزانه‌ی BTC در لیست می‌ماند (رد نمی‌شود) و تیک بعدی دوباره سنجیده می‌شود.
+        _dy_ok, _dy_txt = _btc_daily_gate(chat_id, s, symbol, side)
+        if not _dy_ok:
+            rec['block_note'] = _dy_txt[:120]
+            return False
     if btc_undecided_enabled(chat_id, s):
         # V3.44.115: لیست انتظار: وقتی جهت BTC بلاتکلیف است مورد (رد نمی‌شود) در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
         _un_ok, _un_txt = _btc_undecided_gate(chat_id, s, symbol, side, tf)
@@ -14972,6 +15211,11 @@ async def scan_symbol(http,chat_id,symbol):
         _fr_ok, _fr_txt = _final_regime_verdict(_fr_gate, sig)
         if not _fr_ok:
             return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «رژیم بازار در مرحله‌ی آخر»: {_fr_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'final_regime', sig, diagnostics=diagnostics)
+    if btc_daily_enabled(s):
+        # V3.44.130: مسیر مستقیم (بدون صف): جهتِ مخالف رژیم روزانه‌ی BTC وارد نمی‌شود؛ سیگنال رد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
+        _dy_ok, _dy_txt = await asyncio.to_thread(_btc_daily_gate, chat_id, s, symbol, sig)
+        if not _dy_ok:
+            return _entry_diag_result(chat_id, symbol, 'blocked', f'کلید «رژیم روزانه BTC»: {_dy_txt} (اسکن بعدی دوباره بررسی می‌شود)', 'btc_daily', sig, diagnostics=diagnostics)
     if btc_undecided_enabled(chat_id, s):
         # V3.44.115: مسیر مستقیم (بدون صف): وقتی جهت BTC بلاتکلیف است هیچ ورودی انجام نمی‌شود؛ سیگنال رد نمی‌شود و اسکن بعدی دوباره می‌سنجد.
         _un_ok, _un_txt = await asyncio.to_thread(_btc_undecided_gate, chat_id, s, symbol, sig, tf)
@@ -15273,6 +15517,7 @@ GATE_REGISTRY = {
     'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
     'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', False, 'btceth', 'پیش‌فرض خاموش (مستقل از پریست‌ها). حتی وقتی خاموش است، هر معامله‌ای که باز می‌شود در ژورنال برچسب می‌خورد که «اگر این کلید روشن بود، این معامله بسته می‌شد یا نه» و گزارش مقایسه‌ی نتیجه با /undecided_report ساخته می‌شود. روشن: اگر BTC وسطِ راهروی دو سطح خودش باشد، یعنی کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال هم بیش از ۵×ATR و هم بیش از ۴۰٪ فاصله‌ی دو سطح (بالا و پایین) از نزدیک‌ترین سطح دور باشد، جهت BTC مشخص نیست؛ ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا BTC به یکی از سطوح نزدیک شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیتکوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود. حدها با متغیرهای BTC_UNDECIDED_FAR_ATR و BTC_UNDECIDED_FAR_GAP (یا کلیدهای btc_undecided_far_atr / btc_undecided_far_gap) عوض می‌شوند. در منوی اصلی فقط ادمین کلید را می‌بیند؛ کاربر عادی فقط زیر پیام هشدار آن را دارد.'),
     'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
+    'gate_btc_daily_regime_enabled': ('🌅 رژیم روزانه BTC (جهت مجاز امروز)', True, 'btceth', 'پیش‌فرض روشن. رژیم روزانه‌ی بیت‌کوین از آخرین کندل بسته‌شده‌ی روزانه با معیار دقیق (EMA20/50 هم‌جهت + ADX ≥ ۱۸ + DI هم‌جهت + شیب EMA50 + فاصله از EMA50) سنجیده می‌شود و در طول روز ثابت می‌ماند (کندل روزانه ساعت ۰۳:۳۰ به وقت ایران عوض می‌شود). اگر نزولی باشد، ورود همه‌ی معاملات خرید در همه‌ی مسیرها (خودکار، صف، لیست انتظار، دستی، ⚡ ورود سریع، کارت دستیار، اوردر معلق) متوقف است و فقط فروش مجاز است؛ اگر صعودی باشد برعکس؛ در رنج، خرید و فروش آزاد است. با «معاملات معکوس» روشن، جهتِ نهایی معامله سنجیده می‌شود. سیگنال رد نمی‌شود و در صف/لیست انتظار می‌ماند. اگر داده‌ی روزانه در دسترس نباشد ورود آزاد است. اول هر روز یک پیام اعلام می‌شود («امروز بیتکوین نزولیه و ما فقط دنبال موقعیت‌های فروش می‌گردیم»). معامله‌های باز دست‌نخورده می‌مانند. مستقل از پریست‌هاست.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'btceth', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
@@ -18717,6 +18962,14 @@ def process_command(cmd,chat_id,message_id=None):
         if message_id and _bu_rec.get('mid') == message_id:
             return
         menu(chat_id, message_id)
+        return
+    if cl=='/btc_daily_toggle':
+        # V3.44.130: کلید «رژیم روزانه BTC» زیر پیام اول روز (فقط ادمین؛ برای کاربر عادی در access_policy بسته است)
+        if not is_admin(chat_id):
+            return
+        _bd_on = btc_daily_toggle(chat_id)
+        if message_id:
+            tg('editMessageReplyMarkup', {'chat_id': chat_id, 'message_id': message_id, 'reply_markup': _btc_daily_markup(chat_id, _bd_on)}, 10)
         return
     if cl=='/assist_main_toggle':
         # V3.44.75: کلید حالت دستیار در منوی اصلی؛ تغییر روی همان پیام نمایش داده می‌شود (منوی اصلی در جا بازسازی می‌شود)

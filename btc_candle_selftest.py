@@ -102,7 +102,7 @@ def blk(chat_id, reason):
     return False
 
 
-g3 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_session=lambda c: S, btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: bool(S['cfg'].get(k, False)),
+g3 = dict(time=time, logger=log, _BLK_CTX={}, _LAST_BLOCK_REASON=LBR, get_session=lambda c: S, btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool(S['cfg'].get(k, False)),
           side_long=lambda side: 'BUY' in str(side).upper() or 'LONG' in str(side).upper(),
           btc_candle_verdict=v, _BTC_CANDLE_BLOCK_PREFIX=P, _blk=blk, latest_price=lambda s: 100.0, get_entry_lock=lambda c: _L(),
           _btc_undecided_precheck=lambda *a, **k: True,      # V3.44.115: کلید جدید «بلاتکلیفی جهت BTC» جدا تست می‌شود (btc_undecided_selftest.py)
@@ -149,7 +149,7 @@ gf = dict(os=os, logger=log, time=time, FAV_CONFIRM_MIN_RR=0.0, FAV_CONFIRM_CANC
           exchange_latest_price=lambda c, s: 100.8, latest_price=lambda s: 100.8,
           get_klines=lambda sym, tf, n: pd.DataFrame(rows),
           get_session=lambda c: SF, save_session=lambda c: None, _fav_update_card=lambda *a, **k: None,
-          btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX=P,
+          btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool(SF['cfg'].get(k, False)), _BTC_CANDLE_BLOCK_PREFIX=P,
           _btc_front_flags=lambda s: (bool(SF['cfg'].get('gate_btc_front_level_enabled', False)), bool(SF['cfg'].get('gate_btc_chop_enabled', False))),
           btc_candle_verdict=lambda tf, sig: (True, '') if (calls['btc'] == ('BULLISH' if sig == 'BUY' else 'BEARISH')) else (False, f"{P} {calls['btc']}"),
           execute_trade=lambda *a, **k: (calls.__setitem__('exec', calls['exec'] + 1) or True),

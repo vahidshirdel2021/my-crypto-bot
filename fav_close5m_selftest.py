@@ -13,7 +13,7 @@ g = dict(os=os, time=time, hashlib=hashlib, logger=logging.getLogger('t'), pd=pd
          fmt=lambda v: str(v), extract_setup_level=lambda r: ('t', 'L', '1.0'), send_message=lambda c, t, *a, **k: sent.append(t),
          latest_price=lambda sym: state['live'], exchange_latest_price=lambda c, sym: state['live'], get_klines=gk,
          _auto_trend_gate=lambda *a, **k: False, execute_trade=lambda *a, **k: (calls.append(k) or True),
-         btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s, k: False, _btc_front_flags=lambda s: (False, False), USER_SESSIONS={},
+         btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: False, _btc_front_flags=lambda s: (False, False), USER_SESSIONS={},
          ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a, **k: 'assist_sent')
 exec(block, g)
 E = g['_fav_eval_tf']

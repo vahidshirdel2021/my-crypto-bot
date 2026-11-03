@@ -15,7 +15,7 @@ g=dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, os=os,time=time,hashlib=has
   get_klines=lambda sym,tf,n:state['df'],
   _auto_trend_gate=lambda *a,**k:state['gate'],
   execute_trade=lambda *a,**k:(calls.append(k) or state['exec_ok']),
-  btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s,k:False, _btc_front_flags=lambda s:(False,False), USER_SESSIONS={}, ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a,**k:(calls.append(('assist',a[5],a[3],k)) or 'assist_sent'))
+  btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s,k:False, _btc_front_flags=lambda s:(False,False), USER_SESSIONS={}, ASSIST_SHADOW_HORIZON_SECONDS=86400, _assist_queue_signal=lambda *a,**k:(calls.append(('assist',a[5],a[3],k)) or 'assist_sent'))
 exec(block,g)
 g['get_klines_for']=lambda cid,sym,tf,n: g['get_klines'](sym,tf,n)   # V3.44.98
 D=g['_fav_decide']
@@ -181,7 +181,7 @@ _long=[_mkv('btceth','SELL','ETH نزولی، BTC نزولی'),_mkv('h4','SELL',
        _mkv('level','SELL','آخرین کلوز پایین سطح'),_mkv('ylevel','SELL','برخورد به سقف دیروز (5.9770) و عبور نکرده')]
 g.update(_touch_enabled_keys=lambda s_:list(_ALL), _touch_votes=lambda sym,tf,reason,keys,ind_df=None,cfg=None:copy.deepcopy(_long),
          _final_regime_check=lambda tf,sig:(False,'x'), TIMEFRAME_REGIME_CACHE={'5min':{'gate':'RANGE'}},
-         btc_undecided_enabled=lambda c, s=None: False, gate_on=lambda s_,k:True if k=='gate_final_regime_enabled' else False, _btc_front_flags=lambda s_:(False,False))
+         btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s_,k:True if k=='gate_final_regime_enabled' else False, _btc_front_flags=lambda s_:(False,False))
 state['live']=99.9
 state['df']=mkdf([100.0,99.95,99.9])
 rz=[r for r in S['fav_wait'].values() if r['symbol']=='DDD'][0]
