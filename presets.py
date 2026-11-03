@@ -50,6 +50,7 @@ _GATES_OFF = (
     'gate_fc_symreg_enabled',               # V3.44.104: رأی «رژیم نماد در تایم‌فریم فعال»
     'gate_symbol_structure_block_enabled',  # V3.44.105: مانع ثبت وقتی ساختار سقف/کف نماد خلاف جهت سیگنال است
     'gate_touch_bias_block_enabled',        # V3.44.132: مانع جهت مخالفِ جهت غالب لیست انتظار (۷۰٪)
+    'gate_touch_need_dominant_enabled',     # V3.44.133: جهت غالب مشخص نباشد = بدون معامله (پیش‌فرض خاموش)
 )
 
 BASE_CFG = {
