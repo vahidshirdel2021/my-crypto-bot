@@ -18,6 +18,10 @@ kind ها:
     shadow       : اگر در لحظه‌ی برخورد/صف وارد می‌شدیم تا چند ساعت بعد چه می‌شد (tp/sl اول، MFE/MAE، زمان رسیدن به +۰.۱۵/۰.۲۵/۰.۳۵R)
                    V3.44.107: sk = touch_d1 / touch_d2 = «ورود روی کلوز کندل برخورد» / «روی کلوز کندل بعدی» با همان SL/TP مطلق؛
                    فیلدهای entry (قیمت ورود فرضی)، plan_entry، shift_r (+ = قیمت بهتر از طرح)، و outcome='void' وقتی قیمت از قبل بیرون از SL/TP بوده.
+    react        : V3.44.139: «واکنش قیمت به سطح» برای هر برخورد (۸ کندل بعد): label = held (≥۱R در جهت واکنش بدون کلوز پشت سطح) /
+                   broke (کلوز پشت سطح اول رخ داد) / chop؛ k_res = شماره‌ی کندلِ تعیین‌تکلیف، run_r = ادامه‌ی حرکت بعد از شکست (دنبال‌شدن)،
+                   c0 = مشخصات کندل برخورد (body_r، rej_wick، pen_r، range_r، vol_ratio، close_r)، c = کلوز ۳ کندل اول نسبت به سطح (به R)،
+                   ok3 = چندتا از ۳ کلوز اول سمت درستِ سطح بودند. R = فاصله‌ی entry تا SL طرح؛ علامت‌ها در جهت واکنشِ مورد انتظار.
     settings     : V3.44.107: عکس کلیدهای روشن/تنظیمات مهم هر حساب (هر بار که عوض شود + روزی یک‌بار)؛ هش آن (cfg) در همه‌ی رکوردها هست.
 
 هیچ‌چیز از این ماژول نباید جلوی کار ربات را بگیرد: همه‌ی خطاها قورت داده می‌شوند.
@@ -186,7 +190,7 @@ def _save_pending():
         pass
 
 
-def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_seconds, start_ts=None, delay=None):
+def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_seconds, start_ts=None, delay=None, level=None, due_s=None):
     """ثبت یک ردیابی: «اگر با این entry/sl/tp وارد می‌شدیم». هر (tid, kind) فقط یک‌بار."""
     if not ENABLED:
         return False
@@ -202,8 +206,9 @@ def shadow_register(tid, shadow_kind, ctx, symbol, side, entry, sl, tp, tf, tf_s
                 return False
             _SHADOW.append({'tid': tid, 'sk': shadow_kind, 'ctx': dict(ctx or {}), 'symbol': symbol, 'side': side,
                             'entry': entry, 'sl': sl, 'tp': tp, 'tf': tf, 'tfs': int(tf_seconds or 900),
-                            'start_ts': float(start_ts or time.time()), 'due': float(start_ts or time.time()) + SHADOW_HORIZON_SECONDS,
-                            'delay': delay})
+                            'start_ts': float(start_ts or time.time()),
+                            'due': float(start_ts or time.time()) + (float(due_s) if due_s else SHADOW_HORIZON_SECONDS),
+                            'delay': delay, 'level': (float(level) if level is not None else None)})
             if len(_SHADOW) > 4000:
                 del _SHADOW[:len(_SHADOW) - 4000]
             _save_pending()
@@ -285,6 +290,79 @@ def _evaluate_delayed(x, df, ts):
     return res, entry_new, extra
 
 
+REACT_CANDLES = 8
+REACT_BREAK_R = 0.10       # کلوز دست‌کم این‌قدر (به R) پشت سطح = شکست
+REACT_HELD_R = 1.0         # حرکت دست‌کم این‌قدر (به R) از سطح در جهت واکنش = نگه داشت
+
+
+def _evaluate_reaction(x, df, ts):
+    """V3.44.139: واکنش قیمت به سطح روی ۸ کندل بعد از کندل برخورد. جهت واکنشِ مورد انتظار = جهت سیگنال
+    (BUY: بالای سطح می‌ماند، SELL: پایین سطح). خروجی dict (بدون tid/ctx) یا {'label': 'void', ...}."""
+    side = x['side']
+    level = x.get('level')
+    risk = abs(float(x['entry']) - float(x['sl']))
+    if level is None or risk <= 0:
+        return {'label': 'void', 'void': 'no_level'}
+    level = float(level)
+    sg = 1.0 if side == 'BUY' else -1.0
+    tfs = int(x.get('tfs') or 900)
+    open_ts = (int(x['start_ts']) // tfs) * tfs
+    tsv = ts.values
+    idx = None
+    for j in range(len(tsv)):
+        if abs(float(tsv[j]) - open_ts) < 1.0:
+            idx = j
+            break
+    if idx is None:
+        return {'label': 'void', 'void': 'no_candle'}
+    o, h, l, c = (df[k].values for k in ('open', 'high', 'low', 'close'))
+    vol = df['volume'].values if 'volume' in df else None
+
+    def sr(px):             # فاصله‌ی علامت‌دار از سطح به R؛ مثبت = سمت درستِ سطح
+        return sg * (float(px) - level) / risk
+    rng = float(h[idx]) - float(l[idx])
+    if side == 'BUY':
+        wick = (min(float(o[idx]), float(c[idx])) - float(l[idx])) / rng if rng > 0 else 0.0
+        pen = max(0.0, level - float(l[idx])) / risk
+    else:
+        wick = (float(h[idx]) - max(float(o[idx]), float(c[idx]))) / rng if rng > 0 else 0.0
+        pen = max(0.0, float(h[idx]) - level) / risk
+    vr = None
+    if vol is not None and idx >= 5:
+        prev = [float(v) for v in vol[max(0, idx - 20):idx] if v == v]
+        if prev and sum(prev) > 0:
+            vr = round(float(vol[idx]) / (sum(prev) / len(prev)), 2)
+    c0 = {'close_r': round(sr(c[idx]), 3), 'body_r': round(sg * (float(c[idx]) - float(o[idx])) / risk, 3),
+          'rej_wick': round(wick, 3), 'pen_r': round(pen, 3), 'range_r': round(rng / risk, 3), 'vol_ratio': vr}
+    last = min(len(tsv) - 1, idx + REACT_CANDLES)
+    n_after = last - idx
+    label, k_res = 'chop', None
+    mfe = mae = 0.0
+    closes_r = []
+    for k in range(idx, last + 1):
+        fav = sr(h[k] if side == 'BUY' else l[k])                 # بهترین نقطه‌ی کندل در جهت واکنش
+        adv = -sr(l[k] if side == 'BUY' else h[k])                # بدترین نقطه‌ی کندل (پشت سطح)
+        mfe, mae = max(mfe, fav), max(mae, adv)
+        cl = sr(c[k])
+        if k > idx and len(closes_r) < 3:
+            closes_r.append(round(cl, 3))
+        if k_res is None:
+            brk, held = cl <= -REACT_BREAK_R, fav >= REACT_HELD_R
+            if brk and held:
+                label, k_res = 'chop', k - idx
+            elif brk:
+                label, k_res = 'broke', k - idx
+            elif held:
+                label, k_res = 'held', k - idx
+    run_r = None
+    if label == 'broke':          # بعد از شکست چقدر پشت سطح دنبال شد (حیوان درنده)
+        run_r = round(max(0.0, mae), 3)
+    return {'label': label, 'k_res': k_res, 'n_after': n_after, 'partial': bool(n_after < REACT_CANDLES),
+            'level': level, 'risk_pct': round(risk / level * 100.0, 3) if level else None,
+            'mfe_r': round(mfe, 3), 'mae_r': round(mae, 3), 'run_r': run_r, 'c0': c0, 'c': closes_r,
+            'ok3': sum(1 for v in closes_r if v > 0)}
+
+
 def shadow_run_once(get_klines_fn):
     """موارد سررسیدشده را روی کندل‌ها حل می‌کند و رویداد shadow می‌نویسد. تعداد حل‌شده را برمی‌گرداند."""
     if not ENABLED:
@@ -314,6 +392,15 @@ def shadow_run_once(get_klines_fn):
                 ts = df['timestamp'].astype('float64')
                 if float(ts.max()) > 1e12:
                     ts = ts / 1000.0
+                if x.get('sk') == 'react':
+                    rr = _evaluate_reaction(x, df, ts)
+                    pl = {'tid': x['tid'], 'symbol': x['symbol'], 'side': x['side'], 'entry': x['entry'], 'sl': x['sl']}
+                    pl.update(dict(x.get('ctx') or {}))
+                    pl['tf'] = tf
+                    pl.update(rr)
+                    emit('react', **pl)
+                    done.append(x)
+                    continue
                 entry_used, extra = x['entry'], {}
                 if x.get('delay') is not None:
                     res, entry_used, extra = _evaluate_delayed(x, df, ts)

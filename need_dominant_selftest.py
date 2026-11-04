@@ -27,7 +27,7 @@ KB = 'gate_touch_bias_block_enabled'
 # ثبت کلید: پیش‌فرض خاموش، بخش قوانین ورود، در پریست‌ها مدیریت می‌شود
 assert bot.GATE_REGISTRY[K][1] is False and bot.GATE_REGISTRY[K][2] == 'entry_rules'
 import presets; assert presets.BASE_CFG.get(K) is False
-assert bot.BOT_VERSION == '3.44.136'
+assert bot.BOT_VERSION == '3.44.139'
 
 bot.save_session = lambda *a, **k: None
 bot._touch_update_card = lambda *a, **k: True
@@ -86,8 +86,15 @@ assert 'مشخص نیست' not in (r.get('block_note') or ''), r.get('block_note
 sent = []
 bot.send_message = lambda chat_id, text, markup=None, message_id=None, **k: sent.append(text) or True
 bot.is_restricted_user = lambda c: False
-for kk, kb, b, sl in ((True, False, 0, 1), (True, True, 3, 7), (False, False, 0, 1)):
-    cfg[K] = kk; cfg[KB] = kb; load(b, sl); sent.clear(); bot.assist_pending_list(CID)
-    assert 'جهت بازار' not in sent[-1] and 'فشار' not in sent[-1] and '📊' not in sent[-1] and 'بدون غلبه' not in sent[-1], sent[-1][:400]   # V3.44.136: خطوط بالای لیست حذف شد
-    assert '📋' in sent[-1] and 'برخورد با سطح' in sent[-1]
+def _top():
+    return sent[-1]
+cfg[K] = True; cfg[KB] = False; load(0, 1); sent.clear(); bot.assist_pending_list(CID)
+assert 'جهت بازار: بدون غلبه‌ی واضح' in _top() and 'معامله‌ای انجام نمی‌شود' in _top() and 'هر دو جهت آزاد' not in _top(), _top()[:400]
+assert 'فشار' not in _top() and '📊' not in _top()
+load(3, 7); sent.clear(); bot.assist_pending_list(CID)
+assert 'جهت بازار: فروش' in _top() and 'بلاک است' not in _top(), _top()[:400]       # بدون کلید مانع، فقط اطلاع
+cfg[KB] = True; sent.clear(); bot.assist_pending_list(CID)
+assert 'جهت خرید بلاک است' in _top(), _top()[:400]
+cfg[K] = False; cfg[KB] = False; load(0, 1); sent.clear(); bot.assist_pending_list(CID)
+assert 'جهت بازار' not in _top() and '📋' in _top()
 print('need_dominant_selftest ALL OK')

@@ -6439,7 +6439,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.136'
+BOT_VERSION = '3.44.139'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -9137,7 +9137,15 @@ def _fn_touch_created(chat_id, s, rec, plan, flip_from):
         return
     tf = rec.get('tf') or s.get('timeframe', '5min')
     pl = plan or {}
-    _fn_emit(chat_id, 'touch', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), scn=rec.get('scn'),
+    try:        # V3.44.138: وضعیت واقعیِ جهت غالب بازار در لحظه‌ی ثبت برخورد (مستقل از روشن/خاموش بودن گیت‌ها) برای تحلیل بعدی
+        _dm_blk, _dm_b, _dm_s = _touch_bias_verdict(s)
+        _dm_dom = {'SELL': 'BUY', 'BUY': 'SELL'}.get(_dm_blk)
+        _dm_sig = rec.get('touch_sig')
+        _dom_log = {'b': _dm_b, 's': _dm_s, 'd': _dm_dom, 'p': TOUCH_BIAS_PCT, 'min': TOUCH_BIAS_MIN_TOTAL,
+                    'c': ('undecided' if _dm_dom is None else ('aligned' if _dm_dom == _dm_sig else 'opposed'))}
+    except Exception:
+        _dom_log = None
+    _fn_emit(chat_id, 'touch', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), scn=rec.get('scn'), dom=_dom_log,
              level_token=rec.get('level_token'), level_value=rec.get('level_value'), touch_price=rec.get('touch_price'),
              plan_entry=pl.get('entry'), plan_sl=pl.get('sl'), plan_tp=pl.get('tp'), plan_rr=pl.get('rr'), plan_score=pl.get('score'),
              flip_from=flip_from, reason=str(rec.get('reason') or '')[:300],
@@ -9160,6 +9168,14 @@ def _fn_touch_created(chat_id, s, rec, plan, flip_from):
         for _sk, _dl in (('touch_d1', 0), ('touch_d2', 1)):
             funnel_log.shadow_register(rec.get('id'), _sk, _ctx_sh, rec['symbol'], side, entry, sl, tp, tf,
                                        _TF_SECONDS.get(tf, 900), start_ts=rec.get('created_at'), delay=_dl)
+        try:        # V3.44.139: واکنش قیمت به سطح (held / broke / chop) روی ۸ کندل بعد؛ جزئیات در docstring ماژول funnel_log
+            _lv = rec.get('level_value')
+            if _lv:
+                funnel_log.shadow_register(rec.get('id'), 'react', _ctx_sh, rec['symbol'], side, entry, sl, tp, tf,
+                                           _TF_SECONDS.get(tf, 900), start_ts=rec.get('created_at'), level=float(_lv),
+                                           due_s=(funnel_log.REACT_CANDLES + 3) * _TF_SECONDS.get(tf, 900))
+        except Exception:
+            logger.exception('funnel react register failed')
 
 
 def _fn_after_enter(chat_id, rec, res):
@@ -14719,7 +14735,20 @@ def assist_pending_list(chat_id, message_id=None):
     t_recs = [r for r in t_all if _pending_vote_ok(r, vf)]
     shown = recs[:25]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + len(t_recs)})*"]
-    # V3.44.136: خطوط «📊 خرید/فروش»، «فشار بازار» و «🚦 جهت بازار» از بالای لیست حذف شد (شمارششان با ردیف‌های لیست نمی‌خواند). گیت‌ها بدون تغییر کار می‌کنند و دلیل نگه‌داشتن روی کارت هر مورد نوشته می‌شود.
+    # V3.44.137: خطوط «📊 خرید/فروش» و «فشار بازار» حذف‌شده می‌مانند؛ خط «🚦 جهت بازار» (وضعیت گیت) برگشت.
+    try:
+        _need_dom = gate_on(s, TOUCH_NEED_DOMINANT_KEY)
+        if gate_on(s, TOUCH_BIAS_KEY) or _need_dom:      # V3.44.132/133: وضعیت جهت غالب بازار (فقط اطلاع‌رسانی)
+            _bb, _bn, _sn = _touch_bias_verdict(s)
+            if _bb:
+                _blk_txt = f" — جهت {'فروش' if _bb == 'SELL' else 'خرید'} بلاک است" if gate_on(s, TOUCH_BIAS_KEY) else ''
+                lines.append(f"🚦 جهت بازار: {'خرید' if _bb == 'SELL' else 'فروش'} ({_bn} خرید / {_sn} فروش){_blk_txt}")
+            elif _need_dom:
+                lines.append(f"🚦 جهت بازار: بدون غلبه‌ی واضح ({_bn} خرید / {_sn} فروش) — تا مشخص‌شدن غلبه معامله‌ای انجام نمی‌شود")
+            else:
+                lines.append(f"🚦 جهت بازار: بدون غلبه‌ی واضح ({_bn} خرید / {_sn} فروش) — هر دو جهت آزاد")
+    except Exception:
+        logger.exception('pending bias line failed')
     lines.append("")
     if vf != 'all':
         lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
