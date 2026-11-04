@@ -562,6 +562,15 @@ SHORT_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AA
 SHORT_WATCHLIST[:] = _static_swap_unavailable(SHORT_WATCHLIST)
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
+# V3.44.140 (موقت): واچ‌لیست فقط به این ۲۴ نماد محدود شد (انتخاب کاربر). برای برگشت به لیست کامل:
+#   متغیر محیطی TEMP_WATCHLIST_ONLY=0 بگذارید (یا TEMP_WATCHLIST_SYMBOLS را خالی کنید) و ربات را دوباره بالا بیاورید.
+TEMP_WATCHLIST_SYMBOLS = ('BTC', 'ETH', 'BNB', 'SOL', 'DOT', 'LINK', 'AVAX', 'ADA', 'XRP', 'ARB', 'SUI', 'RENDER',
+                          'ATOM', 'NEAR', 'JUP', 'SEI', 'TIA', 'INJ', 'OP', 'APT', 'TAO', 'ONDO', 'ENA', 'STRK')
+TEMP_WATCHLIST_ONLY = os.environ.get('TEMP_WATCHLIST_ONLY', '1').strip().lower() not in ('0', 'false', 'no', 'off') and bool(TEMP_WATCHLIST_SYMBOLS)
+if TEMP_WATCHLIST_ONLY:
+    LONG_WATCHLIST[:] = list(TEMP_WATCHLIST_SYMBOLS)      # in-place: WINNING_*/SHARED_* همان شیء را می‌بینند
+    SHORT_WATCHLIST[:] = list(TEMP_WATCHLIST_SYMBOLS)
+
 # اجتماع دو لیست فقط برای مصارف عمومی (fallback نمادهای فعال در حالت REAL) استفاده می‌شود.
 SHARED_LONG_WATCHLIST = LONG_WATCHLIST
 SHARED_SHORT_WATCHLIST = SHORT_WATCHLIST
@@ -20345,7 +20354,8 @@ def refresh_watchlists_from_spot():
     else:
         if len(avail.per) < 2:
             report['warning'] = 'فقط یکی از دو صرافی فهرست معتبر داد؛ معیار فقط همان صرافی بود.'
-        plans = {name: watchlist_tools.plan_watchlist(list(lst), watchlist_tools.RESERVE_TOP_SYMBOLS, avail)
+        _reserve = [] if TEMP_WATCHLIST_ONLY else watchlist_tools.RESERVE_TOP_SYMBOLS   # V3.44.140: در حالت موقت نماد جایگزین از بیرون اضافه نمی‌شود
+        plans = {name: watchlist_tools.plan_watchlist(list(lst), _reserve, avail)
                  for name, lst in (('long', LONG_WATCHLIST), ('short', SHORT_WATCHLIST))}
         if any(watchlist_tools.plan_is_suspicious(p, len(lst)) for p, lst in ((plans['long'], LONG_WATCHLIST), (plans['short'], SHORT_WATCHLIST))):
             report['note'] = 'تعداد نمادهای غایب مشکوکاً زیاد است (فهرست صرافی ناقص؟)؛ واچ‌لیست دست‌نخورده ماند.'
