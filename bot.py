@@ -562,10 +562,9 @@ SHORT_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AA
 SHORT_WATCHLIST[:] = _static_swap_unavailable(SHORT_WATCHLIST)
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
-# V3.44.140 (موقت): واچ‌لیست فقط به این ۲۴ نماد محدود شد (انتخاب کاربر). برای برگشت به لیست کامل:
+# V3.44.140 (موقت): واچ‌لیست فقط به این ۱۳ نماد محدود شد (انتخاب کاربر). برای برگشت به لیست کامل:
 #   متغیر محیطی TEMP_WATCHLIST_ONLY=0 بگذارید (یا TEMP_WATCHLIST_SYMBOLS را خالی کنید) و ربات را دوباره بالا بیاورید.
-TEMP_WATCHLIST_SYMBOLS = ('BTC', 'ETH', 'BNB', 'SOL', 'DOT', 'LINK', 'AVAX', 'ADA', 'XRP', 'ARB', 'SUI', 'RENDER',
-                          'ATOM', 'NEAR', 'JUP', 'SEI', 'TIA', 'INJ', 'OP', 'APT', 'TAO', 'ONDO', 'ENA', 'STRK')
+TEMP_WATCHLIST_SYMBOLS = ('BTC', 'ETH', 'LINK', 'SOL', 'XRP', 'SUI', 'NEAR', 'TAO', 'ONDO', 'XLM', 'UNI', 'ZEC', 'PEPE')
 TEMP_WATCHLIST_ONLY = os.environ.get('TEMP_WATCHLIST_ONLY', '1').strip().lower() not in ('0', 'false', 'no', 'off') and bool(TEMP_WATCHLIST_SYMBOLS)
 if TEMP_WATCHLIST_ONLY:
     LONG_WATCHLIST[:] = list(TEMP_WATCHLIST_SYMBOLS)      # in-place: WINNING_*/SHARED_* همان شیء را می‌بینند
