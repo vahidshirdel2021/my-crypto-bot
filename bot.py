@@ -14092,19 +14092,55 @@ def _touch_eff_dir(r):
     return d if d in ('BUY', 'SELL') else None
 
 
-def _touch_bias_verdict(s, now=None):
-    """(جهتِ بلاک‌شده یا None, تعداد خرید, تعداد فروش). فقط برخوردهای منقضی‌نشده‌ی «waiting» و «bias_blocked» شمرده می‌شوند."""
-    now = now or time.time()
-    buy = sell = 0
+# ===================== V3.44.142: تابلوی جهت نمادها =====================
+# هر اسکن، نمادی که الگوی سناریویش مشخص باشد (سیگنال داد) جهتش در s['dir_board'] ثبت می‌شود (به‌اندازه‌ی مهلت لیست انتظار معتبر می‌ماند).
+# جهت غالب بازار حالا به‌ازای «هر نماد یک رأی» شمرده می‌شود: اگر نماد برخورد زنده در لیست انتظار دارد جهت همان برخورد، وگرنه جهت تابلو.
+# قبلاً فقط برخوردهای باقی‌مانده در لیست شمرده می‌شد و با رفتن هر مورد به صف/معامله، غلبه به‌هم می‌ریخت (و با ۱۳ نماد به حداقل نمونه نمی‌رسید).
+DIR_BOARD_ON = os.environ.get('DIR_BOARD_COUNT', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def _dir_board_note(chat_id, symbol, tf, sig, reason):
+    """جهتِ الگوی سناریوی همین نماد را در تابلو ثبت می‌کند (فقط وقتی الگو مشخص است؛ بدون الگو چیزی پاک نمی‌شود، با مهلت منقضی می‌شود)."""
+    if sig not in ('BUY', 'SELL'):
+        return
+    s = get_session(chat_id)
+    now = time.time()
+    ttl = int(s.get('assist_expiry_seconds', 1800) or 1800)
+    board = s.setdefault('dir_board', {})
     with _TOUCH_LOCK:
-        recs = [r for r in (s.get('touch_wait') or {}).values()
-                if r.get('status') in ('waiting', 'bias_blocked') and float(r.get('expires_at', 0) or 0) > now]
-    for r in recs:
+        board[symbol] = {'dir': sig, 'tf': tf, 'scn': extract_scenario_tag(reason), 'at': now, 'exp': now + ttl}
+        for k in [k for k, v in board.items() if float(v.get('exp', 0) or 0) <= now]:
+            board.pop(k, None)
+
+
+def _dir_per_symbol(s, now=None):
+    """{نماد: 'BUY'/'SELL'} یک رأی برای هر نماد (برخورد لیست انتظار روی تابلو اولویت دارد)."""
+    now = now or time.time()
+    out = {}
+    with _TOUCH_LOCK:
+        if DIR_BOARD_ON:
+            tf0 = s.get('timeframe')
+            for sym, e in (s.get('dir_board') or {}).items():
+                if float(e.get('exp', 0) or 0) > now and e.get('dir') in ('BUY', 'SELL') and (not tf0 or e.get('tf') in (None, tf0)):
+                    out[sym] = e['dir']
+        recs = sorted([r for r in (s.get('touch_wait') or {}).values()
+                       if r.get('status') in ('waiting', 'bias_blocked') and float(r.get('expires_at', 0) or 0) > now],
+                      key=lambda r: float(r.get('created_at', 0) or 0))
+    for r in recs:          # قدیمی‌ترین اول؛ تازه‌ترین رکوردِ هر نماد می‌ماند
         d = _touch_eff_dir(r)
-        if d == 'BUY':
-            buy += 1
-        elif d == 'SELL':
-            sell += 1
+        if d:
+            out[r.get('symbol')] = d
+        elif not DIR_BOARD_ON:
+            out.pop(r.get('symbol'), None)
+    return out
+
+
+def _touch_bias_verdict(s, now=None):
+    """(جهتِ بلاک‌شده یا None, تعداد خرید, تعداد فروش). هر نماد یک رأی (_dir_per_symbol)."""
+    now = now or time.time()
+    per = _dir_per_symbol(s, now)
+    buy = sum(1 for d in per.values() if d == 'BUY')
+    sell = sum(1 for d in per.values() if d == 'SELL')
     total = buy + sell
     blocked = None
     if total >= TOUCH_BIAS_MIN_TOTAL:
@@ -14113,6 +14149,33 @@ def _touch_bias_verdict(s, now=None):
         elif sell / total >= TOUCH_BIAS_PCT - 1e-9:
             blocked = 'BUY'
     return blocked, buy, sell
+
+
+def _dir_board_lines(s):
+    """خطوط نمایشیِ جهت همه‌ی نمادهای واچ‌لیست + جهت غالب بازار (برای «📋 سیگنال‌های در انتظار»)."""
+    syms = list(LONG_WATCHLIST)
+    per = _dir_per_symbol(s)
+    for k in per:
+        if k not in syms:
+            syms.append(k)
+    if not syms:
+        return []
+    buys = [x for x in syms if per.get(x) == 'BUY']
+    sells = [x for x in syms if per.get(x) == 'SELL']
+    none_ = [x for x in syms if x not in per]
+    blocked, b, sl = _touch_bias_verdict(s)
+    if blocked:
+        head = f"🧭 جهت غالب بازار: {'خرید' if blocked == 'SELL' else 'فروش'} ({b} خرید / {sl} فروش از {len(syms)} نماد)"
+    else:
+        head = f"🧭 جهت غالب بازار: مشخص نیست ({b} خرید / {sl} فروش از {len(syms)} نماد؛ حداقل {TOUCH_BIAS_MIN_TOTAL} نماد جهت‌دار و {int(round(TOUCH_BIAS_PCT * 100))}٪ هم‌نظری لازم است)"
+    out = [head]
+    if buys:
+        out.append(f"🟢 خرید ({len(buys)}): " + '، '.join(buys))
+    if sells:
+        out.append(f"🔴 فروش ({len(sells)}): " + '، '.join(sells))
+    if none_:
+        out.append(f"⚪ بدون الگوی مشخص ({len(none_)}): " + '، '.join(none_))
+    return out
 
 
 def _touch_bias_apply(chat_id, s, only_rec=None):
@@ -14734,7 +14797,12 @@ def assist_pending_list(chat_id, message_id=None):
     recs = _assist_pending_recs(s)
     t_all = _touch_waiting_recs(s)
     if not recs and not t_all:
-        send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.', message_id=message_id)
+        try:
+            _bl0 = [] if is_restricted_user(chat_id) else _dir_board_lines(s)
+        except Exception:
+            logger.exception('pending dir board failed')
+            _bl0 = []
+        send_message(chat_id, '✅ الان هیچ سیگنالی در انتظار تصمیم شما نیست.' + (('\n\n' + '\n'.join(_bl0)) if _bl0 else ''), message_id=message_id)
         return
     if is_restricted_user(chat_id):                  # V3.44.62: کاربر عادی لیست ساده می‌بیند
         _assist_pending_list_plain(chat_id, message_id, recs, t_all)
@@ -14757,6 +14825,10 @@ def assist_pending_list(chat_id, message_id=None):
                 lines.append(f"🚦 جهت بازار: بدون غلبه‌ی واضح ({_bn} خرید / {_sn} فروش) — هر دو جهت آزاد")
     except Exception:
         logger.exception('pending bias line failed')
+    try:
+        lines.extend(_dir_board_lines(s))       # V3.44.142: جهت همه‌ی نمادهای واچ‌لیست + جهت غالب بازار
+    except Exception:
+        logger.exception('pending dir board failed')
     lines.append("")
     if vf != 'all':
         lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
@@ -15289,6 +15361,10 @@ async def scan_symbol(http,chat_id,symbol):
             _st_sig, _st_reason = None, None
         if _st_sig in ('BUY', 'SELL'):
             sig, reason, _simple_touch = _st_sig, _st_reason, True
+    try:
+        _dir_board_note(chat_id, symbol, tf, sig, reason)      # V3.44.142: جهت الگوی این نماد در تابلوی جهت‌ها
+    except Exception:
+        logger.debug('dir board note failed symbol=%s', symbol, exc_info=True)
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
     if _simple_touch or gate_on(s, 'gate_touch_vote_enabled'):
