@@ -408,6 +408,7 @@ def keyboard(s):
         rows.append(row)
     rows.append([{'text': '📊 نتیجه‌ی هر کلید', 'callback_data': '/preset_stats'}])
     rows.append([{'text': '🧭 گزارش بلاتکلیفی BTC (روشن یا خاموش؟)', 'callback_data': '/undecided_report'}])
+    rows.append([{'text': '🔎 نمادهای بین دو سطح زرد نزدیک (مثل BTC)', 'callback_data': '/levels_gap_scan'}])
     rows.append([{'text': '🧪 بک‌تست (نماد و دوره را خودم انتخاب می‌کنم)', 'callback_data': '/backtest_start'}])   # V3.44.126
     rows.append([{'text': '🧪 بک‌تست BTC (۶ ماه اول سال، ۱۵ دقیقه)', 'callback_data': '/backtest_btc'}])
     rows.append([{'text': '📤 ارسال فایل ژورنال معاملات', 'callback_data': '/preset_export'}])

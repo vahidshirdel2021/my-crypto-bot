@@ -563,10 +563,11 @@ SHORT_WATCHLIST = ['BTC', 'ETH', 'DEFI', 'YFI', 'BCH', 'COMP', 'KSM', 'LTC', 'AA
 SHORT_WATCHLIST[:] = _static_swap_unavailable(SHORT_WATCHLIST)
 WINNING_SHORT_WATCHLISTS = {tf: SHORT_WATCHLIST for tf in ('5min', '15min', '1hour', '4hour')}
 
+FULL_WATCHLIST_SNAPSHOT = list(LONG_WATCHLIST)      # V3.44.146: لیست کامل (قبل از محدودسازی موقت) برای اسکن «نزدیکی به سطوح»
 # V3.44.140 (موقت): واچ‌لیست فقط به این ۱۳ نماد محدود شد (انتخاب کاربر). برای برگشت به لیست کامل:
-#   متغیر محیطی TEMP_WATCHLIST_ONLY=0 بگذارید (یا TEMP_WATCHLIST_SYMBOLS را خالی کنید) و ربات را دوباره بالا بیاورید.
+#   V3.44.147: حالت موقت خاموش است (۱۲۴ نماد فعال)؛ برای محدودکردن دوباره TEMP_WATCHLIST_ONLY=1 بگذارید و TEMP_WATCHLIST_SYMBOLS را با لیست دلخواه پر کنید.
 TEMP_WATCHLIST_SYMBOLS = ('BTC', 'ETH', 'LINK', 'SOL', 'XRP', 'SUI', 'NEAR', 'TAO', 'ONDO', 'XLM', 'UNI', 'ZEC', 'PEPE')
-TEMP_WATCHLIST_ONLY = os.environ.get('TEMP_WATCHLIST_ONLY', '1').strip().lower() not in ('0', 'false', 'no', 'off') and bool(TEMP_WATCHLIST_SYMBOLS)
+TEMP_WATCHLIST_ONLY = os.environ.get('TEMP_WATCHLIST_ONLY', '0').strip().lower() in ('1', 'true', 'yes', 'on') and bool(TEMP_WATCHLIST_SYMBOLS)   # V3.44.147: پیش‌فرض خاموش = هر ۱۲۴ نماد فعال
 if TEMP_WATCHLIST_ONLY:
     LONG_WATCHLIST[:] = list(TEMP_WATCHLIST_SYMBOLS)      # in-place: WINNING_*/SHARED_* همان شیء را می‌بینند
     SHORT_WATCHLIST[:] = list(TEMP_WATCHLIST_SYMBOLS)
@@ -16811,6 +16812,103 @@ def handle_bt_command(cmd, chat_id):
         return
 
 
+# ===================== V3.44.146: اسکن «نمادهای بین دو سطح زرد نزدیک» روی کل لیست (۱۲۴ نماد) =====================
+# «دو سطح زرد» = دو سطح نصف‌کردنِ عمق فعال که قیمت بینشان است؛ فاصله‌شان همان step مدل (k × ATR، با k پویا از BTC).
+# BTC مبنای مقایسه است؛ هر نماد با همان منطق/سقف و کف/ATR خودش سنجیده می‌شود. فقط نمایش؛ هیچ سفارشی ثبت نمی‌شود.
+GAP_SCAN_NEAR_BAND = 0.25      # «هم‌اندازه BTC» = گپ٪ در ±۲۵٪ گپ٪ BTC
+
+
+def _gap_scan_one(symbol, tf, scfg):
+    rng = get_halving_range_sync(symbol)
+    if not rng:
+        return {'symbol': symbol, 'err': 'سقف/کف تاریخی ندارد'}
+    df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
+    if df is None or df.empty or len(df) < 60:
+        return {'symbol': symbol, 'err': 'داده‌ی کندل کافی نیست'}
+    ind = calculate_indicators(df)
+    dated_df, _a, _b = _compute_prev_day_levels(df)
+    if dated_df is None or ind is None or len(ind) != len(dated_df) or 'atr' not in ind.columns:
+        return {'symbol': symbol, 'err': 'ATR محاسبه نشد'}
+    dated_df['atr'] = ind['atr'].values
+    live = latest_price(symbol)
+    price = float(live) if live is not None else float(df['close'].iloc[-1])
+    cfg = {**get_timeframe_preset(tf), 'halving_model_enabled': True, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k'):
+        if k in scfg:
+            cfg[k] = scfg[k]
+    cfg.update(_halving_tf_params(scfg, tf))
+    ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
+    if not ctx or not ctx.get('step') or price <= 0:
+        return {'symbol': symbol, 'err': 'سطوح ساخته نشد'}
+    step, lo = float(ctx['step']), float(ctx['low'])
+    n = math.floor((price - lo) / step)
+    lower = lo + n * step
+    upper = lower + step
+    return {'symbol': symbol, 'price': price, 'depth': int(ctx['depth']), 'step': step, 'lower': lower, 'upper': upper,
+            'gap': step / price * 100.0, 'dn': (price - lower) / price * 100.0, 'up': (upper - price) / price * 100.0}
+
+
+def levels_gap_scan_texts(chat_id, tf=None, symbols=None):
+    """لیست نمادهای هم‌اندازه یا فشرده‌تر از BTC از نظر فاصله‌ی دو سطح زرد دور قیمت. خروجی: لیست متن‌های ≤۳۸۰۰ نویسه."""
+    s = get_session(chat_id)
+    tf = tf or s['timeframe']
+    scfg = s.get('strategy_config') or {}
+    syms = list(symbols or FULL_WATCHLIST_SNAPSHOT)
+    if 'BTC' not in syms:
+        syms.insert(0, 'BTC')
+    rows, errs = [], []
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = {ex.submit(_gap_scan_one, sym, tf, scfg): sym for sym in syms}
+        for f in as_completed(futs):
+            try:
+                r = f.result()
+            except Exception as exc:
+                r = {'symbol': futs[f], 'err': str(exc)[:60]}
+            (errs if r.get('err') else rows).append(r)
+    ref = next((r for r in rows if r['symbol'] == 'BTC'), None)
+    if not ref:
+        return ['❌ BTC سنجیده نشد، مبنای مقایسه ندارم. چند دقیقه بعد دوباره امتحان کنید.']
+    k_eff, k_src = halving_k_effective({**scfg, **_halving_tf_params(scfg, tf)})
+    lo_b, hi_b = ref['gap'] * (1 - GAP_SCAN_NEAR_BAND), ref['gap'] * (1 + GAP_SCAN_NEAR_BAND)
+    same = sorted([r for r in rows if r['symbol'] != 'BTC' and lo_b <= r['gap'] <= hi_b], key=lambda r: abs(r['gap'] - ref['gap']))
+    tight = sorted([r for r in rows if r['symbol'] != 'BTC' and r['gap'] < lo_b], key=lambda r: r['gap'])
+    wide = [r for r in rows if r['symbol'] != 'BTC' and r['gap'] > hi_b]
+
+    def line(r):
+        return (f"• `{r['symbol']}` گپ `{r['gap']:.2f}٪` | عمق {r['depth']} | زیر قیمت `-{r['dn']:.2f}٪` | بالای قیمت `+{r['up']:.2f}٪`")
+
+    head = [f"🔎 *نمادهای بین دو سطح زرد نزدیک* (تایم‌فریم `{TF_DISPLAY.get(tf, tf)}`، k=`{k_eff:g}`{' از BTC' if k_src == 'btc' else ''})",
+            f"مبنا BTC: گپ `{ref['gap']:.2f}٪` (عمق {ref['depth']}، سطح زرد پایین `{fmt(ref['lower'])}` و بالا `{fmt(ref['upper'])}`، قیمت `{fmt(ref['price'])}`)",
+            f"از {len(syms)} نماد: {len(same)} هم‌اندازه BTC (±{int(GAP_SCAN_NEAR_BAND * 100)}٪)، {len(tight)} فشرده‌تر، {len(wide)} گشادتر"
+            + (f"، {len(errs)} بدون داده" if errs else ''), '']
+    body = []
+    if same:
+        body += ['🟡 *هم‌اندازه BTC* (به‌ترتیب نزدیکیِ گپ به BTC):'] + [line(r) for r in same] + ['']
+    if tight:
+        body += ['🟠 *فشرده‌تر از BTC* (سطوح زرد نزدیک‌تر):'] + [line(r) for r in tight] + ['']
+    if not same and not tight:
+        body += ['هیچ نمادی به اندازه‌ی BTC فشرده نیست.', '']
+    if errs:
+        body.append('⚪ بدون داده: ' + '، '.join(sorted(r['symbol'] for r in errs)))
+    body.append('ℹ️ گپ = فاصله‌ی دو سطح زرد دور قیمت نسبت به قیمت؛ هر نماد با سقف/کف و ATR خودش سنجیده شده.')
+    chunks, cur = [], '\n'.join(head)
+    for ln in body:
+        if len(cur) + len(ln) + 1 > 3800:
+            chunks.append(cur); cur = ''
+        cur += ('\n' if cur else '') + ln
+    chunks.append(cur)
+    return chunks
+
+
+def _levels_gap_scan_worker(chat_id):
+    try:
+        for chunk in levels_gap_scan_texts(chat_id):
+            send_message(chat_id, chunk)
+    except Exception:
+        logger.exception('levels gap scan failed')
+        send_message(chat_id, '❌ اسکن سطوح انجام نشد (جزئیات در لاگ).')
+
+
 def undecided_report_text(trades):
     """V3.44.124: گزارش مقایسه‌ی «کلید بلاتکلیفی BTC روشن بود یا خاموش» از ژورنال.
     trades = رکوردهای بسته‌شده‌ی ژورنال. فقط معاملاتی که فیلد undecided_shadow دارند (یعنی وقتی کلید خاموش بود باز شده‌اند) شمرده می‌شوند.
@@ -19304,6 +19402,12 @@ def process_command(cmd,chat_id,message_id=None):
             send_message(chat_id, '⏳ بک‌تست قبلی هنوز در حال اجراست.', presets_mod.keyboard(s)); return
         send_message(chat_id, '⏳ بک‌تست BTC شروع شد؛ چند دقیقه طول می‌کشد…', presets_mod.keyboard(s))
         Thread(target=_backtest_worker, args=(chat_id, cl), daemon=True, name='inbot-backtest').start()
+        return
+    if cl == '/levels_gap_scan':      # V3.44.146
+        if not is_admin(chat_id):
+            send_message(chat_id, '⛔ این بخش فقط برای ادمین است.', presets_mod.keyboard(s)); return
+        send_message(chat_id, f"⏳ دارم {len(FULL_WATCHLIST_SNAPSHOT)} نماد را می‌سنجم؛ حدود یک دو دقیقه طول می‌کشد…")
+        Thread(target=_levels_gap_scan_worker, args=(chat_id,), daemon=True, name='levels-gap-scan').start()
         return
     if cl == '/undecided_report':      # V3.44.124
         if not is_admin(chat_id):
