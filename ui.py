@@ -1,5 +1,5 @@
 import os
-from strategy import STRATEGY_DEFAULTS, MIN_RR_FLOOR
+from strategy import STRATEGY_DEFAULTS, MIN_RR_FLOOR, halving_k_effective
 
 CHAT_INPUT_PLACEHOLDER = "نام ارز خود را جهت تحلیل وارد کنید"
 
@@ -205,7 +205,13 @@ def get_setup_management_keyboard(session=None):
     rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
     if hv_on:
         _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
-        rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
+        _k_eff, _k_src = halving_k_effective(_cfg_ui)      # V3.44.145: k مؤثر (از BTC یا دستی)
+        _bd = bool(_cfg_ui.get("halving_btc_dynamic_k", True))
+        rows.append([{"text": f"{'🟢' if _bd else '🔴'} k پویا از BTC (۲↔۴ برای کل ربات)", "callback_data": "/halving_btc_dyn_toggle"}])
+        if _k_src == "btc":
+            rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k_eff:g}×ATR (الان از BTC؛ k دستی نادیده است)", "callback_data": "/halving_k_cycle"}])
+        else:
+            rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k:g}×ATR (تپ برای تغییر)", "callback_data": "/halving_k_cycle"}])
         _dyn = bool(_cfg_ui.get("halving_dynamic_k", False))
         rows.append([{"text": f"{'🟢' if _dyn else '🔴'} k پویا (تطبیق با نوسان)", "callback_data": "/halving_dyn_toggle"}])
         rows.append([{"text": f"سقف عمق درخت: {_md}", "callback_data": "/halving_depth_cycle"}])

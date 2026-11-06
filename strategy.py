@@ -2229,6 +2229,9 @@ HALVING_DEFAULTS = {
     "halving_atr_smooth_candles": 200, # ATR هموار (میانه‌ی N کندل اخیر) تا عمق هر کندل جابه‌جا نشود
     # k پویا: ATR مؤثر = ATR کند × clamp(ATR سریع / ATR کند). نوسان بالا → سطوح درشت‌تر، بازار آرام → سطوح ریزتر.
     "halving_dynamic_k": False,
+    # V3.44.145: k پویا از روی BTC (۲ یا ۴): یک مقدار برای کل ربات؛ مقدار را bot.py از نوسان BTC تعیین می‌کند (HALVING_K_PROVIDER).
+    # وقتی روشن و مقدار در دسترس باشد، k دستی و «k پویا»ی تک‌نماد نادیده گرفته می‌شود (هیچ نمادی جداگانه سنجیده نمی‌شود).
+    "halving_btc_dynamic_k": True,
     "halving_dyn_fast_candles": 30,    # پنجره‌ی ATR سریع (میانه‌ی N کندل اخیر)
     "halving_dyn_min": 0.7,            # حداقل ضریب (جلوی ریزشدن بیش‌ازحد سطوح در بازار خواب)
     "halving_dyn_max": 1.6,            # حداکثر ضریب (جلوی درشت‌شدن بیش‌ازحد در هیجان)
@@ -2240,9 +2243,42 @@ HALVING_DEFAULTS = {
 }
 
 
+HALVING_K_PROVIDER = None      # V3.44.145: تابع بدون ورودی که k جهانیِ مبتنی بر BTC را برمی‌گرداند (یا None)
+
+
+def set_halving_k_provider(fn):
+    global HALVING_K_PROVIDER
+    HALVING_K_PROVIDER = fn
+
+
+def _halving_btc_k():
+    fn = HALVING_K_PROVIDER
+    if fn is None:
+        return None
+    try:
+        k = fn()
+        k = float(k) if k is not None else None
+        return k if (k is not None and k > 0 and np.isfinite(k)) else None
+    except Exception:
+        return None
+
+
 def _halving_cfg(strategy_config):
     base = _cfg(strategy_config) if isinstance(strategy_config, dict) else {}
-    return {**HALVING_DEFAULTS, **STRATEGY_DEFAULTS, **base}
+    cfg = {**HALVING_DEFAULTS, **STRATEGY_DEFAULTS, **base}
+    if cfg.get("halving_btc_dynamic_k", False):
+        k = _halving_btc_k()
+        if k is not None:
+            cfg["halving_k_atr"] = k          # همه‌ی نمادها و همه‌ی مسیرها (اسکن، کانال، هدف‌گذاری، گزارش‌ها) همین k را می‌بینند
+            cfg["halving_dynamic_k"] = False  # ضریب ATR تک‌نماد خاموش؛ تنها منبع تغییر k همان BTC است
+            cfg["_halving_k_source"] = "btc"
+    return cfg
+
+
+def halving_k_effective(strategy_config):
+    """(k مؤثر, منبع) برای نمایش در منو/گزارش: منبع 'btc' یا 'manual'."""
+    c = _halving_cfg(strategy_config)
+    return float(c.get("halving_k_atr", 4.0)), ("btc" if c.get("_halving_k_source") == "btc" else "manual")
 
 
 def _halving_range(d, idx, cfg):

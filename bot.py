@@ -46,6 +46,7 @@ from strategy import (
     pd_level_guard_df,
 )
 from halving_levels import depth_label_fa as _hv_depth_label
+from strategy import set_halving_k_provider, halving_k_effective      # V3.44.145: k پویا از BTC
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
@@ -1175,7 +1176,7 @@ def default_session():
 
 
 _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
-                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_tf')
+                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf')
 
 # V3.44.40: پیش‌فرضِ «فاصله‌ی حداقل سطوح (×ATR)» و «سقف عمق درخت» برای هر تایم‌فریم جدا؛ با تغییر تایم‌فریم خودکار اعمال می‌شود.
 # تغییر دستی کاربر با دکمه‌ها فقط برای همان تایم‌فریمِ فعال ذخیره می‌شود (کلید halving_tf). تایم‌فریم‌های دیگر (۱ و ۴ ساعته) دست‌نخورده می‌مانند.
@@ -1300,7 +1301,7 @@ def normalize_session(data):
         'sweep_require_confirmation_candle',
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
-        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_tf',
+        'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -5335,7 +5336,7 @@ def _signal_channel_halving_cfg_for(symbol, timeframe):
     scfg = ((USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}).get('strategy_config') or {})
     cfg = {**get_timeframe_preset(timeframe), 'halving_model_enabled': True,
            'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
-    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k'):
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k'):
         if k in scfg:
             cfg[k] = scfg[k]
     cfg.update(_halving_tf_params(scfg, timeframe))      # V3.44.40: کانال هم برای هر تایم‌فریم k و عمق خودش را می‌گیرد
@@ -16011,7 +16012,7 @@ def preset_active_text(name):
     if mg: lines += ['', '🚪 *مدیریت معامله*'] + mg
     if cfg.get('halving_model_enabled'):
         sc = [str(n) for n in range(1, 8) if cfg.get(f'scenario_{n}_enabled')]
-        lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {cfg.get('halving_k_atr', 0):g}، عمق {cfg.get('halving_max_depth', 0)}",
+        lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}",
                   '• حالت‌های معامله: ' + ('، '.join(sc) if sc else 'هیچ‌کدام')]
     return '\n'.join(lines)[:3900]
 
@@ -17167,7 +17168,7 @@ def symbol_levels_chart(chat_id, raw_symbol):
     scfg = s.get('strategy_config') or {}
     cfg = {**get_timeframe_preset(tf), 'halving_model_enabled': True,
            'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
-    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k'):
+    for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k'):
         if k in scfg:
             cfg[k] = scfg[k]
     cfg.update(_halving_tf_params(scfg, tf))
@@ -17242,7 +17243,7 @@ def symbol_levels_report(chat_id, raw_symbol):
             scfg = s.get('strategy_config') or {}
             cfg = {**get_timeframe_preset(tf), 'halving_model_enabled': True,
                    'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
-            for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k'):
+            for k in ('halving_k_atr', 'halving_min_depth', 'halving_max_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k'):
                 if k in scfg:
                     cfg[k] = scfg[k]
             cfg.update(_halving_tf_params(scfg, tf))
@@ -17884,6 +17885,105 @@ def manual_signal_scan(chat_id, symbol=None):
     send_message(chat_id, '\n'.join(lines))
 
 
+# ===================== V3.44.145: k پویا از روی BTC (۲ یا ۴) برای کل ربات =====================
+# نوسان BTC سنجیده می‌شود: r = میانه‌ی ATR سریع (۳۰ کندل) ÷ میانه‌ی ATR کند (۲۰۰ کندل) روی تایم‌فریم مرجع (پیش‌فرض ۱۵ دقیقه).
+# نوسان بالا (r ≥ R_HIGH) → k=۴ (سطوح درشت‌تر)، نوسان آرام (r ≤ R_LOW) → k=۲ (سطوح ریزتر)؛ بین این دو مقدار قبلی می‌ماند (ضدلرزش).
+# یک k برای همه‌ی نمادها و همه‌ی تایم‌فریم‌ها؛ هیچ نمادی جداگانه سنجیده نمی‌شود. با کلید «k پویا از BTC» (پیش‌فرض روشن) کار می‌کند.
+# اگر داده‌ی BTC در دسترس نباشد یا قدیمی شود، k دستیِ تنظیمات استفاده می‌شود.
+HV_BTC_K_LOW = float(os.environ.get('HV_BTC_K_LOW', '2'))
+HV_BTC_K_HIGH = float(os.environ.get('HV_BTC_K_HIGH', '4'))
+HV_BTC_R_HIGH = float(os.environ.get('HV_BTC_R_HIGH', '1.2'))
+HV_BTC_R_LOW = float(os.environ.get('HV_BTC_R_LOW', '1.0'))
+HV_BTC_DYN_TF = os.environ.get('HV_BTC_DYN_TF', '15min').strip() or '15min'
+HV_BTC_FAST = max(10, int(float(os.environ.get('HV_BTC_FAST_CANDLES', '30'))))
+HV_BTC_SLOW = max(50, int(float(os.environ.get('HV_BTC_SLOW_CANDLES', '200'))))
+HV_BTC_REFRESH_SECONDS = max(20, int(float(os.environ.get('HV_BTC_REFRESH_SECONDS', '60'))))
+HV_BTC_STALE_SECONDS = max(300, int(float(os.environ.get('HV_BTC_STALE_SECONDS', '1800'))))
+_BTC_DYN_K = {'k': None, 'ratio': None, 'at': 0.0, 'since': 0.0}
+_BTC_DYN_LOCK = threading.RLock()
+
+
+def _btc_dyn_k_decide(ratio, prev_k):
+    """k از روی r با ضدلرزش: بالاتر از R_HIGH → K_HIGH؛ پایین‌تر از R_LOW → K_LOW؛ بین دو آستانه → قبلی (اولین بار نزدیک‌تر به وسط)."""
+    if ratio >= HV_BTC_R_HIGH:
+        return HV_BTC_K_HIGH
+    if ratio <= HV_BTC_R_LOW:
+        return HV_BTC_K_LOW
+    if prev_k is not None:
+        return prev_k
+    return HV_BTC_K_HIGH if ratio >= (HV_BTC_R_HIGH + HV_BTC_R_LOW) / 2 else HV_BTC_K_LOW
+
+
+def _btc_dyn_k_ratio(ind_df):
+    """r = میانه‌ی ATR سریع ÷ میانه‌ی ATR کند، فقط با کندل‌های بسته‌شده؛ None اگر داده کافی نبود."""
+    if ind_df is None or 'atr' not in ind_df.columns or len(ind_df) < HV_BTC_FAST + 20:
+        return None
+    seg = pd.to_numeric(ind_df['atr'].iloc[:-1], errors='coerce').dropna()
+    seg = seg[seg > 0]
+    if len(seg) < HV_BTC_FAST + 10:
+        return None
+    slow = float(seg.iloc[-HV_BTC_SLOW:].median())
+    fast = float(seg.iloc[-HV_BTC_FAST:].median())
+    if not (slow > 0 and math.isfinite(slow) and math.isfinite(fast)):
+        return None
+    return fast / slow
+
+
+def _btc_dyn_k_refresh(now=None):
+    """نوسان BTC را می‌سنجد و k جهانی را به‌روز می‌کند؛ تغییر k را به ادمین‌ها اعلام می‌کند. خروجی: k فعلی یا None."""
+    now = now or time.time()
+    df = get_klines('BTC', HV_BTC_DYN_TF, max(HV_BTC_SLOW + 60, 300))
+    if df is None or df.empty:
+        return None
+    ratio = _btc_dyn_k_ratio(calculate_indicators(df))
+    if ratio is None:
+        return None
+    with _BTC_DYN_LOCK:
+        prev = _BTC_DYN_K['k']
+        k = _btc_dyn_k_decide(ratio, prev)
+        _BTC_DYN_K.update({'k': k, 'ratio': ratio, 'at': now})
+        if prev is None or prev != k:
+            _BTC_DYN_K['since'] = now
+    if prev is not None and prev != k:
+        logger.info('btc dynamic k: %s -> %s (ratio %.3f, tf %s)', prev, k, ratio, HV_BTC_DYN_TF)
+        _btc_dyn_k_alert(prev, k, ratio)
+    return k
+
+
+def _btc_dyn_k_alert(old, new, ratio):
+    arrow = '⬆️ سطوح درشت‌تر (نوسان BTC بالا)' if new > old else '⬇️ سطوح ریزتر (نوسان BTC آرام)'
+    text = (f"🌡 *k پویا از BTC عوض شد: {old:g} ← {new:g}* {arrow}\n"
+            f"نوسان BTC ({TF_DISPLAY.get(HV_BTC_DYN_TF, HV_BTC_DYN_TF)}): ATR سریع ÷ ATR کند = `{ratio:.2f}` "
+            f"(بالای {HV_BTC_R_HIGH:g} ← k={HV_BTC_K_HIGH:g}، پایین {HV_BTC_R_LOW:g} ← k={HV_BTC_K_LOW:g}).\n"
+            f"از این لحظه همه‌ی نمادها با k={new:g} سطح می‌سازند؛ عمق فعال و فاصله‌ی سطوح همه‌ی نمادها تغییر می‌کند.")
+    for cid in sorted(ADMIN_CHAT_IDS):
+        try:
+            send_message(cid, text)
+        except Exception:
+            logger.exception('btc dyn k alert send failed chat=%s', cid)
+
+
+def _btc_dyn_k_value():
+    """k جهانیِ فعلی برای strategy._halving_cfg؛ None اگر هنوز سنجیده نشده یا قدیمی است (آن‌وقت k دستی)."""
+    with _BTC_DYN_LOCK:
+        k, at = _BTC_DYN_K['k'], float(_BTC_DYN_K['at'] or 0)
+    if k is None or time.time() - at > HV_BTC_STALE_SECONDS:
+        return None
+    return k
+
+
+def _btc_dyn_k_loop():
+    while True:
+        try:
+            _btc_dyn_k_refresh()
+        except Exception:
+            logger.exception('btc dynamic k refresh failed')
+        time.sleep(HV_BTC_REFRESH_SECONDS)
+
+
+set_halving_k_provider(_btc_dyn_k_value)
+
+
 # ===================== V3.44.143: هشدار تغییر عمق سطوح نصف‌کردن (تغییر ATR) =====================
 # عمق = floor(log2(سقف-کف ÷ (k × ATR مؤثر))) بین min و max؛ پس هر بار ATR مؤثر تقریباً دو برابر/نصف شود یک پله عمق عوض می‌شود
 # (فاصله‌ی سطوح دو برابر/نصف). ATR مؤثر = میانه‌ی ATR (۲۰۰ کندل) × ضریب پویا (اگر «k پویا» روشن باشد). قبلاً این تغییر بی‌صدا بود.
@@ -17902,12 +18002,13 @@ def _hv_depth_track(symbol, tf, ind_df, cfg):
     """عمق فعلی را برای این نماد/تایم‌فریم می‌سنجد و تغییرش را (پس از تایید) برای هشدار ثبت می‌کند."""
     if not HV_DEPTH_ALERT or ind_df is None or len(ind_df) < 30 or not (cfg or {}).get('halving_model_enabled'):
         return
-    ctx = _halving_context(ind_df, len(ind_df) - 2, _halving_cfg(cfg))
+    _ecfg = _halving_cfg(cfg)       # V3.44.145: k مؤثر (ممکن است از BTC بیاید)
+    ctx = _halving_context(ind_df, len(ind_df) - 2, _ecfg)
     if not ctx:
         return
     depth, atr_eff = int(ctx['depth']), float(ctx['atr']) * float(ctx.get('dyn_ratio') or 1.0)
-    sig = (float(cfg.get('halving_k_atr', 4.0)), int(cfg.get('halving_min_depth', 3)), int(cfg.get('halving_max_depth', 10)),
-           bool(cfg.get('halving_dynamic_k', False)))
+    sig = (float(_ecfg.get('halving_k_atr', 4.0)), int(_ecfg.get('halving_min_depth', 3)), int(_ecfg.get('halving_max_depth', 10)),
+           bool(_ecfg.get('halving_dynamic_k', False)))
     now = time.time()
     snap = {'depth': depth, 'atr': float(ctx['atr']), 'ratio': float(ctx.get('dyn_ratio') or 1.0), 'atr_eff': atr_eff,
             'step': float(ctx['step']), 'k': sig[0], 'dyn': sig[3]}
@@ -18499,13 +18600,15 @@ def process_command(cmd,chat_id,message_id=None):
             _p4_sync_tags(s)
         save_session(chat_id)
         edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
-    if cl in ('/toggle_halving_model', '/halving_k_cycle', '/halving_depth_cycle', '/halving_major_cycle', '/halving_dyn_toggle'):
+    if cl in ('/toggle_halving_model', '/halving_k_cycle', '/halving_depth_cycle', '/halving_major_cycle', '/halving_dyn_toggle', '/halving_btc_dyn_toggle'):
         _cfg_hv = s.setdefault('strategy_config', {})
         if cl == '/toggle_halving_model':
             _cfg_hv['halving_model_enabled'] = not bool(_cfg_hv.get('halving_model_enabled', False))
             s['setup_legacy_view'] = False
         elif cl == '/halving_dyn_toggle':
             _cfg_hv['halving_dynamic_k'] = not bool(_cfg_hv.get('halving_dynamic_k', False))
+        elif cl == '/halving_btc_dyn_toggle':
+            _cfg_hv['halving_btc_dynamic_k'] = not bool(_cfg_hv.get('halving_btc_dynamic_k', True))
         elif cl == '/halving_k_cycle':
             _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
@@ -20600,6 +20703,7 @@ def main():
     Thread(target=lambda: (time.sleep(17), _day_cleanup_loop()), daemon=True, name='day-cleanup').start()
     Thread(target=lambda: (time.sleep(19), _fee_daily_loop()), daemon=True, name='fee-daily').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
+    Thread(target=lambda: (time.sleep(2), _btc_dyn_k_loop()), daemon=True, name='btc-dynamic-k').start()      # V3.44.145
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 
