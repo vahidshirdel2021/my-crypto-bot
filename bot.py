@@ -6735,7 +6735,7 @@ def _paper_stop_fill_price(pos, low, high, risk_distance):
     return (sl - charged) if is_long else (sl + charged)
 
 
-def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
+def _entry_snapshot(symbol, side, timeframe, reason, price, sl, cfg=None):
     """V3.43.26: عکس‌فوری لحظه‌ی ورود برای تحلیل بعدیِ معامله‌ها (فقط ثبت؛ هیچ تصمیم ورود/خروجی را عوض نمی‌کند):
     ۱) جهت رژیم BTC/ETH (امتیاز EMA روی آخرین کندل بسته‌شده) نسبت به جهت معامله
     ۲) رأی RSI/MACD/ADX نسبت به جهت معامله (هم‌جهت / مخالف / خنثی) + مقدارهای خام
@@ -6761,6 +6761,22 @@ def _entry_snapshot(symbol, side, timeframe, reason, price, sl):
                             'with_trade': None if sc == 0 else ((sc > 0) == is_long)}
         except Exception:
             logger.exception('entry snapshot regime failed sym=%s', sym)
+    # V3.44.144: ATR/k/عمق درخت نصف‌کردن در لحظه‌ی ورود (فقط ثبت؛ هیچ تصمیمی را عوض نمی‌کند). همان ورودی‌های اسکن: ۶۵۰ کندل، k و عمق تایم‌فریم فعال.
+    try:
+        if isinstance(cfg, dict) and cfg.get('halving_model_enabled'):
+            _hv_rng = get_halving_range_sync(symbol)
+            _hd = get_klines(symbol, timeframe, 650 if timeframe in ('5min', '15min', '1hour') else 200)
+            if _hv_rng and _hd is not None and not _hd.empty and len(_hd) >= 30:
+                _hcfg = _halving_cfg(_with_halving_cfg(cfg, _hv_rng))
+                _hctx = _halving_context(calculate_indicators(_hd), len(_hd) - 2, _hcfg)
+                if _hctx:
+                    _ratio = float(_hctx.get('dyn_ratio') or 1.0)
+                    out['halving'] = {'k_atr': float(_hcfg.get('halving_k_atr', 4.0)), 'atr': float(_hctx['atr']), 'dyn_ratio': _ratio,
+                                      'atr_eff': float(_hctx['atr']) * _ratio, 'dynamic_k': bool(_hcfg.get('halving_dynamic_k', False)),
+                                      'tree_depth': int(_hctx['depth']), 'step': float(_hctx['step']),
+                                      'min_depth': int(_hcfg.get('halving_min_depth', 3)), 'max_depth': int(_hcfg.get('halving_max_depth', 10))}
+    except Exception:
+        logger.exception('entry snapshot halving failed symbol=%s', symbol)
     try:
         d = get_klines(symbol, timeframe, 160)
         if d is None or d.empty or len(d) < 60:
@@ -7137,7 +7153,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
     _und_shadow = _btc_undecided_shadow(chat_id, s)      # V3.44.124
-    _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl)
+    _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl, s.get('strategy_config'))
     trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'undecided_shadow':_und_shadow,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
@@ -9305,6 +9321,10 @@ def _close_snapshot_lines(pos):
         out.append(f"\n• سطح: `{fmt(lv.get('level'))}` — آخرین کندل بسته‌شده {side_txt} ({conf})")
     else:
         out.append("\n• سطح: —")
+    _hv = snap.get('halving')
+    if _hv:
+        _dyn_txt = f" (ATR هموار `{fmt(_hv['atr'])}` × ضریب پویا `{_hv['dyn_ratio']:.2f}`)" if _hv.get('dynamic_k') else ' (k پویا خاموش)'
+        out.append(f"\n• ATR در لحظه ورود: مؤثر `{fmt(_hv['atr_eff'])}`{_dyn_txt} | k=`{_hv['k_atr']:g}` | عمق درخت `{_hv['tree_depth']}` (از {_hv['min_depth']} تا {_hv['max_depth']}) | فاصله‌ی سطوح `{fmt(_hv['step'])}`")
     for key, name in (('btc', 'BTC'), ('eth', 'ETH')):
         r = snap.get(key)
         out.append(f"\n• رژیم {name} در لحظه ورود: " + ((r['label'] if r.get('with_trade') is None else f"{r['label']} — {_snap_dir_fa(r.get('with_trade'))}") if r else '—'))
@@ -15349,6 +15369,10 @@ async def scan_symbol(http,chat_id,symbol):
         if not _hv_rng:
             return _entry_diag_result(chat_id, symbol, 'no_signal', 'مدل نصف‌کردن: سقف/کف تاریخی این نماد در دسترس نیست', 'signal')
         cfg_entry = _with_halving_cfg(cfg_entry, _hv_rng)
+        try:
+            _hv_depth_track(symbol, tf, primary, cfg_entry)      # V3.44.143: هشدار تغییر عمق سطوح
+        except Exception:
+            logger.debug('hv depth track failed symbol=%s', symbol, exc_info=True)
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], cfg_entry, None, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     _simple_touch = False
@@ -17228,6 +17252,11 @@ def symbol_levels_report(chat_id, raw_symbol):
                 up = [x for x in lv if x['price'] > price][:3]
                 dn = [x for x in reversed([x for x in lv if x['price'] <= price])][:3]
                 lines += ['', f"🧮 *سطوح نصف‌کردن* (عمق انتخابی `{ctx['depth']}` | فاصله‌ی هر سطح `{fmt(ctx['step'])}`)"]
+                try:
+                    _hv_dyn = bool(_halving_cfg(cfg).get('halving_dynamic_k', False))
+                    lines.append(f"📏 ATR هموار `{fmt(ctx['atr'])}`" + (f" × ضریب پویا `{ctx.get('dyn_ratio', 1.0):.2f}` = ATR مؤثر `{fmt(float(ctx['atr']) * float(ctx.get('dyn_ratio') or 1.0))}`" if _hv_dyn else " (k پویا خاموش)") + f" | k=`{float(_halving_cfg(cfg).get('halving_k_atr', 4.0)):g}`")
+                except Exception:
+                    pass
                 for x in reversed(up):
                     lines.append(f"🔺 `{fmt(x['price'])}`  ({_pct_from(price, x['price'])})  عمق {x['depth']}")
                 lines.append(f"▶️ قیمت: `{fmt(price)}`")
@@ -17853,6 +17882,82 @@ def manual_signal_scan(chat_id, symbol=None):
             f"\nدلیل: {reason}"
         )
     send_message(chat_id, '\n'.join(lines))
+
+
+# ===================== V3.44.143: هشدار تغییر عمق سطوح نصف‌کردن (تغییر ATR) =====================
+# عمق = floor(log2(سقف-کف ÷ (k × ATR مؤثر))) بین min و max؛ پس هر بار ATR مؤثر تقریباً دو برابر/نصف شود یک پله عمق عوض می‌شود
+# (فاصله‌ی سطوح دو برابر/نصف). ATR مؤثر = میانه‌ی ATR (۲۰۰ کندل) × ضریب پویا (اگر «k پویا» روشن باشد). قبلاً این تغییر بی‌صدا بود.
+# هر نماد/تایم‌فریم: تغییر عمق باید در HV_DEPTH_CONFIRM اسکن پیاپی ثابت بماند (ضدلرزش)، بعد در یک پیام تجمیعی به ادمین‌ها می‌رسد.
+# اگر کاربر خودش k/حداقل/حداکثر عمق/کلید k پویا را عوض کند، فقط مبنا ریست می‌شود (هشدار نمی‌آید).
+HV_DEPTH_ALERT = os.environ.get('HV_DEPTH_ALERT', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+HV_DEPTH_CONFIRM = max(1, int(float(os.environ.get('HV_DEPTH_CONFIRM', '3'))))
+HV_DEPTH_FLUSH_SECONDS = max(30, int(float(os.environ.get('HV_DEPTH_FLUSH_SECONDS', '120'))))
+_HV_DEPTH_TRACK = {}      # {(symbol, tf): {'depth','atr','ratio','step','sig','cand','cand_n'}}
+_HV_DEPTH_PENDING = []    # تغییرهای تاییدشده‌ی منتظر ارسال
+_HV_DEPTH_STATE = {'first_pending': 0.0}
+_HV_DEPTH_LOCK = threading.RLock()
+
+
+def _hv_depth_track(symbol, tf, ind_df, cfg):
+    """عمق فعلی را برای این نماد/تایم‌فریم می‌سنجد و تغییرش را (پس از تایید) برای هشدار ثبت می‌کند."""
+    if not HV_DEPTH_ALERT or ind_df is None or len(ind_df) < 30 or not (cfg or {}).get('halving_model_enabled'):
+        return
+    ctx = _halving_context(ind_df, len(ind_df) - 2, _halving_cfg(cfg))
+    if not ctx:
+        return
+    depth, atr_eff = int(ctx['depth']), float(ctx['atr']) * float(ctx.get('dyn_ratio') or 1.0)
+    sig = (float(cfg.get('halving_k_atr', 4.0)), int(cfg.get('halving_min_depth', 3)), int(cfg.get('halving_max_depth', 10)),
+           bool(cfg.get('halving_dynamic_k', False)))
+    now = time.time()
+    snap = {'depth': depth, 'atr': float(ctx['atr']), 'ratio': float(ctx.get('dyn_ratio') or 1.0), 'atr_eff': atr_eff,
+            'step': float(ctx['step']), 'k': sig[0], 'dyn': sig[3]}
+    key = (symbol, tf)
+    with _HV_DEPTH_LOCK:
+        cur = _HV_DEPTH_TRACK.get(key)
+        if cur is None or cur['sig'] != sig:           # اولین سنجش یا تنظیمات عوض شد → فقط مبنا
+            _HV_DEPTH_TRACK[key] = {**snap, 'sig': sig, 'cand': None, 'cand_n': 0}
+        elif depth == cur['depth']:
+            cur.update({k: snap[k] for k in ('atr', 'ratio', 'atr_eff', 'step')}); cur['cand'] = None; cur['cand_n'] = 0
+        else:
+            if cur['cand'] == depth:
+                cur['cand_n'] += 1
+            else:
+                cur['cand'], cur['cand_n'] = depth, 1
+            if cur['cand_n'] >= HV_DEPTH_CONFIRM:
+                _HV_DEPTH_PENDING.append({'symbol': symbol, 'tf': tf, 'old': cur['depth'], 'new': depth, 'old_atr': cur['atr_eff'],
+                                          'new_atr': atr_eff, 'old_step': cur['step'], 'new_step': snap['step'],
+                                          'ratio': snap['ratio'], 'dyn': snap['dyn'], 'k': snap['k'], 'at': now})
+                _HV_DEPTH_STATE['first_pending'] = _HV_DEPTH_STATE['first_pending'] or now
+                _HV_DEPTH_TRACK[key] = {**snap, 'sig': sig, 'cand': None, 'cand_n': 0}
+                logger.info('halving depth changed %s %s: %s -> %s (atr_eff %.6g -> %.6g)', symbol, tf, cur['depth'], depth, cur['atr_eff'], atr_eff)
+    _hv_depth_flush(now)
+
+
+def _hv_depth_flush(now=None, force=False):
+    """تغییرهای تاییدشده را در یک پیام به ادمین‌ها می‌فرستد (حداکثر هر HV_DEPTH_FLUSH_SECONDS ثانیه)."""
+    now = now or time.time()
+    with _HV_DEPTH_LOCK:
+        if not _HV_DEPTH_PENDING:
+            return None
+        if not force and now - float(_HV_DEPTH_STATE['first_pending'] or now) < HV_DEPTH_FLUSH_SECONDS:
+            return None
+        items = list(_HV_DEPTH_PENDING)
+        _HV_DEPTH_PENDING.clear(); _HV_DEPTH_STATE['first_pending'] = 0.0
+    lines = ['📐 *تغییر عمق سطوح نصف‌کردن (به‌خاطر تغییر ATR)*']
+    for it in sorted(items, key=lambda x: (x['tf'], x['symbol'])):
+        arrow = '⬆️ ریزتر' if it['new'] > it['old'] else '⬇️ درشت‌تر'
+        dyn = f" | ضریب پویا ×{it['ratio']:.2f}" if it['dyn'] else ''
+        lines.append(f"• `{it['symbol']}` ({TF_DISPLAY.get(it['tf'], it['tf'])}): عمق {it['old']} ← *{it['new']}* {arrow}\n"
+                     f"   ATR مؤثر {fmt(it['old_atr'])} ← {fmt(it['new_atr'])} | فاصله‌ی سطوح {fmt(it['old_step'])} ← {fmt(it['new_step'])}{dyn} | k={it['k']:g}")
+    lines.append('')
+    lines.append('ℹ️ هر بار ATR مؤثر تقریباً دو برابر شود یک پله عمق کم می‌شود (سطوح درشت‌تر) و برعکس؛ سطوح و سیگنال‌ها از همین عمق جدید ساخته می‌شوند.')
+    text = '\n'.join(lines)[:3800]
+    for cid in sorted(ADMIN_CHAT_IDS):
+        try:
+            send_message(cid, text)
+        except Exception:
+            logger.exception('hv depth alert send failed chat=%s', cid)
+    return text
 
 
 def _priority_watch_remove(chat_id, symbol):
