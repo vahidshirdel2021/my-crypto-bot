@@ -15047,7 +15047,7 @@ def assist_manual_start(chat_id, aid):
         f"قیمت ورود دلخواهت را (فقط عدد) بفرست.\n"
         f"• ورود پیشنهادی ربات: `{fmt(rec['entry'])}`" + (f" | لحظه‌ای: `{fmt(live)}`" if live else "") + "\n"
         f"• SL `{fmt(rec['sl'])}` و TP `{fmt(rec['tp'])}` همان سیگنال می‌مانند.\n"
-        f"معامله وقتی قیمت به عدد تو برسد باز می‌شود.")
+        f"معامله وقتی قیمت به عدد تو برسد باز می‌شود (یا بعد از وارد کردن قیمت «🔔 فقط یادآوری» را بزن تا فقط کارت سیگنال دوباره بیاید).")
 
 
 def manual_entry_start_channel(chat_id, symbol, side):
@@ -15120,6 +15120,7 @@ def manual_entry_price_received(chat_id, raw):
         lines.append(f"⚠️ R:R کمتر از حداقل `{MIN_RR_FLOOR:g}` است (تصمیم با خودت).")
     lines.extend(pnl_estimate_lines(price, sl, tp, side, _m, _lev, platform_rate=_prate))
     lines.append("\nتایید می‌کنی؟ اوردر ثبت می‌شود و وقتی قیمت به ورودِ تو برسد، معامله باز می‌شود.")
+    lines.append("یا «🔔 فقط یادآوری» را بزن: وقتی قیمت به این عدد برسد کارت سیگنال دوباره برایت می‌آید و تصمیم ورود با خودت است.")
     s['_manual_entry_tmp'] = {'symbol': symbol, 'side': side, 'entry': price, 'sl': sl, 'tp': tp,
                               'tp_level_name': tp_name, 'reason': reason, 'assist_id': aid,
                               'exp_tp_pnl_net': (round(estimate_trade_pnl(price, sl, tp, side, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
@@ -15127,7 +15128,146 @@ def manual_entry_price_received(chat_id, raw):
     save_session(chat_id)
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': [[
         {'text': '✅ ثبت اوردر ورود', 'callback_data': '/confirm_manual_entry'},
-        {'text': '❌ انصراف', 'callback_data': '/cancel'}]]})
+        {'text': '❌ انصراف', 'callback_data': '/cancel'}],
+        [{'text': '🔔 فقط یادآوری (با رسیدن قیمت کارت را دوباره بفرست)', 'callback_data': '/manual_entry_alert'}]]})
+
+
+# ===================== V3.44.148: یادآوری قیمت در «ورود با قیمت دستی» =====================
+# کاربر قیمت دلخواه را می‌دهد و به‌جای ثبت اوردر، «🔔 فقط یادآوری» را می‌زند؛ وقتی قیمت به آن عدد برسد، کارت سیگنال
+# با همان دکمه‌ها دوباره پایین چت ارسال می‌شود (assist_open) و تصمیم ورود با خود کاربر می‌ماند. هیچ معامله‌ای خودکار باز نمی‌شود.
+# برای سیگنالِ دارای کارت، سیگنال «ذخیره» می‌شود (بدون مهلت و بدون ورود خودکار) تا تا لحظه‌ی رسیدن قیمت منقضی نشود.
+# یادآوری‌ها در نشست ذخیره می‌شوند (s['price_alerts']) و با ری‌استارت از بین نمی‌روند.
+PRICE_ALERT_TTL_SECONDS = max(600, int(float(os.environ.get('PRICE_ALERT_TTL_SECONDS', str(7 * 24 * 3600)))))
+PRICE_ALERT_POLL_SECONDS = max(5, int(float(os.environ.get('PRICE_ALERT_POLL_SECONDS', '10'))))
+PRICE_ALERT_MAX_PER_USER = 30
+_PRICE_ALERT_LOCK = threading.RLock()
+
+
+def price_alert_register(chat_id, tmp):
+    """از خلاصه‌ی «ورود با قیمت دستی» یادآوری قیمت می‌سازد (به‌جای ثبت اوردر)."""
+    s = get_session(chat_id)
+    symbol, side, target, aid = tmp['symbol'], tmp['side'], float(tmp['entry']), tmp.get('assist_id')
+    try:
+        live = latest_price(symbol)
+        live = float(live) if live is not None else None
+    except Exception:
+        live = None
+    if not live or live <= 0:
+        send_message(chat_id, f'⚠️ قیمت لحظه‌ای `{symbol}` را نگرفتم؛ چند ثانیه بعد دوباره امتحان کن.'); return False
+    if aid:
+        rec = _assist_pending_or_notify(chat_id, s, aid)
+        if not rec:
+            s.pop('_manual_entry_tmp', None); save_session(chat_id); return False
+        with _ASSIST_LOCK:
+            if not rec.get('saved'):
+                now = time.time()
+                rec['saved'] = True; rec['saved_at'] = now; rec['countdown'] = False
+                rec['expires_at'] = now + ASSIST_SAVED_HORIZON_SECONDS; rec['saved_by_alert'] = True
+        _assist_edit_markup(chat_id, rec)
+    now = time.time()
+    # id با حروف کوچک ساخته می‌شود چون دستور callback کوچک‌حرف می‌شود
+    alert = {'id': f"{symbol.lower()}-{int(now * 1000) % 10**9}", 'symbol': symbol, 'side': side, 'price': target, 'dir': 'up' if target > live else 'down',
+             'aid': aid, 'created_at': now, 'expires_at': now + PRICE_ALERT_TTL_SECONDS, 'live_at_create': live}
+    with _PRICE_ALERT_LOCK:
+        lst = [a for a in (s.get('price_alerts') or []) if not (a['symbol'] == symbol and a.get('aid') == aid and abs(a['price'] - target) < 1e-12)]
+        lst.append(alert)
+        s['price_alerts'] = lst[-PRICE_ALERT_MAX_PER_USER:]
+    s.pop('_manual_entry_tmp', None)
+    save_session(chat_id)
+    arrow = 'بالا' if alert['dir'] == 'up' else 'پایین'
+    send_message(chat_id,
+        f"🔔 *یادآوری ثبت شد — `{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})*\n"
+        f"• قیمت هدف: `{fmt(target)}` (الان `{fmt(live)}`، یعنی وقتی قیمت به {arrow} برسد)\n"
+        + ("• وقتی رسید، کارت همین سیگنال با همه‌ی دکمه‌ها دوباره پایین چت می‌آید؛ سیگنال تا آن موقع ذخیره می‌ماند و خودکار وارد نمی‌شوم.\n" if aid
+           else "• وقتی رسید، پیام یادآوری با دکمه‌ی ورود با قیمت دستی می‌فرستم.\n")
+        + "• خودکار هیچ معامله‌ای باز نمی‌شود؛ تصمیم با خودت است.",
+        {'inline_keyboard': [[{'text': '❌ لغو این یادآوری', 'callback_data': f"/price_alert_cancel_{alert['id']}"}]]})
+    return True
+
+
+def manual_entry_alert_confirm(chat_id):
+    s = get_session(chat_id)
+    tmp = s.get('_manual_entry_tmp')
+    if not tmp:
+        send_message(chat_id, '⚠️ اطلاعات ورود دستی پیدا نشد؛ از اول شروع کن.'); return
+    price_alert_register(chat_id, tmp)
+
+
+def price_alert_cancel(chat_id, alert_id):
+    s = get_session(chat_id)
+    with _PRICE_ALERT_LOCK:
+        before = len(s.get('price_alerts') or [])
+        s['price_alerts'] = [a for a in (s.get('price_alerts') or []) if a.get('id') != alert_id]
+        removed = before - len(s['price_alerts'])
+    save_session(chat_id)
+    send_message(chat_id, '✅ یادآوری لغو شد.' if removed else 'ℹ️ این یادآوری دیگر وجود ندارد (قبلاً رسیده یا لغو شده).')
+
+
+def _price_alert_fire(chat_id, a, price):
+    sym = a['symbol']
+    head = f"🔔 قیمت `{sym}` به `{fmt(a['price'])}` رسید (الان `{fmt(price)}`)."
+    s = get_session(chat_id)
+    if a.get('aid'):
+        with _ASSIST_LOCK:
+            rec = _assist_find(s, a['aid'])
+            alive = bool(rec and rec.get('status') == 'pending')
+        if alive:
+            send_message(chat_id, head + '\nکارت سیگنال را دوباره می‌فرستم 👇')
+            assist_open(chat_id, a['aid'])
+        else:
+            send_message(chat_id, head + '\nولی این سیگنال دیگر در انتظار تصمیم نیست (ردشده، وارد‌شده یا منقضی).')
+    else:
+        send_message(chat_id, head + '\nبرای ورود، دکمه‌ی زیر را بزن.',
+                     {'inline_keyboard': [[{'text': '✏️ ورود با قیمت دستی', 'callback_data': f"/qtm_{'buy' if a.get('side') == 'BUY' else 'sell'}_{sym}"}]]})
+
+
+def price_alert_check_once(now=None):
+    """هر چند ثانیه: یادآوری‌هایی که قیمتشان رد شده را شلیک می‌کند و منقضی‌ها را پاک می‌کند."""
+    now = now or time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        alerts = s.get('price_alerts') or []
+        if not alerts:
+            continue
+        prices, keep, fired, expired = {}, [], [], []
+        for a in list(alerts):
+            if now > float(a.get('expires_at', 0) or 0):
+                expired.append(a); continue
+            sym = a['symbol']
+            if sym not in prices:
+                try:
+                    v = latest_price(sym)
+                    prices[sym] = float(v) if v is not None else None
+                except Exception:
+                    prices[sym] = None
+            px = prices[sym]
+            if px is not None and ((a['dir'] == 'up' and px >= a['price']) or (a['dir'] == 'down' and px <= a['price'])):
+                fired.append((a, px))
+            else:
+                keep.append(a)
+        if not fired and not expired:
+            continue
+        with _PRICE_ALERT_LOCK:
+            s['price_alerts'] = keep
+        save_session(chat_id)
+        for a, px in fired:
+            try:
+                _price_alert_fire(chat_id, a, px)
+            except Exception:
+                logger.exception('price alert fire failed chat=%s symbol=%s', chat_id, a.get('symbol'))
+        for a in expired:
+            try:
+                send_message(chat_id, f"⌛ یادآوری قیمت `{a['symbol']}` ({fmt(a['price'])}) بدون رسیدن قیمت منقضی شد.")
+            except Exception:
+                pass
+
+
+def _price_alert_loop():
+    while True:
+        try:
+            price_alert_check_once()
+        except Exception:
+            logger.exception('price alert loop failed')
+        time.sleep(PRICE_ALERT_POLL_SECONDS)
 
 
 @_from_signal_origin
@@ -18805,6 +18945,10 @@ def process_command(cmd,chat_id,message_id=None):
         manual_entry_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
     if cl == '/confirm_manual_entry':
         manual_entry_confirm(chat_id); return
+    if cl == '/manual_entry_alert':      # V3.44.148
+        manual_entry_alert_confirm(chat_id); return
+    if cl.startswith('/price_alert_cancel_'):
+        price_alert_cancel(chat_id, cl[len('/price_alert_cancel_'):]); return
     if cl.startswith('/keep_channel_msg_'):
         # دکمه‌ی «ذخیره برای بررسی بعدی» زیر پیام کانال - فقط تایمر حذف خودکار همان
         # پیام را لغو می‌کند؛ خود پیام و دکمه‌هایش دست‌نخورده در کانال باقی می‌مانند.
@@ -20808,6 +20952,7 @@ def main():
     Thread(target=lambda: (time.sleep(19), _fee_daily_loop()), daemon=True, name='fee-daily').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     Thread(target=lambda: (time.sleep(2), _btc_dyn_k_loop()), daemon=True, name='btc-dynamic-k').start()      # V3.44.145
+    Thread(target=lambda: (time.sleep(3), _price_alert_loop()), daemon=True, name='price-alerts').start()      # V3.44.148
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 

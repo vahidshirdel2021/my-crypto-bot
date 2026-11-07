@@ -84,6 +84,7 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/tw_(qe|open|ref)_[a-z0-9_.:\-]*$', r'^/fq_(qe|ref|rej|ext)_[a-z0-9_.:\-]*$',
     r'^/becl_[a-z0-9_.:\-]*$', r'^/(rvshow|rvdel)_[a-z0-9_.:\-]*$',
     r'^/(manual_entry_tgok|confirm_manual_entry|confirm_manual_trade)([a-z0-9_.:\-]*)$',
+    r'^/(manual_entry_alert|price_alert_cancel_[a-z0-9_.:\-]*)$',      # V3.44.148: یادآوری قیمت در ورود با قیمت دستی
     # سؤال تاییدِ «مطمئنی؟» (خودش بعداً دستور اصلی را دوباره از همین فیلتر رد می‌کند)
     r'^/cfm(no)?_[a-z0-9_.:\-]*$',
     # V3.44.61: دکمه‌ی «✅ واریز کردم» روی فاکتور کارمزد روزانه
