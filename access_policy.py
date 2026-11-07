@@ -78,13 +78,13 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/edit_(sl|tp)_[a-z0-9_]+$',
     r'^/show_chart_[a-z0-9_]+$', r'^/view_chart_[a-z0-9_]+$',
     # دکمه‌های کارت‌های سیگنال/تایید/لمس که ربات خودش برای کاربر می‌فرستد
-    r'^/assist_(ok|no|rev|revok|man|open|save|saved|cd|ext|farok|farno|tgok|trendcancel)_?[a-z0-9_.:\-]*$',
+    r'^/assist_(ok|no|rev|revok|man|alert|open|save|saved|cd|ext|farok|farno|tgok|trendcancel)_?[a-z0-9_.:\-]*$',
     r'^/(autotg_(ok|no)|tgref|keep_channel_msg|del_channel_msg|check_entry|cancel_watch)_[a-z0-9_.:\-]*$',
     r'^/(qt|qtm)_(buy|sell|tgok)_[a-z0-9_.:\-]*$', r'^/quick_manual_trade_[a-z0-9_.:\-]*$',
     r'^/tw_(qe|open|ref)_[a-z0-9_.:\-]*$', r'^/fq_(qe|ref|rej|ext)_[a-z0-9_.:\-]*$',
     r'^/becl_[a-z0-9_.:\-]*$', r'^/(rvshow|rvdel)_[a-z0-9_.:\-]*$',
     r'^/(manual_entry_tgok|confirm_manual_entry|confirm_manual_trade)([a-z0-9_.:\-]*)$',
-    r'^/(manual_entry_alert|price_alert_cancel_[a-z0-9_.:\-]*)$',      # V3.44.148: یادآوری قیمت در ورود با قیمت دستی
+    r'^/(manual_entry_alert|price_alert_cancel_[a-z0-9_.:\-]*)$',      # V3.44.149: یادآور قیمت (manual_entry_alert دکمه‌ی قدیمی است؛ فقط پیام «حذف شده» می‌دهد)
     # سؤال تاییدِ «مطمئنی؟» (خودش بعداً دستور اصلی را دوباره از همین فیلتر رد می‌کند)
     r'^/cfm(no)?_[a-z0-9_.:\-]*$',
     # V3.44.61: دکمه‌ی «✅ واریز کردم» روی فاکتور کارمزد روزانه
