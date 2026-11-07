@@ -206,7 +206,7 @@ def get_setup_management_keyboard(session=None):
     if hv_on:
         _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
         _k_eff, _k_src = halving_k_effective(_cfg_ui)      # V3.44.145: k مؤثر (از BTC یا دستی)
-        _bd = bool(_cfg_ui.get("halving_btc_dynamic_k", True))
+        _bd = bool(_cfg_ui.get("halving_btc_dynamic_k", False))
         rows.append([{"text": f"{'🟢' if _bd else '🔴'} k پویا از BTC (۲↔۴ برای کل ربات)", "callback_data": "/halving_btc_dyn_toggle"}])
         if _k_src == "btc":
             rows.append([{"text": f"فاصله‌ی حداقل سطوح: {_k_eff:g}×ATR (الان از BTC؛ k دستی نادیده است)", "callback_data": "/halving_k_cycle"}])

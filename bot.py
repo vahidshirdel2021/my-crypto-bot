@@ -2180,7 +2180,7 @@ _LAST_PHOTO = _threading.local()      # V3.42.11: message_id آخرین عکسی
 # فقط دکمه‌هایی که روی «کارت سیگنال/پیام کانال» کار می‌کنند یا خروجی مستقل (نمودار/فایل) دارند،
 # عمداً مسیر قبلی خودشان را نگه می‌دارند.
 _NEW_MESSAGE_PREFIXES = (
-    '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_open_', '/assist_save_',
+    '/tw_qe_', '/tw_open_', '/fq_qe_', '/assist_ok_', '/assist_no_', '/assist_rev_', '/assist_man_', '/assist_alert_', '/assist_open_', '/assist_save_',
     '/assist_saved_', '/assist_cd_', '/assist_ind_', '/autotg_', '/tgref_', '/keep_channel_msg_', '/del_channel_msg_', '/qt_', '/show_chart_',
     '/lv_', '/lvc_', '/an_', '/bt_', '/check_entry_', '/cancel_watch_', '/chind_', '/chlist', '/chlist_buy', '/chlist_sell', '/chreg', '/rvshow_', '/noop', '/dummy',
 )
@@ -4440,8 +4440,12 @@ def btc_front_level_info(s, tf, is_long):
     chop_win = _ci('btc_chop_window', BTC_CHOP_WINDOW, 4)
     chop_k = _ci('btc_chop_clear_closes', BTC_CHOP_CLEAR_CLOSES, 1)
     chop_x = _cf('btc_chop_clear_atr', BTC_CHOP_CLEAR_ATR)
+    try:
+        _eff_k = halving_k_effective(cfg0)      # V3.44.151: k مؤثر (دستی یا از BTC) جزو کلید کش است
+    except Exception:
+        _eff_k = None
     ckey = (_venue(), tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
-            cfg0.get('halving_min_depth'), cfg0.get('halving_max_depth'), bool(cfg0.get('halving_dynamic_k')),
+            cfg0.get('halving_min_depth'), cfg0.get('halving_max_depth'), bool(cfg0.get('halving_dynamic_k')), _eff_k,
             bool(cfg0.get('halving_only_targets', True)))
     with _BTC_FRONT_LOCK:
         hit = _BTC_FRONT_CACHE.get(ckey)
@@ -11449,7 +11453,7 @@ def _assist_markup(rec, remaining=None):
     rows = [
         [{'text': '✅ ورود', 'callback_data': f'/assist_ok_{aid}'}, {'text': '❌ رد', 'callback_data': f'/assist_no_{aid}'}],
         [{'text': f"🔄 معامله برعکس ({'فروش' if is_long else 'خرید'}) با قیمت لحظه‌ای", 'callback_data': f'/assist_rev_{aid}'}],
-        [{'text': '✏️ ورود با قیمت دستی', 'callback_data': f'/assist_man_{aid}'}, ext_btn],
+        [{'text': '🔔 یادآور قیمت', 'callback_data': f'/assist_alert_{aid}'}, ext_btn],
         [{'text': '📈 TradingView', 'url': tradingview_chart_url(sym, tf)}, {'text': '📊 اندیکاتورها', 'callback_data': f'/assist_ind_{aid}'}],
     ]
     mini = miniapp_chart_url(sym, tf)
@@ -14173,9 +14177,10 @@ def _touch_bias_verdict(s, now=None):
     return blocked, buy, sell
 
 
-def _dir_board_lines(s):
-    """خطوط نمایشیِ جهت همه‌ی نمادهای واچ‌لیست + جهت غالب بازار (برای «📋 سیگنال‌های در انتظار»)."""
-    syms = list(LONG_WATCHLIST)
+def _dir_board_lines(s, with_head=True, max_names=24, hide_none_over=12):
+    """خطوط نمایشیِ جهت نمادهای واچ‌لیست + جهت غالب بازار (برای «📋 سیگنال‌های در انتظار»).
+    V3.44.150 (جمع‌وجور): خط «بدون الگو» وقتی نمادهای زیادی دارد فقط تعداد را نشان می‌دهد؛ اسم‌های خرید/فروش هم تا max_names می‌آیند."""
+    syms = list(globals().get('LONG_WATCHLIST') or [])
     per = _dir_per_symbol(s)
     for k in per:
         if k not in syms:
@@ -14186,17 +14191,21 @@ def _dir_board_lines(s):
     sells = [x for x in syms if per.get(x) == 'SELL']
     none_ = [x for x in syms if x not in per]
     blocked, b, sl = _touch_bias_verdict(s)
-    if blocked:
-        head = f"🧭 جهت غالب بازار: {'خرید' if blocked == 'SELL' else 'فروش'} ({b} خرید / {sl} فروش از {len(syms)} نماد)"
-    else:
-        head = f"🧭 جهت غالب بازار: مشخص نیست ({b} خرید / {sl} فروش از {len(syms)} نماد؛ حداقل {TOUCH_BIAS_MIN_TOTAL} نماد جهت‌دار و {int(round(TOUCH_BIAS_PCT * 100))}٪ هم‌نظری لازم است)"
-    out = [head]
+    out = []
+    if with_head:
+        if blocked:
+            out.append(f"🧭 جهت غالب بازار: {'خرید' if blocked == 'SELL' else 'فروش'} ({b} خرید / {sl} فروش از {len(syms)} نماد)")
+        else:
+            out.append(f"🧭 جهت غالب بازار: مشخص نیست ({b} خرید / {sl} فروش از {len(syms)} نماد؛ حداقل {TOUCH_BIAS_MIN_TOTAL} نماد جهت‌دار و {int(round(TOUCH_BIAS_PCT * 100))}٪ هم‌نظری لازم است)")
+
+    def _names(lst):
+        return '، '.join(lst[:max_names]) + (f" و {len(lst) - max_names} نماد دیگر" if len(lst) > max_names else '')
     if buys:
-        out.append(f"🟢 خرید ({len(buys)}): " + '، '.join(buys))
+        out.append(f"🟢 خرید ({len(buys)}): " + _names(buys))
     if sells:
-        out.append(f"🔴 فروش ({len(sells)}): " + '، '.join(sells))
+        out.append(f"🔴 فروش ({len(sells)}): " + _names(sells))
     if none_:
-        out.append(f"⚪ بدون الگوی مشخص ({len(none_)}): " + '، '.join(none_))
+        out.append(f"⚪ بدون الگوی مشخص: {len(none_)} نماد" if len(none_) > hide_none_over else f"⚪ بدون الگوی مشخص ({len(none_)}): " + '، '.join(none_))
     return out
 
 
@@ -14834,9 +14843,11 @@ def assist_pending_list(chat_id, message_id=None):
     shown = recs[:25]
     lines = [f"📋 *سیگنال‌های در انتظار ({len(recs) + len(t_recs)})*"]
     # V3.44.137: خطوط «📊 خرید/فروش» و «فشار بازار» حذف‌شده می‌مانند؛ خط «🚦 جهت بازار» (وضعیت گیت) برگشت.
+    _gate_line_shown = False
     try:
         _need_dom = gate_on(s, TOUCH_NEED_DOMINANT_KEY)
         if gate_on(s, TOUCH_BIAS_KEY) or _need_dom:      # V3.44.132/133: وضعیت جهت غالب بازار (فقط اطلاع‌رسانی)
+            _gate_line_shown = True
             _bb, _bn, _sn = _touch_bias_verdict(s)
             if _bb:
                 _blk_txt = f" — جهت {'فروش' if _bb == 'SELL' else 'خرید'} بلاک است" if gate_on(s, TOUCH_BIAS_KEY) else ''
@@ -14848,7 +14859,7 @@ def assist_pending_list(chat_id, message_id=None):
     except Exception:
         logger.exception('pending bias line failed')
     try:
-        lines.extend(_dir_board_lines(s))       # V3.44.142: جهت همه‌ی نمادهای واچ‌لیست + جهت غالب بازار
+        lines.extend(_dir_board_lines(s, with_head=not _gate_line_shown))       # V3.44.142/150: جهت نمادها (اگر خط «🚦 جهت بازار» هست تکرار نمی‌شود)
     except Exception:
         logger.exception('pending dir board failed')
     lines.append("")
@@ -14856,6 +14867,7 @@ def assist_pending_list(chat_id, message_id=None):
         lines.append(f"🔎 فیلتر رأی: {'≥' + str(int(round(PENDING_HIGH_VOTE_PCT * 100))) + '٪ فیلترها موافق' if vf == 'high' else 'همه‌ی فیلترها موافق'} — {len(t_recs)} از {len(t_all)} مورد برخورد با سطح")
         lines.append("")
     rows = [[{'text': _PENDING_VF_LABEL[vf], 'callback_data': '/pending_vote_filter'}]]
+    item_btns = []          # V3.44.150: دکمه‌ی نمادها شبکه‌ای (PENDING_BTN_COLS در هر ردیف) و هر مورد یک خط
     n = 0
     t_shown = t_recs[:TOUCH_CARDS_PER_LIST]
     _t_done = 0
@@ -14886,8 +14898,8 @@ def assist_pending_list(chat_id, message_id=None):
                 vote_txt = f"{total} فیلتر" if total else 'بدون فیلتر روشن'
                 btn_icon = '⏳'
                 btn_votes = ''
-            lines.append(f"{n}) `{r['symbol']}`{' 🔁' if r.get('flipped_from') else ''} {side_txt} · {vote_txt} · {TF_DISPLAY.get(tf, tf)} · ⏳ {_rem} دقیقه")
-            rows.append([{'text': f"🔎 {r['symbol']} {btn_icon}{btn_votes}", 'callback_data': f"/tw_open_{r['id']}"}])
+            lines.append(f"{n}) `{r['symbol']}`{' 🔁' if r.get('flipped_from') else ''} {btn_icon} {vote_txt} · {TF_DISPLAY.get(tf, tf)} · ⏳{_rem}د")
+            item_btns.append({'text': f"{n}· {r['symbol']} {btn_icon}{btn_votes}", 'callback_data': f"/tw_open_{r['id']}"})
         if len(t_recs) > _t_done:
             lines.append(f"… و {len(t_recs) - _t_done} مورد دیگر برخورد با سطح (بعد از ورود یا انقضای این‌ها نمایش داده می‌شوند)")
         lines.append("")
@@ -14909,20 +14921,25 @@ def assist_pending_list(chat_id, message_id=None):
             live = latest_price(r['symbol'])
         except Exception:
             live = None
-        price_txt = ''
+        r_txt = ''
         risk = abs(float(r['entry']) - float(r['sl']))
         if live and risk > 0:
             fav = ((float(live) - float(r['entry'])) if is_long else (float(r['entry']) - float(live))) / risk
             crossed_sl = (live <= r['sl']) if is_long else (live >= r['sl'])
             crossed_tp = (live >= r['tp']) if is_long else (live <= r['tp'])
-            flag = ' ⚠️ از SL رد شده' if crossed_sl else (' ⚠️ از TP رد شده' if crossed_tp else '')
-            price_txt = f" | لحظه‌ای `{fmt(float(live))}` (`{fav:+.2f}R`){flag}"
-        lines.append(f"{n}) `{r['symbol']}` {side_txt} · {TF_DISPLAY.get(tf, tf)} · {state_txt}")
-        lines.append(f"    ورود `{fmt(float(r['entry']))}`{price_txt}")
-        rows.append([{'text': f"🔎 {r['symbol']} {'🟢' if is_long else '🔴'}" + (' 💾' if r.get('saved') else ''), 'callback_data': f"/assist_open_{r['id']}"}])
+            r_txt = f" · `{fav:+.2f}R`" + (' ⚠️SL' if crossed_sl else (' ⚠️TP' if crossed_tp else ''))
+        if r.get('saved'):
+            st_short = '💾'
+        else:
+            _rem_min = max(0, int((float(r.get('expires_at', 0) or 0) - time.time() + 59) // 60))
+            st_short = ('⚠️تایید ' if r.get('auto_gate') else '') + f'⏳{_rem_min}د'
+        lines.append(f"{n}) `{r['symbol']}` {'🟢' if is_long else '🔴'} {TF_DISPLAY.get(tf, tf)} · {st_short}{r_txt}")
+        item_btns.append({'text': f"{n}· {r['symbol']} {'🟢' if is_long else '🔴'}" + (' 💾' if r.get('saved') else ''), 'callback_data': f"/assist_open_{r['id']}"})
     if len(recs) > _a_done:
         lines.append(f"\n… و {len(recs) - _a_done} سیگنال دیگر (جدیدترین‌ها اول نمایش داده شد)")
-    lines.append("\nروی نماد هر ردیف بزنید تا کارت همان سیگنال پایین چت بیاید. (`R` مثبت یعنی قیمت به نفع سیگنال رفته)")
+    lines.append("\nروی دکمه‌ی هر نماد بزنید تا کارت همان سیگنال پایین چت بیاید. (💾 ذخیره‌شده؛ `R` مثبت یعنی قیمت به نفع سیگنال رفته)")
+    _cols = max(1, min(4, int(float(os.environ.get('PENDING_BTN_COLS', '3')))))
+    rows.extend(item_btns[i:i + _cols] for i in range(0, len(item_btns), _cols))
     rows.append([{'text': '🔄 بروزرسانی', 'callback_data': '/assist_pending'}])
     rows.append([{'text': '⏳ صف تایید حرکت', 'callback_data': '/fav_queue'}])
     send_message(chat_id, "\n".join(lines), {'inline_keyboard': rows}, message_id=message_id)
@@ -15030,123 +15047,94 @@ def assist_reverse(chat_id, aid, skip_trend=False):
         _assist_strip_buttons(chat_id, rec.get('message_id'), rec)
 
 
-def assist_manual_start(chat_id, aid):
+def _crypto_day_end_ts():
+    """پایان روز جاریِ ربات (همان مرز روز کریپتو: ۰۰:۰۰ UTC مگر CRYPTO_DAY_TZ عوض شده باشد) به‌صورت timestamp."""
+    n = _crypto_now()
+    return (n + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+
+def _price_alert_prompt(chat_id, ctx, title, extra=''):
+    s = get_session(chat_id)
+    s['user_state'] = 'WAIT_ALERT_PRICE'
+    s['_alert_ctx'] = ctx
+    save_session(chat_id)
+    send_message(chat_id,
+        f"🔔 *یادآور قیمت — {title}*\n"
+        f"قیمتی را که می‌خواهی خبرت کنم (فقط عدد) بفرست.\n" + extra +
+        f"• تا پایان روز جاری معتبر است (تا {fmt_scan_time(_crypto_day_end_ts())} به وقت تهران) و بعدش خودکار پاک می‌شود.\n"
+        f"• وقتی قیمت به آن عدد برسد، کارت سیگنال دوباره برایت ارسال می‌شود؛ هیچ معامله‌ای خودکار باز نمی‌شود.")
+
+
+def assist_alert_start(chat_id, aid):
+    """«🔔 یادآور قیمت» زیر کارت سیگنال دستیار (دکمه‌ی قدیمیِ ورود با قیمت دستی هم به همین‌جا می‌آید)."""
     s = get_session(chat_id)
     rec = _assist_pending_or_notify(chat_id, s, aid)
     if not rec:
         return
     try:
-        live = exchange_latest_price(chat_id, rec['symbol']) if s.get('trading_mode') == 'REAL' else latest_price(rec['symbol'])
+        live = latest_price(rec['symbol'])
     except Exception:
         live = None
-    s['user_state'] = 'WAIT_MANUAL_ENTRY_PRICE'
-    s['_manual_entry_ctx'] = {'kind': 'assist', 'aid': aid}
-    save_session(chat_id)
-    send_message(chat_id,
-        f"✏️ *ورود با قیمت دستی — `{rec['symbol']}`*\n"
-        f"قیمت ورود دلخواهت را (فقط عدد) بفرست.\n"
-        f"• ورود پیشنهادی ربات: `{fmt(rec['entry'])}`" + (f" | لحظه‌ای: `{fmt(live)}`" if live else "") + "\n"
-        f"• SL `{fmt(rec['sl'])}` و TP `{fmt(rec['tp'])}` همان سیگنال می‌مانند.\n"
-        f"معامله وقتی قیمت به عدد تو برسد باز می‌شود (یا بعد از وارد کردن قیمت «🔔 فقط یادآوری» را بزن تا فقط کارت سیگنال دوباره بیاید).")
+    _price_alert_prompt(chat_id, {'kind': 'assist', 'aid': aid}, f"`{rec['symbol']}` ({'🟢 خرید' if rec['sig'] == 'BUY' else '🔴 فروش'})",
+                        f"• ورود پیشنهادی ربات: `{fmt(rec['entry'])}`" + (f" | قیمت لحظه‌ای: `{fmt(live)}`" if live else '') + "\n")
 
 
-def manual_entry_start_channel(chat_id, symbol, side):
-    """شروع ورود با قیمت دستی از دکمه‌ی زیر پیام کانال."""
+def alert_start_channel(chat_id, symbol, side):
+    """دکمه‌های قدیمیِ «ورود با قیمت دستی» زیر پیام کانال (/qtm_) حالا یادآور قیمت می‌سازند."""
     s = get_session(chat_id)
     symbol = re.sub(r'[^A-Z0-9]', '', str(symbol).upper())
     if not (2 <= len(symbol) <= 12):
         send_message(chat_id, '⚠️ نماد نامعتبر است.'); return
-    if any(p['symbol'] == symbol for p in s['paper_positions']):
-        send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
     try:
-        live = exchange_latest_price(chat_id, symbol) if s.get('trading_mode') == 'REAL' else latest_price(symbol)
+        live = latest_price(symbol)
     except Exception:
         live = None
-    s['user_state'] = 'WAIT_MANUAL_ENTRY_PRICE'
-    s['_manual_entry_ctx'] = {'kind': 'qt', 'symbol': symbol, 'side': side}
-    save_session(chat_id)
-    send_message(chat_id,
-        f"✏️ *ورود با قیمت دستی — `{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})*\n"
-        f"قیمت ورود دلخواهت را (فقط عدد) بفرست." + (f"\nقیمت لحظه‌ای: `{fmt(live)}`" if live else "") + "\n"
-        f"SL/TP بر اساس همان قیمت ورود ساخته می‌شوند و معامله وقتی قیمت به عدد تو برسد باز می‌شود.")
+    _price_alert_prompt(chat_id, {'kind': 'qt', 'symbol': symbol, 'side': side}, f"`{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})",
+                        (f"• قیمت لحظه‌ای: `{fmt(live)}`\n" if live else ''))
 
 
-def manual_entry_price_received(chat_id, raw):
+def alert_price_received(chat_id, raw):
     s = get_session(chat_id)
-    ctx = dict(s.get('_manual_entry_ctx') or {})
+    ctx = dict(s.get('_alert_ctx') or s.get('_manual_entry_ctx') or {})
     s['user_state'] = None
+    s.pop('_alert_ctx', None); s.pop('_manual_entry_ctx', None)
     save_session(chat_id)
     try:
         price = float(str(raw).replace(',', '').strip())
         if not math.isfinite(price) or price <= 0:
             raise ValueError
     except Exception:
-        send_message(chat_id, '⚠️ قیمت معتبر نیست؛ دوباره روی دکمه‌ی «ورود با قیمت دستی» بزن و فقط عدد بفرست.'); return
+        send_message(chat_id, '⚠️ قیمت معتبر نیست؛ دوباره روی «🔔 یادآور قیمت» بزن و فقط عدد بفرست.'); return
     if ctx.get('kind') == 'assist':
         rec = _assist_pending_or_notify(chat_id, s, ctx.get('aid'))
         if not rec:
             return
-        symbol, side = rec['symbol'], rec['sig']
-        sl, tp, tp_name, reason, aid = float(rec['sl']), float(rec['tp']), rec.get('tp_level_name'), rec['reason'], rec['id']
+        symbol, side, aid = rec['symbol'], rec['sig'], rec['id']
     elif ctx.get('kind') == 'qt':
-        symbol, side = ctx['symbol'], ctx['side']
-        plan, _ = build_quick_plan_with_fallback(symbol, side, s.get('strategy_config'), price, s['timeframe'])
-        sl, tp, tp_name, reason, aid = float(plan['sl']), float(plan['tp']), plan.get('tp_level_name'), plan['reason'], None
+        symbol, side, aid = ctx['symbol'], ctx['side'], None
     else:
-        send_message(chat_id, 'ℹ️ درخواست ورود دستی پیدا نشد؛ دوباره از دکمه‌ی زیر سیگنال شروع کن.'); return
+        send_message(chat_id, 'ℹ️ درخواست یادآور پیدا نشد؛ دوباره از دکمه‌ی زیر سیگنال شروع کن.'); return
     live = latest_price(symbol)
     if live and abs(price - float(live)) / float(live) > 0.20:
         send_message(chat_id, f"⚠️ قیمت `{fmt(price)}` بیش از ۲۰٪ با قیمت لحظه‌ای (`{fmt(live)}`) فاصله دارد؛ دوباره تلاش کن."); return
-    is_long = side == 'BUY'
-    if not ((is_long and sl < price < tp) or ((not is_long) and tp < price < sl)):
-        send_message(chat_id,
-            f"⚠️ با ورود `{fmt(price)}` ترتیب SL/TP با جهت {'خرید' if is_long else 'فروش'} نمی‌خواند "
-            f"(باید {'SL < ورود < TP' if is_long else 'TP < ورود < SL'} باشد؛ SL `{fmt(sl)}` | TP `{fmt(tp)}`). قیمت دیگری بفرست."); return
-    rr = abs(tp - price) / abs(price - sl)
-    _m, _lev = estimate_session_size(chat_id, symbol, price, sl)
-    try:
-        _prate = float(get_user_fee_rate(chat_id))
-    except Exception:
-        _prate = None
-    lines = [
-        f"🖐 *خلاصه‌ی ورود با قیمت دستی*",
-        f"• نماد: `{symbol}` ({'🟢 خرید' if is_long else '🔴 فروش'})",
-        f"• ورود (دستی): `{fmt(price)}`",
-        f"• حد ضرر: `{fmt(sl)}`",
-        f"• هدف (TP): `{fmt(tp)}`" + (f" — سطح: `{tp_name}`" if tp_name else ""),
-        f"• R:R: `{rr:.2f}`",
-    ]
-    if rr < MIN_RR_FLOOR:
-        lines.append(f"⚠️ R:R کمتر از حداقل `{MIN_RR_FLOOR:g}` است (تصمیم با خودت).")
-    lines.extend(pnl_estimate_lines(price, sl, tp, side, _m, _lev, platform_rate=_prate))
-    lines.append("\nتایید می‌کنی؟ اوردر ثبت می‌شود و وقتی قیمت به ورودِ تو برسد، معامله باز می‌شود.")
-    lines.append("یا «🔔 فقط یادآوری» را بزن: وقتی قیمت به این عدد برسد کارت سیگنال دوباره برایت می‌آید و تصمیم ورود با خودت است.")
-    s['_manual_entry_tmp'] = {'symbol': symbol, 'side': side, 'entry': price, 'sl': sl, 'tp': tp,
-                              'tp_level_name': tp_name, 'reason': reason, 'assist_id': aid,
-                              'exp_tp_pnl_net': (round(estimate_trade_pnl(price, sl, tp, side, _m, _lev)['tp_net'], 4) if (_m and _lev) else None),
-                              'exp_sl_pnl_net': (round(estimate_trade_pnl(price, sl, tp, side, _m, _lev)['sl_net'], 4) if (_m and _lev) else None)}
-    save_session(chat_id)
-    send_message(chat_id, "\n".join(lines), {'inline_keyboard': [[
-        {'text': '✅ ثبت اوردر ورود', 'callback_data': '/confirm_manual_entry'},
-        {'text': '❌ انصراف', 'callback_data': '/cancel'}],
-        [{'text': '🔔 فقط یادآوری (با رسیدن قیمت کارت را دوباره بفرست)', 'callback_data': '/manual_entry_alert'}]]})
+    price_alert_register(chat_id, symbol, side, price, aid)
 
 
-# ===================== V3.44.148: یادآوری قیمت در «ورود با قیمت دستی» =====================
-# کاربر قیمت دلخواه را می‌دهد و به‌جای ثبت اوردر، «🔔 فقط یادآوری» را می‌زند؛ وقتی قیمت به آن عدد برسد، کارت سیگنال
+# ===================== V3.44.149: یادآور قیمت (جایگزین «ورود با قیمت دستی»؛ معتبر تا پایان روز جاری) =====================
+# کاربر قیمت دلخواه را می‌دهد؛ وقتی قیمت به آن عدد برسد، کارت سیگنال
 # با همان دکمه‌ها دوباره پایین چت ارسال می‌شود (assist_open) و تصمیم ورود با خود کاربر می‌ماند. هیچ معامله‌ای خودکار باز نمی‌شود.
 # برای سیگنالِ دارای کارت، سیگنال «ذخیره» می‌شود (بدون مهلت و بدون ورود خودکار) تا تا لحظه‌ی رسیدن قیمت منقضی نشود.
 # یادآوری‌ها در نشست ذخیره می‌شوند (s['price_alerts']) و با ری‌استارت از بین نمی‌روند.
-PRICE_ALERT_TTL_SECONDS = max(600, int(float(os.environ.get('PRICE_ALERT_TTL_SECONDS', str(7 * 24 * 3600)))))
+# اعتبار هر یادآور تا پایان روز جاری ربات (۰۰:۰۰ UTC)؛ بعد از آن بی‌صدا پاک می‌شود (برای عوض‌کردن مرز روز: CRYPTO_DAY_TZ).
 PRICE_ALERT_POLL_SECONDS = max(5, int(float(os.environ.get('PRICE_ALERT_POLL_SECONDS', '10'))))
 PRICE_ALERT_MAX_PER_USER = 30
 _PRICE_ALERT_LOCK = threading.RLock()
 
 
-def price_alert_register(chat_id, tmp):
-    """از خلاصه‌ی «ورود با قیمت دستی» یادآوری قیمت می‌سازد (به‌جای ثبت اوردر)."""
+def price_alert_register(chat_id, symbol, side, target, aid=None):
+    """یادآور قیمت می‌سازد (معتبر تا پایان روز جاری)."""
     s = get_session(chat_id)
-    symbol, side, target, aid = tmp['symbol'], tmp['side'], float(tmp['entry']), tmp.get('assist_id')
+    target = float(target)
     try:
         live = latest_price(symbol)
         live = float(live) if live is not None else None
@@ -15157,7 +15145,7 @@ def price_alert_register(chat_id, tmp):
     if aid:
         rec = _assist_pending_or_notify(chat_id, s, aid)
         if not rec:
-            s.pop('_manual_entry_tmp', None); save_session(chat_id); return False
+            return False
         with _ASSIST_LOCK:
             if not rec.get('saved'):
                 now = time.time()
@@ -15165,32 +15153,28 @@ def price_alert_register(chat_id, tmp):
                 rec['expires_at'] = now + ASSIST_SAVED_HORIZON_SECONDS; rec['saved_by_alert'] = True
         _assist_edit_markup(chat_id, rec)
     now = time.time()
+    end_ts = _crypto_day_end_ts()
+    if abs(target - live) / live < 1e-6:            # همین الان رسیده → بلافاصله
+        _price_alert_fire(chat_id, {'symbol': symbol, 'side': side, 'price': target, 'aid': aid}, live)
+        return True
     # id با حروف کوچک ساخته می‌شود چون دستور callback کوچک‌حرف می‌شود
     alert = {'id': f"{symbol.lower()}-{int(now * 1000) % 10**9}", 'symbol': symbol, 'side': side, 'price': target, 'dir': 'up' if target > live else 'down',
-             'aid': aid, 'created_at': now, 'expires_at': now + PRICE_ALERT_TTL_SECONDS, 'live_at_create': live}
+             'aid': aid, 'created_at': now, 'expires_at': end_ts, 'live_at_create': live}
     with _PRICE_ALERT_LOCK:
         lst = [a for a in (s.get('price_alerts') or []) if not (a['symbol'] == symbol and a.get('aid') == aid and abs(a['price'] - target) < 1e-12)]
         lst.append(alert)
         s['price_alerts'] = lst[-PRICE_ALERT_MAX_PER_USER:]
-    s.pop('_manual_entry_tmp', None)
     save_session(chat_id)
     arrow = 'بالا' if alert['dir'] == 'up' else 'پایین'
     send_message(chat_id,
-        f"🔔 *یادآوری ثبت شد — `{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})*\n"
-        f"• قیمت هدف: `{fmt(target)}` (الان `{fmt(live)}`، یعنی وقتی قیمت به {arrow} برسد)\n"
+        f"🔔 *یادآور ثبت شد — `{symbol}` ({'🟢 خرید' if side == 'BUY' else '🔴 فروش'})*\n"
+        f"• قیمت هدف: `{fmt(target)}` (الان `{fmt(live)}`؛ وقتی قیمت به {arrow} برسد خبرت می‌کنم)\n"
+        f"• اعتبار: تا پایان روز جاری ({fmt_scan_time(end_ts)} به وقت تهران)؛ بعدش خودکار پاک می‌شود.\n"
         + ("• وقتی رسید، کارت همین سیگنال با همه‌ی دکمه‌ها دوباره پایین چت می‌آید؛ سیگنال تا آن موقع ذخیره می‌ماند و خودکار وارد نمی‌شوم.\n" if aid
-           else "• وقتی رسید، پیام یادآوری با دکمه‌ی ورود با قیمت دستی می‌فرستم.\n")
-        + "• خودکار هیچ معامله‌ای باز نمی‌شود؛ تصمیم با خودت است.",
-        {'inline_keyboard': [[{'text': '❌ لغو این یادآوری', 'callback_data': f"/price_alert_cancel_{alert['id']}"}]]})
+           else "• وقتی رسید، پیام یادآور با دکمه‌ی ورود سریع برایت می‌آید.\n")
+        + "• هیچ معامله‌ای خودکار باز نمی‌شود؛ تصمیم با خودت است.",
+        {'inline_keyboard': [[{'text': '❌ لغو این یادآور', 'callback_data': f"/price_alert_cancel_{alert['id']}"}]]})
     return True
-
-
-def manual_entry_alert_confirm(chat_id):
-    s = get_session(chat_id)
-    tmp = s.get('_manual_entry_tmp')
-    if not tmp:
-        send_message(chat_id, '⚠️ اطلاعات ورود دستی پیدا نشد؛ از اول شروع کن.'); return
-    price_alert_register(chat_id, tmp)
 
 
 def price_alert_cancel(chat_id, alert_id):
@@ -15217,8 +15201,8 @@ def _price_alert_fire(chat_id, a, price):
         else:
             send_message(chat_id, head + '\nولی این سیگنال دیگر در انتظار تصمیم نیست (ردشده، وارد‌شده یا منقضی).')
     else:
-        send_message(chat_id, head + '\nبرای ورود، دکمه‌ی زیر را بزن.',
-                     {'inline_keyboard': [[{'text': '✏️ ورود با قیمت دستی', 'callback_data': f"/qtm_{'buy' if a.get('side') == 'BUY' else 'sell'}_{sym}"}]]})
+        send_message(chat_id, head + '\nاگر می‌خواهی وارد شوی، دکمه‌ی زیر را بزن.',
+                     {'inline_keyboard': [[{'text': ('🟢 ورود سریع (خرید)' if a.get('side') == 'BUY' else '🔴 ورود سریع (فروش)'), 'callback_data': f"/qt_{'buy' if a.get('side') == 'BUY' else 'sell'}_{sym}"}]]})
 
 
 def price_alert_check_once(now=None):
@@ -15254,11 +15238,7 @@ def price_alert_check_once(now=None):
                 _price_alert_fire(chat_id, a, px)
             except Exception:
                 logger.exception('price alert fire failed chat=%s symbol=%s', chat_id, a.get('symbol'))
-        for a in expired:
-            try:
-                send_message(chat_id, f"⌛ یادآوری قیمت `{a['symbol']}` ({fmt(a['price'])}) بدون رسیدن قیمت منقضی شد.")
-            except Exception:
-                pass
+        # یادآورهای منقضی‌شده (پایان روز) بی‌صدا پاک می‌شوند.
 
 
 def _price_alert_loop():
@@ -15268,43 +15248,6 @@ def _price_alert_loop():
         except Exception:
             logger.exception('price alert loop failed')
         time.sleep(PRICE_ALERT_POLL_SECONDS)
-
-
-@_from_signal_origin
-def manual_entry_confirm(chat_id, skip_trend=False):
-    s = get_session(chat_id)
-    tmp = s.get('_manual_entry_tmp')
-    if not tmp:
-        send_message(chat_id, '⚠️ اطلاعات ورود دستی پیدا نشد یا قبلاً ثبت شده؛ از اول شروع کن.'); return
-    symbol = tmp['symbol']
-    if any(p['symbol'] == symbol for p in s['paper_positions']):
-        send_message(chat_id, f'⚠️ برای `{symbol}` همین حالا یک پوزیشن باز داری.'); return
-    aid = tmp.get('assist_id')
-    if aid:
-        rec = _assist_pending_or_notify(chat_id, s, aid)
-        if not rec:
-            s.pop('_manual_entry_tmp', None); save_session(chat_id); return
-    if not skip_trend and _assist_trend_warn(chat_id, symbol, tmp['side'], '/manual_entry_tgok', '/cancel'):
-        return
-    order = {
-        'order_id': f"{symbol}-{int(time.time())}", 'symbol': symbol,
-        'side': 'BUY (Long)' if tmp['side'] == 'BUY' else 'SELL (Short)',
-        'trigger_price': None, 'entry_price': tmp['entry'], 'tp': tmp['tp'], 'sl': tmp['sl'],
-        'margin': float(s.get('trade_amount_usdt') or 0), 'leverage': s.get('leverage'),
-        'created_at': time.time(), 'triggered': True, 'force': True,
-        'reason': tmp.get('reason') or 'ورود دستی', 'tp_level_name': tmp.get('tp_level_name'), 'assist_id': aid,
-        'exp_tp_pnl_net': tmp.get('exp_tp_pnl_net'), 'exp_sl_pnl_net': tmp.get('exp_sl_pnl_net'),
-    }
-    s.setdefault('pending_orders', []).append(order)
-    if aid:
-        with _ASSIST_LOCK:
-            rec = _assist_find(s, aid)
-            if rec:
-                rec['status'] = 'approved'; rec['approved_at'] = time.time(); rec['manual_entry'] = tmp['entry']
-        _assist_strip_buttons(chat_id, (rec or {}).get('message_id'), rec)
-    s.pop('_manual_entry_tmp', None)
-    save_session(chat_id)
-    send_message(chat_id, f"✅ اوردر `{symbol}` با ورود `{fmt(tmp['entry'])}` ثبت شد؛ وقتی قیمت به آن برسد با همین SL/TP معامله باز می‌شود.", pending_orders_keyboard(chat_id))
 
 
 def _assist_resolve_shadow(rec, tf, df):
@@ -16602,6 +16545,7 @@ def run_inbot_backtest(chat_id, cl='/backtest_btc'):
     if len(df) < 800:
         raise RuntimeError('داده‌ی تاریخی کافی نیست')
     cfg = copy.deepcopy(s['strategy_config'])
+    cfg['halving_btc_dynamic_k'] = False      # V3.44.151: بک‌تست با k زنده‌ی BTC آلوده نشود
     _halving_tf_apply(cfg, tf)
     if cfg.get('halving_model_enabled'):
         rng = get_halving_range_sync(symbol)
@@ -16874,6 +16818,7 @@ def _bt_run_worker(chat_id):
         if len(df) < 800:
             raise RuntimeError('فایل داده‌ی نگه‌داری‌شده ناقص است؛ دوباره دانلود کنید.')
         cfg = copy.deepcopy(s['strategy_config'])
+        cfg['halving_btc_dynamic_k'] = False      # V3.44.151
         _halving_tf_apply(cfg, tf)
         if cfg.get('halving_model_enabled'):
             rng = get_halving_range_sync(base + 'USDT')
@@ -18210,10 +18155,22 @@ def _btc_dyn_k_value():
     return k
 
 
+def _btc_dyn_k_any_enabled():
+    """آیا حداقل یک کاربر کلید «k پویا از BTC» را روشن کرده؟ (پیش‌فرض خاموش؛ وگرنه نه سنجشی انجام می‌شود نه هشداری می‌آید)"""
+    try:
+        return any(bool((sess.get('strategy_config') or {}).get('halving_btc_dynamic_k', False)) for sess in list(USER_SESSIONS.values()))
+    except Exception:
+        return False
+
+
 def _btc_dyn_k_loop():
     while True:
         try:
-            _btc_dyn_k_refresh()
+            if _btc_dyn_k_any_enabled():
+                _btc_dyn_k_refresh()
+            else:
+                with _BTC_DYN_LOCK:
+                    _BTC_DYN_K.update({'k': None, 'ratio': None, 'at': 0.0})      # هیچ‌کس روشن نکرده → وضعیت پاک؛ روشن‌شدن بعدی از اول سنجیده می‌شود
         except Exception:
             logger.exception('btc dynamic k refresh failed')
         time.sleep(HV_BTC_REFRESH_SECONDS)
@@ -18846,7 +18803,7 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl == '/halving_dyn_toggle':
             _cfg_hv['halving_dynamic_k'] = not bool(_cfg_hv.get('halving_dynamic_k', False))
         elif cl == '/halving_btc_dyn_toggle':
-            _cfg_hv['halving_btc_dynamic_k'] = not bool(_cfg_hv.get('halving_btc_dynamic_k', True))
+            _cfg_hv['halving_btc_dynamic_k'] = not bool(_cfg_hv.get('halving_btc_dynamic_k', False))
         elif cl == '/halving_k_cycle':
             _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
@@ -18940,13 +18897,11 @@ def process_command(cmd,chat_id,message_id=None):
         _, qt_side, qt_sym = cl.split('_', 2)
         quick_channel_trade(chat_id, qt_sym.upper(), 'BUY' if qt_side == 'buy' else 'SELL'); return
     if cl.startswith('/qtm_buy_') or cl.startswith('/qtm_sell_'):
-        # ورود با قیمت دستی از دکمه‌های زیر پیام کانال: /qtm_<buy|sell>_<SYMBOL>
+        # V3.44.149: «ورود با قیمت دستی» حذف شد؛ دکمه‌های قدیمیِ /qtm_<buy|sell>_<SYMBOL> یادآور قیمت می‌سازند
         _, qm_side, qm_sym = cl.split('_', 2)
-        manual_entry_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
-    if cl == '/confirm_manual_entry':
-        manual_entry_confirm(chat_id); return
-    if cl == '/manual_entry_alert':      # V3.44.148
-        manual_entry_alert_confirm(chat_id); return
+        alert_start_channel(chat_id, qm_sym.upper(), 'BUY' if qm_side == 'buy' else 'SELL'); return
+    if cl in ('/confirm_manual_entry', '/manual_entry_alert', '/manual_entry_tgok'):
+        send_message(chat_id, 'ℹ️ «ورود با قیمت دستی» حذف شده است؛ به‌جایش «🔔 یادآور قیمت» زیر کارت سیگنال را بزن.'); return
     if cl.startswith('/price_alert_cancel_'):
         price_alert_cancel(chat_id, cl[len('/price_alert_cancel_'):]); return
     if cl.startswith('/keep_channel_msg_'):
@@ -19357,7 +19312,7 @@ def process_command(cmd,chat_id,message_id=None):
             extra = '\n\n⚠️ هر دو کلید بیت‌کوین و اتریوم خاموش‌اند؛ تا یکی را روشن نکنی بررسی‌ای انجام نمی‌شود.'
         send_message(chat_id,
             f"🧭 {label}: {st}\n\n"
-            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
+            "قبل از ورود (خودکار، دستیار و ورود سریع از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبود داده مانع نمی‌شود." + extra,
             trade_filter_management_keyboard(chat_id, 'entry_warn'))
         return
@@ -19402,7 +19357,7 @@ def process_command(cmd,chat_id,message_id=None):
         st = '🟢 روشن' if s['ind_warn_enabled'] else '🔴 خاموش'
         send_message(chat_id,
             f"📊 {_filter_info('ind_warn')[0]}: {st}\n\n"
-            "قبل از ورود (خودکار، دستیار، ورود سریع و ورود با قیمت دستی از کانال) اگر اکثر اندیکاتورها (RSI/MACD/ADX) خلاف جهت معامله باشند، "
+            "قبل از ورود (خودکار، دستیار و ورود سریع از کانال) اگر اکثر اندیکاتورها (RSI/MACD/ADX) خلاف جهت معامله باشند، "
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. اگر هشدار روند BTC/ETH هم روشن باشد، هر دو تضاد در همان یک کارت می‌آیند. "
             "نبود اجماع یا نبود داده مانع نمی‌شود.",
             trade_filter_management_keyboard(chat_id, 'entry_warn'))
@@ -19754,9 +19709,6 @@ def process_command(cmd,chat_id,message_id=None):
     if cl == '/assist_trendcancel':
         _strip_all_buttons(chat_id, message_id)
         send_message(chat_id, 'انصراف داده شد؛ ورودی انجام نشد.', keep=False); return
-    if cl == '/manual_entry_tgok':
-        _strip_all_buttons(chat_id, message_id)
-        manual_entry_confirm(chat_id, skip_trend=True); return
     if cl.startswith('/assist_save_'):
         assist_save(chat_id, cl[len('/assist_save_'):]); return
     if cl.startswith('/assist_saved_'):
@@ -19801,8 +19753,8 @@ def process_command(cmd,chat_id,message_id=None):
         return      # دکمه‌ی شمارش معکوس فقط نمایشی است
     if cl.startswith('/assist_rev_'):
         assist_reverse(chat_id, cl[len('/assist_rev_'):]); return
-    if cl.startswith('/assist_man_'):
-        assist_manual_start(chat_id, cl[len('/assist_man_'):]); return
+    if cl.startswith('/assist_alert_') or cl.startswith('/assist_man_'):      # /assist_man_ = دکمه‌ی قدیمی روی کارت‌های قبلی
+        assist_alert_start(chat_id, cl.split('_', 2)[2]); return
     if cl=='/my_profile_menu':
         send_message(
             chat_id,
@@ -20163,8 +20115,8 @@ def handle_text(chat_id,text,message_id=None):
             send_message(chat_id,'⚠️ نماد نامعتبر است یا قیمت آن در دسترس نیست.'); return
         s['_pending_tmp']={'symbol':sym}; s['user_state']=None; save_session(chat_id)
         send_message(chat_id,f'🧾 جهت اوردر `{sym}` را انتخاب کنید:',get_pending_side_keyboard()); return
-    if current_state == 'WAIT_MANUAL_ENTRY_PRICE':
-        manual_entry_price_received(chat_id, raw); return
+    if current_state in ('WAIT_ALERT_PRICE', 'WAIT_MANUAL_ENTRY_PRICE'):      # WAIT_MANUAL_ENTRY_PRICE = حالت قدیمیِ ذخیره‌شده در نشست‌ها
+        alert_price_received(chat_id, raw); return
     if current_state == 'WAIT_MANUAL_ONESHOT':
         lines=[ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
         if len(lines) < 5:
