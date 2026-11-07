@@ -11074,6 +11074,8 @@ def _entry_diag_stage(item):
     """Map an internal scan result to a small human stage machine."""
     status = str(item.get('status') or '')
     reason = str(item.get('reason') or '')
+    if status == 'vote_only':      # V3.44.152
+        return '🗳', 'فقط رأی جهت', 'این نماد فقط در تعیین جهت غالب بازار رأی می‌دهد و روی آن معامله نمی‌شود'
     if status == 'entry_opened':
         return '🟢', 'سیگنال آماده', 'ورود انجام شد'
     if status in ('assist_sent', 'assist_waiting'):
@@ -14723,6 +14725,169 @@ def _touch_wait_loop():
 # END V3.44.14
 
 
+# ===================== V3.44.152: مجموعهٔ معامله (نمادهای هم‌بسته با بیتکوین) =====================
+# همهٔ نمادهای واچ‌لیست مثل قبل اسکن می‌شوند و جهت الگوی هرکدام در «تابلوی جهت» ثبت می‌شود، پس «جهت غالب بازار» هنوز از کل لیست
+# شمرده می‌شود. ولی ورود (ثبت برخورد در لیست انتظار، رأی‌گیری، صف تایید، معامله) فقط برای TRADE_SET_SIZE نمادی انجام می‌شود که
+# بیشترین همبستگی بازده با BTC را دارند. BTC و ETH همیشه در مجموعه‌اند. همبستگی از بازده لگاریتمی کندل‌های بسته‌ی TRADE_SET_CORR_TF
+# (پیش‌فرض ۱ساعته، ~۲۰۰ کندل) حساب می‌شود و هر TRADE_SET_REFRESH_S ثانیه (پیش‌فرض ۶ ساعت) تازه می‌شود. تا اولین محاسبه (یا اگر داده
+# نیامد) فهرست ثابت TRADE_SET_FALLBACK به‌کار می‌رود. «ورود سریع» دستی (priority_watch) از این محدودیت مستثنی است.
+# خاموش‌کردن: TRADE_SET_ONLY=0 (همه‌ی نمادهای واچ‌لیست معامله‌پذیر می‌شوند، مثل قبل).
+TRADE_SET_ON = os.environ.get('TRADE_SET_ONLY', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+TRADE_SET_SIZE = max(3, int(float(os.environ.get('TRADE_SET_SIZE', '20') or 20)))
+TRADE_SET_CORR_TF = os.environ.get('TRADE_SET_CORR_TF', '1hour').strip() or '1hour'
+if TRADE_SET_CORR_TF not in TIMEFRAME_MAP:
+    TRADE_SET_CORR_TF = '1hour'
+TRADE_SET_CORR_BARS = max(80, min(200, int(float(os.environ.get('TRADE_SET_CORR_BARS', '200') or 200))))
+TRADE_SET_MIN_BARS = max(40, int(float(os.environ.get('TRADE_SET_MIN_BARS', '100') or 100)))
+TRADE_SET_MIN_CORR = float(os.environ.get('TRADE_SET_MIN_CORR', '0') or 0)          # کف همبستگی؛ ۰ = فقط رتبه‌بندی
+TRADE_SET_REFRESH_S = max(900, int(float(os.environ.get('TRADE_SET_REFRESH_S', str(6 * 3600)) or 6 * 3600)))
+TRADE_SET_ALWAYS = ('BTC', 'ETH')
+TRADE_SET_FALLBACK = ('BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOGE', 'LINK', 'AVAX', 'DOT', 'LTC', 'ATOM', 'NEAR',
+                      'UNI', 'AAVE', 'SUI', 'APT', 'ARB', 'OP', 'INJ')
+TRADE_SET_REPORT_PATH = os.environ.get('TRADE_SET_REPORT_PATH', 'trade_set_report.json')
+_TRADE_SET = {'symbols': None, 'corr': {}, 'ts': 0.0, 'src': 'fallback', 'n_ok': 0, 'n_all': 0}
+_TRADE_SET_LOCK = threading.Lock()
+
+
+def _trade_set_universe():
+    return [x for x in dict.fromkeys(list(LONG_WATCHLIST) + list(SHORT_WATCHLIST))]
+
+
+def _trade_set_fallback():
+    uni = set(_trade_set_universe())
+    out = [x for x in TRADE_SET_ALWAYS if x in uni]
+    for x in TRADE_SET_FALLBACK:
+        if x in uni and x not in out:
+            out.append(x)
+    return out[:max(TRADE_SET_SIZE, len(TRADE_SET_ALWAYS))]
+
+
+def trade_set_symbols():
+    """نمادهای مجاز برای معامله (به ترتیب همبستگی با BTC؛ تا اولین محاسبه فهرست ثابت)."""
+    with _TRADE_SET_LOCK:
+        syms = _TRADE_SET.get('symbols')
+    return list(syms) if syms else _trade_set_fallback()
+
+
+def trade_set_allows(symbol):
+    if not TRADE_SET_ON:
+        return True
+    return _base_asset(symbol) in set(trade_set_symbols())
+
+
+def _trade_set_blocks_entry(s, symbol):
+    """True = این نماد فقط رأی جهت می‌دهد و نباید وارد مسیر ورود شود. «ورود سریع» دستی (priority_watch) مستثناست."""
+    if not TRADE_SET_ON:
+        return False
+    if symbol in (s.get('priority_watch') or {}):
+        return False
+    return not trade_set_allows(symbol)
+
+
+def _trade_set_corr(df_sym, df_btc):
+    """همبستگی بازده لگاریتمی کندل‌های بسته (ردیف آخر = در حال تشکیل حذف می‌شود) روی زمان‌های مشترک؛ ناکافی = None."""
+    try:
+        import numpy as np
+        a = df_sym.iloc[:-1][['timestamp', 'close']]
+        b = df_btc.iloc[:-1][['timestamp', 'close']]
+        m = a.merge(b, on='timestamp', suffixes=('_s', '_b'))
+        if len(m) < TRADE_SET_MIN_BARS + 1:
+            return None
+        m = m[(m['close_s'] > 0) & (m['close_b'] > 0)]
+        rs = np.log(m['close_s'].astype(float)).diff().dropna()
+        rb = np.log(m['close_b'].astype(float)).diff().dropna()
+        if len(rs) < TRADE_SET_MIN_BARS or float(rs.std()) == 0.0 or float(rb.std()) == 0.0:
+            return None
+        c = float(np.corrcoef(rs.values, rb.values)[0, 1])
+        return c if math.isfinite(c) else None
+    except Exception:
+        return None
+
+
+def compute_trade_set(symbols=None, fetch=None):
+    """(نمادهای انتخاب‌شده, {نماد: همبستگی}, تعداد محاسبه‌شده) یا None وقتی داده‌ی BTC/کافی نیست."""
+    fetch = fetch or (lambda sym: get_klines(sym, TRADE_SET_CORR_TF, TRADE_SET_CORR_BARS))
+    uni = list(symbols) if symbols is not None else _trade_set_universe()
+    try:
+        df_btc = fetch('BTC')
+    except Exception:
+        df_btc = None
+    if df_btc is None or len(df_btc) < TRADE_SET_MIN_BARS + 2:
+        return None
+    todo = [x for x in uni if x != 'BTC']
+    corr = {'BTC': 1.0}
+
+    def _one(sym):
+        try:
+            return sym, _trade_set_corr(fetch(sym), df_btc)
+        except Exception:
+            return sym, None
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        for sym, c in ex.map(_one, todo):
+            if c is not None:
+                corr[sym] = c
+    n_ok = len(corr) - 1
+    if n_ok < max(5, int(len(todo) * 0.3)):
+        return None            # داده‌ی ناکافی: فهرست قبلی/ثابت را عوض نکن
+    chosen = [x for x in TRADE_SET_ALWAYS if x in uni]
+    ranked = sorted((x for x in corr if x not in chosen), key=lambda x: corr[x], reverse=True)
+    for x in ranked:
+        if len(chosen) >= TRADE_SET_SIZE:
+            break
+        if corr[x] >= TRADE_SET_MIN_CORR:
+            chosen.append(x)
+    return chosen, corr, n_ok
+
+
+def refresh_trade_set(symbols=None, fetch=None):
+    res = compute_trade_set(symbols, fetch)
+    if not res:
+        logger.warning('trade set: داده‌ی کافی برای همبستگی نبود؛ فهرست قبلی/ثابت می‌ماند')
+        return False
+    chosen, corr, n_ok = res
+    with _TRADE_SET_LOCK:
+        _TRADE_SET.update({'symbols': list(chosen), 'corr': dict(corr), 'ts': time.time(), 'src': 'corr',
+                           'n_ok': n_ok, 'n_all': len(symbols) if symbols is not None else len(_trade_set_universe())})
+    logger.info('trade set (%s, %s کندل): %s', TRADE_SET_CORR_TF, TRADE_SET_CORR_BARS,
+                ', '.join(f"{x}:{corr.get(x, 0):.2f}" for x in chosen))
+    try:
+        with open(TRADE_SET_REPORT_PATH, 'w', encoding='utf-8') as fh:
+            json.dump({'ts': time.time(), 'tf': TRADE_SET_CORR_TF, 'size': TRADE_SET_SIZE, 'chosen': chosen,
+                       'corr': {k: round(v, 4) for k, v in sorted(corr.items(), key=lambda kv: -kv[1])}}, fh, ensure_ascii=False, indent=1)
+    except Exception:
+        logger.debug('could not write %s', TRADE_SET_REPORT_PATH)
+    return True
+
+
+def _trade_set_loop():
+    while True:
+        wait = TRADE_SET_REFRESH_S
+        try:
+            if TRADE_SET_ON and not refresh_trade_set():
+                wait = 600
+        except Exception:
+            logger.exception('trade set refresh failed')
+            wait = 600
+        time.sleep(wait)
+
+
+def trade_set_text():
+    """متن کوتاه برای صفحه‌ی واچ‌لیست."""
+    if not TRADE_SET_ON:
+        return ''
+    with _TRADE_SET_LOCK:
+        corr = dict(_TRADE_SET.get('corr') or {})
+        src = _TRADE_SET.get('src')
+    syms = trade_set_symbols()
+    uni_n = len(_trade_set_universe())
+    parts = [f"{x} {corr[x]:.2f}" if x in corr and x != 'BTC' else x for x in syms]
+    head = (f"🎯 *نمادهای معامله* ({len(syms)} از {uni_n}؛ بیشترین هم‌بستگی با BTC):" if src == 'corr'
+            else f"🎯 *نمادهای معامله* ({len(syms)} از {uni_n}؛ فهرست اولیه تا محاسبه‌ی هم‌بستگی):")
+    return head + "\n`" + '، '.join(parts) + "`\n🗳 بقیه‌ی نمادها اسکن می‌شوند و فقط در جهت غالب بازار رأی می‌دهند."
+
+
+
+
 def _assist_pending_recs(s):
     """همه‌ی سیگنال‌های در انتظار (ذخیره‌شده + منتظر تصمیم)، جدیدترین اول. V3.42: بدون فیلتر زمان."""
     now = time.time()
@@ -15476,6 +15641,8 @@ async def scan_symbol(http,chat_id,symbol):
         logger.debug('dir board note failed symbol=%s', symbol, exc_info=True)
     if not sig:
         return _entry_diag_result(chat_id, symbol, 'no_signal', reason or 'شرایط ورود کامل نیست', 'signal', diagnostics=diagnostics)
+    if _trade_set_blocks_entry(s, symbol):      # V3.44.152: خارج از مجموعهٔ معامله؛ جهتش در تابلو ثبت شد و همین کافی است
+        return _entry_diag_result(chat_id, symbol, 'vote_only', 'خارج از نمادهای معامله؛ فقط رأی جهت بازار ثبت شد', 'trade_set', sig, diagnostics=diagnostics)
     if _simple_touch or gate_on(s, 'gate_touch_vote_enabled'):
         # V3.44.14: برخورد با سطح وارد لیست انتظار می‌شود؛ جهت بعد از رأی‌گیری فیلترها تعیین می‌شود (نه از خود برخورد).
         # V3.44.47: با کلید «جهت فقط از الگوی برخورد» (پیش‌فرض روشن) جهت همان جهتِ الگوست و رأی‌ها فقط تایید/رد می‌کنند.
@@ -19015,7 +19182,8 @@ def process_command(cmd,chat_id,message_id=None):
             chat_id,
             f"📋 *واچ‌لیست فعال*\n\n"
             f"🟢 *Long* ({len(SHARED_LONG_WATCHLIST)} نماد):\n`{long_list}`\n\n"
-            f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`",
+            f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`"
+            + (("\n\n" + trade_set_text()) if trade_set_text() else ''),
             get_watchlist_manage_keyboard(),message_id); return
     if cl.startswith('/manage_'):
         sym=cl.replace('/manage_','').upper()
@@ -20904,6 +21072,7 @@ def main():
     Thread(target=lambda: (time.sleep(19), _fee_daily_loop()), daemon=True, name='fee-daily').start()
     Thread(target=lambda: (time.sleep(1), _watchlist_refresh_loop()), daemon=True, name='watchlist-spot-check').start()
     Thread(target=lambda: (time.sleep(2), _btc_dyn_k_loop()), daemon=True, name='btc-dynamic-k').start()      # V3.44.145
+    Thread(target=lambda: (time.sleep(4), _trade_set_loop()), daemon=True, name='trade-set-corr').start()      # V3.44.152
     Thread(target=lambda: (time.sleep(3), _price_alert_loop()), daemon=True, name='price-alerts').start()      # V3.44.148
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
