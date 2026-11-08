@@ -14731,8 +14731,9 @@ def _touch_wait_loop():
 # بیشترین همبستگی بازده با BTC را دارند. BTC و ETH همیشه در مجموعه‌اند. همبستگی از بازده لگاریتمی کندل‌های بسته‌ی TRADE_SET_CORR_TF
 # (پیش‌فرض ۱ساعته، ~۲۰۰ کندل) حساب می‌شود و هر TRADE_SET_REFRESH_S ثانیه (پیش‌فرض ۶ ساعت) تازه می‌شود. تا اولین محاسبه (یا اگر داده
 # نیامد) فهرست ثابت TRADE_SET_FALLBACK به‌کار می‌رود. «ورود سریع» دستی (priority_watch) از این محدودیت مستثنی است.
-# خاموش‌کردن: TRADE_SET_ONLY=0 (همه‌ی نمادهای واچ‌لیست معامله‌پذیر می‌شوند، مثل قبل).
-TRADE_SET_ON = os.environ.get('TRADE_SET_ONLY', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+# روشن‌کردن: TRADE_SET_ONLY=1 (پیش‌فرض از V3.44.155 خاموش است؛ همه‌ی نمادهای واچ‌لیست معامله‌پذیرند).
+# V3.44.155: پیش‌فرض خاموش = همه‌ی ۱۲۴ نماد واچ‌لیست معامله‌پذیرند. برای محدودکردن معامله به نمادهای هم‌بسته با BTC: TRADE_SET_ONLY=1.
+TRADE_SET_ON = os.environ.get('TRADE_SET_ONLY', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 TRADE_SET_SIZE = max(3, int(float(os.environ.get('TRADE_SET_SIZE', '20') or 20)))
 TRADE_SET_CORR_TF = os.environ.get('TRADE_SET_CORR_TF', '1hour').strip() or '1hour'
 if TRADE_SET_CORR_TF not in TIMEFRAME_MAP:
