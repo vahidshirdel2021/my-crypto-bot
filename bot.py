@@ -18982,7 +18982,7 @@ def process_command(cmd,chat_id,message_id=None):
         elif cl == '/halving_btc_dyn_toggle':
             _cfg_hv['halving_btc_dynamic_k'] = not bool(_cfg_hv.get('halving_btc_dynamic_k', False))
         elif cl == '/halving_k_cycle':
-            _opts = (2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))
+            _opts = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0); _cur = float(_cfg_hv.get('halving_k_atr', 4.0))   # V3.44.156: گزینه‌ی ۱×ATR اضافه شد
             _cfg_hv['halving_k_atr'] = _opts[(_opts.index(_cur) + 1) % len(_opts)] if _cur in _opts else 4.0
             _halving_tf_store(_cfg_hv, s.get('timeframe', '5min'))      # V3.44.40: فقط برای تایم‌فریم فعال ذخیره می‌شود
         elif cl == '/halving_depth_cycle':
