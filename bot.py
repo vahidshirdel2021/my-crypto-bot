@@ -16713,6 +16713,7 @@ def run_inbot_backtest(chat_id, cl='/backtest_btc'):
         raise RuntimeError('داده‌ی تاریخی کافی نیست')
     cfg = copy.deepcopy(s['strategy_config'])
     cfg['halving_btc_dynamic_k'] = False      # V3.44.151: بک‌تست با k زنده‌ی BTC آلوده نشود
+    cfg['halving_depth_freeze'] = False       # V3.44.154: بک‌تست عمق را هر کندل از ATR همان لحظه می‌گیرد (قفل فقط برای معامله‌ی زنده)
     _halving_tf_apply(cfg, tf)
     if cfg.get('halving_model_enabled'):
         rng = get_halving_range_sync(symbol)
@@ -16986,6 +16987,7 @@ def _bt_run_worker(chat_id):
             raise RuntimeError('فایل داده‌ی نگه‌داری‌شده ناقص است؛ دوباره دانلود کنید.')
         cfg = copy.deepcopy(s['strategy_config'])
         cfg['halving_btc_dynamic_k'] = False      # V3.44.151
+        cfg['halving_depth_freeze'] = False       # V3.44.154
         _halving_tf_apply(cfg, tf)
         if cfg.get('halving_model_enabled'):
             rng = get_halving_range_sync(base + 'USDT')
@@ -18353,6 +18355,9 @@ set_halving_k_provider(_btc_dyn_k_value)
 # اگر کاربر خودش k/حداقل/حداکثر عمق/کلید k پویا را عوض کند، فقط مبنا ریست می‌شود (هشدار نمی‌آید).
 HV_DEPTH_ALERT = os.environ.get('HV_DEPTH_ALERT', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 HV_DEPTH_CONFIRM = max(1, int(float(os.environ.get('HV_DEPTH_CONFIRM', '3'))))
+# V3.44.153: پیش‌فرض: هشدار تغییر عمق فقط وقتی «k پویا» یا «k پویا از BTC» روشن باشد؛ با هر دو خاموش هیچ هشداری نمی‌آید
+# (قبلاً حتی با هر دو خاموش، لغزش ریز ATR از مرز یک پله عمق هشدار می‌داد). برای هشدار همیشگی: HV_DEPTH_ALERT_ONLY_DYNAMIC=0.
+HV_DEPTH_ALERT_ONLY_DYNAMIC = os.environ.get('HV_DEPTH_ALERT_ONLY_DYNAMIC', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 HV_DEPTH_FLUSH_SECONDS = max(30, int(float(os.environ.get('HV_DEPTH_FLUSH_SECONDS', '120'))))
 _HV_DEPTH_TRACK = {}      # {(symbol, tf): {'depth','atr','ratio','step','sig','cand','cand_n'}}
 _HV_DEPTH_PENDING = []    # تغییرهای تاییدشده‌ی منتظر ارسال
@@ -18363,6 +18368,10 @@ _HV_DEPTH_LOCK = threading.RLock()
 def _hv_depth_track(symbol, tf, ind_df, cfg):
     """عمق فعلی را برای این نماد/تایم‌فریم می‌سنجد و تغییرش را (پس از تایید) برای هشدار ثبت می‌کند."""
     if not HV_DEPTH_ALERT or ind_df is None or len(ind_df) < 30 or not (cfg or {}).get('halving_model_enabled'):
+        return
+    if HV_DEPTH_ALERT_ONLY_DYNAMIC and not ((cfg or {}).get('halving_dynamic_k') or (cfg or {}).get('halving_btc_dynamic_k')):
+        with _HV_DEPTH_LOCK:
+            _HV_DEPTH_TRACK.pop((symbol, tf), None)      # کلیدها خاموش: مبنا پاک می‌شود تا با روشن‌شدن بعدی از اول سنجیده شود (نه با مبنای کهنه)
         return
     _ecfg = _halving_cfg(cfg)       # V3.44.145: k مؤثر (ممکن است از BTC بیاید)
     ctx = _halving_context(ind_df, len(ind_df) - 2, _ecfg)

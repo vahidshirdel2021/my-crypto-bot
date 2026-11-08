@@ -1,4 +1,7 @@
 import re
+import os
+import json
+import threading
 import pandas as pd
 import numpy as np
 
@@ -2229,6 +2232,9 @@ HALVING_DEFAULTS = {
     "halving_atr_smooth_candles": 200, # ATR هموار (میانه‌ی N کندل اخیر) تا عمق هر کندل جابه‌جا نشود
     # k پویا: ATR مؤثر = ATR کند × clamp(ATR سریع / ATR کند). نوسان بالا → سطوح درشت‌تر، بازار آرام → سطوح ریزتر.
     "halving_dynamic_k": False,
+    # V3.44.154: وقتی «k پویا (تک‌نماد)» خاموش است عمق درخت برای هر (نماد، تایم‌فریم، k، حداقل/حداکثر عمق، سقف/کف) یک‌بار محاسبه و قفل می‌شود؛
+    # لغزش ATR دیگر سطوح را جابه‌جا نمی‌کند. فقط تغییر k/عمق/تایم‌فریم یا سقف/کف جدید دوباره محاسبه می‌کند. بک‌تست‌ها False می‌گذارند.
+    "halving_depth_freeze": True,
     # V3.44.145: k پویا از روی BTC (۲ یا ۴): یک مقدار برای کل ربات؛ مقدار را bot.py از نوسان BTC تعیین می‌کند (HALVING_K_PROVIDER).
     # فقط وقتی کلید روشن و مقدار در دسترس باشد، k دستی و «k پویا»ی تک‌نماد نادیده گرفته می‌شود (هیچ نمادی جداگانه سنجیده نمی‌شود).
     "halving_btc_dynamic_k": False,      # V3.44.151: پیش‌فرض خاموش (کاربر باید خودش روشن کند)
@@ -2329,6 +2335,74 @@ def _halving_dyn_ratio(d, idx, cfg, atr_slow):
         return 1.0
 
 
+HALVING_FREEZE_ON = os.environ.get("HALVING_FREEZE_DEPTH", "1").strip().lower() not in ("0", "false", "no", "off")
+HALVING_FROZEN_PATH = os.environ.get("HALVING_FROZEN_PATH") or os.path.join(
+    os.path.dirname(os.environ.get("BOT_DB_PATH", "") or "") or ".", "halving_frozen_depth.json")
+_HV_FROZEN = {}
+_HV_FROZEN_LOCK = threading.Lock()
+_HV_FROZEN_MAX = 20000
+
+
+def _hv_frozen_load():
+    try:
+        with open(HALVING_FROZEN_PATH, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if isinstance(raw, dict):
+            with _HV_FROZEN_LOCK:
+                _HV_FROZEN.update({str(k): int(v) for k, v in raw.items()})
+    except Exception:
+        pass
+
+
+def _hv_frozen_save():
+    try:
+        tmp = HALVING_FROZEN_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(dict(_HV_FROZEN), fh)
+        os.replace(tmp, HALVING_FROZEN_PATH)
+    except Exception:
+        pass
+
+
+def _hv_tf_seconds(d):
+    """طول کندل (ثانیه) از ستون زمان؛ ۰ اگر معلوم نبود. ms و ns هر دو درست خوانده می‌شوند."""
+    try:
+        ts = pd.to_numeric(d["timestamp"].iloc[-60:], errors="coerce").diff().dropna()
+        v = float(ts.median())
+        if v > 1e12:
+            v /= 1e6          # نانوثانیه → میلی‌ثانیه
+        return int(round(v / 1000.0))
+    except Exception:
+        return 0
+
+
+def _hv_frozen_depth(d, hi, lo, cfg, fresh):
+    """عمق قفل‌شده برای همین کلید؛ اگر نبود، همین عمق تازه ثبت و برگردانده می‌شود."""
+    key = "%.10g|%.10g|%d|%g|%d|%d" % (hi, lo, _hv_tf_seconds(d), float(cfg.get("halving_k_atr", 4.0)),
+                                      int(cfg.get("halving_min_depth", 3)), int(cfg.get("halving_max_depth", 10)))
+    with _HV_FROZEN_LOCK:
+        v = _HV_FROZEN.get(key)
+        if v is not None:
+            return int(v)
+        if len(_HV_FROZEN) >= _HV_FROZEN_MAX:
+            _HV_FROZEN.pop(next(iter(_HV_FROZEN)))
+        _HV_FROZEN[key] = int(fresh)
+    _hv_frozen_save()
+    return int(fresh)
+
+
+def halving_frozen_reset():
+    """همه‌ی عمق‌های قفل‌شده پاک می‌شود (اسکن بعدی از ATR فعلی دوباره قفل می‌کند). خروجی: تعداد پاک‌شده."""
+    with _HV_FROZEN_LOCK:
+        n = len(_HV_FROZEN)
+        _HV_FROZEN.clear()
+    _hv_frozen_save()
+    return n
+
+
+_hv_frozen_load()
+
+
 def _halving_context(d, idx, cfg, span_cells=4):
     """درخت نصف‌کردن را در لحظه‌ی idx می‌سازد (فقط با داده‌ی تا idx): عمق انتخاب‌شده، فاصله،
     سطوح نزدیک قیمت و سلول‌های اطراف قیمت مرجع (close کندل قبلِ idx). None اگر داده نبود."""
@@ -2339,6 +2413,9 @@ def _halving_context(d, idx, cfg, span_cells=4):
     dyn_ratio = _halving_dyn_ratio(d, idx, cfg, atr_s)
     depth = _hv_choose_depth(hi, lo, atr_s * dyn_ratio, float(cfg.get("halving_k_atr", 4.0)),
                              int(cfg.get("halving_min_depth", 3)), int(cfg.get("halving_max_depth", 10)))
+    if (HALVING_FREEZE_ON and cfg.get("halving_depth_freeze", True) and not cfg.get("halving_dynamic_k", False)
+            and atr_s and atr_s > 0 and idx >= len(d) - 2):
+        depth = _hv_frozen_depth(d, hi, lo, cfg, depth)      # V3.44.154: کلید پویا خاموش = سطوح ثابت
     step = _hv_spacing_at(hi, lo, depth)
     ref = float(d["close"].iloc[idx - 1]) if idx >= 1 else float(d["close"].iloc[idx])
     levels = _hv_levels_near(hi, lo, depth, ref - span_cells * step, ref + span_cells * step)
