@@ -1857,6 +1857,15 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     min_sl_pct = float(cfg.get("min_sl_percent", 0.005))
     max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
     max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
+    _mtf_sl = bool(cfg.get("mtf_mode_enabled")) and bool(cfg.get("halving_model_enabled"))      # V3.44.157
+    _mtf_n = max(1, int(cfg.get("mtf_sl_lookback_15m", 8))) if _mtf_sl else 1
+    if _mtf_sl:      # سقف فاصله‌ی SL بر حسب ATR ۱ ساعته (halving_atr_override = ATR هموار ۱ ساعته) چون سطح و ناحیه‌ی واکنش ۱ ساعته‌اند
+        try:
+            _h1a = float(cfg.get("halving_atr_override") or 0.0)
+        except (TypeError, ValueError):
+            _h1a = 0.0
+        if _h1a > 0 and atr > 0:
+            max_sl_atr = max(max_sl_atr, float(cfg.get("mtf_max_sl_atr", 2.5)) * _h1a / atr)
     body_ratio = _safe_float(curr.get("body_ratio"), 0)
     vr = _safe_float(curr.get("volume_ratio"), 1)
 
@@ -1885,6 +1894,10 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
 
     if signal == "SELL":
         sweep_extreme = float(curr["high"])
+        if _mtf_sl:      # V3.44.157: SL پشت بالاترین سقفِ چند کندل ۱۵ دقیقه‌ی اخیر (ناحیه‌ی واکنش ۱ ساعته)
+            _seg = pd.to_numeric(d["high"].iloc[max(0, idx - _mtf_n + 1): idx + 1], errors="coerce").dropna()
+            if len(_seg):
+                sweep_extreme = max(sweep_extreme, float(_seg.max()))
         sl = sweep_extreme + (atr * buffer_atr)
         sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, -1)
         if (sl - entry) / entry < min_sl_pct:
@@ -1911,6 +1924,10 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
             tp_level_name = _grid_level_label(grid_levels, tp)
     else:
         sweep_extreme = float(curr["low"])
+        if _mtf_sl:      # V3.44.157
+            _seg = pd.to_numeric(d["low"].iloc[max(0, idx - _mtf_n + 1): idx + 1], errors="coerce").dropna()
+            if len(_seg):
+                sweep_extreme = min(sweep_extreme, float(_seg.min()))
         sl = sweep_extreme - (atr * buffer_atr)
         sl = _extend_stop_to_grid(grid_levels, sweep_extreme, sl, atr, 1)
         if (entry - sl) / entry < min_sl_pct:
@@ -2246,6 +2263,13 @@ HALVING_DEFAULTS = {
     "pd_guard_room_atr": 1.5,          # فروش: اگر PDL کمتر از این‌قدر×ATR زیر قیمت است (خرید: PDH بالای قیمت) ورود نگه داشته می‌شود
     "pd_guard_touch_atr": 0.15,        # تلورانس «رسیدن به سطح» = این‌قدر×ATR
     "pd_guard_lookback_candles": 12,   # اگر در این‌تعداد کندل اخیر به PDL/PDH رسیده و برگشته، ورود هم‌جهت با مانع نگه داشته می‌شود
+    # V3.44.157: حالت چندتایم‌فریمی (۴س رژیم نرم ← ۱س سطح و واکنش ← ۱۵د ورود). پیش‌فرض خاموش.
+    "mtf_mode_enabled": False,
+    "mtf_react_lookback_1h": 2,        # واکنش کندل ۱ ساعته‌ی بسته‌شده تا این‌تعداد کندل اخیر معتبر است
+    "mtf_entry_min_body_ratio": 0.30,  # حداقل بدنه‌ی کندل ۱۵ دقیقه‌ی ورود (نسبت به کل کندل)
+    "mtf_max_chase_atr": 1.5,          # قیمت زنده بیش از این×ATR(۱ ساعته) از سطح در جهت معامله دور شده = تعقیب قیمت، ورود نمی‌شود
+    "mtf_sl_lookback_15m": 8,          # SL پشت سوینگ این‌تعداد کندل ۱۵ دقیقه‌ی اخیر (۸ = ۲ ساعت)
+    "mtf_max_sl_atr": 2.5,             # سقف فاصله‌ی SL (×ATR ۱ ساعته) در این حالت
 }
 
 
@@ -2308,6 +2332,13 @@ def _halving_range(d, idx, cfg):
 
 
 def _halving_atr(d, idx, cfg):
+    # V3.44.157 (حالت چندتایم‌فریمی): ATR هموار ۱ ساعته از بیرون داده می‌شود تا درخت سطوح روی چارت ۱۵ دقیقه همان درخت ۱ ساعته باشد
+    try:
+        _ov = cfg.get("halving_atr_override")
+        if _ov is not None and np.isfinite(float(_ov)) and float(_ov) > 0:
+            return float(_ov)
+    except (TypeError, ValueError):
+        pass
     n = max(20, int(cfg.get("halving_atr_smooth_candles", 200)))
     try:
         seg = pd.to_numeric(d["atr"].iloc[max(0, idx - n + 1):idx + 1], errors="coerce").dropna()
@@ -2380,6 +2411,8 @@ def _hv_frozen_depth(d, hi, lo, cfg, fresh):
     """عمق قفل‌شده برای همین کلید؛ اگر نبود، همین عمق تازه ثبت و برگردانده می‌شود."""
     key = "%.10g|%.10g|%d|%g|%d|%d" % (hi, lo, _hv_tf_seconds(d), float(cfg.get("halving_k_atr", 4.0)),
                                       int(cfg.get("halving_min_depth", 3)), int(cfg.get("halving_max_depth", 10)))
+    if cfg.get("halving_atr_override"):
+        key += "|MTF1H"      # V3.44.157: درخت ۱ ساعته (حالت چندتایم‌فریمی) با درخت عادی ۱۵ دقیقه قاطی نشود
     with _HV_FROZEN_LOCK:
         v = _HV_FROZEN.get(key)
         if v is not None:
@@ -2616,6 +2649,153 @@ def strategy_halving(df, strategy_config=None, live_price=None):
                   f"فاصله‌ی سطوح {ctx['step']:.6g})")
 
 
+def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run):
+    """V3.44.157: تشخیص سناریوهای مدل نصف‌کردن روی یک سلول (سقف، کف) در کندل idx از d؛ همان ترتیب strategy_halving
+    (ادامه ← شکست کاذب ← برخورد ساده). خروجی (sig, reason) یا (None, None)."""
+    require_reclaim = bool(cfg_run.get("sweep_require_reclaim", True))
+    require_reversal = bool(cfg_run.get("sweep_require_reversal_candle", True))
+    if bool(cfg_run.get("sweep_enable_retest_continuation", True)):
+        rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
+        if rsig and _scenario_enabled("continuation", rsig, cfg_run):
+            return rsig, _tag_scenario(rreason, "continuation", rsig)
+    fsig, freason = _detect_failed_retest_reversal(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
+    if fsig and _scenario_enabled("fakeout", fsig, cfg_run):
+        return fsig, _tag_scenario(freason, "fakeout", fsig)
+    ssig, sreason, _ = _detect_named_level_sweep(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label,
+                                                  cfg_run, require_reclaim, require_reversal)
+    if ssig and _precise_scenarios(cfg_run):
+        _pen = atr * max(0.0, float(cfg_run.get("scenario_penetration_min_atr", 0.10)))
+        _n = max(0, int(cfg_run.get("scenario_fakeout_max_gap_candles", 0))) + 1
+        if ssig == "SELL" and _recent_close_beyond(d, idx, hi, "UP", _pen, _n):
+            ssig = None
+        elif ssig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
+            ssig = None
+    if ssig and _scenario_enabled("simple", ssig, cfg_run):
+        return ssig, _tag_scenario(sreason, "simple", ssig)
+    return None, None
+
+
+def _ts_seconds(v):
+    try:
+        v = float(v)
+        return v / 1000.0 if v > 1e12 else v
+    except (TypeError, ValueError):
+        return None
+
+
+def _mtf_entry_trigger(d15, i15, d1, i1, sig, anchor, lp, cfg, atr15, atr1=None):
+    """V3.44.157: مرحله‌ی سوم حالت چندتایم‌فریمی - کندل بسته‌شده‌ی ۱۵ دقیقه باید ورود را تأیید کند. (ok, توضیح)"""
+    row = d15.iloc[i15]
+    o, c, h, l = (_safe_float(row.get(k), np.nan) for k in ("open", "close", "high", "low"))
+    if not all(np.isfinite(x) for x in (o, c, h, l)):
+        return False, "کندل ۱۵ دقیقه نامعتبر است"
+    # الف) کندل ورود باید بعد از بسته‌شدن کندل واکنشِ ۱ ساعته شروع شده باشد (نه خودِ همان ساعت)
+    if bool(cfg.get("mtf_entry_after_reaction", True)):
+        t1 = _ts_seconds(d1["timestamp"].iloc[i1]); t15 = _ts_seconds(d15["timestamp"].iloc[i15])
+        sec1 = _hv_tf_seconds(d1) or 3600
+        if t1 is not None and t15 is not None and t15 < t1 + sec1 - 1:
+            return False, "هنوز کندل ۱۵ دقیقه‌ی بعد از بسته‌شدن واکنش ۱ ساعته کامل نشده"
+    # ب) جهت و بدنه‌ی کندل ۱۵ دقیقه
+    if (sig == "BUY" and not c > o) or (sig == "SELL" and not c < o):
+        return False, "کندل ۱۵ دقیقه‌ی بسته‌شده هم‌جهت معامله نیست"
+    rng = h - l
+    br = (abs(c - o) / rng) if rng > 0 else 0.0
+    min_br = float(cfg.get("mtf_entry_min_body_ratio", 0.30))
+    if br < min_br:
+        return False, f"بدنه‌ی کندل ۱۵ دقیقه ضعیف است ({br:.2f} < {min_br:.2f})"
+    # ج) سمت درست سطح، تعقیب قیمت، باطل‌شدن
+    if anchor is not None and np.isfinite(anchor):
+        tol = 0.15 * atr15
+        if (sig == "BUY" and c < anchor - tol) or (sig == "SELL" and c > anchor + tol):
+            return False, "کلوز ۱۵ دقیقه سمت درست سطح نیست"
+        try:
+            px = float(lp) if lp is not None else c
+        except (TypeError, ValueError):
+            px = c
+        if not np.isfinite(px) or px <= 0:
+            px = c
+        chase = float(cfg.get("mtf_max_chase_atr", 1.5)) * (atr1 if (atr1 and np.isfinite(atr1) and atr1 > 0) else 2.0 * atr15)
+        if (sig == "BUY" and px > anchor + chase) or (sig == "SELL" and px < anchor - chase):
+            return False, "قیمت از سطح خیلی دور شده (تعقیب قیمت)"
+        inv = atr15 * max(0.05, float(cfg.get("active_setup_invalidation_atr", 0.25)), float(cfg.get("halving_zone_atr", 0.30)))
+        if (sig == "BUY" and px < anchor - inv) or (sig == "SELL" and px > anchor + inv):
+            return False, "قیمت برخلاف جهت ستاپ از سطح عبور کرده (ستاپ باطل شد)"
+    return True, ""
+
+
+def strategy_halving_mtf(df15, df1h, strategy_config=None, live_price=None):
+    """V3.44.157: حالت چندتایم‌فریمی مدل نصف‌کردن.
+    ۱) رژیم ۴ ساعته با کلید «رتبه‌ی نرم» (خارج از این تابع، موقع باز شدن معامله) ریسک را تنظیم می‌کند.
+    ۲) سطوح درخت نصف‌کردن با ATR ۱ ساعته ساخته می‌شوند (halving_atr_override) و واکنش کندل‌های بسته‌شده‌ی ۱ ساعته به آن‌ها سنجیده می‌شود.
+    ۳) نقطه‌ی ورود فقط با کندل بسته‌شده‌ی ۱۵ دقیقه (بعد از واکنش ۱ ساعته) پیدا می‌شود. خروجی: (sig, reason)."""
+    cfg = _halving_cfg(strategy_config)
+    d15, _p1, _p2 = _compute_prev_day_levels(df15)
+    if d15 is None:
+        return None, "داده‌ی ۱۵ دقیقه برای حالت چندتایم‌فریمی کافی نیست"
+    i15 = len(d15) - 2
+    if i15 < 2:
+        return None, "داده‌ی ۱۵ دقیقه برای حالت چندتایم‌فریمی کافی نیست"
+    d1, _q1, _q2 = _compute_prev_day_levels(df1h)
+    if d1 is None or len(d1) < 10:
+        return None, "داده‌ی ۱ ساعته برای حالت چندتایم‌فریمی کافی نیست"
+    ctx = _halving_context(d15, i15, cfg)      # سطوح با ATR ۱ ساعته (override)؛ سلول‌های اطراف قیمت
+    if ctx is None:
+        return None, "سقف/کف تاریخی نماد برای مدل نصف‌کردن در دسترس نیست"
+    atr15 = _safe_float(d15.iloc[i15].get("atr"), 0.0)
+    if not np.isfinite(atr15) or atr15 <= 0:
+        return None, "ATR ۱۵ دقیقه نامعتبر است"
+    cfg_run = {**cfg, "scenario_touch_tolerance_atr": float(cfg.get("halving_zone_atr", 0.30))}
+    max_depth_trade = int(cfg.get("halving_max_trade_depth", 0) or 0)
+    n_lb = max(1, int(cfg.get("mtf_react_lookback_1h", 2)))
+    last1 = len(d1) - 2
+    try:
+        lp = float(live_price) if live_price is not None else float(d15.iloc[i15]["close"])
+    except Exception:
+        lp = float(d15.iloc[i15]["close"])
+    pd_blocked = None
+    trig_blocked = None
+    found_reaction = False
+
+    for cell in ctx["cells"]:
+        hi, lo = float(cell["hi"]["price"]), float(cell["lo"]["price"])
+        hi_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['hi']['depth'])})"
+        lo_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['lo']['depth'])})"
+        for age in range(n_lb):
+            i1 = last1 - age
+            if i1 < 3:
+                break
+            atr1 = _safe_float(d1.iloc[i1].get("atr"), 0.0)
+            if not np.isfinite(atr1) or atr1 <= 0:
+                continue
+            sig, reason = _hv_detect_cell(d1, i1, hi, lo, hi_label, lo_label, atr1, cfg_run)
+            if not sig:
+                continue
+            found_reaction = True
+            anchor, _tgt = extract_sweep_anchor_target(reason)
+            a_depth = _halving_depth_of(ctx, anchor) if anchor is not None else None
+            if max_depth_trade > 0 and a_depth is not None and a_depth > max_depth_trade:
+                continue
+            ok, why = _mtf_entry_trigger(d15, i15, d1, i1, sig, anchor, lp, cfg, atr15, atr1)
+            if not ok:
+                trig_blocked = why
+                continue
+            _pd_ok, _pd_txt = pd_level_guard(d15, i15, sig, lp, cfg)
+            if not _pd_ok:
+                pd_blocked = _pd_txt
+                continue
+            extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}|MTF=1H|MTFAGE={age}"
+            return sig, tag_setup_reason("Halving", f"واکنش کندل ۱ ساعته + ورود با کلوز ۱۵ دقیقه | {reason}{extra}")
+
+    if pd_blocked:
+        return None, f"گارد سقف/کف دیروز: {pd_blocked}"
+    if trig_blocked:
+        return None, f"چندتایم‌فریمی: واکنش ۱ ساعته هست ولی ورود ۱۵ دقیقه تأیید نشد ({trig_blocked})"
+    if not found_reaction:
+        return None, (f"چندتایم‌فریمی: کندل ۱ ساعته به سطوح واکنشی نشان نداد (عمق درخت {ctx['depth']}، "
+                      f"فاصله‌ی سطوح {ctx['step']:.6g})")
+    return None, "چندتایم‌فریمی: ستاپی ثبت نشد"
+
+
 def build_halving_trade_plan(df, signal, strategy_config=None, grid_levels=None, setup_index=None, live_price=None):
     """طرح معامله‌ی مدل نصف‌کردن: همان پلنر Sweep با SL از extreme کندل و TP = نزدیک‌ترین سطح
     نصف‌کردن در مسیر (گیت R:R بات هم سر جایش). شبکه‌ی لگاریتمی و مدل P4 عمداً خاموش‌اند."""
@@ -2634,6 +2814,11 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     if isinstance(strategy_config, dict) and strategy_config.get("halving_model_enabled"):
+        if strategy_config.get("mtf_mode_enabled") and timeframe == "15min":      # V3.44.157: ۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود
+            _h1 = market_data_dict.get("1h") if isinstance(market_data_dict, dict) else None
+            if _h1 is None or len(_h1) < 100:
+                return None, "حالت چندتایم‌فریمی: داده‌ی ۱ ساعته در دسترس نیست"
+            return strategy_halving_mtf(df_primary, _h1, strategy_config, live_price=live_price)
         return strategy_halving(df_primary, strategy_config, live_price=live_price)
     cfg_top = get_v2_config(strategy_config)
     if timeframe in ("1h", "4h", "1hour", "4hour"):

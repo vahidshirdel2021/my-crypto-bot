@@ -65,7 +65,7 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     # تنظیمات ریسک (فقط عدد). «هم‌جهت» فقط از داخل ویزارد (/set_wsame_N)؛ منوی جداگانه‌ی آن و «کولداون» بیرون است
     r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', r'^/trade_mode_set_[345]$', r'^/set_wmode_[345]$',
     # تایم‌فریم: مرحله‌ی اجباریِ ویزارد اولیه
-    r'^/set_tf_(5m|15m|1h|4h)$',
+    r'^/set_tf_(5m|15m|1h|4h|mtf)$',
     # اتصال صرافی (REAL)
     r'^/real_(pick|use|new|del)_[a-z0-9_]+$',
     # V3.44.113: انتخاب مقدار سود (دکمه‌های آماده / عدد دلخواه)

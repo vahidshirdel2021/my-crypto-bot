@@ -1177,7 +1177,8 @@ def default_session():
 
 
 _P4_FLAG_KEYS = ('daily_p4_mode', 'p4_reversal_enabled',
-                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf')
+                 'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf',
+                 'mtf_mode_enabled', 'mtf_prev_tier')
 
 # V3.44.40: پیش‌فرضِ «فاصله‌ی حداقل سطوح (×ATR)» و «سقف عمق درخت» برای هر تایم‌فریم جدا؛ با تغییر تایم‌فریم خودکار اعمال می‌شود.
 # تغییر دستی کاربر با دکمه‌ها فقط برای همان تایم‌فریمِ فعال ذخیره می‌شود (کلید halving_tf). تایم‌فریم‌های دیگر (۱ و ۴ ساعته) دست‌نخورده می‌مانند.
@@ -1186,8 +1187,19 @@ HALVING_TF_DEFAULTS = {'5min': {'halving_k_atr': 3.0, 'halving_max_depth': 12},
                        '1hour': {'halving_k_atr': 4.0, 'halving_max_depth': 10}}   # V3.44.101: ۱ ساعته (مثل ۱۵ دقیقه)
 
 
+def _halving_eff_tf(cfg, tf):
+    """V3.44.157: در حالت چندتایم‌فریمی (۱۵ دقیقه) k و عمق درخت از تایم‌فریم ۱ ساعته می‌آید (سطوح از کندل ۱ ساعته‌اند)."""
+    try:
+        if (cfg or {}).get('mtf_mode_enabled') and tf == '15min':
+            return '1hour'
+    except Exception:
+        pass
+    return tf
+
+
 def _halving_tf_params(cfg, tf):
     """{'halving_k_atr','halving_max_depth'} این تایم‌فریم (انتخاب کاربر، وگرنه پیش‌فرض)؛ {} اگر برای این تایم‌فریم چیزی تعریف نشده."""
+    tf = _halving_eff_tf(cfg, tf)
     base = dict(HALVING_TF_DEFAULTS.get(tf) or {})
     user = ((cfg or {}).get('halving_tf') or {}).get(tf) or {}
     for k in ('halving_k_atr', 'halving_max_depth'):
@@ -1206,6 +1218,7 @@ def _halving_tf_apply(cfg, tf):
 def _halving_tf_store(cfg, tf):
     """مقدار فعلیِ k و عمق (بعد از تغییر دستی) را برای تایم‌فریم tf ذخیره می‌کند."""
     hv = cfg.setdefault('halving_tf', {})
+    tf = _halving_eff_tf(cfg, tf)      # V3.44.157
     hv[tf] = {'halving_k_atr': float(cfg.get('halving_k_atr', 3.0)), 'halving_max_depth': int(cfg.get('halving_max_depth', 12))}
 
 
@@ -1238,7 +1251,9 @@ def _setup_mgmt_text(s):
     if (s.get('strategy_config') or {}).get('halving_model_enabled'):
         if s.get('setup_legacy_view'):
             return "📦 *سطوح قدیمی*\nتا وقتی مدل نصف‌کردن روشن است این‌ها روی معامله اثری ندارند. فقط اگر مدل نصف‌کردن را خاموش کنی دوباره کار می‌کنند."
-        return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید. سطوح قدیمی (PDH/PDL+P4 و ...) در زیرمنوی «سطوح قدیمی» هستند و فعلاً استفاده نمی‌شوند."
+        _mtf_txt = ("\n\n🧭 *حالت چندتایم‌فریمی روشن است:* ۴ ساعته → رژیم نماد با «رتبه‌ی نرم» (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک) | ۱ ساعته → سطوح و واکنش کندل‌ها به آن‌ها | ۱۵ دقیقه → فقط نقطه‌ی ورود."
+                    if (s.get('strategy_config') or {}).get('mtf_mode_enabled') else "")
+        return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید. سطوح قدیمی (PDH/PDL+P4 و ...) در زیرمنوی «سطوح قدیمی» هستند و فعلاً استفاده نمی‌شوند." + _mtf_txt
     if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
         return "🎛 *مدیریت ستاپ‌های معاملاتی*\nمدل PDH/PDL+P4 روشن است: فقط Daily برای معامله فعال می‌ماند."
     return "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:"
@@ -1303,6 +1318,7 @@ def normalize_session(data):
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
         'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf',
+        'mtf_mode_enabled', 'mtf_prev_tier',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -4462,7 +4478,7 @@ def btc_front_level_info(s, tf, is_long):
         rng = get_halving_range_sync('BTC')
         if not rng:
             return None
-        cfg = _with_halving_cfg(cfg, rng)
+        cfg = _with_halving_cfg_sym(cfg, rng, 'BTC')
     _grid = _log_grid_levels_sync('BTC')
     levels = _quick_opposing_levels(ind, close, bool(is_long), _grid, cfg)
     info = {'ok': True, 'close': close, 'atr': atr, 'front_price': None, 'front_label': None, 'dist': None, 'dist_atr': None,
@@ -5345,6 +5361,7 @@ def _signal_channel_halving_cfg_for(symbol, timeframe):
         if k in scfg:
             cfg[k] = scfg[k]
     cfg.update(_halving_tf_params(scfg, timeframe))      # V3.44.40: کانال هم برای هر تایم‌فریم k و عمق خودش را می‌گیرد
+    _mtf_inject_override(cfg, scfg, symbol, timeframe)      # V3.44.157: درخت ۱ ساعته در حالت چندتایم‌فریمی
     return cfg
 
 
@@ -6773,7 +6790,7 @@ def _entry_snapshot(symbol, side, timeframe, reason, price, sl, cfg=None):
             _hv_rng = get_halving_range_sync(symbol)
             _hd = get_klines(symbol, timeframe, 650 if timeframe in ('5min', '15min', '1hour') else 200)
             if _hv_rng and _hd is not None and not _hd.empty and len(_hd) >= 30:
-                _hcfg = _halving_cfg(_with_halving_cfg(cfg, _hv_rng))
+                _hcfg = _halving_cfg(_with_halving_cfg_sym(cfg, _hv_rng, symbol))
                 _hctx = _halving_context(calculate_indicators(_hd), len(_hd) - 2, _hcfg)
                 if _hctx:
                     _ratio = float(_hctx.get('dyn_ratio') or 1.0)
@@ -7760,11 +7777,99 @@ def get_halving_range_sync(symbol):
     return rng
 
 
-def _with_halving_cfg(cfg, rng):
-    """کپی کانفیگ با سقف/کف تاریخی برای مدل نصف‌کردن (بدون دست‌زدن به کانفیگ ذخیره‌شده)."""
+_MTF_ATR_CACHE = {}
+
+
+def _mtf_h1_atr(symbol):
+    """V3.44.157: ATR هموار ۱ ساعته (میانه‌ی ۲۰۰ کندل بسته‌شده، مثل مدل نصف‌کردن) برای ساخت درخت سطوح در حالت چندتایم‌فریمی.
+    کش ۱۵ دقیقه‌ای؛ None اگر داده نبود."""
+    key = (_venue(), symbol)
+    now = time.time()
+    c = _MTF_ATR_CACHE.get(key)
+    if c and now - c[0] < 900:
+        return c[1]
+    v = None
+    try:
+        d = get_klines(symbol, '1hour', 650)
+        ind = calculate_indicators(d) if d is not None and not d.empty else None
+        if ind is not None and len(ind) >= 60 and 'atr' in ind.columns:
+            seg = pd.to_numeric(ind['atr'].iloc[-201:-1], errors='coerce').dropna()
+            seg = seg[seg > 0]
+            if len(seg):
+                v = float(seg.median())
+    except Exception:
+        logger.exception('mtf h1 atr failed symbol=%s', symbol)
+    if v and math.isfinite(v) and v > 0:
+        _MTF_ATR_CACHE[key] = (now, v)
+        return v
+    return c[1] if c else None
+
+
+def _with_halving_cfg(cfg, rng, h1_atr=None):
+    """کپی کانفیگ با سقف/کف تاریخی برای مدل نصف‌کردن (بدون دست‌زدن به کانفیگ ذخیره‌شده).
+    V3.44.157: در حالت چندتایم‌فریمی با h1_atr، درخت سطوح از ATR و k/عمقِ ۱ ساعته ساخته می‌شود."""
     if not (cfg or {}).get('halving_model_enabled') or not rng:
         return cfg
-    return {**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+    out = {**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
+    if cfg.get('mtf_mode_enabled') and h1_atr:
+        out['halving_atr_override'] = float(h1_atr)
+        out.update(_halving_tf_params(cfg, '15min'))
+    return out
+
+
+def _with_halving_cfg_sym(cfg, rng, symbol):
+    """مثل _with_halving_cfg؛ در حالت چندتایم‌فریمی ATR ۱ ساعته‌ی نماد را خودش می‌گیرد (برای مسیرهای sync)."""
+    h1 = None
+    if (cfg or {}).get('mtf_mode_enabled') and (cfg or {}).get('halving_model_enabled') and rng:
+        h1 = _mtf_h1_atr(symbol)
+    return _with_halving_cfg(cfg, rng, h1)
+
+
+def _mtf_inject_override(cfg, scfg, symbol, tf):
+    """کانفیگ‌های مشتق‌شده‌ی کانال/گزارش‌ها هم از همان درخت ۱ ساعته استفاده کنند (فقط وقتی حالت چندتایم‌فریمی روشن و تایم‌فریم ۱۵ دقیقه است)."""
+    try:
+        if (scfg or {}).get('mtf_mode_enabled') and tf == '15min':
+            a = _mtf_h1_atr(symbol)
+            if a:
+                cfg['halving_atr_override'] = float(a)
+                cfg['mtf_mode_enabled'] = True
+    except Exception:
+        logger.debug('mtf inject failed symbol=%s', symbol, exc_info=True)
+    return cfg
+
+
+def _mtf_md_for(symbol):
+    """market-data (کندل ۱ ساعته با اندیکاتور) برای مسیرهای sync که get_signal_with_reason را صدا می‌زنند."""
+    try:
+        hd = get_klines(symbol, '1hour', 160)
+        if hd is not None and not hd.empty:
+            return {'1h': calculate_indicators(hd)}
+    except Exception:
+        logger.debug('mtf md failed symbol=%s', symbol, exc_info=True)
+    return None
+
+
+def _mtf_set(chat_id, s, on):
+    """V3.44.157: روشن/خاموش‌کردن حالت چندتایم‌فریمی: ۴ساعته (رژیم نرم) ← ۱ساعته (سطوح و واکنش) ← ۱۵دقیقه (ورود)."""
+    if on:
+        if s.get('timeframe') != '15min':
+            _old = s.get('strategy_config')
+            s['timeframe'] = '15min'
+            s['strategy_config'] = _p4_keep_flags(_old, get_timeframe_preset('15min'))
+        cfg = s.setdefault('strategy_config', {})
+        if not cfg.get('mtf_mode_enabled'):
+            cfg['mtf_prev_tier'] = bool(cfg.get('gate_h4_tier_enabled', False))
+        cfg['mtf_mode_enabled'] = True
+        cfg['halving_model_enabled'] = True
+        cfg['gate_h4_tier_enabled'] = True          # رژیم ۴ ساعته: رتبه‌ی نرم (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک)
+        _halving_tf_apply(cfg, '15min')
+    else:
+        cfg = s.setdefault('strategy_config', {})
+        if cfg.get('mtf_mode_enabled'):
+            cfg['gate_h4_tier_enabled'] = bool(cfg.pop('mtf_prev_tier', False))
+        cfg['mtf_mode_enabled'] = False
+        _halving_tf_apply(cfg, s.get('timeframe', '15min'))
+    _p4_sync_tags(s)
 
 
 def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_ind=None):
@@ -7773,7 +7878,7 @@ def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_i
     is_long = side == 'BUY'
     plan, why = None, 'داده‌ی بازار در دسترس نبود'
     if isinstance(strategy_config, dict) and strategy_config.get('halving_model_enabled') and strategy_config.get('halving_high') is None:
-        strategy_config = _with_halving_cfg(strategy_config, get_halving_range_sync(symbol))   # هدف‌ها از سطوح نصف‌کردن
+        strategy_config = _with_halving_cfg_sym(strategy_config, get_halving_range_sync(symbol), symbol)   # هدف‌ها از سطوح نصف‌کردن
     try:
         if df_ind is None:
             df = get_klines(symbol, tf, 650 if tf in ('5min', '15min', '1hour') else 200)
@@ -13761,7 +13866,7 @@ def _btc_pattern_vote(tf, cfg=None):
             c = dict(base)
             if c.get('halving_model_enabled'):
                 rng = get_halving_range_sync('BTC')
-                c = _with_halving_cfg(c, rng) if rng else c
+                c = _with_halving_cfg_sym(c, rng, 'BTC') if rng else c
             try:
                 live = latest_price('BTC')
                 live = float(live) if live else None
@@ -15619,7 +15724,12 @@ async def scan_symbol(http,chat_id,symbol):
         _hv_rng = await get_halving_range(http, symbol)
         if not _hv_rng:
             return _entry_diag_result(chat_id, symbol, 'no_signal', 'مدل نصف‌کردن: سقف/کف تاریخی این نماد در دسترس نیست', 'signal')
-        cfg_entry = _with_halving_cfg(cfg_entry, _hv_rng)
+        _h1_atr = None
+        if cfg_entry.get('mtf_mode_enabled') and primary_tf == '15min':      # V3.44.157: درخت سطوح از ATR ۱ ساعته
+            _h1_atr = await asyncio.to_thread(_mtf_h1_atr, symbol)
+            if not _h1_atr or '1h' not in md:
+                return _entry_diag_result(chat_id, symbol, 'no_signal', 'حالت چندتایم‌فریمی: داده‌ی ۱ ساعته در دسترس نیست', 'signal')
+        cfg_entry = _with_halving_cfg(cfg_entry, _hv_rng, _h1_atr)
         try:
             _hv_depth_track(symbol, tf, primary, cfg_entry)      # V3.44.143: هشدار تغییر عمق سطوح
         except Exception:
@@ -16266,6 +16376,8 @@ def preset_active_text(name):
         sc = [str(n) for n in range(1, 8) if cfg.get(f'scenario_{n}_enabled')]
         lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}",
                   '• حالت‌های معامله: ' + ('، '.join(sc) if sc else 'هیچ‌کدام')]
+        if cfg.get('mtf_mode_enabled'):
+            lines.append('• حالت چندتایم‌فریمی: روشن (۴ساعته رژیم نرم ← ۱ساعته سطح و واکنش ← ۱۵دقیقه ورود)')
     return '\n'.join(lines)[:3900]
 
 
@@ -16713,6 +16825,7 @@ def run_inbot_backtest(chat_id, cl='/backtest_btc'):
     if len(df) < 800:
         raise RuntimeError('داده‌ی تاریخی کافی نیست')
     cfg = copy.deepcopy(s['strategy_config'])
+    cfg['mtf_mode_enabled'] = False           # V3.44.157: بک‌تست فعلاً فقط تک‌تایم‌فریم است (۱۵ دقیقه‌ی عادی)
     cfg['halving_btc_dynamic_k'] = False      # V3.44.151: بک‌تست با k زنده‌ی BTC آلوده نشود
     cfg['halving_depth_freeze'] = False       # V3.44.154: بک‌تست عمق را هر کندل از ATR همان لحظه می‌گیرد (قفل فقط برای معامله‌ی زنده)
     _halving_tf_apply(cfg, tf)
@@ -16987,6 +17100,7 @@ def _bt_run_worker(chat_id):
         if len(df) < 800:
             raise RuntimeError('فایل داده‌ی نگه‌داری‌شده ناقص است؛ دوباره دانلود کنید.')
         cfg = copy.deepcopy(s['strategy_config'])
+        cfg['mtf_mode_enabled'] = False           # V3.44.157
         cfg['halving_btc_dynamic_k'] = False      # V3.44.151
         cfg['halving_depth_freeze'] = False       # V3.44.154
         _halving_tf_apply(cfg, tf)
@@ -17092,6 +17206,7 @@ def _gap_scan_one(symbol, tf, scfg):
         if k in scfg:
             cfg[k] = scfg[k]
     cfg.update(_halving_tf_params(scfg, tf))
+    _mtf_inject_override(cfg, scfg, symbol, tf)      # V3.44.157
     ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
     if not ctx or not ctx.get('step') or price <= 0:
         return {'symbol': symbol, 'err': 'سطوح ساخته نشد'}
@@ -17377,7 +17492,8 @@ def analyze(chat_id,symbol):
     live_price=latest_price(symbol)
     # V3.19: تنها یک استراتژی معاملاتی هست (Liquidity Sweep)؛ همان مسیر واقعی
     # اسکن زنده (get_signal_with_reason) اینجا هم صدا زده می‌شود تا این تحلیل با تصمیم واقعی ربات یکی باشد.
-    sig,reason=get_signal_with_reason(d,None,'single',tf,'dynamic',s['filters'],_with_halving_cfg(s['strategy_config'], get_halving_range_sync(symbol) if s['strategy_config'].get('halving_model_enabled') else None),None,live_price=live_price)
+    _mtf_md = _mtf_md_for(symbol) if s['strategy_config'].get('mtf_mode_enabled') else None
+    sig,reason=get_signal_with_reason(d,_mtf_md,'single',tf,'dynamic',s['filters'],_with_halving_cfg_sym(s['strategy_config'], get_halving_range_sync(symbol) if s['strategy_config'].get('halving_model_enabled') else None, symbol),None,live_price=live_price)
 
     close=float(c.close); ema20=float(c.ema20); ema50=float(c.ema50)
     adx=float(c.adx or 0); plus_di=float(c.plus_di or 0); minus_di=float(c.minus_di or 0)
@@ -17525,6 +17641,7 @@ def symbol_levels_chart(chat_id, raw_symbol):
         if k in scfg:
             cfg[k] = scfg[k]
     cfg.update(_halving_tf_params(scfg, tf))
+    _mtf_inject_override(cfg, scfg, symbol, tf)      # V3.44.157
     ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
     if not (ctx and ctx.get('levels')):
         return None, f'⚠️ سطوح نصف‌کردن `{symbol}` ساخته نشد.', None
@@ -17600,6 +17717,7 @@ def symbol_levels_report(chat_id, raw_symbol):
                 if k in scfg:
                     cfg[k] = scfg[k]
             cfg.update(_halving_tf_params(scfg, tf))
+            _mtf_inject_override(cfg, scfg, symbol, tf)      # V3.44.157
             ctx = _halving_context(dated_df, len(dated_df) - 1, _halving_cfg(cfg), span_cells=8)
             if ctx and ctx.get('levels'):
                 lv = sorted(({'price': float(x['price']), 'depth': int(x['depth'])} for x in ctx['levels']), key=lambda x: x['price'])
@@ -18904,13 +19022,23 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
     if cl.startswith('/set_wsame_'):          # V3.44.62: مرحله‌ی هم‌جهت ویزارد
         s['max_same_direction_positions']=max(0,int(cl.replace('/set_wsame_',''))); save_session(chat_id)
-        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min')), message_id); return
+        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
+    if cl == '/set_tf_mtf':          # V3.44.157: ویزارد: حالت چندتایم‌فریمی (۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود)
+        _mtf_set(chat_id, s, True)
+        save_session(chat_id)
+        wizard_mode_page(chat_id, message_id); return
+    if cl == '/toggle_mtf_mode':     # V3.44.157: منوی مدیریت ستاپ‌ها
+        _mtf_set(chat_id, s, not bool((s.get('strategy_config') or {}).get('mtf_mode_enabled', False)))
+        save_session(chat_id)
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
     if cl.startswith('/set_tf_'):
         tf_map={'/set_tf_5m':'5min','/set_tf_15m':'15min','/set_tf_1h':'1hour','/set_tf_4h':'4hour'}
         if cl in tf_map:
+            if (s.get('strategy_config') or {}).get('mtf_mode_enabled'):
+                _mtf_set(chat_id, s, False)      # V3.44.157: انتخاب صریح تایم‌فریم عادی = حالت چندتایم‌فریمی خاموش (رتبه‌ی نرم قبلی برمی‌گردد)
             _old_cfg = s.get('strategy_config')
             s['timeframe']=tf_map[cl]; s['strategy_config']=_p4_keep_flags(_old_cfg, get_timeframe_preset(s['timeframe']))
             _halving_tf_apply(s['strategy_config'], s['timeframe'])      # V3.44.40
@@ -18927,7 +19055,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/wiz_lev': edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(s.get('max_open_positions', 3)),message_id); return
     if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
-    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min')), message_id); return
+    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
     if cl.startswith('/set_wmode_'):          # V3.44.85: انتخاب حالت معامله در ویزارد (همان صفحه ویرایش می‌شود)
         _mk = cl[len('/set_wmode_'):]
         if not any(x[0] == _mk for x in presets_mod.TRADE_MODES) or not presets_mod.apply_preset(s, _mk):

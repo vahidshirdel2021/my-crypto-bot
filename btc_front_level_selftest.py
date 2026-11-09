@@ -45,6 +45,7 @@ g = dict(_venue=lambda: 'binance', _tfk=lambda tf: tf, os=os, time=time, math=ma
          _quick_opposing_levels=stg._quick_opposing_levels,
          get_halving_range_sync=lambda sym: st['range'],
          _with_halving_cfg=lambda cfg, rng: ({**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])} if (cfg or {}).get('halving_model_enabled') and rng else cfg),
+         _with_halving_cfg_sym=lambda cfg, rng, symbol: ({**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])} if (cfg or {}).get('halving_model_enabled') and rng else cfg),
          _log_grid_levels_sync=lambda sym: [],
          send_message=lambda c, t, *a, **k: st['sent'].append((c, t)), send_detail_message=lambda c, t, *a, **k: st['sent'].append((c, t)),
          btc_undecided_enabled=lambda c, s=None: False, btc_daily_enabled=lambda s: False, _btc_daily_precheck=lambda *a, **k: True, _btc_daily_gate=lambda *a, **k: (True, ''), gate_on=lambda s, k: bool((s.get('cfg') or {}).get(k, False)))

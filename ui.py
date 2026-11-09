@@ -137,15 +137,17 @@ def get_max_positions_keyboard(cur=3):
     return {"inline_keyboard": [[opt(2, "2"), opt(3, "3")], [opt(5, "5"), opt(10, "10")], [opt(15, "15"), opt(0, "بدون محدودیت")], [{"text": "🔙 بازگشت", "callback_data": "/wiz_lev"}], [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]]}
 
 
-def get_timeframe_keyboard(cur='15min'):
-    """cur = تایم‌فریم فعلی (پیش‌فرض ۱۵ دقیقه)؛ گزینه‌ی فعلی تیک ✅ می‌خورد."""
+def get_timeframe_keyboard(cur='15min', mtf=False):
+    """cur = تایم‌فریم فعلی (پیش‌فرض ۱۵ دقیقه)؛ گزینه‌ی فعلی تیک ✅ می‌خورد.
+    mtf=True (V3.44.157): حالت چندتایم‌فریمی روشن است؛ تیک روی همان گزینه می‌خورد، نه ۱۵ دقیقه‌ی عادی."""
     def t(tf, label, cb):
-        return {"text": f"{'✅ ' if cur == tf else ''}{label}", "callback_data": cb}
+        return {"text": f"{'✅ ' if (cur == tf and not mtf) else ''}{label}", "callback_data": cb}
 
     return {"inline_keyboard": [
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [t("5min", "⏱ ۵ دقیقه", "/set_tf_5m"), t("15min", "⏱ ۱۵ دقیقه", "/set_tf_15m")],
         [t("1hour", "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "/set_tf_1h")],
+        [{"text": f"{'✅ ' if mtf else ''}🧭 چندتایم‌فریمی: جهت ۴س ← واکنش ۱س ← ورود ۱۵د", "callback_data": "/set_tf_mtf"}],
         [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
@@ -204,6 +206,8 @@ def get_setup_management_keyboard(session=None):
         return {"inline_keyboard": rows}
     rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
     if hv_on:
+        _mtf_on = bool(_cfg_ui.get("mtf_mode_enabled", False))      # V3.44.157
+        rows.append([{"text": f"{'🟢' if _mtf_on else '🔴'} 🧭 چندتایم‌فریمی: ۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود", "callback_data": "/toggle_mtf_mode"}])
         _k = float(_cfg_ui.get("halving_k_atr", 4.0)); _md = int(_cfg_ui.get("halving_max_depth", 10)); _mt = int(_cfg_ui.get("halving_max_trade_depth", 0) or 0)
         _k_eff, _k_src = halving_k_effective(_cfg_ui)      # V3.44.145: k مؤثر (از BTC یا دستی)
         _bd = bool(_cfg_ui.get("halving_btc_dynamic_k", False))
