@@ -1187,10 +1187,13 @@ HALVING_TF_DEFAULTS = {'5min': {'halving_k_atr': 3.0, 'halving_max_depth': 12},
                        '1hour': {'halving_k_atr': 4.0, 'halving_max_depth': 10}}   # V3.44.101: ۱ ساعته (مثل ۱۵ دقیقه)
 
 
+_MTF_ENTRY_TFS = ('15min', '5min')      # V3.44.158: تایم‌فریم ورود در حالت چندتایم‌فریمی (سطوح و واکنش همیشه ۱ ساعته)
+
+
 def _halving_eff_tf(cfg, tf):
     """V3.44.157: در حالت چندتایم‌فریمی (۱۵ دقیقه) k و عمق درخت از تایم‌فریم ۱ ساعته می‌آید (سطوح از کندل ۱ ساعته‌اند)."""
     try:
-        if (cfg or {}).get('mtf_mode_enabled') and tf == '15min':
+        if (cfg or {}).get('mtf_mode_enabled') and tf in _MTF_ENTRY_TFS:
             return '1hour'
     except Exception:
         pass
@@ -1251,7 +1254,7 @@ def _setup_mgmt_text(s):
     if (s.get('strategy_config') or {}).get('halving_model_enabled'):
         if s.get('setup_legacy_view'):
             return "📦 *سطوح قدیمی*\nتا وقتی مدل نصف‌کردن روشن است این‌ها روی معامله اثری ندارند. فقط اگر مدل نصف‌کردن را خاموش کنی دوباره کار می‌کنند."
-        _mtf_txt = ("\n\n🧭 *حالت چندتایم‌فریمی روشن است:* ۴ ساعته → رژیم نماد با «رتبه‌ی نرم» (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک) | ۱ ساعته → سطوح و واکنش کندل‌ها به آن‌ها | ۱۵ دقیقه → فقط نقطه‌ی ورود."
+        _mtf_txt = ("\n\n🧭 *حالت چندتایم‌فریمی روشن است:* ۴ ساعته → رژیم نماد با «رتبه‌ی نرم» (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک) | ۱ ساعته → سطوح و واکنش کندل‌ها به آن‌ها | " + ('۵' if s.get('timeframe') == '5min' else '۱۵') + " دقیقه → فقط نقطه‌ی ورود."
                     if (s.get('strategy_config') or {}).get('mtf_mode_enabled') else "")
         return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید. سطوح قدیمی (PDH/PDL+P4 و ...) در زیرمنوی «سطوح قدیمی» هستند و فعلاً استفاده نمی‌شوند." + _mtf_txt
     if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
@@ -7813,7 +7816,7 @@ def _with_halving_cfg(cfg, rng, h1_atr=None):
     out = {**cfg, 'halving_high': float(rng[0]), 'halving_low': float(rng[1])}
     if cfg.get('mtf_mode_enabled') and h1_atr:
         out['halving_atr_override'] = float(h1_atr)
-        out.update(_halving_tf_params(cfg, '15min'))
+        out.update(_halving_tf_params(cfg, '15min'))      # k/عمق ۱ ساعته (eff_tf)
     return out
 
 
@@ -7828,7 +7831,7 @@ def _with_halving_cfg_sym(cfg, rng, symbol):
 def _mtf_inject_override(cfg, scfg, symbol, tf):
     """کانفیگ‌های مشتق‌شده‌ی کانال/گزارش‌ها هم از همان درخت ۱ ساعته استفاده کنند (فقط وقتی حالت چندتایم‌فریمی روشن و تایم‌فریم ۱۵ دقیقه است)."""
     try:
-        if (scfg or {}).get('mtf_mode_enabled') and tf == '15min':
+        if (scfg or {}).get('mtf_mode_enabled') and tf in _MTF_ENTRY_TFS:
             a = _mtf_h1_atr(symbol)
             if a:
                 cfg['halving_atr_override'] = float(a)
@@ -7849,20 +7852,23 @@ def _mtf_md_for(symbol):
     return None
 
 
-def _mtf_set(chat_id, s, on):
-    """V3.44.157: روشن/خاموش‌کردن حالت چندتایم‌فریمی: ۴ساعته (رژیم نرم) ← ۱ساعته (سطوح و واکنش) ← ۱۵دقیقه (ورود)."""
+def _mtf_set(chat_id, s, on, entry_tf=None):
+    """V3.44.157: روشن/خاموش‌کردن حالت چندتایم‌فریمی: ۴ساعته (رژیم نرم) ← ۱ساعته (سطوح و واکنش) ← ورود با ۱۵ یا ۵ دقیقه.
+    V3.44.158: entry_tf انتخاب تایم‌فریم ورود؛ None = همان تایم‌فریم فعلی اگر ۵/۱۵ دقیقه باشد، وگرنه ۱۵ دقیقه."""
     if on:
-        if s.get('timeframe') != '15min':
+        if entry_tf is None:
+            entry_tf = s.get('timeframe') if s.get('timeframe') in _MTF_ENTRY_TFS else '15min'
+        if s.get('timeframe') != entry_tf:
             _old = s.get('strategy_config')
-            s['timeframe'] = '15min'
-            s['strategy_config'] = _p4_keep_flags(_old, get_timeframe_preset('15min'))
+            s['timeframe'] = entry_tf
+            s['strategy_config'] = _p4_keep_flags(_old, get_timeframe_preset(entry_tf))
         cfg = s.setdefault('strategy_config', {})
         if not cfg.get('mtf_mode_enabled'):
             cfg['mtf_prev_tier'] = bool(cfg.get('gate_h4_tier_enabled', False))
         cfg['mtf_mode_enabled'] = True
         cfg['halving_model_enabled'] = True
         cfg['gate_h4_tier_enabled'] = True          # رژیم ۴ ساعته: رتبه‌ی نرم (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک)
-        _halving_tf_apply(cfg, '15min')
+        _halving_tf_apply(cfg, s['timeframe'])
     else:
         cfg = s.setdefault('strategy_config', {})
         if cfg.get('mtf_mode_enabled'):
@@ -15725,7 +15731,7 @@ async def scan_symbol(http,chat_id,symbol):
         if not _hv_rng:
             return _entry_diag_result(chat_id, symbol, 'no_signal', 'مدل نصف‌کردن: سقف/کف تاریخی این نماد در دسترس نیست', 'signal')
         _h1_atr = None
-        if cfg_entry.get('mtf_mode_enabled') and primary_tf == '15min':      # V3.44.157: درخت سطوح از ATR ۱ ساعته
+        if cfg_entry.get('mtf_mode_enabled') and primary_tf in _MTF_ENTRY_TFS:      # V3.44.157: درخت سطوح از ATR ۱ ساعته
             _h1_atr = await asyncio.to_thread(_mtf_h1_atr, symbol)
             if not _h1_atr or '1h' not in md:
                 return _entry_diag_result(chat_id, symbol, 'no_signal', 'حالت چندتایم‌فریمی: داده‌ی ۱ ساعته در دسترس نیست', 'signal')
@@ -16377,7 +16383,7 @@ def preset_active_text(name):
         lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}",
                   '• حالت‌های معامله: ' + ('، '.join(sc) if sc else 'هیچ‌کدام')]
         if cfg.get('mtf_mode_enabled'):
-            lines.append('• حالت چندتایم‌فریمی: روشن (۴ساعته رژیم نرم ← ۱ساعته سطح و واکنش ← ۱۵دقیقه ورود)')
+            lines.append('• حالت چندتایم‌فریمی: روشن (۴ساعته رژیم نرم ← ۱ساعته سطح و واکنش ← ورود با ' + ('۵' if s.get('timeframe') == '5min' else '۱۵') + ' دقیقه)')
     return '\n'.join(lines)[:3900]
 
 
@@ -19030,6 +19036,15 @@ def process_command(cmd,chat_id,message_id=None):
         _mtf_set(chat_id, s, True)
         save_session(chat_id)
         wizard_mode_page(chat_id, message_id); return
+    if cl == '/set_tf_mtf5':         # V3.44.158: ویزارد: چندتایم‌فریمی با ورود ۵ دقیقه
+        _mtf_set(chat_id, s, True, entry_tf='5min')
+        save_session(chat_id)
+        wizard_mode_page(chat_id, message_id); return
+    if cl == '/toggle_mtf_entry_tf':     # V3.44.158: تعویض تایم‌فریم ورود ۱۵ دقیقه ⇄ ۵ دقیقه (سطوح همچنان از ۱ ساعته)
+        if (s.get('strategy_config') or {}).get('mtf_mode_enabled'):
+            _mtf_set(chat_id, s, True, entry_tf=('5min' if s.get('timeframe') == '15min' else '15min'))
+            save_session(chat_id)
+        edit_page(chat_id, _setup_mgmt_text(s), get_setup_management_keyboard(s), message_id); return
     if cl == '/toggle_mtf_mode':     # V3.44.157: منوی مدیریت ستاپ‌ها
         _mtf_set(chat_id, s, not bool((s.get('strategy_config') or {}).get('mtf_mode_enabled', False)))
         save_session(chat_id)

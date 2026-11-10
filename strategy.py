@@ -1858,7 +1858,7 @@ def build_sweep_trade_plan(df, signal, strategy_config=None, grid_levels=None, s
     max_fee_ratio = float(cfg.get("max_fee_risk_ratio", 0.20))
     max_sl_atr = max(1.5, float(cfg.get("max_sl_atr", 3.00)))
     _mtf_sl = bool(cfg.get("mtf_mode_enabled")) and bool(cfg.get("halving_model_enabled"))      # V3.44.157
-    _mtf_n = max(1, int(cfg.get("mtf_sl_lookback_15m", 8))) if _mtf_sl else 1
+    _mtf_n = max(1, int(round(float(cfg.get("mtf_sl_lookback_minutes", 120)) * 60.0 / float(_hv_tf_seconds(d) or 900)))) if _mtf_sl else 1
     if _mtf_sl:      # سقف فاصله‌ی SL بر حسب ATR ۱ ساعته (halving_atr_override = ATR هموار ۱ ساعته) چون سطح و ناحیه‌ی واکنش ۱ ساعته‌اند
         try:
             _h1a = float(cfg.get("halving_atr_override") or 0.0)
@@ -2268,7 +2268,7 @@ HALVING_DEFAULTS = {
     "mtf_react_lookback_1h": 2,        # واکنش کندل ۱ ساعته‌ی بسته‌شده تا این‌تعداد کندل اخیر معتبر است
     "mtf_entry_min_body_ratio": 0.30,  # حداقل بدنه‌ی کندل ۱۵ دقیقه‌ی ورود (نسبت به کل کندل)
     "mtf_max_chase_atr": 1.5,          # قیمت زنده بیش از این×ATR(۱ ساعته) از سطح در جهت معامله دور شده = تعقیب قیمت، ورود نمی‌شود
-    "mtf_sl_lookback_15m": 8,          # SL پشت سوینگ این‌تعداد کندل ۱۵ دقیقه‌ی اخیر (۸ = ۲ ساعت)
+    "mtf_sl_lookback_minutes": 120,    # SL پشت سوینگ این‌تعداد دقیقه‌ی اخیر (به کندل‌های تایم‌فریم ورود تبدیل می‌شود؛ ۱۲۰ = ۲ ساعت)
     "mtf_max_sl_atr": 2.5,             # سقف فاصله‌ی SL (×ATR ۱ ساعته) در این حالت
 }
 
@@ -2688,26 +2688,27 @@ def _mtf_entry_trigger(d15, i15, d1, i1, sig, anchor, lp, cfg, atr15, atr1=None)
     row = d15.iloc[i15]
     o, c, h, l = (_safe_float(row.get(k), np.nan) for k in ("open", "close", "high", "low"))
     if not all(np.isfinite(x) for x in (o, c, h, l)):
-        return False, "کندل ۱۵ دقیقه نامعتبر است"
+        return False, "کندل ورود نامعتبر است"
+    _em = int(round((_hv_tf_seconds(d15) or 900) / 60.0))      # دقیقه‌ی تایم‌فریم ورود (۵ یا ۱۵)
     # الف) کندل ورود باید بعد از بسته‌شدن کندل واکنشِ ۱ ساعته شروع شده باشد (نه خودِ همان ساعت)
     if bool(cfg.get("mtf_entry_after_reaction", True)):
         t1 = _ts_seconds(d1["timestamp"].iloc[i1]); t15 = _ts_seconds(d15["timestamp"].iloc[i15])
         sec1 = _hv_tf_seconds(d1) or 3600
         if t1 is not None and t15 is not None and t15 < t1 + sec1 - 1:
-            return False, "هنوز کندل ۱۵ دقیقه‌ی بعد از بسته‌شدن واکنش ۱ ساعته کامل نشده"
+            return False, f"هنوز کندل {_em} دقیقه‌ی بعد از بسته‌شدن واکنش ۱ ساعته کامل نشده"
     # ب) جهت و بدنه‌ی کندل ۱۵ دقیقه
     if (sig == "BUY" and not c > o) or (sig == "SELL" and not c < o):
-        return False, "کندل ۱۵ دقیقه‌ی بسته‌شده هم‌جهت معامله نیست"
+        return False, f"کندل {_em} دقیقه‌ی بسته‌شده هم‌جهت معامله نیست"
     rng = h - l
     br = (abs(c - o) / rng) if rng > 0 else 0.0
     min_br = float(cfg.get("mtf_entry_min_body_ratio", 0.30))
     if br < min_br:
-        return False, f"بدنه‌ی کندل ۱۵ دقیقه ضعیف است ({br:.2f} < {min_br:.2f})"
+        return False, f"بدنه‌ی کندل {_em} دقیقه ضعیف است ({br:.2f} < {min_br:.2f})"
     # ج) سمت درست سطح، تعقیب قیمت، باطل‌شدن
     if anchor is not None and np.isfinite(anchor):
         tol = 0.15 * atr15
         if (sig == "BUY" and c < anchor - tol) or (sig == "SELL" and c > anchor + tol):
-            return False, "کلوز ۱۵ دقیقه سمت درست سطح نیست"
+            return False, f"کلوز {_em} دقیقه سمت درست سطح نیست"
         try:
             px = float(lp) if lp is not None else c
         except (TypeError, ValueError):
@@ -2784,12 +2785,13 @@ def strategy_halving_mtf(df15, df1h, strategy_config=None, live_price=None):
                 pd_blocked = _pd_txt
                 continue
             extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}|MTF=1H|MTFAGE={age}"
-            return sig, tag_setup_reason("Halving", f"واکنش کندل ۱ ساعته + ورود با کلوز ۱۵ دقیقه | {reason}{extra}")
+            _em2 = int(round((_hv_tf_seconds(d15) or 900) / 60.0))
+            return sig, tag_setup_reason("Halving", f"واکنش کندل ۱ ساعته + ورود با کلوز {_em2} دقیقه | {reason}{extra}")
 
     if pd_blocked:
         return None, f"گارد سقف/کف دیروز: {pd_blocked}"
     if trig_blocked:
-        return None, f"چندتایم‌فریمی: واکنش ۱ ساعته هست ولی ورود ۱۵ دقیقه تأیید نشد ({trig_blocked})"
+        return None, f"چندتایم‌فریمی: واکنش ۱ ساعته هست ولی ورود تأیید نشد ({trig_blocked})"
     if not found_reaction:
         return None, (f"چندتایم‌فریمی: کندل ۱ ساعته به سطوح واکنشی نشان نداد (عمق درخت {ctx['depth']}، "
                       f"فاصله‌ی سطوح {ctx['step']:.6g})")
@@ -2814,7 +2816,7 @@ def get_signal_with_reason(df_primary, market_data_dict=None, timeframe_mode="si
     if df_primary is None or df_primary.empty or len(df_primary) < 60:
         return None, "داده کافی نیست"
     if isinstance(strategy_config, dict) and strategy_config.get("halving_model_enabled"):
-        if strategy_config.get("mtf_mode_enabled") and timeframe == "15min":      # V3.44.157: ۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود
+        if strategy_config.get("mtf_mode_enabled") and timeframe in ("15min", "5min"):      # V3.44.157: ۴س رژیم نرم ← ۱س سطح/واکنش ← ورود با ۱۵ یا ۵ دقیقه
             _h1 = market_data_dict.get("1h") if isinstance(market_data_dict, dict) else None
             if _h1 is None or len(_h1) < 100:
                 return None, "حالت چندتایم‌فریمی: داده‌ی ۱ ساعته در دسترس نیست"

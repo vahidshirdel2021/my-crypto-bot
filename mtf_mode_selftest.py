@@ -79,7 +79,7 @@ s2, r2 = get_signal_with_reason(d15, {'1h': d1}, 'single', '15min', 'dynamic', N
 check("get_signal_with_reason حالت چندتایم‌فریمی را صدا می‌زند", s2 == 'BUY' and 'MTF=1H' in (r2 or ''))
 s3, r3 = get_signal_with_reason(d15, None, 'single', '15min', 'dynamic', None, CFG, None, live_price=127.1)
 check("بدون داده‌ی ۱ ساعته سیگنال نمی‌دهد", s3 is None and '۱ ساعته' in (r3 or ''), r3)
-s4, r4 = get_signal_with_reason(d15, {'1h': d1}, 'single', '5min', 'dynamic', None, CFG, None, live_price=127.1)
+s4, r4 = get_signal_with_reason(d15, {'1h': d1}, 'single', '1hour', 'dynamic', None, CFG, None, live_price=127.1)
 check("روی تایم‌فریم غیر از ۱۵ دقیقه حالت چندتایم‌فریمی اعمال نمی‌شود", 'MTF=1H' not in (r4 or ''))
 
 # ---- ۴) کندل ورود نزولی => سیگنال نمی‌دهد
@@ -103,6 +103,36 @@ if plan:
     p2, _w2 = build_trade_plan(d15, 'BUY', cfg_off, 'liquidity_sweep', strategy_timeframe='15min', live_price=127.1)
     check("بدون حالت چندتایم‌فریمی SL فقط پشت خود کندل آخر است (بالاتر از ۱۲۵)", (p2 is None) or p2['sl'] > 125.0, str(None if not p2 else p2['sl']))
 
+
+# ---- ۸) ورود با ۵ دقیقه (سطوح و واکنش همچنان از ۱ ساعته)
+def split5(df15):
+    rows = []
+    for r in df15[['timestamp', 'open', 'high', 'low', 'close', 'volume']].itertuples(index=False):
+        t, o, h, l, c, v = r
+        m1, m2 = o + (c - o) / 3.0, o + 2.0 * (c - o) / 3.0
+        pts = [(o, m1), (m1, m2), (m2, c)]
+        for k, (a, b) in enumerate(pts):
+            hi = h if k == 1 else max(a, b)
+            lo = l if k == 0 else min(a, b)
+            rows.append([t + k * 300_000, a, hi, lo, b, v / 3.0])
+    return pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+
+raw15 = d15[['timestamp', 'open', 'high', 'low', 'close', 'volume']].iloc[:-1]       # بدون کندل در حال تشکیل
+r5 = split5(raw15)
+# اولین کندل ۵ دقیقه‌ی بعد از ساعت واکنش بسته شده و یک کندل ۵ دقیقه‌ی در حال تشکیل بعدش
+last_trig = r5.iloc[-3:]            # سه کندل ۵ دقیقه‌ی کندل ورود
+r5_cut = r5.iloc[:-2]               # فقط اولین کندل ۵ دقیقه‌ی ورود بسته‌شده + یکی در حال تشکیل
+forming = r5_cut.iloc[-1:].copy(); forming['timestamp'] += 300_000
+d5 = calculate_indicators(pd.concat([r5_cut, forming], ignore_index=True))
+CFG5 = {**CFG}
+s5, rs5 = strategy_halving_mtf(d5, d1, CFG5, live_price=float(r5_cut['close'].iloc[-1]))
+print("   →", s5, (rs5 or '')[:150])
+check("ورود با کندل ۵ دقیقه: BUY با همان واکنش ۱ ساعته", s5 == 'BUY' and 'کلوز 5 دقیقه' in (rs5 or ''), rs5)
+s6, r6 = get_signal_with_reason(d5, {'1h': d1}, 'single', '5min', 'dynamic', None, CFG5, None, live_price=float(r5_cut['close'].iloc[-1]))
+check("get_signal_with_reason روی تایم‌فریم ۵ دقیقه هم حالت چندتایم‌فریمی را اعمال می‌کند", s6 == 'BUY' and 'MTF=1H' in (r6 or ''))
+pl5, w5 = build_trade_plan(d5, 'BUY', CFG5, 'liquidity_sweep', strategy_timeframe='5min', live_price=float(r5_cut['close'].iloc[-1]))
+check("پلن ۵ دقیقه: TP سطح ۱ ساعته و SL پشت سوینگ ۲ ساعت", pl5 is not None and abs(pl5['tp'] - 137.5) < 1e-6 and pl5['sl'] < 124.7, str(pl5 and (pl5['sl'], pl5['tp'])) + ' ' + str(w5))
+
 # ---- ۷) سمت bot / UI / دسترسی
 import sys, types
 for _m in ('aiohttp','ccxt','dotenv','matplotlib','matplotlib.pyplot','matplotlib.dates','requests'):
@@ -114,25 +144,38 @@ for _m in ('aiohttp','ccxt','dotenv','matplotlib','matplotlib.pyplot','matplotli
 try:
     import bot
     import ui
-    s = {'timeframe': '5min', 'strategy_config': {**st.get_timeframe_preset('5min'), 'gate_h4_tier_enabled': False, 'halving_model_enabled': True}}
+    s = {'timeframe': '1hour', 'strategy_config': {**st.get_timeframe_preset('1hour'), 'gate_h4_tier_enabled': False, 'halving_model_enabled': True}}
     bot._mtf_set(1, s, True)
     c = s['strategy_config']
-    check("روشن‌کردن: تایم‌فریم ۱۵ دقیقه + رتبه‌ی نرم روشن", s['timeframe'] == '15min' and c['mtf_mode_enabled'] and c['gate_h4_tier_enabled'])
+    check("روشن‌کردن از تایم‌فریم غیرمجاز: ورود پیش‌فرض ۱۵ دقیقه + رتبه‌ی نرم روشن", s['timeframe'] == '15min' and c['mtf_mode_enabled'] and c['gate_h4_tier_enabled'])
     check("k و عمق از تایم‌فریم ۱ ساعته", bot._halving_eff_tf(c, '15min') == '1hour' and c['halving_k_atr'] == bot.HALVING_TF_DEFAULTS['1hour']['halving_k_atr'])
     bot._halving_tf_store({**c}, '15min')
     bot._mtf_set(1, s, False)
     c = s['strategy_config']
     check("خاموش‌کردن: رتبه‌ی نرم به حالت قبلی برمی‌گردد", c['mtf_mode_enabled'] is False and c['gate_h4_tier_enabled'] is False)
+    s5s = {'timeframe': '15min', 'strategy_config': {**st.get_timeframe_preset('15min'), 'gate_h4_tier_enabled': False, 'halving_model_enabled': True}}
+    bot._mtf_set(1, s5s, True, entry_tf='5min')
+    check("ورود ۵ دقیقه: تایم‌فریم جلسه ۵ دقیقه و k/عمق ۱ ساعته", s5s['timeframe'] == '5min' and s5s['strategy_config']['mtf_mode_enabled'] and bot._halving_eff_tf(s5s['strategy_config'], '5min') == '1hour')
+    bot._mtf_set(1, s5s, True, entry_tf='15min')
+    check("تعویض به ۱۵ دقیقه، حالت روشن می‌ماند", s5s['timeframe'] == '15min' and s5s['strategy_config']['mtf_mode_enabled'] and s5s['strategy_config']['gate_h4_tier_enabled'])
+    bot._mtf_set(1, s5s, False)
+    check("خاموش‌کردن بعد از تعویض: رتبه‌ی نرم به حالت اول", s5s['strategy_config']['gate_h4_tier_enabled'] is False)
     kb = ui.get_timeframe_keyboard('15min', True)
     texts = [(b['text'], b['callback_data']) for r in kb['inline_keyboard'] for b in r]
     check("کیبورد ویزارد گزینه‌ی چندتایم‌فریمی دارد و تیک روی همان است", any(cb == '/set_tf_mtf' and t.startswith('✅') for t, cb in texts)
           and not any(cb == '/set_tf_15m' and t.startswith('✅') for t, cb in texts))
+    kb5 = ui.get_timeframe_keyboard('5min', True)
+    t5 = [(b['text'], b['callback_data']) for r in kb5['inline_keyboard'] for b in r]
+    check("کیبورد ویزارد: گزینه‌ی ورود ۵ دقیقه تیک می‌خورد", any(cb == '/set_tf_mtf5' and t.startswith('✅') for t, cb in t5) and not any(cb == '/set_tf_mtf' and t.startswith('✅') for t, cb in t5))
+    kb3 = ui.get_setup_management_keyboard({'timeframe': '5min', 'strategy_config': {'halving_model_enabled': True, 'mtf_mode_enabled': True}})
+    check("منوی ستاپ: دکمه‌ی تعویض تایم‌فریم ورود", any(b['callback_data'] == '/toggle_mtf_entry_tf' for r in kb3['inline_keyboard'] for b in r))
     kb2 = ui.get_setup_management_keyboard({'strategy_config': {'halving_model_enabled': True, 'mtf_mode_enabled': True}})
     check("منوی ستاپ دکمه‌ی روشن/خاموش چندتایم‌فریمی دارد", any(b['callback_data'] == '/toggle_mtf_mode' for r in kb2['inline_keyboard'] for b in r))
     import access_policy, re
     pats = [p for p in access_policy._USER_PATTERNS]
     check("کاربر عادی می‌تواند در ویزارد گزینه‌ی چندتایم‌فریمی را بزند", any(p.match('/set_tf_mtf') for p in pats))
-    check("تاگل منوی ستاپ فقط برای ادمین است", not any(p.match('/toggle_mtf_mode') for p in pats))
+    check("تاگل منوی ستاپ فقط برای ادمین است", not any(p.match('/toggle_mtf_mode') or p.match('/toggle_mtf_entry_tf') for p in pats))
+    check("کاربر عادی گزینه‌ی ویزارد ۵ دقیقه را هم می‌تواند بزند", any(p.match('/set_tf_mtf5') for p in pats))
 except ImportError as e:
     print("SKIP bot-level checks (import error):", e)
 
