@@ -1113,6 +1113,7 @@ def default_session():
         'fav_confirm_wait_sec': 1800,      # V3.44.27: مهلت پیش‌فرض صف تایید حرکت ۳۰ دقیقه
         'fav_close_5m_enabled': False,     # V3.44.95: خروج از صف تایید حرکت روی کلوز کندل ۵ دقیقه‌ای (به‌جای تایم‌فریم سیگنال، مثلاً ۱۵ دقیقه). پیش‌فرض خاموش
         'fav_close_15m_enabled': False,    # V3.44.101: خروج از صف تایید حرکت روی کلوز کندل ۱۵ دقیقه‌ای (برای سیگنال ۱ ساعته). پیش‌فرض خاموش
+        'core_symbols_only': False,        # V3.44.159: کلید واچ‌لیست؛ روشن = فقط BTC/ETH/SOL اسکن و معامله می‌شوند. پیش‌فرض خاموش
         'fav_wait30': True,                # V3.44.27: نشانه‌ی اینکه مهاجرت مهلت قدیمی (۱۵ دقیقه) به ۳۰ دقیقه انجام شده
         # V3.44.14: رأی‌گیری فیلترها بعد از برخورد با سطح
         'touch_auto_mode': 'all',
@@ -5903,6 +5904,8 @@ def _signal_channel_scan_once():
             return
     _ensure_tf_gate_sync(timeframe)
     watchlist = sorted(set(LONG_WATCHLIST) | set(SHORT_WATCHLIST))
+    if (USER_SESSIONS.get(SIGNAL_CHANNEL_TF_CHAT_ID) or {}).get('core_symbols_only'):      # V3.44.159: کانال هم فقط این سه نماد
+        watchlist = [x for x in watchlist if _base_asset(x) in CORE_SYMBOLS]
     for symbol in watchlist:
         for tag, side_fa, level_value, candle_ts, pattern, forming, regime, ind_row in _signal_channel_touch_scan_symbol(symbol, timeframe):
             is_return = (pattern == 'touch_return')        # V3.43.9: نفوذ و برگشت - همان الگوی «برخورد ساده» ولی بعد از چند کندل آن‌طرفِ سطح
@@ -9072,7 +9075,7 @@ _FN_SYM_CACHE = {}      # (symbol, tf) -> (ts, dict)
 _FN_MKT_CACHE = {}      # tf -> (ts, dict)
 _FN_REG_LETTER = {'BULLISH': 'B', 'BEARISH': 'S', 'RANGE': 'R'}
 _FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt', 'fav_confirm_enabled', 'fav_confirm_min_r',
-                'fav_confirm_max_r', 'fav_confirm_max_mode', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled',
+                'fav_confirm_max_r', 'fav_confirm_max_mode', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled', 'core_symbols_only',
                 'touch_auto_mode', 'assist_mode_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled',
                 'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'max_open_positions', 'max_same_direction_positions',
                 'risk_per_trade_pct', 'active_strategy', 'timeframe', 'enabled_setup_tags', 'hours_filter_enabled', 'hours_profile')
@@ -14887,8 +14890,22 @@ def trade_set_allows(symbol):
     return _base_asset(symbol) in set(trade_set_symbols())
 
 
+CORE_SYMBOLS = ('BTC', 'ETH', 'SOL')      # V3.44.159: کلید واچ‌لیست «فقط BTC/ETH/SOL»
+
+
+def _core_only_blocks(s, symbol):
+    """V3.44.159: کلید «فقط BTC/ETH/SOL» روشن و نماد بیرون از این سه تاست؟ «ورود سریع» دستی (priority_watch) مستثناست."""
+    if not (s or {}).get('core_symbols_only'):
+        return False
+    if symbol in ((s or {}).get('priority_watch') or {}):
+        return False
+    return _base_asset(symbol) not in CORE_SYMBOLS
+
+
 def _trade_set_blocks_entry(s, symbol):
     """True = این نماد فقط رأی جهت می‌دهد و نباید وارد مسیر ورود شود. «ورود سریع» دستی (priority_watch) مستثناست."""
+    if _core_only_blocks(s, symbol):
+        return True
     if not TRADE_SET_ON:
         return False
     if symbol in (s.get('priority_watch') or {}):
@@ -16831,7 +16848,7 @@ def run_inbot_backtest(chat_id, cl='/backtest_btc'):
     if len(df) < 800:
         raise RuntimeError('داده‌ی تاریخی کافی نیست')
     cfg = copy.deepcopy(s['strategy_config'])
-    cfg['mtf_mode_enabled'] = False           # V3.44.157: بک‌تست فعلاً فقط تک‌تایم‌فریم است (۱۵ دقیقه‌ی عادی)
+    # V3.44.160: بک‌تست حالت چندتایم‌فریمی را هم پشتیبانی می‌کند (سطوح/واکنش ۱ ساعته از کندل‌های همان داده ساخته می‌شود)
     cfg['halving_btc_dynamic_k'] = False      # V3.44.151: بک‌تست با k زنده‌ی BTC آلوده نشود
     cfg['halving_depth_freeze'] = False       # V3.44.154: بک‌تست عمق را هر کندل از ATR همان لحظه می‌گیرد (قفل فقط برای معامله‌ی زنده)
     _halving_tf_apply(cfg, tf)
@@ -17079,6 +17096,8 @@ def _bt_extra_line(res, s, tf, truncated_note=''):
     pre = presets_mod.PRESETS.get(act, {}).get('label') if act else None
     parts = [f"پریست: {('کلید ' + str(act) + ' — ' + pre) if pre else 'تنظیمات دستی/بدون کلید'}",
              'با ترلینگ' if s.get('trail_enabled') else 'بدون ترلینگ']
+    if (s.get('strategy_config') or {}).get('mtf_mode_enabled') and tf in _MTF_ENTRY_TFS:      # V3.44.160
+        parts.append('چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if tf == '5min' else '۱۵') + ' دقیقه (رتبه‌ی نرم ۴ ساعته شبیه‌سازی نمی‌شود)')
     if tl:
         w = [t['pnl'] for t in tl if t['pnl'] > 0]
         l = [t['pnl'] for t in tl if t['pnl'] <= 0]
@@ -17106,7 +17125,6 @@ def _bt_run_worker(chat_id):
         if len(df) < 800:
             raise RuntimeError('فایل داده‌ی نگه‌داری‌شده ناقص است؛ دوباره دانلود کنید.')
         cfg = copy.deepcopy(s['strategy_config'])
-        cfg['mtf_mode_enabled'] = False           # V3.44.157
         cfg['halving_btc_dynamic_k'] = False      # V3.44.151
         cfg['halving_depth_freeze'] = False       # V3.44.154
         _halving_tf_apply(cfg, tf)
@@ -19328,16 +19346,22 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id,'📝 نام نماد را ارسال کنید (مثال BTC)')
         return
 
+    if cl == '/toggle_core_symbols':      # V3.44.159
+        s['core_symbols_only'] = not bool(s.get('core_symbols_only', False))
+        save_session(chat_id)
+        cl = '/manage_watchlist'
     if cl in ('/manage_watchlist','/watchlist_list'):
         long_list='، '.join(SHARED_LONG_WATCHLIST)
         short_list='، '.join(SHARED_SHORT_WATCHLIST)
+        _core_txt = ("🎯 *حالت «فقط BTC / ETH / SOL» روشن است:* اسکن و معامله فقط روی همین سه نماد انجام می‌شود (بقیه‌ی واچ‌لیست دست‌نخورده می‌ماند و با خاموش‌کردن کلید برمی‌گردد).\n\n"
+                     if s.get('core_symbols_only') else "")
         edit_page(
             chat_id,
-            f"📋 *واچ‌لیست فعال*\n\n"
+            _core_txt + f"📋 *واچ‌لیست فعال*\n\n"
             f"🟢 *Long* ({len(SHARED_LONG_WATCHLIST)} نماد):\n`{long_list}`\n\n"
             f"🔴 *Short* ({len(SHARED_SHORT_WATCHLIST)} نماد):\n`{short_list}`"
             + (("\n\n" + trade_set_text()) if trade_set_text() else ''),
-            get_watchlist_manage_keyboard(),message_id); return
+            get_watchlist_manage_keyboard(bool(s.get('core_symbols_only', False))),message_id); return
     if cl.startswith('/manage_'):
         sym=cl.replace('/manage_','').upper()
         for p in s['paper_positions']:
@@ -20817,6 +20841,8 @@ async def scan_loop():
                             continue
                         user_tf = s.get('timeframe', '5min')
                         watchlist = base_watchlist_by_tf.get(user_tf) or []
+                        if s.get('core_symbols_only'):      # V3.44.159: فقط BTC/ETH/SOL
+                            watchlist = [x for x in watchlist if _base_asset(x) in CORE_SYMBOLS]
                         _hrs_ok, _hrs_why = _in_trade_hours(s)
                         if not _hrs_ok:
                             # V3.44.34: خارج از ساعات مجاز، واچ‌لیست عادی اسکن نمی‌شود؛ صف «ورود سریع» خودِ کاربر همچنان بررسی می‌شود.

@@ -436,8 +436,9 @@ def get_entry_diag_keyboard(enabled=True, interval=600):
     ]}
 
 
-def get_watchlist_manage_keyboard():
+def get_watchlist_manage_keyboard(core_on=False):
     return {"inline_keyboard": [
+        [{"text": f"{'🟢' if core_on else '🔴'} 🎯 فقط BTC / ETH / SOL", "callback_data": "/toggle_core_symbols"}],
         [{"text":"➕ افزودن Long","callback_data":"/add_long_symbol"},{"text":"➖ حذف Long","callback_data":"/remove_long_symbol"}],
         [{"text":"➕ افزودن Short","callback_data":"/add_short_symbol"},{"text":"➖ حذف Short","callback_data":"/remove_short_symbol"}],
         [{"text":"🧪 بک‌تست","callback_data":"/backtest_start"}],

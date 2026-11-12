@@ -12,6 +12,9 @@
   * اگر در یک کندل هم SL و هم TP لمس شود، SL حساب می‌شود (همان PAPER_CONSERVATIVE_OHLC ربات).
 
 گیت‌های ورودی BTC (V3.44.127) از طریق entry_gate اختیاری وصل می‌شوند (bt_btc_gates.py).
+حالت چندتایم‌فریمی (V3.44.160): اگر cfg['mtf_mode_enabled'] روشن و تایم‌فریم ۵/۱۵ دقیقه باشد، کندل‌های ۱ ساعته از خودِ کندل‌های
+ورود ساخته می‌شوند (ساعت جاری ناقص و فقط تا لحظه‌ی همان قدم) و ATR هموار ۱ ساعته (میانه‌ی ۲۰۰ کندل بسته‌شده) برای درخت سطوح
+در هر قدم تازه می‌شود؛ سطوح و واکنش از ۱ ساعته، ورود از کندل بسته‌شده‌ی ۵/۱۵ دقیقه (strategy_halving_mtf).
 آنچه عمداً شبیه‌سازی نمی‌شود (در خروجی هم نوشته می‌شود): رأی‌گیری فیلترها، صف تایید، فیلتر ساعت،
 سقف ریسک روزانه، ورود/خروج پله‌ای (tp_stages)، محافظ BTC بعد از ورود و هم‌جهتی با بازار (۱۰ شاخص).
 """
@@ -82,6 +85,17 @@ def simulate(df: pd.DataFrame, cfg: dict, filters: dict, timeframe: str = '15min
     htf_specs = {'5min': [('1h', 3_600_000), ('4h', 14_400_000)], '15min': [('1h', 3_600_000), ('4h', 14_400_000)],
                  '1hour': [('4h', 14_400_000)]}.get(timeframe, []) if use_htf else []
     htf = {k: _build_htf_complete(df, pm) for k, pm in htf_specs}
+    # V3.44.160: حالت چندتایم‌فریمی (سطوح/واکنش ۱ ساعته، ورود ۵/۱۵ دقیقه)
+    mtf_on = bool(halving_on and cfg.get('mtf_mode_enabled') and timeframe in ('5min', '15min'))
+    mtf_agg = mtf_g = mtf_med = mtf_keys = None
+    md_cache: Dict[int, pd.DataFrame] = {}
+    mtf_warm = 0
+    if mtf_on:
+        mtf_agg, mtf_g = _build_htf_complete(df, 3_600_000)
+        _i1 = calculate_indicators(mtf_agg.reset_index(drop=True)[['timestamp', 'open', 'high', 'low', 'close', 'volume']])
+        mtf_med = pd.to_numeric(_i1['atr'], errors='coerce').rolling(200, min_periods=60).median().values
+        mtf_keys = mtf_agg.index.values
+        mtf_warm = int(105 * 3_600_000 / tf_ms) + 50          # حداقل ۱۰۰ کندل ۱ ساعته برای strategy_halving_mtf
     # اندیکاتورها (EMA/ATR/ADX/RSI/MACD/رولینگ) همه علّی‌اند؛ یک‌بار روی کل تاریخچه حساب می‌شوند (به‌جای هر قدم).
     # تفاوتِ شروع پنجره با زنده فقط در گرم‌شدن EMAهاست که بعد از چند صد کندل صفر می‌شود.
     ind_all = calculate_indicators(df)
@@ -91,14 +105,14 @@ def simulate(df: pd.DataFrame, cfg: dict, filters: dict, timeframe: str = '15min
     first = 0
     if start_ms is not None:
         first = int(np.searchsorted(ts, start_ms, side='left'))
-    first = max(first, WARMUP)
+    first = max(first, WARMUP, mtf_warm)
     last = n - 2 if end_ms is None else min(n - 2, int(np.searchsorted(ts, end_ms, side='left')) - 1)
     if last <= first:
         raise RuntimeError('داده کافی برای این بازه نیست (حداقل ~۷۰۰ کندل قبل از شروع بازه لازم است).')
 
     t0 = time.time()
     trades: List[dict] = []
-    stats = {'signals': 0, 'plan_failed': 0, 'steps': 0, 'with_stages': 0, 'gate_blocked': {}}
+    stats = {'signals': 0, 'plan_failed': 0, 'steps': 0, 'with_stages': 0, 'gate_blocked': {}, 'mtf': mtf_on}
     fee_rate = float(fee_pct) / 100.0
     i = first
     cool_until = -1
@@ -119,11 +133,24 @@ def simulate(df: pd.DataFrame, cfg: dict, filters: dict, timeframe: str = '15min
         frow.update({'timestamp': int(ts[i + 1]), 'open': nxt_open, 'high': nxt_open, 'low': nxt_open,
                      'close': nxt_open, 'volume': 0.0})
         primary = pd.concat([closed, pd.DataFrame([frow])], ignore_index=True)
+        cfg_i = cfg
         try:
             md = {}
             for key, (agg, g) in htf.items():
                 md[key] = calculate_indicators(_htf_view(agg, g, df, i))
-            sig, reason = get_signal_with_reason(primary, md, 'single', timeframe, strategy_type, filters, cfg, None,
+            if mtf_on:
+                gi = int(mtf_g[i])
+                if gi not in md_cache:        # بخش بسته‌شده‌ی ۱ ساعته در طول همان ساعت ثابت است؛ فقط ردیف در حال تشکیل (نادیده‌گرفته می‌شود) فرق می‌کند
+                    md_cache.clear()
+                    md_cache[gi] = calculate_indicators(_htf_view(mtf_agg, mtf_g, df, i))
+                md['1h'] = md_cache[gi]
+                pos = int(np.searchsorted(mtf_keys, gi, side='left')) - 1       # آخرین کندل ۱ ساعته‌ی کامل
+                med = float(mtf_med[pos]) if pos >= 0 and np.isfinite(mtf_med[pos]) else 0.0
+                if med <= 0:
+                    i += 1
+                    continue
+                cfg_i = {**cfg, 'halving_atr_override': med}
+            sig, reason = get_signal_with_reason(primary, md, 'single', timeframe, strategy_type, filters, cfg_i, None,
                                                  live_price=nxt_open)
         except Exception:
             i += 1
@@ -133,7 +160,7 @@ def simulate(df: pd.DataFrame, cfg: dict, filters: dict, timeframe: str = '15min
             continue
         stats['signals'] += 1
         try:
-            plan, _why = build_trade_plan(primary, sig, cfg, 'dynamic' if strategy_type == 'dynamic' else strategy_type,
+            plan, _why = build_trade_plan(primary, sig, cfg_i, 'dynamic' if strategy_type == 'dynamic' else strategy_type,
                                           strategy_timeframe=timeframe, grid_levels=None, live_price=nxt_open)
         except Exception:
             plan = None
