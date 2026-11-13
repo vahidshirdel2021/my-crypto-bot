@@ -46,7 +46,8 @@ from strategy import (
     pd_level_guard_df,
 )
 from halving_levels import depth_label_fa as _hv_depth_label
-from strategy import set_halving_k_provider, halving_k_effective      # V3.44.145: k پویا از BTC
+from strategy import set_halving_k_provider, halving_k_effective
+from strategy import simple_mode_on, simple_mode_forces_off      # V3.44.162      # V3.44.145: k پویا از BTC
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
@@ -1229,7 +1230,7 @@ def _halving_tf_store(cfg, tf):
 def _p4_keep_flags(old_cfg, new_cfg):
     """دکمه‌های مدل PDH/PDL+P4 هنگام بازسازی preset (تغییر تایم‌فریم/ریست) از دست نروند."""
     if isinstance(old_cfg, dict):
-        for k in tuple(_P4_FLAG_KEYS) + tuple(GATE_REGISTRY):   # V3.42: کلیدهای گیت هم با تغییر تایم‌فریم از بین نروند
+        for k in tuple(_P4_FLAG_KEYS) + tuple(GATE_REGISTRY) + ('simple_scenario_mode',):   # V3.42: کلیدهای گیت هم با تغییر تایم‌فریم از بین نروند
             if k in old_cfg:
                 new_cfg[k] = old_cfg[k]
     return new_cfg
@@ -1255,7 +1256,7 @@ def _setup_mgmt_text(s):
     if (s.get('strategy_config') or {}).get('halving_model_enabled'):
         if s.get('setup_legacy_view'):
             return "📦 *سطوح قدیمی*\nتا وقتی مدل نصف‌کردن روشن است این‌ها روی معامله اثری ندارند. فقط اگر مدل نصف‌کردن را خاموش کنی دوباره کار می‌کنند."
-        _mtf_txt = ("\n\n🧭 *حالت چندتایم‌فریمی روشن است:* ۴ ساعته → رژیم نماد با «رتبه‌ی نرم» (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک) | ۱ ساعته → سطوح و واکنش کندل‌ها به آن‌ها | " + ('۵' if s.get('timeframe') == '5min' else '۱۵') + " دقیقه → فقط نقطه‌ی ورود."
+        _mtf_txt = ("\n\n🧭 *حالت چندتایم‌فریمی روشن است:* ۱ ساعته → سطوح و واکنش کندل‌ها به آن‌ها | ورود با " + ('۵' if s.get('timeframe') == '5min' else '۱۵') + " دقیقه → فقط نقطه‌ی ورود."
                     if (s.get('strategy_config') or {}).get('mtf_mode_enabled') else "")
         return "🎛 *مدیریت ستاپ‌های معاملاتی*\n🪜 مدل سطوح نصف‌کردن روشن است: سیگنال و هدف فقط از سطوح درخت نصف‌کردن می‌آید. سطوح قدیمی (PDH/PDL+P4 و ...) در زیرمنوی «سطوح قدیمی» هستند و فعلاً استفاده نمی‌شوند." + _mtf_txt
     if (s.get('strategy_config') or {}).get('daily_p4_mode', True):
@@ -1322,7 +1323,7 @@ def normalize_session(data):
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
         'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf',
-        'mtf_mode_enabled', 'mtf_prev_tier',
+        'mtf_mode_enabled', 'mtf_prev_tier', 'simple_scenario_mode',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -6476,7 +6477,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.139'
+BOT_VERSION = '3.44.162'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7142,7 +7143,7 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
                 tp_level_name=' → '.join(str(st.get('name')) for st in _valid)+' (پله‌ای)'
     # V3.44.13: رتبه‌ی نرم با رژیم ۴ ساعته - سیگنال را رد نمی‌کند، فقط ریسک/حجم را کم می‌کند
     _tier_mult = 1.0; _tier_info = None
-    if gate_on(s, 'gate_h4_tier_enabled') and not force:
+    if gate_on(s, 'gate_h4_tier_enabled') and not force and not (s.get('strategy_config') or {}).get('mtf_mode_enabled'):      # V3.44.161: در حالت چندتایم‌فریمی رتبه‌ی نرم ۴ ساعته حذف است
         try:
             _reg = _symbol_h4_regime(symbol)
             if _reg is not None:
@@ -7856,7 +7857,7 @@ def _mtf_md_for(symbol):
 
 
 def _mtf_set(chat_id, s, on, entry_tf=None):
-    """V3.44.157: روشن/خاموش‌کردن حالت چندتایم‌فریمی: ۴ساعته (رژیم نرم) ← ۱ساعته (سطوح و واکنش) ← ورود با ۱۵ یا ۵ دقیقه.
+    """V3.44.157: روشن/خاموش‌کردن حالت چندتایم‌فریمی: ۱ساعته (سطوح و واکنش) ← ورود با ۱۵ یا ۵ دقیقه (V3.44.161: رژیم نرم ۴ ساعته حذف شد).
     V3.44.158: entry_tf انتخاب تایم‌فریم ورود؛ None = همان تایم‌فریم فعلی اگر ۵/۱۵ دقیقه باشد، وگرنه ۱۵ دقیقه."""
     if on:
         if entry_tf is None:
@@ -7870,7 +7871,7 @@ def _mtf_set(chat_id, s, on, entry_tf=None):
             cfg['mtf_prev_tier'] = bool(cfg.get('gate_h4_tier_enabled', False))
         cfg['mtf_mode_enabled'] = True
         cfg['halving_model_enabled'] = True
-        cfg['gate_h4_tier_enabled'] = True          # رژیم ۴ ساعته: رتبه‌ی نرم (هر دو جهت مجاز؛ خلاف رژیم = نصف ریسک)
+        cfg['gate_h4_tier_enabled'] = False         # V3.44.161: رتبه‌ی نرم ۴ ساعته در این حالت خاموش (خاموش‌کردن حالت، مقدار قبلی را برمی‌گرداند)
         _halving_tf_apply(cfg, s['timeframe'])
     else:
         cfg = s.setdefault('strategy_config', {})
@@ -10502,7 +10503,7 @@ def _trade_hours_ranges_text(key):
 
 def _in_trade_hours(s, ts=None):
     """(مجاز؟, توضیح). خاموش = همیشه مجاز."""
-    if not (s or {}).get('hours_filter_enabled', False):
+    if not (s or {}).get('hours_filter_enabled', False) or simple_mode_on((s or {}).get('strategy_config')):
         return True, ''
     key = _hours_profile_key(s)
     t = time.gmtime(ts if ts is not None else time.time())
@@ -12538,7 +12539,7 @@ def _fav_confirm_active(chat_id):
 def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """True = سیگنال در صف «صبر برای تایید» نگه داشته شد (ورود فعلاً انجام نمی‌شود)."""
     s = get_session(chat_id)
-    if not s.get('fav_confirm_enabled', False):
+    if not s.get('fav_confirm_enabled', False) or simple_mode_on(s.get('strategy_config')):
         return False
     now = time.time()
     _tag, level_token, level_value = extract_setup_level(full_reason)
@@ -13365,6 +13366,8 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
     دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
     همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
+    if simple_mode_on((get_session(chat_id) or {}).get('strategy_config')):      # V3.44.162
+        return False
     if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id) and not _h4_warn_active(chat_id):
         return False
     s = get_session(chat_id)
@@ -14904,6 +14907,8 @@ def _core_only_blocks(s, symbol):
 
 def _trade_set_blocks_entry(s, symbol):
     """True = این نماد فقط رأی جهت می‌دهد و نباید وارد مسیر ورود شود. «ورود سریع» دستی (priority_watch) مستثناست."""
+    if simple_mode_on((s or {}).get('strategy_config')):      # V3.44.162: حالت ساده فقط BTC/ETH/SOL
+        return symbol not in ((s or {}).get('priority_watch') or {}) and _base_asset(symbol) not in CORE_SYMBOLS
     if _core_only_blocks(s, symbol):
         return True
     if not TRADE_SET_ON:
@@ -15696,6 +15701,8 @@ async def scan_symbol(http,chat_id,symbol):
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
     scan_generation=int(s.get('scan_generation',0))
+    if simple_mode_on(s.get('strategy_config')) and symbol not in (s.get('priority_watch') or {}) and _base_asset(symbol) not in CORE_SYMBOLS:
+        return _entry_diag_result(chat_id, symbol, 'blocked', 'حالت ساده ۶ سناریو: فقط BTC/ETH/SOL', 'simple_mode')      # V3.44.162
     if time.time() < float(s['cooldowns'].get(symbol,0)):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     tf=s['timeframe']; strat=s['active_strategy']; md={}
@@ -15760,7 +15767,7 @@ async def scan_symbol(http,chat_id,symbol):
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], cfg_entry, None, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     _simple_touch = False
-    if not sig and is_scalp_strategy and cfg_entry.get('scenario_7_enabled', False):
+    if not sig and is_scalp_strategy and cfg_entry.get('scenario_7_enabled', False) and not simple_mode_on(cfg_entry):
         # V3.44.35: حالت ۷ «برخورد ساده»: وقتی هیچ‌کدام از ۶ حالتِ دیگر سیگنال نداده، فقط رسیدن قیمت به سطح کافی است؛ مستقیم به لیست انتظار و رأی‌گیری می‌رود.
         try:
             _st_sig, _st_reason = simple_touch_signal(primary, cfg_entry, live_entry_price, primary_tf)
@@ -16400,7 +16407,7 @@ def preset_active_text(name):
         lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}",
                   '• حالت‌های معامله: ' + ('، '.join(sc) if sc else 'هیچ‌کدام')]
         if cfg.get('mtf_mode_enabled'):
-            lines.append('• حالت چندتایم‌فریمی: روشن (۴ساعته رژیم نرم ← ۱ساعته سطح و واکنش ← ورود با ' + ('۵' if s.get('timeframe') == '5min' else '۱۵') + ' دقیقه)')
+            lines.append('• حالت چندتایم‌فریمی: روشن (۱ساعته سطح و واکنش ← ورود با ' + ('۵' if s.get('timeframe') == '5min' else '۱۵') + ' دقیقه)')
     return '\n'.join(lines)[:3900]
 
 
@@ -16414,7 +16421,10 @@ def _gate_default(key):
 def gate_on(s, key):
     """وضعیت یک کلید گیت برای این سشن (از strategy_config؛ در غیاب آن پیش‌فرض رجیستری)."""
     try:
-        return bool((s.get('strategy_config') or {}).get(key, _gate_default(key)))
+        _c = s.get('strategy_config') or {}
+        if simple_mode_forces_off(_c, key):      # V3.44.162: حالت ساده ۶ سناریو
+            return False
+        return bool(_c.get(key, _gate_default(key)))
     except Exception:
         return _gate_default(key)
 
@@ -17097,7 +17107,7 @@ def _bt_extra_line(res, s, tf, truncated_note=''):
     parts = [f"پریست: {('کلید ' + str(act) + ' — ' + pre) if pre else 'تنظیمات دستی/بدون کلید'}",
              'با ترلینگ' if s.get('trail_enabled') else 'بدون ترلینگ']
     if (s.get('strategy_config') or {}).get('mtf_mode_enabled') and tf in _MTF_ENTRY_TFS:      # V3.44.160
-        parts.append('چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if tf == '5min' else '۱۵') + ' دقیقه (رتبه‌ی نرم ۴ ساعته شبیه‌سازی نمی‌شود)')
+        parts.append('چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if tf == '5min' else '۱۵') + ' دقیقه')
     if tl:
         w = [t['pnl'] for t in tl if t['pnl'] > 0]
         l = [t['pnl'] for t in tl if t['pnl'] <= 0]
@@ -19050,7 +19060,7 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
-    if cl == '/set_tf_mtf':          # V3.44.157: ویزارد: حالت چندتایم‌فریمی (۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود)
+    if cl == '/set_tf_mtf':          # V3.44.157: ویزارد: حالت چندتایم‌فریمی (۱س سطح/واکنش ← ۱۵د ورود)
         _mtf_set(chat_id, s, True)
         save_session(chat_id)
         wizard_mode_page(chat_id, message_id); return
@@ -19895,6 +19905,21 @@ def process_command(cmd,chat_id,message_id=None):
         _row = GATE_REGISTRY[_gk]
         _new_state = '🟢 روشن' if not _cur else '🔴 خاموش'
         send_message(chat_id, f"{_row[0]}: {_new_state}\n\n{_row[3]}", trade_filter_management_keyboard(chat_id, _row[2]))
+        return
+    if cl=='/toggle_simple_mode':      # V3.44.162
+        s.setdefault('strategy_config', {})
+        cur = bool(s['strategy_config'].get('simple_scenario_mode', False))
+        s['strategy_config']['simple_scenario_mode'] = not cur
+        save_session(chat_id)
+        if not cur:
+            _note = ('🟢 *حالت ساده ۶ سناریو روشن شد*\n\n• فقط BTC / ETH / SOL\n• هر ۶ سناریو فعال (حالت ۷ و «سخت‌گیری بیشتر» نادیده)\n'
+                     '• بدون رأی‌گیری، بدون صف انتظار/تایید حرکت، بدون هیچ فیلتر BTC/ETH/رژیم/اندیکاتور/ساعت/امتیاز/R:R\n'
+                     '• به‌محض تحقق سناریو، ورود انجام می‌شود\n• فقط این‌ها می‌مانند: توقف ضرر روزانه/ایست ایمنی، سقف جمع ریسک، استراحت بعد از معامله، عدم تکرار روی یک سطح، سقف پوزیشن و موجودی')
+            if s.get('assist_mode_enabled'):
+                _note += '\n\n⚠️ حالت دستیار روشن است؛ ورود فقط بعد از تایید دستی انجام می‌شود. برای ورود خودکار آن را خاموش کنید.'
+        else:
+            _note = '🔴 حالت ساده ۶ سناریو خاموش شد؛ تنظیمات قبلی فیلترها و رأی‌گیری دوباره اعمال می‌شود.'
+        send_message(chat_id, _note, get_scenario_management_keyboard(s))
         return
     if cl=='/scenario_management':
         send_message(
