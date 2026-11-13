@@ -147,8 +147,8 @@ def get_timeframe_keyboard(cur='15min', mtf=False):
         [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
         [t("5min", "⏱ ۵ دقیقه", "/set_tf_5m"), t("15min", "⏱ ۱۵ دقیقه", "/set_tf_15m")],
         [t("1hour", "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "/set_tf_1h")],
-        [{"text": f"{'✅ ' if (mtf and cur != '5min') else ''}🧭 چندتایم‌فریمی: جهت ۴س ← واکنش ۱س ← ورود ۱۵د", "callback_data": "/set_tf_mtf"}],
-        [{"text": f"{'✅ ' if (mtf and cur == '5min') else ''}🧭 چندتایم‌فریمی: جهت ۴س ← واکنش ۱س ← ورود ۵د", "callback_data": "/set_tf_mtf5"}],
+        [{"text": f"{'✅ ' if (mtf and cur != '5min') else ''}🧭 چندتایم‌فریمی: سطح و واکنش ۱س ← ورود ۱۵د", "callback_data": "/set_tf_mtf"}],
+        [{"text": f"{'✅ ' if (mtf and cur == '5min') else ''}🧭 چندتایم‌فریمی: سطح و واکنش ۱س ← ورود ۵د", "callback_data": "/set_tf_mtf5"}],
         [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
@@ -208,7 +208,7 @@ def get_setup_management_keyboard(session=None):
     rows.append([{"text": f"{'🟢' if hv_on else '🔴'} 🪜 مدل سطوح نصف‌کردن (مستقل از بقیه‌ی سطوح)", "callback_data": "/toggle_halving_model"}])
     if hv_on:
         _mtf_on = bool(_cfg_ui.get("mtf_mode_enabled", False))      # V3.44.157
-        rows.append([{"text": f"{'🟢' if _mtf_on else '🔴'} 🧭 چندتایم‌فریمی: ۴س رژیم نرم ← ۱س سطح/واکنش ← ورود با ۱۵/۵ دقیقه", "callback_data": "/toggle_mtf_mode"}])
+        rows.append([{"text": f"{'🟢' if _mtf_on else '🔴'} 🧭 چندتایم‌فریمی: ۱س سطح/واکنش ← ورود با ۱۵/۵ دقیقه", "callback_data": "/toggle_mtf_mode"}])
         if _mtf_on:
             _et = "۵ دقیقه" if s.get("timeframe") == "5min" else "۱۵ دقیقه"
             rows.append([{"text": f"⏱ تایم‌فریم ورود: {_et} (برای تعویض بزن)", "callback_data": "/toggle_mtf_entry_tf"}])
@@ -245,7 +245,7 @@ def get_scenario_management_keyboard(session=None):
     + معافیت‌های همسویی با بازار. نام دکمه‌ها برای کاربر مبتدی ساده نوشته شده؛ callback_data ها ثابت‌اند."""
     s = session or {}
     cfg = s.get("strategy_config") or {}
-    rows = []
+    rows = [[{"text": f"{'🟢' if cfg.get('simple_scenario_mode') else '🔴'} حالت ساده ۶ سناریو (BTC/ETH/SOL، بدون فیلتر و رأی‌گیری)", "callback_data": "/toggle_simple_mode"}]]
     for n in ("1", "2", "3", "4", "5", "6", "7"):
         is_on = bool(cfg.get(f"scenario_{n}_enabled", n != "7"))
         icon = "🟢" if is_on else "🔴"

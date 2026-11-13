@@ -1,4 +1,4 @@
-"""تست مستقل «حالت چندتایم‌فریمی» (۴س رژیم نرم ← ۱س سطح/واکنش ← ۱۵د ورود): python mtf_mode_selftest.py
+"""تست مستقل «حالت چندتایم‌فریمی» (۱س سطح/واکنش ← ۱۵د ورود): python mtf_mode_selftest.py
 داده‌ی ساختگی: سقف/کف 200/100، ATR مؤثر ۲ (درخت ۱ ساعته) => عمق ۳ و سطوح 100، 112.5، 125، 137.5 ...
 کندل ۱ ساعته‌ی واکنش: سایه‌ی بلند زیر ۱۲۵ و کلوز ۱۲۷٫۲؛ بعدش اولین کندل ۱۵ دقیقه‌ی صعودی."""
 import numpy as np
@@ -147,7 +147,7 @@ try:
     s = {'timeframe': '1hour', 'strategy_config': {**st.get_timeframe_preset('1hour'), 'gate_h4_tier_enabled': False, 'halving_model_enabled': True}}
     bot._mtf_set(1, s, True)
     c = s['strategy_config']
-    check("روشن‌کردن از تایم‌فریم غیرمجاز: ورود پیش‌فرض ۱۵ دقیقه + رتبه‌ی نرم روشن", s['timeframe'] == '15min' and c['mtf_mode_enabled'] and c['gate_h4_tier_enabled'])
+    check("روشن‌کردن از تایم‌فریم غیرمجاز: ورود پیش‌فرض ۱۵ دقیقه + رتبه‌ی نرم ۴س خاموش", s['timeframe'] == '15min' and c['mtf_mode_enabled'] and not c['gate_h4_tier_enabled'])
     check("k و عمق از تایم‌فریم ۱ ساعته", bot._halving_eff_tf(c, '15min') == '1hour' and c['halving_k_atr'] == bot.HALVING_TF_DEFAULTS['1hour']['halving_k_atr'])
     bot._halving_tf_store({**c}, '15min')
     bot._mtf_set(1, s, False)
@@ -157,7 +157,7 @@ try:
     bot._mtf_set(1, s5s, True, entry_tf='5min')
     check("ورود ۵ دقیقه: تایم‌فریم جلسه ۵ دقیقه و k/عمق ۱ ساعته", s5s['timeframe'] == '5min' and s5s['strategy_config']['mtf_mode_enabled'] and bot._halving_eff_tf(s5s['strategy_config'], '5min') == '1hour')
     bot._mtf_set(1, s5s, True, entry_tf='15min')
-    check("تعویض به ۱۵ دقیقه، حالت روشن می‌ماند", s5s['timeframe'] == '15min' and s5s['strategy_config']['mtf_mode_enabled'] and s5s['strategy_config']['gate_h4_tier_enabled'])
+    check("تعویض به ۱۵ دقیقه، حالت روشن می‌ماند و رتبه‌ی نرم خاموش", s5s['timeframe'] == '15min' and s5s['strategy_config']['mtf_mode_enabled'] and not s5s['strategy_config']['gate_h4_tier_enabled'])
     bot._mtf_set(1, s5s, False)
     check("خاموش‌کردن بعد از تعویض: رتبه‌ی نرم به حالت اول", s5s['strategy_config']['gate_h4_tier_enabled'] is False)
     kb = ui.get_timeframe_keyboard('15min', True)

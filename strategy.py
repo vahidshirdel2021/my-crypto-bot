@@ -310,6 +310,8 @@ STRATEGY_DEFAULTS = {
     "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
     "gate_fee_ratio_enabled": True,     # نسبت ریسک به کارمزد (پلن)
     "gate_min_score_enabled": True,     # حداقل امتیاز کیفیت
+    # V3.44.162: «حالت ساده ۶ سناریو» (کلید اصلی): فقط ۶ سناریو؛ بدون رأی‌گیری، بدون فیلتر و بدون سناریوی ۷ و سخت‌گیری‌های اضافه.
+    "simple_scenario_mode": False,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -893,11 +895,26 @@ def _rejection_wick_ok(o, c, h, l, sig, min_wick_frac):
     return (wick / rng) >= min_wick_frac
 
 
+# V3.44.162: حالت ساده ۶ سناریو. وقتی روشن است همه‌ی کلیدهای gate_* خاموش حساب می‌شوند، به‌جز این چهار کنترل مدیریت سرمایه/ضدتکرار.
+SIMPLE_MODE_KEEP_GATES = frozenset({"gate_risk_guard_enabled", "gate_total_risk_cap_enabled", "gate_cooldown_enabled", "gate_traded_level_enabled"})
+
+
+def simple_mode_on(cfg):
+    try:
+        return bool((cfg or {}).get("simple_scenario_mode", False))
+    except Exception:
+        return False
+
+
+def simple_mode_forces_off(cfg, key):
+    return simple_mode_on(cfg) and str(key).startswith("gate_") and key not in SIMPLE_MODE_KEEP_GATES
+
+
 def _confirm_simple_reject(curr, sig, cfg):
     """تاییدیه‌ی اختیاری حالت ۱/۲ (برخورد ساده + برگشت): طبق چیزی که قبلاً باهم
     صحبت کردیم - کندل رد‌کننده (فتیله‌ی بلند فراتر از سطح، حداقل confirm_simple_min_wick_frac
     از کل رنج کندل) + حجم بالاتر از میانگین روی همان کندل."""
-    if not bool(cfg.get("confirm_simple_reject_enabled", False)):
+    if simple_mode_on(cfg) or not bool(cfg.get("confirm_simple_reject_enabled", False)):
         return True, None
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
     min_wick = float(cfg.get("confirm_simple_min_wick_frac", 0.35))
@@ -912,7 +929,7 @@ def _confirm_continuation(d, breakout_idx, pullback_idx, cfg):
     """تاییدیه‌ی اختیاری حالت ۳/۴ (نفوذ+پولبک+ادامه): پولبک «سالم» یعنی حجم لگ شکست
     از حجم کندل پولبک بیشتر باشد (پولبک کم‌حجم = سالم) + کندل پولبک بدنه‌ی قوی در جهت
     ادامه داشته باشد - دقیقاً همان دو معیاری که قبلاً برای این حالت پیشنهاد شد."""
-    if not bool(cfg.get("confirm_continuation_enabled", False)):
+    if simple_mode_on(cfg) or not bool(cfg.get("confirm_continuation_enabled", False)):
         return True, None
     if breakout_idx is None or not (0 <= breakout_idx < len(d)):
         return True, None
@@ -931,7 +948,7 @@ def _confirm_fakeout(d, breakout_idx, pullback_idx, cfg):
     """تاییدیه‌ی اختیاری حالت ۵/۶ (شکست کاذب): همان معیاری که قبلاً پیشنهاد شد -
     واگرایی حجم (لگ نفوذ کم‌حجم بوده یا کندل برگشت پرحجم‌تر از آن است) + کندل برگشت
     با بدنه‌ی قوی (رد شدن قاطع، نه یک دوجی بی‌تصمیم)."""
-    if not bool(cfg.get("confirm_fakeout_enabled", False)):
+    if simple_mode_on(cfg) or not bool(cfg.get("confirm_fakeout_enabled", False)):
         return True, None
     if breakout_idx is None or not (0 <= breakout_idx < len(d)):
         return True, None
@@ -1423,6 +1440,8 @@ def _scenario_enabled(kind, sig, cfg):
     n = _scenario_number(kind, sig)
     if n is None:
         return True
+    if simple_mode_on(cfg):      # V3.44.162: حالت ساده = همیشه هر ۶ سناریو روشن
+        return n in ("1", "2", "3", "4", "5", "6")
     key = _SCENARIO_TOGGLE_KEYS.get(n)
     return bool(cfg.get(key, True)) if key else True
 
@@ -1480,7 +1499,7 @@ def simple_touch_signal(df, strategy_config=None, live_price=None, timeframe="5m
     سطح پایینی = خرید (فقط یک رأی؛ جهت نهایی با رأی‌گیری فیلترها تعیین می‌شود). سطوح: همان سطوح فعال استراتژی (مدل PDH/PDL: سقف/کف روز قبل،
     و در حالت برگشت P4: ۴ساعته هم). خروجی reason تگ [SETUP ...] و |SCN=7 دارد تا لیست انتظار و رأی‌گیری مثل بقیه‌ی حالت‌ها کار کنند."""
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    if not bool(cfg.get("scenario_7_enabled", False)):
+    if simple_mode_on(cfg) or not bool(cfg.get("scenario_7_enabled", False)):
         return None, "حالت ۷ (برخورد ساده) خاموش است"
     if cfg.get("halving_model_enabled"):
         return _simple_touch_halving(df, strategy_config, live_price)     # V3.44.37: روی سطوح نصف‌کردن
@@ -1823,6 +1842,8 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
 
 
 def _gate_on(cfg, key, default=True):
+    if simple_mode_forces_off(cfg, key):
+        return False
     try:
         return bool(cfg.get(key, default))
     except Exception:
@@ -2504,7 +2525,7 @@ def pd_level_guard(d, idx, sig, live_price, cfg):
     (در مدل PDH/PDL خودِ سطح ستاپ است). d باید خروجی _compute_prev_day_levels با ستون‌های atr/_pdh/_pdl باشد."""
     try:
         cfg = cfg or {}
-        if sig not in ("BUY", "SELL") or not bool(cfg.get("halving_model_enabled")) or not bool(cfg.get("gate_pd_level_enabled", True)):
+        if sig not in ("BUY", "SELL") or not bool(cfg.get("halving_model_enabled")) or not _gate_on(cfg, "gate_pd_level_enabled"):
             return True, ""
         if d is None or idx is None or idx < 1 or idx >= len(d):
             return True, ""
