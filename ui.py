@@ -245,7 +245,7 @@ def get_scenario_management_keyboard(session=None):
     + معافیت‌های همسویی با بازار. نام دکمه‌ها برای کاربر مبتدی ساده نوشته شده؛ callback_data ها ثابت‌اند."""
     s = session or {}
     cfg = s.get("strategy_config") or {}
-    rows = [[{"text": f"{'🟢' if cfg.get('simple_scenario_mode') else '🔴'} حالت ساده ۶ سناریو (BTC/ETH/SOL، بدون فیلتر و رأی‌گیری)", "callback_data": "/toggle_simple_mode"}]]
+    rows = [[{"text": f"{'🟢' if cfg.get('fvg_enabled') else '🔴'} تشخیص FVG / IFVG برای ۶ سناریو", "callback_data": "/toggle_fvg"}]]
     for n in ("1", "2", "3", "4", "5", "6", "7"):
         is_on = bool(cfg.get(f"scenario_{n}_enabled", n != "7"))
         icon = "🟢" if is_on else "🔴"

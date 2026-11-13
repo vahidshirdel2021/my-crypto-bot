@@ -310,8 +310,12 @@ STRATEGY_DEFAULTS = {
     "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
     "gate_fee_ratio_enabled": True,     # نسبت ریسک به کارمزد (پلن)
     "gate_min_score_enabled": True,     # حداقل امتیاز کیفیت
-    # V3.44.162: «حالت ساده ۶ سناریو» (کلید اصلی): فقط ۶ سناریو؛ بدون رأی‌گیری، بدون فیلتر و بدون سناریوی ۷ و سخت‌گیری‌های اضافه.
-    "simple_scenario_mode": False,
+    # V3.44.163: تایید FVG/IFVG برای ۶ سناریو (کلید روشن/خاموش، پیش‌فرض خاموش). جزئیات در fvg_ifvg.py
+    "fvg_enabled": False,
+    "fvg_lookback_candles": 30,
+    "fvg_min_size_atr": 0.15,
+    "fvg_level_tol_atr": 1.0,
+    "fvg_recent_candles": 5,
 }
 
 TIMEFRAME_STRATEGY_PRESETS = {
@@ -895,26 +899,28 @@ def _rejection_wick_ok(o, c, h, l, sig, min_wick_frac):
     return (wick / rng) >= min_wick_frac
 
 
-# V3.44.162: حالت ساده ۶ سناریو. وقتی روشن است همه‌ی کلیدهای gate_* خاموش حساب می‌شوند، به‌جز این چهار کنترل مدیریت سرمایه/ضدتکرار.
-SIMPLE_MODE_KEEP_GATES = frozenset({"gate_risk_guard_enabled", "gate_total_risk_cap_enabled", "gate_cooldown_enabled", "gate_traded_level_enabled"})
+from fvg_ifvg import fvg_confirm as _fvg_confirm      # V3.44.163
 
 
-def simple_mode_on(cfg):
-    try:
-        return bool((cfg or {}).get("simple_scenario_mode", False))
-    except Exception:
-        return False
-
-
-def simple_mode_forces_off(cfg, key):
-    return simple_mode_on(cfg) and str(key).startswith("gate_") and key not in SIMPLE_MODE_KEEP_GATES
+def _fvg_apply(d, idx, kind, sig, reason, atr, cfg):
+    """V3.44.163: کلید fvg_enabled. خاموش = reason بدون تغییر. روشن = reason با توضیح تایید، یا None اگر FVG/IFVG تایید نکرد."""
+    if not bool((cfg or {}).get("fvg_enabled", False)):
+        return reason
+    anchor, _t = extract_sweep_anchor_target(reason)
+    ok, note = _fvg_confirm(d, idx, kind, sig, anchor, atr, cfg)
+    if not ok:
+        return None
+    if not note:
+        return reason
+    head, sep, tail = str(reason).partition("|")
+    return f"{head} + {note}{sep}{tail}"
 
 
 def _confirm_simple_reject(curr, sig, cfg):
     """تاییدیه‌ی اختیاری حالت ۱/۲ (برخورد ساده + برگشت): طبق چیزی که قبلاً باهم
     صحبت کردیم - کندل رد‌کننده (فتیله‌ی بلند فراتر از سطح، حداقل confirm_simple_min_wick_frac
     از کل رنج کندل) + حجم بالاتر از میانگین روی همان کندل."""
-    if simple_mode_on(cfg) or not bool(cfg.get("confirm_simple_reject_enabled", False)):
+    if not bool(cfg.get("confirm_simple_reject_enabled", False)):
         return True, None
     o, c, h, l = float(curr["open"]), float(curr["close"]), float(curr["high"]), float(curr["low"])
     min_wick = float(cfg.get("confirm_simple_min_wick_frac", 0.35))
@@ -929,7 +935,7 @@ def _confirm_continuation(d, breakout_idx, pullback_idx, cfg):
     """تاییدیه‌ی اختیاری حالت ۳/۴ (نفوذ+پولبک+ادامه): پولبک «سالم» یعنی حجم لگ شکست
     از حجم کندل پولبک بیشتر باشد (پولبک کم‌حجم = سالم) + کندل پولبک بدنه‌ی قوی در جهت
     ادامه داشته باشد - دقیقاً همان دو معیاری که قبلاً برای این حالت پیشنهاد شد."""
-    if simple_mode_on(cfg) or not bool(cfg.get("confirm_continuation_enabled", False)):
+    if not bool(cfg.get("confirm_continuation_enabled", False)):
         return True, None
     if breakout_idx is None or not (0 <= breakout_idx < len(d)):
         return True, None
@@ -948,7 +954,7 @@ def _confirm_fakeout(d, breakout_idx, pullback_idx, cfg):
     """تاییدیه‌ی اختیاری حالت ۵/۶ (شکست کاذب): همان معیاری که قبلاً پیشنهاد شد -
     واگرایی حجم (لگ نفوذ کم‌حجم بوده یا کندل برگشت پرحجم‌تر از آن است) + کندل برگشت
     با بدنه‌ی قوی (رد شدن قاطع، نه یک دوجی بی‌تصمیم)."""
-    if simple_mode_on(cfg) or not bool(cfg.get("confirm_fakeout_enabled", False)):
+    if not bool(cfg.get("confirm_fakeout_enabled", False)):
         return True, None
     if breakout_idx is None or not (0 <= breakout_idx < len(d)):
         return True, None
@@ -1440,8 +1446,6 @@ def _scenario_enabled(kind, sig, cfg):
     n = _scenario_number(kind, sig)
     if n is None:
         return True
-    if simple_mode_on(cfg):      # V3.44.162: حالت ساده = همیشه هر ۶ سناریو روشن
-        return n in ("1", "2", "3", "4", "5", "6")
     key = _SCENARIO_TOGGLE_KEYS.get(n)
     return bool(cfg.get(key, True)) if key else True
 
@@ -1499,7 +1503,7 @@ def simple_touch_signal(df, strategy_config=None, live_price=None, timeframe="5m
     سطح پایینی = خرید (فقط یک رأی؛ جهت نهایی با رأی‌گیری فیلترها تعیین می‌شود). سطوح: همان سطوح فعال استراتژی (مدل PDH/PDL: سقف/کف روز قبل،
     و در حالت برگشت P4: ۴ساعته هم). خروجی reason تگ [SETUP ...] و |SCN=7 دارد تا لیست انتظار و رأی‌گیری مثل بقیه‌ی حالت‌ها کار کنند."""
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    if simple_mode_on(cfg) or not bool(cfg.get("scenario_7_enabled", False)):
+    if not bool(cfg.get("scenario_7_enabled", False)):
         return None, "حالت ۷ (برخورد ساده) خاموش است"
     if cfg.get("halving_model_enabled"):
         return _simple_touch_halving(df, strategy_config, live_price)     # V3.44.37: روی سطوح نصف‌کردن
@@ -1707,12 +1711,16 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                         d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
                     )
                     if rsig and _scenario_enabled("continuation", rsig, cfg):
-                        return rsig, _tag_scenario(rreason, "continuation", rsig), atr, tag
+                        rreason = _fvg_apply(d, idx, "continuation", rsig, rreason, atr, cfg)
+                        if rreason:
+                            return rsig, _tag_scenario(rreason, "continuation", rsig), atr, tag
                 fsig, freason = _detect_failed_retest_reversal(
                     d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label, atr, cfg
                 )
                 if fsig and _scenario_enabled("fakeout", fsig, cfg) and (not p4_rev_tag or _p4_rev_side_ok(fsig, buy_ok, sell_ok)):
-                    return fsig, _tag_scenario(freason, "fakeout", fsig), atr, tag
+                    freason = _fvg_apply(d, idx, "fakeout", fsig, freason, atr, cfg)
+                    if freason:
+                        return fsig, _tag_scenario(freason, "fakeout", fsig), atr, tag
             sig, reason, _ = _detect_named_level_sweep(
                 d, idx, hi, lo, hi_key, lo_key, hi_label, lo_label,
                 cfg, require_reclaim, require_reversal
@@ -1728,7 +1736,9 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
                 elif sig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
                     sig = None
             if sig and _scenario_enabled("simple", sig, cfg) and (not p4_rev_tag or _p4_rev_side_ok(sig, buy_ok, sell_ok)):
-                return sig, _tag_scenario(reason, "simple", sig), atr, tag
+                reason = _fvg_apply(d, idx, "simple", sig, reason, atr, cfg)
+                if reason:
+                    return sig, _tag_scenario(reason, "simple", sig), atr, tag
         return None, None, None, None
 
     detect_at = detect_multi_at
@@ -1842,8 +1852,6 @@ def _cap_target_to_grid(levels, entry, risk_dist, direction, min_rr, current_tar
 
 
 def _gate_on(cfg, key, default=True):
-    if simple_mode_forces_off(cfg, key):
-        return False
     try:
         return bool(cfg.get(key, default))
     except Exception:
@@ -2617,11 +2625,15 @@ def strategy_halving(df, strategy_config=None, live_price=None):
         if allow_cont:
             rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
             if rsig and _scenario_enabled("continuation", rsig, cfg_run):
-                sig, reason = rsig, _tag_scenario(rreason, "continuation", rsig)
+                rreason = _fvg_apply(d, idx, "continuation", rsig, rreason, atr, cfg_run)
+                if rreason:
+                    sig, reason = rsig, _tag_scenario(rreason, "continuation", rsig)
         if not sig:
             fsig, freason = _detect_failed_retest_reversal(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
             if fsig and _scenario_enabled("fakeout", fsig, cfg_run):
-                sig, reason = fsig, _tag_scenario(freason, "fakeout", fsig)
+                freason = _fvg_apply(d, idx, "fakeout", fsig, freason, atr, cfg_run)
+                if freason:
+                    sig, reason = fsig, _tag_scenario(freason, "fakeout", fsig)
         if not sig:
             ssig, sreason, _ = _detect_named_level_sweep(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label,
                                                           cfg_run, require_reclaim, require_reversal)
@@ -2633,7 +2645,9 @@ def strategy_halving(df, strategy_config=None, live_price=None):
                 elif ssig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
                     ssig = None
             if ssig and _scenario_enabled("simple", ssig, cfg_run):
-                sig, reason = ssig, _tag_scenario(sreason, "simple", ssig)
+                sreason = _fvg_apply(d, idx, "simple", ssig, sreason, atr, cfg_run)
+                if sreason:
+                    sig, reason = ssig, _tag_scenario(sreason, "simple", ssig)
         if not sig:
             continue
 
@@ -2678,10 +2692,14 @@ def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run):
     if bool(cfg_run.get("sweep_enable_retest_continuation", True)):
         rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
         if rsig and _scenario_enabled("continuation", rsig, cfg_run):
-            return rsig, _tag_scenario(rreason, "continuation", rsig)
+            rreason = _fvg_apply(d, idx, "continuation", rsig, rreason, atr, cfg_run)
+            if rreason:
+                return rsig, _tag_scenario(rreason, "continuation", rsig)
     fsig, freason = _detect_failed_retest_reversal(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
     if fsig and _scenario_enabled("fakeout", fsig, cfg_run):
-        return fsig, _tag_scenario(freason, "fakeout", fsig)
+        freason = _fvg_apply(d, idx, "fakeout", fsig, freason, atr, cfg_run)
+        if freason:
+            return fsig, _tag_scenario(freason, "fakeout", fsig)
     ssig, sreason, _ = _detect_named_level_sweep(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label,
                                                   cfg_run, require_reclaim, require_reversal)
     if ssig and _precise_scenarios(cfg_run):
@@ -2692,7 +2710,9 @@ def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run):
         elif ssig == "BUY" and _recent_close_beyond(d, idx, lo, "DOWN", _pen, _n):
             ssig = None
     if ssig and _scenario_enabled("simple", ssig, cfg_run):
-        return ssig, _tag_scenario(sreason, "simple", ssig)
+        sreason = _fvg_apply(d, idx, "simple", ssig, sreason, atr, cfg_run)
+        if sreason:
+            return ssig, _tag_scenario(sreason, "simple", ssig)
     return None, None
 
 
