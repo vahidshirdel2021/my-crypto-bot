@@ -47,7 +47,6 @@ from strategy import (
 )
 from halving_levels import depth_label_fa as _hv_depth_label
 from strategy import set_halving_k_provider, halving_k_effective
-from strategy import simple_mode_on, simple_mode_forces_off      # V3.44.162      # V3.44.145: k پویا از BTC
 from ui import (
     get_start_keyboard, get_balance_keyboard, get_margin_keyboard, get_leverage_keyboard,
     get_max_positions_keyboard, get_timeframe_keyboard, get_main_menu_keyboard,
@@ -1230,7 +1229,7 @@ def _halving_tf_store(cfg, tf):
 def _p4_keep_flags(old_cfg, new_cfg):
     """دکمه‌های مدل PDH/PDL+P4 هنگام بازسازی preset (تغییر تایم‌فریم/ریست) از دست نروند."""
     if isinstance(old_cfg, dict):
-        for k in tuple(_P4_FLAG_KEYS) + tuple(GATE_REGISTRY) + ('simple_scenario_mode',):   # V3.42: کلیدهای گیت هم با تغییر تایم‌فریم از بین نروند
+        for k in tuple(_P4_FLAG_KEYS) + tuple(GATE_REGISTRY) + ('fvg_enabled',):   # V3.42: کلیدهای گیت هم با تغییر تایم‌فریم از بین نروند
             if k in old_cfg:
                 new_cfg[k] = old_cfg[k]
     return new_cfg
@@ -1323,7 +1322,7 @@ def normalize_session(data):
         'strategy_sweep_enabled',
         'daily_p4_mode', 'p4_reversal_enabled',
         'halving_model_enabled', 'halving_k_atr', 'halving_max_depth', 'halving_max_trade_depth', 'halving_dynamic_k', 'halving_btc_dynamic_k', 'halving_tf',
-        'mtf_mode_enabled', 'mtf_prev_tier', 'simple_scenario_mode',
+        'mtf_mode_enabled', 'mtf_prev_tier', 'fvg_enabled',
     }
     _persist_exact |= set(GATE_REGISTRY)   # V3.42: کلیدهای گیت/فیلتر (منوی «مدیریت فیلتر معاملات») هم ماندگار باشند
     for _k, _v in _stored_scfg.items():
@@ -6477,7 +6476,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.162'
+BOT_VERSION = '3.44.163'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -10503,7 +10502,7 @@ def _trade_hours_ranges_text(key):
 
 def _in_trade_hours(s, ts=None):
     """(مجاز؟, توضیح). خاموش = همیشه مجاز."""
-    if not (s or {}).get('hours_filter_enabled', False) or simple_mode_on((s or {}).get('strategy_config')):
+    if not (s or {}).get('hours_filter_enabled', False):
         return True, ''
     key = _hours_profile_key(s)
     t = time.gmtime(ts if ts is not None else time.time())
@@ -12539,7 +12538,7 @@ def _fav_confirm_active(chat_id):
 def _fav_confirm_hold(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """True = سیگنال در صف «صبر برای تایید» نگه داشته شد (ورود فعلاً انجام نمی‌شود)."""
     s = get_session(chat_id)
-    if not s.get('fav_confirm_enabled', False) or simple_mode_on(s.get('strategy_config')):
+    if not s.get('fav_confirm_enabled', False):
         return False
     now = time.time()
     _tag, level_token, level_value = extract_setup_level(full_reason)
@@ -13366,8 +13365,6 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
     دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
     همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
-    if simple_mode_on((get_session(chat_id) or {}).get('strategy_config')):      # V3.44.162
-        return False
     if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id) and not _h4_warn_active(chat_id):
         return False
     s = get_session(chat_id)
@@ -14907,8 +14904,6 @@ def _core_only_blocks(s, symbol):
 
 def _trade_set_blocks_entry(s, symbol):
     """True = این نماد فقط رأی جهت می‌دهد و نباید وارد مسیر ورود شود. «ورود سریع» دستی (priority_watch) مستثناست."""
-    if simple_mode_on((s or {}).get('strategy_config')):      # V3.44.162: حالت ساده فقط BTC/ETH/SOL
-        return symbol not in ((s or {}).get('priority_watch') or {}) and _base_asset(symbol) not in CORE_SYMBOLS
     if _core_only_blocks(s, symbol):
         return True
     if not TRADE_SET_ON:
@@ -15701,8 +15696,6 @@ async def scan_symbol(http,chat_id,symbol):
     if not s['is_bot_active'] or s['daily_stopped']:
         return _entry_diag_result(chat_id, symbol, 'blocked', 'ربات متوقف است یا محدودیت روزانه فعال است', 'precheck')
     scan_generation=int(s.get('scan_generation',0))
-    if simple_mode_on(s.get('strategy_config')) and symbol not in (s.get('priority_watch') or {}) and _base_asset(symbol) not in CORE_SYMBOLS:
-        return _entry_diag_result(chat_id, symbol, 'blocked', 'حالت ساده ۶ سناریو: فقط BTC/ETH/SOL', 'simple_mode')      # V3.44.162
     if time.time() < float(s['cooldowns'].get(symbol,0)):
         return _entry_diag_result(chat_id, symbol, 'blocked', 'نماد در دوره انتظار پس از معامله قبلی است', 'cooldown')
     tf=s['timeframe']; strat=s['active_strategy']; md={}
@@ -15767,7 +15760,7 @@ async def scan_symbol(http,chat_id,symbol):
     sig, reason = get_signal_with_reason(primary, md, mode, primary_tf, strat, s['filters'], cfg_entry, None, live_price=live_entry_price)
     diagnostics = _breakout_filter_diagnostics(primary, s['filters'], s['strategy_config']) if (strat == 'dynamic' and not is_scalp_strategy) else {}
     _simple_touch = False
-    if not sig and is_scalp_strategy and cfg_entry.get('scenario_7_enabled', False) and not simple_mode_on(cfg_entry):
+    if not sig and is_scalp_strategy and cfg_entry.get('scenario_7_enabled', False):
         # V3.44.35: حالت ۷ «برخورد ساده»: وقتی هیچ‌کدام از ۶ حالتِ دیگر سیگنال نداده، فقط رسیدن قیمت به سطح کافی است؛ مستقیم به لیست انتظار و رأی‌گیری می‌رود.
         try:
             _st_sig, _st_reason = simple_touch_signal(primary, cfg_entry, live_entry_price, primary_tf)
@@ -16422,8 +16415,6 @@ def gate_on(s, key):
     """وضعیت یک کلید گیت برای این سشن (از strategy_config؛ در غیاب آن پیش‌فرض رجیستری)."""
     try:
         _c = s.get('strategy_config') or {}
-        if simple_mode_forces_off(_c, key):      # V3.44.162: حالت ساده ۶ سناریو
-            return False
         return bool(_c.get(key, _gate_default(key)))
     except Exception:
         return _gate_default(key)
@@ -19906,19 +19897,19 @@ def process_command(cmd,chat_id,message_id=None):
         _new_state = '🟢 روشن' if not _cur else '🔴 خاموش'
         send_message(chat_id, f"{_row[0]}: {_new_state}\n\n{_row[3]}", trade_filter_management_keyboard(chat_id, _row[2]))
         return
-    if cl=='/toggle_simple_mode':      # V3.44.162
+    if cl=='/toggle_fvg':      # V3.44.163: تشخیص FVG/IFVG برای ۶ سناریو (پیش‌فرض خاموش)
         s.setdefault('strategy_config', {})
-        cur = bool(s['strategy_config'].get('simple_scenario_mode', False))
-        s['strategy_config']['simple_scenario_mode'] = not cur
+        cur = bool(s['strategy_config'].get('fvg_enabled', False))
+        s['strategy_config']['fvg_enabled'] = not cur
         save_session(chat_id)
         if not cur:
-            _note = ('🟢 *حالت ساده ۶ سناریو روشن شد*\n\n• فقط BTC / ETH / SOL\n• هر ۶ سناریو فعال (حالت ۷ و «سخت‌گیری بیشتر» نادیده)\n'
-                     '• بدون رأی‌گیری، بدون صف انتظار/تایید حرکت، بدون هیچ فیلتر BTC/ETH/رژیم/اندیکاتور/ساعت/امتیاز/R:R\n'
-                     '• به‌محض تحقق سناریو، ورود انجام می‌شود\n• فقط این‌ها می‌مانند: توقف ضرر روزانه/ایست ایمنی، سقف جمع ریسک، استراحت بعد از معامله، عدم تکرار روی یک سطح، سقف پوزیشن و موجودی')
-            if s.get('assist_mode_enabled'):
-                _note += '\n\n⚠️ حالت دستیار روشن است؛ ورود فقط بعد از تایید دستی انجام می‌شود. برای ورود خودکار آن را خاموش کنید.'
+            _note = ('🟢 *تشخیص FVG/IFVG روشن شد*\n\nسیگنال هر ۶ سناریو فقط وقتی وارد می‌شود که شکاف قیمتی (FVG) هم‌جهت آن را تایید کند:\n'
+                     '• ۱ و ۲ (برخورد و برگشت): بعد از برگشت، یک FVG هم‌جهت معامله نزدیک سطح ساخته شده باشد\n'
+                     '• ۳ و ۴ (شکست و ادامه): FVG ساخته‌شده توسط شکست هنوز نگه داشته شده باشد (با بدنه از آن عبور نشده)\n'
+                     '• ۵ و ۶ (شکست کاذب): FVG شکست با بدنه برگشته باشد (IFVG) یا شکاف تازه‌ی هم‌جهت برگشت ساخته شده باشد\n'
+                     'سیگنالی که تایید نشود رد می‌شود. اگر این کلید خاموش باشد هیچ‌چیز تغییر نمی‌کند.')
         else:
-            _note = '🔴 حالت ساده ۶ سناریو خاموش شد؛ تنظیمات قبلی فیلترها و رأی‌گیری دوباره اعمال می‌شود.'
+            _note = '🔴 تشخیص FVG/IFVG خاموش شد؛ سناریوها مثل قبل کار می‌کنند.'
         send_message(chat_id, _note, get_scenario_management_keyboard(s))
         return
     if cl=='/scenario_management':
