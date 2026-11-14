@@ -30,14 +30,13 @@ USER_EXACT = frozenset({
     '/performance', '/performance_today', '/performance_week', '/performance_month',
     '/daily_pnl', '/today_trades',
     # تنظیمات ریسک و حساب
-    '/menu_settings', '/check_wizard', '/mode_paper', '/paper_bal', '/mode_real', '/trade_mode_menu',
+    '/menu_settings', '/check_wizard', '/mode_paper', '/paper_bal', '/mode_real',
     # کارمزد خود کاربر
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
     '/assist_pending',
-    # V3.44.91: «⏳ سیگنال‌های در حال تایید» (صف تایید حرکت) و «🧭 رژیم BTC/ETH» برای کاربر عادی هم باز شد
-    # (متن هر دو در bot.py برای کاربر عادی ساده می‌شود: بدون پارامتر و اطلاعات فنی)
-    '/fav_queue', '/btc_eth_regime',
+    # V3.44.169: «⏳ سیگنال‌های در حال تایید» (صف تایید حرکت) از دید کاربر عادی حذف شد؛ «🧭 رژیم BTC/ETH» باز است
+    '/btc_eth_regime',
     # V3.44.75: کلید حالت دستیار در منوی اصلی
     '/assist_main_toggle',
     # V3.44.117: کلید «توقف معاملات در بلاتکلیفی جهت BTC» فقط زیر پیام هشدار برای کاربر عادی باز است (در منوی اصلی فقط ادمین می‌بیند)
@@ -63,7 +62,7 @@ PAPER_ONLY_EXACT = frozenset({
 _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/start(\s.*)?$',
     # تنظیمات ریسک (فقط عدد). «هم‌جهت» فقط از داخل ویزارد (/set_wsame_N)؛ منوی جداگانه‌ی آن و «کولداون» بیرون است
-    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', r'^/trade_mode_set_[345]$', r'^/set_wmode_[345]$',
+    r'^/set_bal_\d+(\.\d+)?$', r'^/set_margin_\d+(\.\d+)?$', r'^/set_lev_\d+$', r'^/set_max_\d+$', r'^/set_wsame_\d+$', 
     # تایم‌فریم: مرحله‌ی اجباریِ ویزارد اولیه
     r'^/set_tf_(5m|15m|1h|4h|mtf|mtf5)$',
     # اتصال صرافی (REAL)
@@ -94,13 +93,11 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
 # دکمه‌های کیبورد ثابت پایین چت که برای کاربر عادی نمایش داده نمی‌شود
 USER_HIDDEN_REPLY_BUTTONS = frozenset({
     '📊 وضعیت بازار',
+    '⏳ سیگنال‌های در حال تایید',      # V3.44.169
 })
 
-# V3.44.91: دکمه‌ی ثابت «📋 سیگنال‌های در انتظار» برای کاربر عادی با «⏳ سیگنال‌های در حال تایید» عوض می‌شود
-# (همان جای دکمه‌ی قبلی؛ نسخه‌ی تکراری پایین کیبورد حذف می‌شود). فرمان /assist_pending هنوز مجاز است.
-USER_REPLY_BUTTON_SWAPS = {
-    '📋 سیگنال‌های در انتظار': '⏳ سیگنال‌های در حال تایید',
-}
+# V3.44.169: جایگزینی دکمه‌ها حذف شد؛ «📋 سیگنال‌های در انتظار» برای کاربر عادی در کلیدهای ثابت می‌ماند.
+USER_REPLY_BUTTON_SWAPS = {}
 
 
 def user_command_allowed(cmd, paper=False):

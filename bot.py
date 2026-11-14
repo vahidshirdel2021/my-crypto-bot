@@ -249,7 +249,7 @@ MAX_TOTAL_OPEN_RISK_PCT = max(0.0, float(os.environ.get('MAX_TOTAL_OPEN_RISK_PCT
 # اگر روی true تنظیم شود، سیگنال Liquidity Sweep به‌جای صدور فوری روی کندل ریکلیم، یک
 # کندل دیگر صبر می‌کند تا مطمئن شود جهت ریکلیم نقض نشده - قیمت ورود کمی بدتر می‌شود در
 # ازای فیلتر شدن فیک‌اوت‌های زودهنگام. پیش‌فرض خاموش است.
-SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIRMATION_CANDLE', 'true').strip().lower() not in ('0', 'false', 'off', '')
+SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT = os.environ.get('SWEEP_REQUIRE_CONFIRMATION_CANDLE', 'false').strip().lower() not in ('0', 'false', 'off', '')
 PAPER_FUNDING_RATE_PCT_8H = max(0.0, float(os.environ.get('PAPER_FUNDING_RATE_PCT_8H', '0.01')))
 TELEGRAM_SKIP_BACKLOG = os.environ.get('TELEGRAM_SKIP_BACKLOG', 'true').lower() not in ('0', 'false', 'no')
 
@@ -1082,9 +1082,9 @@ def default_session():
         # V3.43.24: بستن همه‌ی پوزیشن‌ها وقتی مجموع سود به TOTAL_PROFIT_AUTOCLOSE_USDT (۵$) برسد. پیش‌فرض خاموش (V3.44.106).
         'total_profit_autoclose_enabled': False,
         # V3.43.29: هشدار وقتی رژیم خودِ نماد روی ۵ و ۱۵ دقیقه هم‌جهت نیست (ورود نگه داشته می‌شود و تایید می‌گیرد). پیش‌فرض روشن.
-        'symbol_tf_regime_warn_enabled': True,
+        'symbol_tf_regime_warn_enabled': False,
         # V3.43.30: هشدار وقتی جهت معامله با رژیم ۴ ساعته‌ی نماد نمی‌خواند (خرید فقط در ۴ساعته‌ی صعودی، فروش فقط در ۴ساعته‌ی نزولی). پیش‌فرض روشن.
-        'symbol_h4_regime_warn_enabled': True,
+        'symbol_h4_regime_warn_enabled': False,
         # V3.42: هشدار «مشاهده ضعف» وقتی سودِ رسیده به پله‌ی ۵/۱۰/۱۵$ شروع به کم‌شدن کند.
         'profit_fade_alert_enabled': False,   # V3.44.110: پیش‌فرض خاموش
         # V3.44.28: بستن سر به سر. اگر معامله به +X R سود رسید و برگشت تا نقطه‌ی ورود، یا تا -Y R منفی رفت و برگشت تا نقطه‌ی ورود:
@@ -1165,12 +1165,17 @@ def default_session():
         'assist_log': [],
         'assist_seen': {},
         # V3.42.7: هشدار هم‌جهتی با روند BTC/ETH (کلیدها در «ورود و فیلتر سیگنال»). پیش‌فرض روشن.
-        'trend_warn_enabled': True,
+        'trend_warn_enabled': False,
         'pending_vote_filter': 'all',
         'trend_warn_btc': True,
         'trend_warn_eth': True,
+        # V3.44.167: هشدار «موقعیت BTC/ETH/SOL نسبت به نزدیک‌ترین سطح»؛ کلید اصلی + سه کلید جدای هر ارز. پیش‌فرض خاموش.
+        'ref_level_warn_enabled': False,
+        'ref_level_warn_btc': True,
+        'ref_level_warn_eth': True,
+        'ref_level_warn_sol': True,
         # V3.43.6: هشدار تضاد با اجماع اندیکاتورها (RSI/MACD/ADX) قبل از ورود. پیش‌فرض خاموش (کاربر روشن می‌کند).
-        'ind_warn_enabled': True,
+        'ind_warn_enabled': False,
         'auto_trend_pending': {},
         'auto_trend_seen': {},
         'tg_refresh': {},
@@ -1263,10 +1268,29 @@ def _setup_mgmt_text(s):
     return "🎛 *مدیریت ستاپ‌های معاملاتی*\nهر ستاپ را با تپ کردن روشن (🟢) یا خاموش (🔴) کنید:"
 
 
+_FILTER_DEFAULTS_V166_OFF = (
+    'gate_touch_pattern_vote_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
+    'sweep_require_confirmation_candle', 'gate_4h_close_block_enabled', 'gate_fc_tf_enabled', 'gate_btc_front_level_enabled',
+    'gate_btc_chop_enabled', 'gate_pd_level_enabled', 'gate_fc_ylevel_enabled', 'gate_fc_rsi_enabled', 'gate_fc_macd_enabled',
+    'gate_fc_vol_enabled', 'gate_fc_adx_enabled', 'gate_min_score_enabled', 'gate_fee_ratio_enabled', 'use_edge_proxy_gate',
+    'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled',
+)
+
+
 def normalize_session(data):
     s = default_session(); s.update(data or {})
     # V3.44.106: پیش‌فرض کلید «بستن با مجموع سود» خاموش شد؛ مقدار روشنِ قدیمی (که کاربر آگاهانه روشن نکرده بود) یک‌بار خاموش می‌شود.
     # V3.44.110: پیش‌فرض‌های منوی «خروج و حفظ سود»: فقط کلید ۱ (تریلینگ) و ۸ (محافظ BTC) روشن؛ بقیه خاموش. یک‌بار روی تنظیمات قبلی اعمال می‌شود؛ بعدش انتخاب دستی کاربر حفظ می‌شود.
+    # V3.44.166: پیش‌فرض‌های جدید فیلترها (فهرست شماره‌دار کاربر). یک‌بار روی تنظیمات قبلی اعمال می‌شود؛ بعدش انتخاب دستی کاربر حفظ می‌شود.
+    _mig166 = not (data or {}).get('filter_defaults_v166')      # مهاجرت همین فراخوانی؟ (برای دو خطِ هشدار پایین‌تر)
+    if not s.get('filter_defaults_v166'):
+        _c = s.setdefault('strategy_config', {})
+        for _k in _FILTER_DEFAULTS_V166_OFF:
+            _c[_k] = False
+        _c['gate_touch_dir_fixed_enabled'] = True
+        for _k in ('trend_warn_enabled', 'ind_warn_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled'):
+            s[_k] = False
+        s['filter_defaults_v166'] = True
     if not s.get('exit_defaults_v110'):
         s['trail_enabled'] = True
         s['btc_guard_enabled'] = True
@@ -1370,11 +1394,14 @@ def normalize_session(data):
     if s['assist_expiry_seconds'] not in (180, 300, 600, 1800):
         s['assist_expiry_seconds'] = 1800
     s['assist_log'] = list(data.get('assist_log') or [])[-500:]
-    s['trend_warn_enabled'] = bool(data.get('trend_warn_enabled', True))
+    s['trend_warn_enabled'] = False if _mig166 else bool(data.get('trend_warn_enabled', False))
     s['pending_vote_filter'] = data.get('pending_vote_filter') if data.get('pending_vote_filter') in ('all', 'high', 'full') else 'all'
     s['trend_warn_btc'] = bool(data.get('trend_warn_btc', True))
     s['trend_warn_eth'] = bool(data.get('trend_warn_eth', True))
-    s['ind_warn_enabled'] = bool(data.get('ind_warn_enabled', True))
+    s['ref_level_warn_enabled'] = bool(data.get('ref_level_warn_enabled', False))       # V3.44.167
+    for _rk in ('btc', 'eth', 'sol'):
+        s[f'ref_level_warn_{_rk}'] = bool(data.get(f'ref_level_warn_{_rk}', True))
+    s['ind_warn_enabled'] = False if _mig166 else bool(data.get('ind_warn_enabled', False))
     _now_n = time.time()
     s['auto_trend_pending'] = {k: v for k, v in dict(data.get('auto_trend_pending') or {}).items()
                                if isinstance(v, dict) and _now_n - float(v.get('created_at', 0) or 0) < 24 * 3600}
@@ -1405,8 +1432,26 @@ def get_session(chat_id):
         else: created = False
         s = USER_SESSIONS[chat_id]
         if created: _apply_default_mode(chat_id, s)
-    if created: save_session(chat_id)
+        _migrated = (not created) and _migrate_old_preset(chat_id, s)
+    if created or _migrated: save_session(chat_id)
     return s
+
+
+def _migrate_old_preset(chat_id, s):
+    """V3.44.169: فقط پریست «معمولی» مانده. جلسه‌ای که روی کلید حذف‌شده (۱، ۲، ۴، ۵) است: کاربر عادی روی «معمولی» می‌نشیند؛
+    ادمین تنظیماتش دست‌نخورده می‌ماند و فقط برچسب پریستش پاک می‌شود. True اگر چیزی عوض شد."""
+    try:
+        act = s.get('active_preset')
+        if act is None or act in presets_mod.PRESETS:
+            return False
+        if int(chat_id) in ADMIN_CHAT_IDS:
+            s['active_preset'] = None
+        else:
+            presets_mod.apply_preset(s, presets_mod.DEFAULT_MODE)
+        return True
+    except Exception:
+        logger.exception('old preset migration failed')
+        return False
 
 
 def _apply_default_mode(chat_id, s):
@@ -4411,7 +4456,7 @@ _BTC_FRONT_WARNED = {}
 _BTC_FRONT_LOCK = threading.Lock()
 
 
-def btc_front_level_info(s, tf, is_long):
+def btc_front_level_info(s, tf, is_long, symbol='BTC'):
     """سنجش فاصله‌ی کلوز آخرین کندل بسته‌شده‌ی BTC تا نزدیک‌ترین سطح روبه‌روی جهت معامله.
     خروجی dict: ok، close، atr، front_price/front_label (None = سطحی روبه‌رو نیست)، dist، dist_atr، min_atr، closed_ts؛ یا None اگر داده نبود."""
     secs = _TF_SECONDS.get(tf)
@@ -4424,9 +4469,9 @@ def btc_front_level_info(s, tf, is_long):
         now = time.time()
         start = int(now // secs) * secs
         try:
-            df = get_klines('BTC', tf, limit)
+            df = get_klines(symbol, tf, limit)
         except Exception:
-            logger.exception('btc front: klines failed tf=%s', tf)
+            logger.exception('btc front: klines failed sym=%s tf=%s', symbol, tf)
             df = None
         if df is None or len(df) < 62:
             return None
@@ -4437,7 +4482,7 @@ def btc_front_level_info(s, tf, is_long):
             break
         if attempt == 0:
             with DATA_LOCK:
-                DATA_CACHE.pop(f'BTC:{period}:{limit}', None)
+                DATA_CACHE.pop(f'{symbol}:{period}:{limit}', None)
         else:
             return None
     cts = float(df.iloc[-2]['timestamp'])
@@ -4464,7 +4509,7 @@ def btc_front_level_info(s, tf, is_long):
         _eff_k = halving_k_effective(cfg0)      # V3.44.151: k مؤثر (دستی یا از BTC) جزو کلید کش است
     except Exception:
         _eff_k = None
-    ckey = (_venue(), tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
+    ckey = (symbol, _venue(), tf, cts, bool(is_long), round(min_atr, 4), chop_flips, chop_win, chop_k, round(chop_x, 4), bool(cfg0.get('halving_model_enabled')), cfg0.get('halving_k_atr'),
             cfg0.get('halving_min_depth'), cfg0.get('halving_max_depth'), bool(cfg0.get('halving_dynamic_k')), _eff_k,
             bool(cfg0.get('halving_only_targets', True)))
     with _BTC_FRONT_LOCK:
@@ -4479,11 +4524,11 @@ def btc_front_level_info(s, tf, is_long):
         return None
     cfg = cfg0
     if cfg.get('halving_model_enabled'):
-        rng = get_halving_range_sync('BTC')
+        rng = get_halving_range_sync(symbol)
         if not rng:
             return None
-        cfg = _with_halving_cfg_sym(cfg, rng, 'BTC')
-    _grid = _log_grid_levels_sync('BTC')
+        cfg = _with_halving_cfg_sym(cfg, rng, symbol)
+    _grid = _log_grid_levels_sync(symbol)
     levels = _quick_opposing_levels(ind, close, bool(is_long), _grid, cfg)
     info = {'ok': True, 'close': close, 'atr': atr, 'front_price': None, 'front_label': None, 'dist': None, 'dist_atr': None,
             'min_atr': min_atr, 'closed_ts': cts, 'is_long': bool(is_long),
@@ -6476,7 +6521,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.163'
+BOT_VERSION = '3.44.169'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -9079,7 +9124,7 @@ _FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'p
                 'touch_auto_mode', 'assist_mode_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled',
                 'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'max_open_positions', 'max_same_direction_positions',
                 'risk_per_trade_pct', 'active_strategy', 'timeframe', 'enabled_setup_tags', 'hours_filter_enabled', 'hours_profile')
-_FN_TOG_DEFAULTS = {'symbol_tf_regime_warn_enabled': True, 'symbol_h4_regime_warn_enabled': True}
+_FN_TOG_DEFAULTS = {'symbol_tf_regime_warn_enabled': False, 'symbol_h4_regime_warn_enabled': False}
 _FN_SC_KEYS = ('halving_model_enabled', 'min_rr', 'min_target_r', 'max_target_r')
 
 
@@ -9237,7 +9282,7 @@ def _fn_scan_hook(chat_id, symbol, stage, status, reason, signal):
 def _fn_cf(touch_sig, votes_all):
     """«کلید ۳/۴/۵ روی همین برخورد با همین رأی‌ها چه تصمیمی می‌گرفتند»؛ بدون فراخوانی داده‌ی اضافه."""
     out = {}
-    for n in ('3', '4', '5'):
+    for n in ('3',):
         try:
             cfg_n, ses_n = presets_mod._full(n)
 
@@ -9276,6 +9321,45 @@ def _fn_after_eval(chat_id, s, rec, votes, votes_all, summ):
              auto_ok=bool(summ.get('auto_ok')), st=st, raw=raw, cf=cf, groups=summ.get('groups'), cx=cx)
 
 
+def _core3_sides(tf, cfg=None):
+    """V3.44.165: جای BTC/ETH/SOL نسبت به «نزدیک‌ترین سطح خودشان» (کلوز آخرین کندل بسته‌شده، همان منبعِ دروازه‌ی BTC).
+    خروجی {'BTC': 'U'|'D'|'E'|None, ...}: U = بالای سطح، D = پایین سطح، E = روی سطح، None = داده/سطح در دسترس نیست. فقط ثبت/گزارش؛ جلوی هیچ ورودی را نمی‌گیرد."""
+    out = {}
+    for sym in ('BTC', 'ETH', 'SOL'):
+        try:
+            info = btc_front_level_info({'strategy_config': cfg or {}}, tf, True, symbol=sym)
+            if not info or info.get('ref_price') is None or info.get('close') is None:
+                out[sym] = None
+                continue
+            close, rp = float(info['close']), float(info['ref_price'])
+            out[sym] = 'U' if close > rp else ('D' if close < rp else 'E')
+        except Exception:
+            out[sym] = None
+    return out
+
+
+def _fn_core3_stamp(chat_id, s, rec):
+    """V3.44.165: در یک رشته‌ی جدا (تا ثبت برخورد/رأی‌گیری کند نشود) سمتِ سه نمادِ اصلی را برای این برخورد ثبت می‌کند."""
+    if not funnel_log.ENABLED:
+        return
+    tid, sym, tf = rec.get('id'), rec.get('symbol'), (rec.get('tf') or s.get('timeframe', '5min'))
+    cfg = dict(s.get('strategy_config') or {})
+
+    def _run():
+        try:
+            c3 = _core3_sides(tf, cfg)
+            _fn_emit(chat_id, 'core3', tid=tid, symbol=sym, c3=c3)
+        except Exception:
+            logger.debug('funnel core3 stamp failed', exc_info=True)
+    threading.Thread(target=_run, name='core3-stamp', daemon=True).start()
+
+
+def _fn_fvgv(reason):
+    """V3.44.164: حکم FVG/IFVG از توکن |FVGV=1/0/2 داخل reason (1 تایید، 0 رد، 2 نامشخص)؛ بدون توکن = None."""
+    m = re.search(r'\|FVGV=([012])', str(reason or ''))
+    return int(m.group(1)) if m else None
+
+
 def _fn_touch_created(chat_id, s, rec, plan, flip_from):
     if not funnel_log.ENABLED:
         return
@@ -9289,7 +9373,7 @@ def _fn_touch_created(chat_id, s, rec, plan, flip_from):
                     'c': ('undecided' if _dm_dom is None else ('aligned' if _dm_dom == _dm_sig else 'opposed'))}
     except Exception:
         _dom_log = None
-    _fn_emit(chat_id, 'touch', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), scn=rec.get('scn'), dom=_dom_log,
+    _fn_emit(chat_id, 'touch', tid=rec.get('id'), symbol=rec.get('symbol'), touch_sig=rec.get('touch_sig'), scn=rec.get('scn'), dom=_dom_log, fvgv=_fn_fvgv(rec.get('reason')),
              level_token=rec.get('level_token'), level_value=rec.get('level_value'), touch_price=rec.get('touch_price'),
              plan_entry=pl.get('entry'), plan_sl=pl.get('sl'), plan_tp=pl.get('tp'), plan_rr=pl.get('rr'), plan_score=pl.get('score'),
              flip_from=flip_from, reason=str(rec.get('reason') or '')[:300],
@@ -11727,7 +11811,7 @@ def _trend_active_symbols(chat_id, symbol=None):
         return []
     if chat_id is not None:
         s = get_session(chat_id)
-        if not s.get('trend_warn_enabled', True):
+        if not s.get('trend_warn_enabled', False):
             return []
         flags = {'BTC': bool(s.get('trend_warn_btc', True)), 'ETH': bool(s.get('trend_warn_eth', True))}
     else:
@@ -11788,7 +11872,7 @@ def _tfr_warn_active(chat_id):
     """V3.43.29: کلید «هشدار ناهم‌جهتی رژیم نماد در ۵ و ۱۵ دقیقه» برای این کاربر روشن است؟"""
     if chat_id is None:
         return False
-    return bool(get_session(chat_id).get('symbol_tf_regime_warn_enabled', True))
+    return bool(get_session(chat_id).get('symbol_tf_regime_warn_enabled', False))
 
 
 def _symbol_tf_regimes(symbol):
@@ -11840,7 +11924,7 @@ def _h4_warn_active(chat_id):
     """V3.43.30: کلید «هشدار خلاف رژیم ۴ ساعته» برای این کاربر روشن است؟"""
     if chat_id is None:
         return False
-    return bool(get_session(chat_id).get('symbol_h4_regime_warn_enabled', True))
+    return bool(get_session(chat_id).get('symbol_h4_regime_warn_enabled', False))
 
 
 def _symbol_h4_regime(symbol):
@@ -11872,6 +11956,71 @@ def _h4_conflict(symbol, side):
     return True, [f"• ۴ ساعته: {fa[reg]} — ⚠️ {why} (این معامله فقط با ۴ ساعته‌ی {need} هم‌جهت است)"], reg
 
 
+# ===================== V3.44.167: هشدار «موقعیت BTC/ETH/SOL نسبت به نزدیک‌ترین سطح» =====================
+# قبل از ورود، «کلوز آخرین کندل بسته‌شده» هر ارزِ شاخص (BTC / ETH / SOL؛ هرکدام با کلید جدا) روی تایم‌فریم فعال با نزدیک‌ترین
+# سطحش سنجیده می‌شود (همان سطح و همان معیارِ «سمت درست سطح» که فیلتر BTC استفاده می‌کند: مدل نصف‌کردن اگر روشن باشد، وگرنه
+# PDH/PDL، سطوح HTF و شبکه‌ی لگاریتمی). خرید فقط وقتی هم‌جهت است که کلوز بالای سطح باشد و فروش وقتی پایین سطح؛ برعکس = هشدار.
+# مثل بقیه‌ی هشدارها ورود را نگه می‌دارد و با «بله، وارد شو / نه» تایید می‌گیرد. نبود داده/سطح = بدون تضاد. خودِ نمادِ سیگنال بررسی نمی‌شود.
+REF_LEVEL_WARN_SYMBOLS = ('BTC', 'ETH', 'SOL')
+_REF_LEVEL_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'SOL': 'سولانا'}
+
+
+def _reflevel_active_symbols(chat_id, symbol=None):
+    """ارزهای شاخصی که طبق کلید اصلی و کلیدهای جدای BTC/ETH/SOL باید چک شوند (نمادِ خودِ سیگنال کنار گذاشته می‌شود)."""
+    if chat_id is None:
+        return []
+    s = get_session(chat_id)
+    if not s.get('ref_level_warn_enabled', False):
+        return []
+    me = str(symbol or '').upper()
+    return [x for x in REF_LEVEL_WARN_SYMBOLS if bool(s.get(f'ref_level_warn_{x.lower()}', True)) and x != me]
+
+
+def _reflevel_check(chat_id, syms, side, tf):
+    """{sym: (status, info)}؛ status = 'ok' (هم‌جهت) | 'bad' (کلوز سمتِ خلافِ سطح) | 'na' (داده/سطح در دسترس نیست = بدون تضاد)."""
+    if not syms:
+        return {}
+    s = get_session(chat_id)
+    is_long = (side == 'BUY')
+
+    def one(sym):
+        try:
+            info = btc_front_level_info(s, tf, is_long, sym)
+        except Exception:
+            logger.exception('ref level warn failed sym=%s tf=%s', sym, tf)
+            info = None
+        if not info or info.get('ref_price') is None:
+            return ('na', info)
+        return ('ok' if info.get('side_ok', True) else 'bad', info)
+
+    try:
+        with ThreadPoolExecutor(max_workers=len(syms)) as ex:
+            return dict(zip(syms, ex.map(one, syms)))
+    except Exception:
+        logger.exception('ref level warn: batch failed')
+        return {x: ('na', None) for x in syms}
+
+
+def _reflevel_lines(res, side):
+    """خطوط کارت هشدار: هر ارز یک خط (کلوز، سمتِ سطح، نتیجه)."""
+    is_long = (side == 'BUY')
+    lines = []
+    for sym, (st, info) in res.items():
+        name = f"{_REF_LEVEL_NAMES.get(sym, sym)} ({sym})"
+        if st == 'na' or not info:
+            lines.append(f"• {name}: ⚪ داده یا سطح در دسترس نیست — بدون تضاد")
+            continue
+        pos_fa = 'پایین' if info.get('ref_above') else 'بالای'
+        lbl = f" {info['ref_label']}" if info.get('ref_label') else ''
+        head = f"• {name}: کلوز {fmt(info['close'])} {pos_fa} سطح{lbl} {fmt(info['ref_price'])}"
+        if st == 'bad':
+            need_fa = 'بالای' if is_long else 'پایین'
+            lines.append(head + f" — ⚠️ با {'خرید' if is_long else 'فروش'} نمی‌خواند (باید {need_fa} سطح باشد)")
+        else:
+            lines.append(head + " — هم‌جهت ✅")
+    return lines
+
+
 def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     """اگر جهت side با روند BTC یا ETH (کلیدهای trend_warn_*) و/یا اجماع اندیکاتورها (کلید ind_warn_enabled) در تضاد باشد
     متن هشدار، وگرنه None (بدون تضاد یا داده ناکافی). هر دو بررسی در یک کارت تایید می‌آیند."""
@@ -11879,7 +12028,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     ind_on = _ind_warn_active(chat_id)
     tfr_on = _tfr_warn_active(chat_id)
     h4_on = _h4_warn_active(chat_id)
-    if not syms and not ind_on and not tfr_on and not h4_on:
+    lv_syms = _reflevel_active_symbols(chat_id, symbol)
+    if not syms and not ind_on and not tfr_on and not h4_on and not lv_syms:
         return None
     is_long = (side == 'BUY')
     lines, conflict = [], False
@@ -11910,12 +12060,17 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     ind_conflict, ind_lines = (_indicator_conflict(symbol, side, tf) if ind_on else (False, []))
     tfr_conflict, tfr_lines = ((_tfr_conflict(symbol, side)[:2]) if tfr_on else (False, []))
     h4_conflict, h4_lines = ((_h4_conflict(symbol, side)[:2]) if h4_on else (False, []))
-    if not conflict and not ind_conflict and not tfr_conflict and not h4_conflict:
+    lv_res = _reflevel_check(chat_id, lv_syms, side, tf) if lv_syms else {}
+    lv_conflict = any(v[0] == 'bad' for v in lv_res.values())
+    lv_lines = _reflevel_lines(lv_res, side) if lv_res else []
+    if not conflict and not ind_conflict and not tfr_conflict and not h4_conflict and not lv_conflict:
         return None
     side_txt = '🟢 خرید (Long)' if is_long else '🔴 فروش (Short)'
     main_parts = []
     if conflict:
         main_parts.append('روند بازار')
+    if lv_conflict:
+        main_parts.append('موقعیت BTC/ETH/SOL نسبت به سطح')
     if ind_conflict:
         main_parts.append('اجماع اندیکاتورها')
     if h4_conflict:
@@ -11929,6 +12084,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     sections = []
     if lines:
         sections.append(('*روند بازار (BTC/ETH):*', lines, True))
+    if lv_lines:
+        sections.append((f'*موقعیت نسبت به نزدیک‌ترین سطح ({tf}):*', lv_lines, False))
     if ind_lines:
         sections.append(('*اندیکاتورها:*', ind_lines, False))
     if h4_lines:
@@ -11945,6 +12102,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     tail = []
     if conflict:
         tail.append('روند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.')
+    if lv_conflict:
+        tail.append('کلوز آخرین کندل بسته‌شده‌ی دست‌کم یکی از ارزهای شاخص سمتِ خلافِ نزدیک‌ترین سطحش است (خرید باید بالای سطح و فروش پایین سطح باشد)؛ ریسک ورود بالاتر است.')
     if ind_conflict:
         tail.append('اندیکاتورها (RSI/MACD/ADX) یا خلاف این معامله‌اند یا هیچ‌کدام از آن پشتیبانی نمی‌کنند؛ شاید بهتر باشد صبر کنید.')
     if h4_conflict:
@@ -11963,7 +12122,8 @@ def _entry_warning_tags(chat_id, symbol, side, tf):
     خروجی: None = هیچ کلید هشداری روشن نیست (چیزی ثبت نمی‌شود) | [] = هشدار نداشت | ['روند BTC', 'اندیکاتورها', ...]"""
     syms = _trend_active_symbols(chat_id, symbol)
     ind_on = _ind_warn_active(chat_id); tfr_on = _tfr_warn_active(chat_id); h4_on = _h4_warn_active(chat_id)
-    if not syms and not ind_on and not tfr_on and not h4_on:
+    lv_syms = _reflevel_active_symbols(chat_id, symbol)
+    if not syms and not ind_on and not tfr_on and not h4_on and not lv_syms:
         return None
     is_long = (side == 'BUY' or side_long(side))
     sig = 'BUY' if is_long else 'SELL'
@@ -11978,6 +12138,12 @@ def _entry_warning_tags(chat_id, symbol, side, tf):
         sc = int(snap.get('score', 0))
         if (sc > 0 and not is_long) or (sc < 0 and is_long):
             tags.append(f'روند {sym}')
+    try:
+        for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, sig, tf).items():
+            if _lst == 'bad':
+                tags.append(f'سطح {_lsym}')
+    except Exception:
+        logger.debug('entry warn: ref level check failed %s', symbol)
     try:
         if ind_on and _indicator_conflict(symbol, sig, tf)[0]:
             tags.append('اندیکاتورها')
@@ -12115,7 +12281,8 @@ def _full_confirm_check(symbol, sig, tf, reason='', ind_df=None, use=None):
 _TF_SECONDS = {'1min': 60, '5min': 300, '15min': 900, '30min': 1800, '1hour': 3600, '4hour': 14400, '1day': 86400}
 TGREF_COOLDOWN_SECONDS = 10
 TGREF_MAX_AGE_SECONDS = 3600
-_TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها', 'TFR': 'رژیم نماد ۵/۱۵ دقیقه', 'H4': 'رژیم ۴ ساعته‌ی نماد'}
+_TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها', 'TFR': 'رژیم نماد ۵/۱۵ دقیقه', 'H4': 'رژیم ۴ ساعته‌ی نماد',
+                'LV_BTC': 'سطح BTC', 'LV_ETH': 'سطح ETH', 'LV_SOL': 'سطح SOL'}
 _TGREF_DIV = '━━━━━━━━━━━━━━━━━━━━'
 
 
@@ -12137,10 +12304,11 @@ def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
     is_long = (side == 'BUY')
     syms = _trend_active_symbols(chat_id, symbol)
     ind_on = _ind_warn_active(chat_id)
+    lv_syms = _reflevel_active_symbols(chat_id, symbol)
     if fresh:
-        for x in set(syms) | {symbol}:
+        for x in set(syms) | set(lv_syms) | {symbol}:
             _drop_kline_cache(x)
-    out = {'items': {}, 'ind_lines': [], 'candle_close': None, 'tfr': None}
+    out = {'items': {}, 'ind_lines': [], 'candle_close': None, 'tfr': None, 'lv': {}}
     for sym in syms:
         snap = _market_snapshot(sym, tf)
         if not snap:
@@ -12155,6 +12323,9 @@ def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
         no_data = bool(lines) and 'داده‌ی کافی نیست' in lines[0]
         out['items']['IND'] = ('na' if no_data else ('bad' if conflict else 'ok'), None)
         out['ind_lines'] = lines
+    for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, side, tf).items():
+        out['items'][f'LV_{_lsym}'] = (_lst, None)
+        out['lv'][_lsym] = _li
     if _h4_warn_active(chat_id):
         h4_bad, _hl, h4_reg = _h4_conflict(symbol, side)
         out['h4'] = h4_reg
@@ -12190,12 +12361,20 @@ def _entry_refresh_block(rec, res, now):
         created_boundary = (float(rec.get('created_at', now)) // tf_s) * tf_s
         new_candle = cc > created_boundary + 1
         lines.append(f"• آخرین کندل بسته‌شده: `{_hm(cc)}` " + ("(بعد از ارسال هشدار بسته شده)" if new_candle else "(از زمان هشدار تغییری نکرده)"))
-    for key in ('BTC', 'ETH', 'IND', 'H4', 'TFR'):
+    for key in ('BTC', 'ETH', 'LV_BTC', 'LV_ETH', 'LV_SOL', 'IND', 'H4', 'TFR'):
         if key not in items:
             continue
         st, sc = items[key]
         name = _TGREF_NAMES[key]
         back = ' — برطرف شد ✅' if (base.get(key) == 'bad' and st == 'ok') else (' — تازه به تضاد رسید ⚠️' if (base.get(key) == 'ok' and st == 'bad') else '')
+        if key.startswith('LV_'):
+            li = (res.get('lv') or {}).get(key[3:]) or {}
+            if st == 'na' or not li:
+                lines.append(f"• {name}: ⚪ داده یا سطح در دسترس نیست")
+            else:
+                pos_fa = 'پایین' if li.get('ref_above') else 'بالای'
+                lines.append(f"• {name}: کلوز {fmt(li['close'])} {pos_fa} سطح {fmt(li['ref_price'])} — " + ('⚠️ خلاف جهت معامله' if st == 'bad' else 'هم‌جهت ✅') + back)
+            continue
         if key == 'H4':
             fa_h4 = {'BULLISH': '🟢 صعودی', 'BEARISH': '🔴 نزولی', 'RANGE': '⚪️ رنج'}.get(res.get('h4'), '⚪ ؟')
             lines.append(f"• {name}: {fa_h4} — " + ('هم‌جهت ✅' if st == 'ok' else ('⚠️ با جهت معامله نمی‌خواند' if st == 'bad' else 'داده کافی نیست')) + back)
@@ -12239,7 +12418,7 @@ def _entry_refresh_block(rec, res, now):
             lines.append(f"🚫 تضادها برطرف شده، ولی قیمت لحظه‌ای (`{fmt(far[0])}`) از ستاپ دور شده (`{far[1]:.2f}R`)"
                          + (" و از SL/TP عبور کرده" if far[2] else "") + "؛ ورود توصیه نمی‌شود.")
         else:
-            lines.append('✅ *در این لحظه ورود تایید می‌شود:* تضادی با روند BTC/ETH و اندیکاتورها نیست. (تصمیم نهایی با توست)')
+            lines.append('✅ *در این لحظه ورود تایید می‌شود:* تضادی با هشدارهای روشن‌شده نیست. (تصمیم نهایی با توست)')
     else:
         was = [k for k, v in base.items() if v == 'bad']
         trend = ''
@@ -13365,7 +13544,8 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     """ورود خودکار (غیر دستیار): اگر با روند BTC/ETH تضاد داشته باشد، ورود انجام نمی‌شود و کارت هشدار با
     دکمه‌ی «بله، وارد شو / نه» می‌آید. True = ورود نگه داشته شد؛ False = ورود می‌تواند ادامه یابد.
     همان ستاپ تا ۶ ساعت دوباره کارت نمی‌فرستد (مثل حالت دستیار)."""
-    if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id) and not _h4_warn_active(chat_id):
+    if not _trend_active_symbols(chat_id, symbol) and not _ind_warn_active(chat_id) and not _tfr_warn_active(chat_id) and not _h4_warn_active(chat_id) \
+            and not _reflevel_active_symbols(chat_id, symbol):
         return False
     s = get_session(chat_id)
     now = time.time()
@@ -13380,7 +13560,15 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
         return False
     rid = hashlib.sha1(f"{chat_id}{symbol}{now}".encode()).hexdigest()[:8]
     expiry = int(s.get('assist_expiry_seconds', 300) or 300)
-    rec = {'id': rid, 'symbol': symbol, 'sig': sig, 'side_label': 'BUY (Long)' if sig == 'BUY' else 'SELL (Short)',
+    # V3.44.168: اگر «فقط» هشدار موقعیت BTC/ETH/SOL نسبت به سطح مانع است، تا پایان مهلت دوباره چک می‌شود و با رفع تضاد خودکار وارد می‌شود.
+    lv_only = False
+    try:
+        _it = _entry_refresh_check(chat_id, symbol, sig, tf, fresh=False)['items']
+        lv_only = (any(k.startswith('LV_') and v[0] == 'bad' for k, v in _it.items())
+                   and not any((not k.startswith('LV_')) and v[0] == 'bad' for k, v in _it.items()))
+    except Exception:
+        logger.exception('auto gate: lv_only check failed symbol=%s', symbol)
+    rec = {'id': rid, 'symbol': symbol, 'sig': sig, 'lv_only': lv_only, 'side_label': 'BUY (Long)' if sig == 'BUY' else 'SELL (Short)',
            'entry': float(entry), 'sl': float(sl), 'tp': float(tp), 'reason': full_reason,
            'structural_tp': bool(plan.get('structural_target', False)), 'score': plan.get('score'), 'rr': plan.get('rr'),
            'quality_label': plan.get('quality_label'), 'tp_level_name': plan.get('tp_level_name'), 'tp_stages': plan.get('tp_stages'),
@@ -13391,7 +13579,9 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
         rr_txt = ''
     head = (f"🤖 *ورود خودکار نگه داشته شد*\n"
             f"• `{symbol}` | ورود: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}` | TP: `{fmt(float(tp))}`{rr_txt}\n"
-            f"• مهلت تایید: `{expiry // 60}` دقیقه\n\n")
+            f"• مهلت تایید: `{expiry // 60}` دقیقه\n"
+            + ("• فقط موقعیت BTC/ETH/SOL نسبت به سطح مانع است؛ تا پایان مهلت هر چند ثانیه دوباره چک می‌شود و با هم‌جهت شدن، خودکار وارد می‌شوم (یا همین حالا دستی تایید کن).\n" if lv_only else "")
+            + "\n")
     rec['tf'] = tf
     res = tg('sendMessage', {'chat_id': chat_id, 'text': head + text, 'parse_mode': 'Markdown',
                              'reply_markup': _auto_gate_markup(rid, symbol, tf)}, 10)
@@ -13426,6 +13616,52 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     seen[seen_key] = now
     save_session(chat_id)
     return True
+
+
+# ===================== V3.44.168: ورود خودکارِ کارت «ورود خودکار نگه داشته شد» وقتی فقط هشدار سطح مانع بوده =====================
+# فقط برای کلید «هشدار موقعیت BTC/ETH/SOL نسبت به سطح»: اگر کارتِ نگه‌داشته‌شده فقط به‌خاطر همین هشدار صادر شده (rec['lv_only'])،
+# تا پایان مهلت دوباره سنجیده می‌شود (سنجش سطح روی کلوز کندل بسته‌شده کش می‌شود، پس ارزان است). وقتی همه‌ی ارزهای روشن هم‌جهت شدند
+# و هیچ هشدار روشن دیگری هم در تضاد نبود، ورود مثل «✅ بله، وارد شو» انجام می‌شود (با همان بررسی دوری قیمت از ستاپ).
+# کارت‌های دیگر (روند، اندیکاتور، رژیم) و حالت دستیار دست‌نخورده‌اند: همچنان فقط با تایید خودِ کاربر وارد می‌شوند.
+LV_AUTO_MIN_INTERVAL = 20.0
+LV_AUTO_MAX_TRIES = 3
+
+
+def lv_auto_enter_tick():
+    now = time.time()
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            if not s.get('ref_level_warn_enabled', False):
+                continue
+            for rid, rec in list((s.get('auto_trend_pending') or {}).items()):
+                if rec.get('status') != 'pending' or not rec.get('lv_only'):
+                    continue
+                if now > float(rec.get('expires_at', 0) or 0):
+                    continue
+                if now - float(rec.get('lv_last_check', 0) or 0) < LV_AUTO_MIN_INTERVAL:
+                    continue
+                rec['lv_last_check'] = now
+                tf = rec.get('tf') or s.get('timeframe', '5min')
+                items = _entry_refresh_check(chat_id, rec['symbol'], rec['sig'], tf, fresh=False)['items']
+                if not any(k.startswith('LV_') for k in items) or any(v[0] != 'ok' for v in items.values()):
+                    continue          # هنوز مخالف است، داده ناقص است، یا کلید سطح خاموش شده: منتظر می‌مانیم
+                if int(rec.get('lv_tries', 0) or 0) >= LV_AUTO_MAX_TRIES:
+                    continue
+                rec['lv_tries'] = int(rec.get('lv_tries', 0) or 0) + 1
+                send_message(chat_id, f"✅ موقعیت BTC/ETH/SOL نسبت به سطح با ورود `{rec['symbol']}` هم‌جهت شد؛ ورود خودکار انجام می‌شود.", keep=False)
+                auto_trend_decide(chat_id, rid, True)
+                save_session(chat_id)
+        except Exception:
+            logger.exception('lv auto enter failed chat=%s', chat_id)
+
+
+def _lv_auto_loop():
+    while True:
+        try:
+            lv_auto_enter_tick()
+        except Exception:
+            logger.exception('lv auto enter loop failed')
+        time.sleep(10)
 
 
 def auto_trend_decide(chat_id, rid, approve):
@@ -14425,6 +14661,7 @@ def _touch_register(chat_id, symbol, touch_sig, reason, tf, plan=None, flip_from
                     waits.pop(k, None)
     try:
         _fn_touch_created(chat_id, s, rec, plan, flip_from)
+        _fn_core3_stamp(chat_id, s, rec)      # V3.44.165
     except Exception:
         logger.debug('funnel touch_created failed', exc_info=True)
     _touch_eval_one(chat_id, rec)
@@ -16170,20 +16407,20 @@ def _scenario_label(scn, reason=''):
 #   key: (برچسب دکمه، پیش‌فرض، بخش منو، توضیح)
 GATE_REGISTRY = {
     # --- شرایط ورود به معامله ---
-    'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', True, 'structure', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
+    'gate_touch_pattern_vote_enabled': ('رأی‌گیری: جهت الگوی برخورد هم یک رأی باشد', False, 'structure', 'جهتی که خودِ الگوی برخورد پیشنهاد می‌دهد (برگشت بدون نفوذ، شکست کاذب، نفوذ و پولبک و ادامه؛ مثلاً شکست کاذب سقف = فروش) در رأی‌گیری فیلترها یک رأی حساب می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_dir_fixed_enabled': ('رأی‌گیری: جهت ثابت از الگو', True, 'structure', 'روشن: جهت معامله فقط از یکی از ۳ الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک و ادامه) مشخص می‌شود و هیچ‌وقت عوض نمی‌شود؛ فیلترها فقط موافق یا مخالف رأی می‌دهند و رأی‌های مخالف معامله را نگه می‌دارند (جهت را برعکس نمی‌کنند). رأی‌ها به‌صورت گروه شمرده می‌شوند: الگوی BTC، روند، مومنتوم، سطح (سقف/کف دیروز هم‌گروه سطح است). خاموش: مثل قبل، جهت از اکثریت رأی‌ها (با الگو وزن ۲) تعیین می‌شود. فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است اثر دارد.'),
     'gate_touch_bias_block_enabled': ('🚦 مانع جهت مخالف بازار در لیست انتظار', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: برخوردهای ثبت‌شده در «📋 سیگنال‌های در انتظار» شمرده می‌شوند (خرید در برابر فروش). اگر یک جهت به ۶۵٪ برسد (مثلاً ۷ فروش و ۳ خرید) جهتِ بازار همان است و جهت مخالف بلاک می‌شود: برخوردهای جهت مخالف از لیست رد می‌شوند، برخورد تازه‌ی جهت مخالف اصلاً ثبت نمی‌شود، و فقط جهتِ آزاد رأی‌گیری را ادامه می‌دهد و به «صف تایید حرکت» می‌رود. حداقل ۴ برخورد جهت‌دار لازم است (نمونه‌ی کم = بلاک نمی‌شود). با هر بروزرسانی لیست دوباره سنجیده می‌شود. «ورود سریع» دستی بلاک نمی‌شود.'),
     'gate_touch_need_dominant_enabled': ('🚦 بدون جهت غالب بازار = بدون معامله', False, 'entry_rules', 'پیش‌فرض خاموش. روشن: جهت غالب بازار از روی برخوردهای ثبت‌شده در «📋 سیگنال‌های در انتظار» سنجیده می‌شود (همان قاعده‌ی ۶۵٪ و حداقل ۴ برخورد جهت‌دار). اگر هیچ جهتی غالب نباشد (مثلاً ۱ خرید / ۱ فروش یا کمتر از ۴ برخورد) هیچ ورود خودکاری انجام نمی‌شود؛ برخوردها در لیست انتظار می‌مانند، می‌شمارند و با مشخص‌شدن غلبه (و تا پایان مهلتشان) دوباره سنجیده می‌شوند. این کلید فقط ورود را نگه می‌دارد و جهت مخالف را بلاک نمی‌کند؛ برای بلاک جهت مخالف کلید «🚦 مانع جهت مخالف بازار» را هم روشن کنید. «ورود سریع» دستی بلاک نمی‌شود.'),
     'gate_reversal_contra_enabled': ('رأی برگشت (آزمایشی): مومنتوم معکوس', False, 'experimental', 'پیش‌فرض خاموش و آزمایشی. فقط رأی‌دهنده است و جلوی هیچ معامله‌ای را نمی‌گیرد؛ فقط «موافق/مخالف» را در رأی‌گیری عوض می‌کند. فقط روی حالت‌های برگشتی (۱ و ۲: برگشت از سطح، ۵ و ۶: شکست کاذب) و فقط وقتی «جهت ثابت از الگو» روشن است اثر دارد. روشن: رأی‌دهنده‌های «رژیم BTC و ETH»، «رژیم ۵ و ۱۵ دقیقه»، «RSI» و «روند ADX» برعکس حساب می‌شوند؛ یعنی وقتی بازار هنوز خلاف جهت برگشت است (فرسودگی حرکت قبلی) این رأی‌ها «موافق» شمرده می‌شوند. «رژیم ۴ ساعته»، MACD، کلوز سطح و سقف/کف دیروز عادی می‌مانند. نتیجه‌ی هر دو حالت (با و بدون معکوس) همیشه در ثبت قیف نوشته می‌شود تا بعداً سنجیده شود.'),
     'gate_touch_vote_enabled': ('رأی‌گیری فیلترها بعد از برخورد با سطح', True, 'entry_rules', 'هر برخورد با سطح اول وارد «📋 سیگنال‌های در انتظار» می‌شود و سیگنالی صادر نمی‌شود. هر فیلتر روشنِ «هم‌جهتی/تایید» (BTC و ETH، ۴ ساعته، ۵ و ۱۵ دقیقه، RSI، MACD، ADX، سطح) یک رأی خرید/فروش/خنثی می‌دهد و جهت (خرید یا فروش) از اکثریت آرا تعیین می‌شود؛ حجم فقط شرط است. وقتی تعداد فیلترهای موافق به حد «ورود خودکار» برسد ربات خودش وارد می‌شود، وگرنه با «⚡ ورود سریع» دستی وارد شوید. با خاموش‌کردن این کلید، مسیر قبلی (جهت از خود برخورد، فیلترها فقط تایید/رد) برمی‌گردد. (از V3.44.47: اگر «جهت فقط از الگوی برخورد» روشن باشد جهت از رأی‌ها عوض نمی‌شود و فقط تعداد رأی‌های موافق برای ورود خودکار سنجیده می‌شود.)'),
-    'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', True, 'timing', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
+    'gate_4h_close_block_enabled': ('بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته', False, 'timing', 'در ۳۰ دقیقه‌ی پایانی هر کندل ۴ ساعته (کندل‌های ۴ ساعته روی ساعت‌های ۰۰، ۰۴، ۰۸، ۱۲، ۱۶، ۲۰ به وقت UTC بسته می‌شوند؛ یعنی ۰۳:۳۰، ۰۷:۳۰، ۱۱:۳۰، ۱۵:۳۰، ۱۹:۳۰، ۲۳:۳۰ به وقت ایران) هیچ معامله‌ای باز نمی‌شود (حتی دستی و حالت دستیار) و یک هشدار برایتان ارسال می‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
     'gate_final_regime_enabled': ('🧭 رژیم بازار در مرحله‌ی آخر ورود', False, 'regime', 'پیش‌فرض خاموش. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، رژیم بازار روی تایم‌فریم سیگنال دوباره بررسی می‌شود. خرید فقط وقتی رژیم صعودی و فروش فقط وقتی نزولی است. اگر رژیم قطعاً خلاف جهت معامله باشد یا رنج/نامشخص باشد، سیگنال حذف نمی‌شود؛ در «⏳ صف تایید حرکت» (یا لیست انتظار) می‌ماند و هر چند ثانیه دوباره سنجیده می‌شود تا رژیم به نفع معامله شود؛ اگر تا پایان مهلت نشد، ورودی انجام نمی‌شود. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند. برای صبر کردن واقعی، «صبر برای تایید حرکت» را هم روشن نگه دار.'),
     'gate_btc_candle_enabled': ('₿ کندل BTC هم‌جهت با معامله', False, 'btceth', 'پیش‌فرض خاموش. روشن: هنگام ورود (خودکار یا دستی)، کندل در حال تشکیل BTC روی تایم‌فریم فعال سنجیده می‌شود؛ خرید فقط وقتی کندل BTC صعودی است (قیمت الان بالاتر از باز شدن کندل) و فروش فقط وقتی نزولی است. ورود خودکار: سیگنال حذف نمی‌شود و تا هم‌جهت شدن کندل BTC منتظر می‌ماند (در صف تایید حرکت، لیست انتظار یا اسکن بعدی). ورود دستی، ⚡ ورود سریع، تایید کارت دستیار: اگر کندل BTC خلاف جهت یا خنثی باشد هشدار می‌دهد و ورود به هیچ عنوان انجام نمی‌شود (حتی با اصرار شما). اوردر معلقِ رسیده به قیمت حذف نمی‌شود و منتظر می‌ماند. اگر داده‌ی BTC در دسترس نباشد هم ورود انجام نمی‌شود. معامله‌های باز دست‌نخورده می‌مانند.'),
-    'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', True, 'btceth', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
+    'gate_btc_front_level_enabled': ('📏 فاصله معقول تا سطح جلویی BTC', False, 'btceth', 'پیش‌فرض روشن. روشن: (۱ — سمت سطح) نزدیک‌ترین سطح BTC به کلوز آخرین کندل بسته‌شده مرجع است؛ خرید فقط وقتی کلوز BTC بالای آن سطح باشد و فروش فقط وقتی پایین آن (اگر BTC بالای سطح بسته باشد، ورود فروش به هیچ عنوان انجام نمی‌شود؛ سیگنال رد نمی‌شود و در صف منتظر می‌ماند). (۲ — فاصله) در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال با نزدیک‌ترین سطح روبه‌روی جهت معامله سنجیده می‌شود (خرید: سطح بالاتر، فروش: سطح پایین‌تر؛ همان سطوحی که ربات استفاده می‌کند). اگر فاصله کمتر از ۱×ATR کندل BTC باشد، هشدار ورود (بیتکوین به سطح مقاومتی/حمایتی نزدیک است؛ تا واکنش به سطح منتظر می‌مانیم) فرستاده می‌شود و ورود نگه داشته می‌شود؛ سیگنال رد نمی‌شود و در «⏳ صف تایید حرکت» (یا لیست انتظار یا اسکن بعدی) می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود تا واکنش BTC به سطح مشخص شود (شکستن سطح یا برگشت از آن). اگر تا پایان مهلت صف معقول نشد، ورودی انجام نمی‌شود. اگر داده‌ی BTC در دسترس نباشد هم ورود نگه داشته می‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا معقول شدن فاصله بسته‌اند (حتی با اصرار شما).'),
     'gate_fc_btcside_enabled':    ('رأی‌گیری: سمت BTC نسبت به نزدیک‌ترین سطح', False, 'btceth', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): نزدیک‌ترین سطح BTC (از هر دو طرف) به کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال مرجع است. کلوز BTC بالای آن سطح = رأی خرید؛ پایین آن = رأی فروش؛ روی سطح یا نبود داده = بدون رأی. برخلاف «📏 فاصله معقول تا سطح جلویی BTC» که ورود را می‌بندد، این کلید فقط رأی می‌دهد و جلوی ورود را نمی‌گیرد. برای خودِ BTC رأی نمی‌دهد.'),
-    'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', True, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
+    'gate_btc_chop_enabled': ('🌀 BTC کلاف دور سطح (حالت نامشخص)', False, 'btceth', 'پیش‌فرض روشن. روشن: در آخرین مرحله‌ای که سیگنال از صف خارج می‌شود و تبدیل به معامله (یا کارت دستیار) می‌شود، اگر در ۱۶ کندل بسته‌شده‌ی اخیر BTC (روی تایم‌فریم فعال) کلوز BTC دست‌کم ۳ بار از نزدیک‌ترین سطح رد و برگشت کرده باشد، یعنی BTC دور سطح کلاف است و هنوز تصمیم نگرفته؛ ورود خرید و فروش هر دو بسته می‌ماند. سیگنال رد نمی‌شود و در صف می‌ماند و با هر کندل بسته‌شده‌ی جدید BTC دوباره سنجیده می‌شود؛ یک هشدار ورود هم می‌آید. استثنا: اگر آخرین ۳ کلوز پشت‌سرهم یک طرف سطح باشند و کلوز آخر دست‌کم ۰٫۵×ATR از سطح فاصله داشته باشد، BTC تصمیم گرفته و کلاف حساب نمی‌شود. «⚡ ورود سریع»، تایید دستی کارت و اوردر معلق هم تا پایان کلاف بسته‌اند (حتی با اصرار شما). مستقل از کلید «فاصله معقول تا سطح جلویی BTC» روشن/خاموش می‌شود.'),
     'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', False, 'btceth', 'پیش‌فرض خاموش (مستقل از پریست‌ها). حتی وقتی خاموش است، هر معامله‌ای که باز می‌شود در ژورنال برچسب می‌خورد که «اگر این کلید روشن بود، این معامله بسته می‌شد یا نه» و گزارش مقایسه‌ی نتیجه با /undecided_report ساخته می‌شود. روشن: اگر BTC وسطِ راهروی دو سطح خودش باشد، یعنی کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال هم بیش از ۵×ATR و هم بیش از ۴۰٪ فاصله‌ی دو سطح (بالا و پایین) از نزدیک‌ترین سطح دور باشد، جهت BTC مشخص نیست؛ ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا BTC به یکی از سطوح نزدیک شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیتکوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود. حدها با متغیرهای BTC_UNDECIDED_FAR_ATR و BTC_UNDECIDED_FAR_GAP (یا کلیدهای btc_undecided_far_atr / btc_undecided_far_gap) عوض می‌شوند. در منوی اصلی فقط ادمین کلید را می‌بیند؛ کاربر عادی فقط زیر پیام هشدار آن را دارد.'),
-    'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', True, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
+    'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', False, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btc_daily_regime_enabled': ('🌅 رژیم روزانه BTC (جهت مجاز امروز)', False, 'btceth', 'پیش‌فرض خاموش (از V3.44.132). روشن: رژیم روزانه‌ی بیت‌کوین از آخرین کندل بسته‌شده‌ی روزانه با معیار دقیق (EMA20/50 هم‌جهت + ADX ≥ ۱۸ + DI هم‌جهت + شیب EMA50 + فاصله از EMA50) سنجیده می‌شود و در طول روز ثابت می‌ماند (کندل روزانه ساعت ۰۳:۳۰ به وقت ایران عوض می‌شود). اگر نزولی باشد، ورود همه‌ی معاملات خرید در همه‌ی مسیرها (خودکار، صف، لیست انتظار، دستی، ⚡ ورود سریع، کارت دستیار، اوردر معلق) متوقف است و فقط فروش مجاز است؛ اگر صعودی باشد برعکس؛ در رنج، خرید و فروش آزاد است. با «معاملات معکوس» روشن، جهتِ نهایی معامله سنجیده می‌شود. سیگنال رد نمی‌شود و در صف/لیست انتظار می‌ماند. اگر داده‌ی روزانه در دسترس نباشد ورود آزاد است. اول هر روز یک پیام اعلام می‌شود («امروز بیتکوین نزولیه و ما فقط دنبال موقعیت‌های فروش می‌گردیم»). معامله‌های باز دست‌نخورده می‌مانند. مستقل از پریست‌هاست.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
@@ -16191,27 +16428,27 @@ GATE_REGISTRY = {
     'gate_fc_h4_enabled':         ('هم‌جهتی: رژیم ۴ ساعته‌ی نماد', False, 'regime', 'رژیم ۴ ساعته‌ی خود نماد باید هم‌جهت با معامله باشد.'),
     'gate_symbol_structure_block_enabled': ('🧱 مانع ثبت: ساختار قیمت نماد خلاف جهت سیگنال', False, 'regime', 'پیش‌فرض خاموش. روشن: قبل از اینکه برخورد با سطح وارد «📋 سیگنال‌های در انتظار» شود، ساختار سقف/کفِ خودِ نماد روی تایم‌فریم فعال سنجیده می‌شود (کندل‌های بسته‌شده، پیوت ۳ کندلی). اگر دو سقف آخر و دو کف آخر هر دو بالاتر باشند (HH/HL = ساختار صعودی)، برخورد فروش اصلاً ثبت نمی‌شود، حتی اگر روی سطح برگشته باشد؛ و برعکس: اگر هر دو پایین‌تر باشند (LH/LL = ساختار نزولی)، برخورد خرید ثبت نمی‌شود. ساختار مختلط یا رنج، نبود داده، و ساختاری که شکسته شده باشد (کلوز زیر آخرین کفِ بالاتر یا بالای آخرین سقفِ پایین‌تر) جلوی هیچ‌طرفی را نمی‌گیرد. روی همه‌ی سناریوها، از جمله برگشتی‌ها، اعمال می‌شود؛ هر ورودی به لیست انتظار (اسکن و برگشت از صف تایید) از همین بررسی می‌گذرد. رد شدن‌ها با دلیل در «تشخیص ورود» ثبت می‌شود. با «معاملات معکوس» روشن، جهت واقعی معامله سنجیده می‌شود.'),
     'gate_fc_symreg_enabled':     ('رأی‌گیری: رژیم نماد در تایم‌فریم فعال', False, 'regime', 'پیش‌فرض خاموش. یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): رژیم خودِ نماد روی همان تایم‌فریمی که ربات روی آن معامله می‌کند (۵ دقیقه، ۱۵ دقیقه یا ۱ ساعته) سنجیده می‌شود (close نسبت به EMA50 و EMA20 نسبت به EMA50 روی آخرین کندل بسته‌شده). نزولی = رأی فروش و صعودی = رأی خرید؛ یعنی برای سیگنال فروش رژیم نزولی رأی موافق (مثبت) و رژیم صعودی رأی مخالف (منفی) است و برای سیگنال خرید برعکس. رنج یا نبود داده = بدون رأی. جدا از «هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد» است (آن هر دو تایم‌فریم ۵ و ۱۵ را با هم می‌سنجد) و در شمارش رأی‌ها یک گروه مستقل است.'),
-    'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', True, 'regime', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
-    'gate_fc_rsi_enabled':        ('تایید RSI', True, 'momentum', 'RSI آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (برای خرید: RSI رو به بالا یا اشباع فروش؛ برای فروش: رو به پایین یا اشباع خرید). RSI خنثی یا نبود داده = سیگنال صادر نمی‌شود.'),
-    'gate_fc_macd_enabled':       ('تایید MACD', True, 'momentum', 'هیستوگرام MACD آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (خرید: مثبت، فروش: منفی). صفر یا نبود داده = سیگنال صادر نمی‌شود.'),
+    'gate_fc_tf_enabled':         ('هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد', False, 'regime', 'رژیم نماد روی ۵ و ۱۵ دقیقه، هر دو، باید هم‌جهت با معامله باشد.'),
+    'gate_fc_rsi_enabled':        ('تایید RSI', False, 'momentum', 'RSI آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (برای خرید: RSI رو به بالا یا اشباع فروش؛ برای فروش: رو به پایین یا اشباع خرید). RSI خنثی یا نبود داده = سیگنال صادر نمی‌شود.'),
+    'gate_fc_macd_enabled':       ('تایید MACD', False, 'momentum', 'هیستوگرام MACD آخرین کندل بسته‌شده باید هم‌جهت با معامله باشد (خرید: مثبت، فروش: منفی). صفر یا نبود داده = سیگنال صادر نمی‌شود.'),
     'gate_fc_vol_enabled':        ('تایید حجم', False, 'momentum', f'حجم آخرین کندل بسته‌شده باید حداقل {FULL_CONFIRM_MIN_VOLUME_RATIO:g} برابر میانگین ۲۰ کندل قبل باشد (همان معیار «حجم بالا» در پیام اندیکاتورها). حجم پایین‌تر یا نبود داده = سیگنال صادر نمی‌شود. پیش‌فرض: خاموش.'),
-    'gate_fc_adx_enabled':        ('تایید روند ADX', True, 'momentum', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
-    'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', True, 'level', 'یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): قیمت از سقف دیروز (PDH) گذشته = رأی خرید؛ کف دیروز (PDL) را از دست داده = رأی فروش؛ به سقف دیروز رسیده ولی نگذشته = رأی فروش؛ به کف دیروز رسیده ولی پایین‌تر نرفته = رأی خرید؛ وسط رنج دیروز = بدون رأی. توجه: در حالت «همه‌ی فیلترها موافق» یا «همه به‌جز یکی»، این رأی هم باید موافق باشد؛ پس ورود خودکار سخت‌گیرانه‌تر می‌شود.'),
+    'gate_fc_adx_enabled':        ('تایید روند ADX', False, 'momentum', 'ADX آخرین کندل بسته‌شده باید حداقل ۲۰ باشد (روند وجود داشته باشد) و جهت آن (+DI در برابر -DI) هم‌جهت با معامله باشد. روند ضعیف/رنج یا نبود داده = سیگنال صادر نمی‌شود.'),
+    'gate_fc_ylevel_enabled':     ('رأی‌گیری: برخورد/عبور از سقف و کف دیروز', False, 'level', 'یک رأی جدا در رأی‌گیری بعد از برخورد با سطح (فقط وقتی «رأی‌گیری فیلترها بعد از برخورد با سطح» روشن است): قیمت از سقف دیروز (PDH) گذشته = رأی خرید؛ کف دیروز (PDL) را از دست داده = رأی فروش؛ به سقف دیروز رسیده ولی نگذشته = رأی فروش؛ به کف دیروز رسیده ولی پایین‌تر نرفته = رأی خرید؛ وسط رنج دیروز = بدون رأی. توجه: در حالت «همه‌ی فیلترها موافق» یا «همه به‌جز یکی»، این رأی هم باید موافق باشد؛ پس ورود خودکار سخت‌گیرانه‌تر می‌شود.'),
     'gate_fc_level_enabled':      ('هم‌جهتی: کندل بسته‌شده سمتِ درستِ سطح', True, 'level', 'آخرین کندل بسته‌شده باید سمت درست سطح ستاپ باشد (خرید بالای سطح، فروش پایین سطح).'),
     'gate_inverse_trading_enabled': ('🔁 معاملات معکوس (آزمایشی)', False, 'experimental', 'پیش‌فرض خاموش. روشن: همه‌چیز مثل قبل پیش می‌رود ولی جهت معامله برعکس می‌شود؛ سیگنال خرید = معامله‌ی فروش و سیگنال فروش = معامله‌ی خرید. فاصله‌ی حد ضرر و فاصله‌ی حد سود همان فاصله‌های سیگنال اصلی می‌مانند (جابه‌جا نمی‌شوند)، پس نسبت پاداش به ریسک هم همان سیگنال اصلی است و ضرر از سود کمتر می‌ماند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     'gate_h4_tier_enabled': ('رتبه‌ی نرم با رژیم ۴ ساعته', False, 'regime', 'پیش‌فرض خاموش. سیگنالی را رد نمی‌کند؛ فقط حجم/ریسک معامله را کم می‌کند. اگر رژیم ۴ ساعته‌ی نماد با جهتِ سیگنال هم‌جهت باشد (خرید با ۴ ساعته‌ی صعودی، فروش با نزولی) با حجم کامل وارد می‌شود؛ اگر هم‌جهت نباشد (خلاف یا رنج) ریسک معامله به نصف (قابل‌تنظیم با H4_TIER_REDUCED_RISK_MULT) کم می‌شود. در حالت معکوس منطق برعکس است: سیگنال‌های هم‌جهت با ۴ ساعته (که بیشتر برنده‌اند) با حجم کم‌تر معکوس می‌شوند. روی معامله‌های دستیِ خودِ شما اثر ندارد.'),
     # --- شناسایی فرصت (الگوی قیمت) ---
-    'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', True, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
-    'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', True, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
-    'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', True, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
+    'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', False, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
+    'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', False, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
+    'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', False, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
     # --- کیفیت و کنترل ریسک ---
-    'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', True, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
+    'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', False, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
     'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
     'gate_max_sl_atr_enabled':    ('سقف فاصله‌ی حد ضرر', True, 'quality', 'اگر حد ضرر لازم از نوسان معمول بازار خیلی دورتر باشد (ریسک زیاد)، سیگنال رد می‌شود.'),
-    'gate_fee_ratio_enabled':     ('جلوگیری از معامله‌ی کم‌ارزش (سیگنال)', True, 'quality', 'اگر مبلغ ریسک معامله آن‌قدر کوچک باشد که کارمزد بخش بزرگی از آن را می‌خورد، سیگنال رد می‌شود.'),
+    'gate_fee_ratio_enabled':     ('جلوگیری از معامله‌ی کم‌ارزش (سیگنال)', False, 'quality', 'اگر مبلغ ریسک معامله آن‌قدر کوچک باشد که کارمزد بخش بزرگی از آن را می‌خورد، سیگنال رد می‌شود.'),
     'use_edge_proxy_gate':        ('فیلتر آزمایشی سودآوری مورد انتظار', False, 'quality', 'یک فیلتر آزمایشی که سودآوری مورد انتظار هر سیگنال را تخمین می‌زند. فقط برای کاربران باتجربه؛ پیش‌فرض خاموش.'),
-    'gate_open_fee_ratio_enabled': ('جلوگیری از معامله‌ی کم‌ارزش (ورود)', True, 'quality', 'در لحظه‌ی ورود هم بررسی می‌شود که مبلغ ریسک چند برابر کارمزد باشد؛ وگرنه ورود انجام نمی‌شود.'),
-    'gate_total_risk_cap_enabled': ('سقف جمع ریسک معامله‌های باز', True, 'quality', 'جمع ریسک همه‌ی معامله‌های باز نباید از درصد مشخصی از سرمایه بیشتر شود.'),
+    'gate_open_fee_ratio_enabled': ('جلوگیری از معامله‌ی کم‌ارزش (ورود)', False, 'quality', 'در لحظه‌ی ورود هم بررسی می‌شود که مبلغ ریسک چند برابر کارمزد باشد؛ وگرنه ورود انجام نمی‌شود.'),
+    'gate_total_risk_cap_enabled': ('سقف جمع ریسک معامله‌های باز', False, 'quality', 'جمع ریسک همه‌ی معامله‌های باز نباید از درصد مشخصی از سرمایه بیشتر شود.'),
     'gate_cooldown_enabled':      ('استراحت بعد از هر معامله', True, 'timing', 'بعد از بسته شدن معامله روی یک ارز، تا مدتی دوباره وارد همان ارز نمی‌شود.'),
     'gate_traded_level_enabled':  ('عدم تکرار ورود روی یک سطح', True, 'level', 'روی سطحی که قبلاً معامله شده و هنوز آزاد نشده، ورود جدید انجام نمی‌شود.'),
     'gate_risk_guard_enabled':    ('ایست ایمنی بعد از ضرر', True, 'timing', 'با چند ضرر پشت‌سرهم یا رسیدن به حد ضرر روزانه، ورود جدید متوقف می‌شود. خاموش کردنش محافظت از سرمایه را برمی‌دارد.'),
@@ -16246,6 +16483,11 @@ def _filter_info(key, s=None):
             'قبل از ورود، اگر اندیکاتورها (RSI، MACD، ADX؛ همان رأی‌های دکمه‌ی «📊 اندیکاتورها») خلاف جهت معامله باشند، یا هیچ‌کدام از معامله پشتیبانی نکنند (همه خنثی)، ورود نگه داشته می‌شود و می‌پرسد «وارد شوم؟» (در همان کارتِ هشدار روند BTC/ETH). نبود داده مانع نمی‌شود. پیش‌فرض روشن.'),
         'trend_warn_btc': ('بررسی روند بیت‌کوین', 'روند بیت‌کوین هم در هشدار بالا بررسی شود.'),
         'trend_warn_eth': ('بررسی روند اتریوم', 'روند اتریوم هم در هشدار بالا بررسی شود.'),
+        'ref_level_warn': ('هشدار موقعیت BTC/ETH/SOL نسبت به سطح (کلید اصلی)',
+            'قبل از ورود، کلوز آخرین کندل بسته‌شده‌ی هر ارزِ شاخص روی تایم‌فریم فعال با نزدیک‌ترین سطحش سنجیده می‌شود (همان سطح‌هایی که ربات استفاده می‌کند). خرید فقط وقتی هم‌جهت است که کلوز بالای سطح باشد و فروش وقتی پایین سطح؛ اگر برعکس بود، ورود نگه داشته می‌شود و با «بله، وارد شو / نه» از تو تایید می‌گیرد. خودِ نمادِ سیگنال بررسی نمی‌شود؛ نبود داده مانع نمی‌شود. در ورود خودکار، اگر فقط همین هشدار مانع باشد، سیگنال تا پایان مهلت دوباره چک می‌شود و با هم‌جهت شدن همه‌ی ارزهای روشن، خودکار وارد می‌شود (حالت دستیار و هشدارهای دیگر همچنان تایید دستی می‌خواهند). سه کلید بعدی مشخص می‌کنند کدام ارز بررسی شود. پیش‌فرض: خاموش.'),
+        'ref_level_warn_btc': ('بررسی BTC', 'موقعیت بیت‌کوین نسبت به نزدیک‌ترین سطحش در هشدار بالا بررسی شود.'),
+        'ref_level_warn_eth': ('بررسی ETH', 'موقعیت اتریوم نسبت به نزدیک‌ترین سطحش در هشدار بالا بررسی شود.'),
+        'ref_level_warn_sol': ('بررسی SOL', 'موقعیت سولانا نسبت به نزدیک‌ترین سطحش در هشدار بالا بررسی شود.'),
         'profit_autoclose': (f'معاملات با {pt:g}$ سود بسته شوند',
             f'وقتی سود ناخالص (بدون کارمزد) یک معامله‌ی باز به {pt:g}$ برسد، معامله با قیمت بازار بسته می‌شود. تا وقتی این کلید روشن است، معامله قبل از رسیدن به هشدار سود {PROFIT_ALERT_USDT:g}$ بسته می‌شود و دکمه‌های «بستن ۵۰٪/۷۵٪/۱۰۰٪» دیده نمی‌شوند؛ برای استفاده از آن دکمه‌ها این کلید را خاموش نگه دار. پیش‌فرض: خاموش.'),
         'total_profit_autoclose': (f'بستن همه‌ی پوزیشن‌ها با مجموع سود {tt:g}$',
@@ -16283,7 +16525,8 @@ def _filter_info(key, s=None):
 
 
 _FILTER_SECTION_KEYS = {
-    'entry_warn': ['trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn'],
+    'entry_warn': ['trend_warn', 'trend_warn_btc', 'trend_warn_eth', 'ref_level_warn', 'ref_level_warn_btc', 'ref_level_warn_eth', 'ref_level_warn_sol',
+                   'ind_warn', 'symbol_tf_regime_warn', 'symbol_h4_regime_warn'],
     'regime': ['regime_adv'],
     'entry_rules': ['sweep_confirm', 'fav_confirm'],
     'exit': ['trail', 'profit_autoclose', 'total_profit_autoclose', 'profit_alert', 'profit_fade_alert', 'be_alert', 'be_auto'],
@@ -16372,7 +16615,7 @@ def preset_active_text(name):
     """V3.44.87: فهرست دسته‌بندی‌شده‌ی کلیدهای روشنِ یک پریست (نسخه‌ی ذخیره‌شده‌ی ادمین اگر باشد، وگرنه پیش‌فرض کد)."""
     cfg, ses = presets_mod._full(name)
     pr = presets_mod.PRESETS[name]
-    lines = [f"👁 *فعال‌های کلید {presets_mod._fa(name)} — {pr['label']}*"]
+    lines = [f"👁 *فعال‌های پریست «{pr['label']}»*"]
     if presets_mod.has_custom(name):
         lines.append('(بر اساس نسخه‌ی ذخیره‌شده‌ی خودت)')
     order = ('level', 'structure', 'momentum', 'btceth', 'regime', 'entry_rules', 'timing', 'quality', 'experimental')
@@ -16387,7 +16630,7 @@ def preset_active_text(name):
     if cfg.get('sweep_require_confirmation_candle'):
         ent.append('• کندل تایید روشن')
     lines += ['', '🎯 *ورود و تایید حرکت*'] + ent
-    warns = [lbl for key, lbl in (('trend_warn_enabled', 'هشدار روند بیت‌کوین/اتریوم'), ('ind_warn_enabled', 'هشدار تضاد با اندیکاتورها'),
+    warns = [lbl for key, lbl in (('trend_warn_enabled', 'هشدار روند بیت‌کوین/اتریوم'), ('ref_level_warn_enabled', 'هشدار موقعیت BTC/ETH/SOL نسبت به سطح'), ('ind_warn_enabled', 'هشدار تضاد با اندیکاتورها'),
                                   ('symbol_tf_regime_warn_enabled', 'هشدار ناهم‌جهتی رژیم ۵ و ۱۵ دقیقه'), ('symbol_h4_regime_warn_enabled', 'هشدار خلاف رژیم ۴ ساعته'))
              if ses.get(key)]
     lines += ['', '⚠️ *هشدارها*'] + ([f'• {w}' for w in warns] if warns else ['• همه خاموش'])
@@ -16449,12 +16692,16 @@ def trade_filter_management_keyboard(chat_id, section=None):
 
     if section == 'entry_warn':
         return {'inline_keyboard': [
-            [fcell(bool(s.get('trend_warn_enabled', True)), 'trend_warn', '/toggle_trend_warn')],
+            [fcell(bool(s.get('trend_warn_enabled', False)), 'trend_warn', '/toggle_trend_warn')],
             [fcell(bool(s.get('trend_warn_btc', True)), 'trend_warn_btc', '/toggle_trend_warn_btc'),
              fcell(bool(s.get('trend_warn_eth', True)), 'trend_warn_eth', '/toggle_trend_warn_eth')],
-            [fcell(bool(s.get('ind_warn_enabled', True)), 'ind_warn', '/toggle_ind_warn')],
-            [fcell(bool(s.get('symbol_tf_regime_warn_enabled', True)), 'symbol_tf_regime_warn', '/toggle_symbol_tf_regime_warn')],
-            [fcell(bool(s.get('symbol_h4_regime_warn_enabled', True)), 'symbol_h4_regime_warn', '/toggle_symbol_h4_regime_warn')],
+            [fcell(bool(s.get('ref_level_warn_enabled', False)), 'ref_level_warn', '/toggle_ref_level_warn')],
+            [fcell(bool(s.get('ref_level_warn_btc', True)), 'ref_level_warn_btc', '/toggle_ref_level_warn_btc'),
+             fcell(bool(s.get('ref_level_warn_eth', True)), 'ref_level_warn_eth', '/toggle_ref_level_warn_eth'),
+             fcell(bool(s.get('ref_level_warn_sol', True)), 'ref_level_warn_sol', '/toggle_ref_level_warn_sol')],
+            [fcell(bool(s.get('ind_warn_enabled', False)), 'ind_warn', '/toggle_ind_warn')],
+            [fcell(bool(s.get('symbol_tf_regime_warn_enabled', False)), 'symbol_tf_regime_warn', '/toggle_symbol_tf_regime_warn')],
+            [fcell(bool(s.get('symbol_h4_regime_warn_enabled', False)), 'symbol_h4_regime_warn', '/toggle_symbol_h4_regime_warn')],
             back_entry]}
 
     if section in ('level', 'momentum', 'btceth', 'timing', 'experimental'):
@@ -16542,7 +16789,7 @@ def trade_filter_management_keyboard(chat_id, section=None):
         ]}
 
     return {'inline_keyboard': [
-        [{'text': '🎚 پریست‌ها (کلید ۱ تا ۵)', 'callback_data': '/preset_menu'}],
+        [{'text': '🎚 پریست (معمولی)', 'callback_data': '/preset_menu'}],
         [{'text': '🧱 سطح', 'callback_data': '/trade_filter_level'},
          {'text': '🧩 الگوی برخورد با سطح', 'callback_data': '/trade_filter_structure'}],
         [{'text': '📈 مومنتوم و اندیکاتور', 'callback_data': '/trade_filter_momentum'},
@@ -16587,11 +16834,11 @@ def wizard_same_dir_text(chat_id):
 
 
 def wizard_mode_page(chat_id, message_id=None):
-    """V3.44.85: مرحله‌ی «حالت معامله» ویزارد. اگر کاربر عادی هنوز حالتی ندارد، «معمولی» پیش‌فرض می‌نشیند."""
+    """V3.44.169: پایان ویزارد (بعد از تایم‌فریم). اگر کاربر عادی هنوز پریستی ندارد، «معمولی» می‌نشیند و منوی اصلی باز می‌شود."""
     s = get_session(chat_id)
     if s.get('active_preset') is None:
         _apply_default_mode(chat_id, s); save_session(chat_id)
-    edit_page(chat_id, presets_mod.wizard_mode_text(s), presets_mod.wizard_mode_keyboard(s), message_id)
+    menu(chat_id, message_id)      # V3.44.169: انتخاب حالت معامله حذف شد؛ آخرین مرحله‌ی ویزارد = تایم‌فریم
 
 
 def same_direction_limit_keyboard(chat_id):
@@ -17095,7 +17342,7 @@ def _bt_extra_line(res, s, tf, truncated_note=''):
     st = res.get('stats') or {}
     act = s.get('active_preset')
     pre = presets_mod.PRESETS.get(act, {}).get('label') if act else None
-    parts = [f"پریست: {('کلید ' + str(act) + ' — ' + pre) if pre else 'تنظیمات دستی/بدون کلید'}",
+    parts = [f"پریست: {pre if pre else 'تنظیمات دستی/بدون پریست'}",
              'با ترلینگ' if s.get('trail_enabled') else 'بدون ترلینگ']
     if (s.get('strategy_config') or {}).get('mtf_mode_enabled') and tf in _MTF_ENTRY_TFS:      # V3.44.160
         parts.append('چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if tf == '5min' else '۱۵') + ' دقیقه')
@@ -17984,16 +18231,11 @@ def menu(chat_id,message_id=None):
     max_same_disp = max_same if max_same>0 else '∞'
     dir_cd = s.get('same_direction_entry_cooldown_seconds',0)
     diag = "🟢 فعال" if s.get('entry_diag_enabled', True) else "🔴 خاموش"
-    try:
-        mode_line = presets_mod.panel_line(s)      # V3.44.102: حالت معامله / پریست فعال
-    except Exception:
-        mode_line = ''
-    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی · '+REAL_VENUES.get(s.get('paper_exchange','binance'),'Binance').split()[0]}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n{mode_line}\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
+    text=f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی · '+REAL_VENUES.get(s.get('paper_exchange','binance'),'Binance').split()[0]}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n📈 استراتژی: `{'پویا (دوطرفه)' if s['active_strategy']=='dynamic' else s['active_strategy']}`\n💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n📌 پوزیشن‌های باز: `{maxp}`  |  🔍 لاگ ورود: `{diag}`\n🛡 ریسک هر معامله: `{s['risk_per_trade_pct']:.2f}%`  |  حد ضرر روزانه: `{s['daily_loss_limit_pct']:.2f}%`\n🧭 سقف هم‌جهت هم‌زمان: `{max_same_disp}`  |  فاصله ورود هم‌جهت: `{dir_cd:.0f}s`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:"
     if is_restricted_user(chat_id):
         # V3.44.59: پنل کاربر عادی بدون جزئیات استراتژی (تایم‌فریم، نوع استراتژی، لاگ ورود، قوانین هم‌جهت).
         text = (f"📊 *پنل اصلی ربات*\n\n🟢 اسکن: `{'فعال' if s['is_bot_active'] else 'متوقف'}`\n"
                 f"💳 حساب: `{('واقعی · '+real_venue_name(chat_id).split()[0]) if s['trading_mode']=='REAL' else 'کاغذی · '+REAL_VENUES.get(s.get('paper_exchange','binance'),'Binance').split()[0]}`  |  ⏱ تایم‌فریم: `{TF_DISPLAY.get(s['timeframe'],s['timeframe'])}`\n"
-                f"{mode_line}\n"
                 f"💰 موجودی: `{bal:.2f} USDT`  |  ⚙️ مقدار هر معامله: `{s['trade_amount_usdt']:.0f} USDT`\n"
                 f"📌 حداکثر پوزیشن باز: `{maxp}`\n"
                 f"🤝 حالت دستیار: `{'روشن (ورود فقط با تایید شما)' if s.get('assist_mode_enabled') else 'خاموش (ورود خودکار)'}`\n\nاز منوی زیر بخش موردنظر را انتخاب کن:")
@@ -19090,12 +19332,6 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(s.get('max_open_positions', 3)),message_id); return
     if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
     if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
-    if cl.startswith('/set_wmode_'):          # V3.44.85: انتخاب حالت معامله در ویزارد (همان صفحه ویرایش می‌شود)
-        _mk = cl[len('/set_wmode_'):]
-        if not any(x[0] == _mk for x in presets_mod.TRADE_MODES) or not presets_mod.apply_preset(s, _mk):
-            edit_page(chat_id, '⚠️ این حالت شناخته نشد.', presets_mod.wizard_mode_keyboard(s), message_id); return
-        save_session(chat_id)
-        edit_page(chat_id, presets_mod.wizard_mode_text(s), presets_mod.wizard_mode_keyboard(s), message_id); return
     if cl=='/wiz_mode_done': menu(chat_id, message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)
@@ -19652,7 +19888,7 @@ def process_command(cmd,chat_id,message_id=None):
         save_session(chat_id)
         st = '🟢 روشن' if s[key] else '🔴 خاموش'
         extra = ''
-        if key != 'trend_warn_enabled' and not s.get('trend_warn_enabled', True):
+        if key != 'trend_warn_enabled' and not s.get('trend_warn_enabled', False):
             extra = '\n\n⚠️ کلید اصلی «هشدار روند بیت‌کوین و اتریوم» خاموش است؛ تا آن را روشن نکنی هیچ بررسی‌ای انجام نمی‌شود.'
         elif key == 'trend_warn_enabled' and s[key] and not (s.get('trend_warn_btc', True) or s.get('trend_warn_eth', True)):
             extra = '\n\n⚠️ هر دو کلید بیت‌کوین و اتریوم خاموش‌اند؛ تا یکی را روشن نکنی بررسی‌ای انجام نمی‌شود.'
@@ -19660,6 +19896,30 @@ def process_command(cmd,chat_id,message_id=None):
             f"🧭 {label}: {st}\n\n"
             "قبل از ورود (خودکار، دستیار و ورود سریع از کانال) اگر جهت معامله با روند بیت‌کوین یا اتریوم در تضاد باشد، "
             "ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. روند خنثی یا نبود داده مانع نمی‌شود." + extra,
+            trade_filter_management_keyboard(chat_id, 'entry_warn'))
+        return
+    if cl in ('/toggle_ref_level_warn', '/toggle_ref_level_warn_btc', '/toggle_ref_level_warn_eth', '/toggle_ref_level_warn_sol'):
+        # V3.44.167: هشدار موقعیت BTC/ETH/SOL نسبت به نزدیک‌ترین سطح (کلید اصلی + سه کلید جدا)
+        _rl_map = {'/toggle_ref_level_warn': ('ref_level_warn_enabled', 'ref_level_warn'),
+                   '/toggle_ref_level_warn_btc': ('ref_level_warn_btc', 'ref_level_warn_btc'),
+                   '/toggle_ref_level_warn_eth': ('ref_level_warn_eth', 'ref_level_warn_eth'),
+                   '/toggle_ref_level_warn_sol': ('ref_level_warn_sol', 'ref_level_warn_sol')}
+        key, info_key = _rl_map[cl]
+        label = _filter_info(info_key)[0]
+        s[key] = not bool(s.get(key, key != 'ref_level_warn_enabled'))
+        save_session(chat_id)
+        st = '🟢 روشن' if s[key] else '🔴 خاموش'
+        _any_sym = any(s.get(f'ref_level_warn_{x}', True) for x in ('btc', 'eth', 'sol'))
+        extra = ''
+        if key != 'ref_level_warn_enabled' and not s.get('ref_level_warn_enabled', False):
+            extra = '\n\n⚠️ کلید اصلی «هشدار موقعیت BTC/ETH/SOL نسبت به سطح» خاموش است؛ تا آن را روشن نکنی هیچ بررسی‌ای انجام نمی‌شود.'
+        elif not _any_sym:
+            extra = '\n\n⚠️ هر سه کلید BTC و ETH و SOL خاموش‌اند؛ تا یکی را روشن نکنی بررسی‌ای انجام نمی‌شود.'
+        send_message(chat_id,
+            f"📍 {label}: {st}\n\n"
+            "قبل از ورود، کلوز آخرین کندل بسته‌شده‌ی BTC / ETH / SOL (هرکدام که کلیدش روشن است) با نزدیک‌ترین سطحش سنجیده می‌شود. "
+            "اگر برخلاف جهت معامله باشد (خرید با کلوز پایین سطح، یا فروش با کلوز بالای سطح)، ورود نگه داشته می‌شود و با دکمه‌ی «بله، وارد شو / نه» از تو تایید می‌گیرد. "
+            "خودِ نمادِ سیگنال بررسی نمی‌شود و نبود داده مانع نمی‌شود." + extra,
             trade_filter_management_keyboard(chat_id, 'entry_warn'))
         return
     if cl=='/toggle_regime_adv':
@@ -19674,7 +19934,7 @@ def process_command(cmd,chat_id,message_id=None):
             trade_filter_management_keyboard(chat_id, 'regime'))
         return
     if cl=='/toggle_symbol_h4_regime_warn':
-        current = bool(s.get('symbol_h4_regime_warn_enabled', True))
+        current = bool(s.get('symbol_h4_regime_warn_enabled', False))
         s['symbol_h4_regime_warn_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -19686,7 +19946,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🧭 {_filter_info('symbol_h4_regime_warn')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_warn'))
         return
     if cl=='/toggle_symbol_tf_regime_warn':
-        current = bool(s.get('symbol_tf_regime_warn_enabled', True))
+        current = bool(s.get('symbol_tf_regime_warn_enabled', False))
         s['symbol_tf_regime_warn_enabled'] = not current
         save_session(chat_id)
         new_state = '🟢 روشن' if not current else '🔴 خاموش'
@@ -19698,7 +19958,7 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"🧭 {_filter_info('symbol_tf_regime_warn')[0]}: {new_state}\n\n{note}", trade_filter_management_keyboard(chat_id, 'entry_warn'))
         return
     if cl=='/toggle_ind_warn':
-        s['ind_warn_enabled'] = not bool(s.get('ind_warn_enabled', True))
+        s['ind_warn_enabled'] = not bool(s.get('ind_warn_enabled', False))
         save_session(chat_id)
         st = '🟢 روشن' if s['ind_warn_enabled'] else '🔴 خاموش'
         send_message(chat_id,
@@ -19748,22 +20008,12 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, FILTER_MAIN_TEXT, trade_filter_management_keyboard(chat_id))
         return
     # V3.44.7: پریست‌های آماده (کلید ۱، ۲، ...)
-    if cl == '/trade_mode_menu':               # V3.44.62: منوی سه حالت معامله (همه‌ی کاربران)
-        send_message(chat_id, presets_mod.mode_menu_text(s), presets_mod.mode_keyboard(s)); return
-    if cl.startswith('/trade_mode_set_'):
-        _mk = cl[len('/trade_mode_set_'):]
-        _mi = next((x for x in presets_mod.TRADE_MODES if x[0] == _mk), None)
-        if not _mi or not presets_mod.apply_preset(s, _mk):
-            send_message(chat_id, '⚠️ این حالت شناخته نشد.', presets_mod.mode_keyboard(s)); return
-        save_session(chat_id)
-        send_message(chat_id, f"✅ حالت معامله روی «{_mi[1]} {_mi[2]}» تنظیم شد.\n\n{_mi[3]}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.",
-                     presets_mod.mode_keyboard(s)); return
     if cl.startswith('/preset_show_'):         # V3.44.87: فهرست کلیدهای روشن همین پریست
         _pn = cl[len('/preset_show_'):]
         if _pn not in presets_mod.PRESETS:
-            send_message(chat_id, '⚠️ این کلید شناخته نشد.', presets_mod.keyboard(s)); return
+            send_message(chat_id, '⚠️ این پریست شناخته نشد.', presets_mod.keyboard(s)); return
         send_message(chat_id, preset_active_text(_pn),
-                     {'inline_keyboard': [[{'text': f'✅ اعمال کلید {presets_mod._fa(_pn)}', 'callback_data': f'/preset_apply_{_pn}'}],
+                     {'inline_keyboard': [[{'text': '✅ اعمال پریست', 'callback_data': f'/preset_apply_{_pn}'}],
                                           [{'text': '🔙 پریست‌ها', 'callback_data': '/preset_menu'}],
                                           [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}); return
     if cl == '/preset_menu':
@@ -19772,11 +20022,11 @@ def process_command(cmd,chat_id,message_id=None):
     if cl.startswith('/preset_apply_'):
         _pn = cl[len('/preset_apply_'):]
         if not presets_mod.apply_preset(s, _pn):
-            send_message(chat_id, '⚠️ این کلید شناخته نشد.', presets_mod.keyboard(s))
+            send_message(chat_id, '⚠️ این پریست شناخته نشد.', presets_mod.keyboard(s))
             return
         save_session(chat_id)
         _pp = presets_mod.PRESETS[_pn]
-        send_message(chat_id, f"✅ کلید {presets_mod._fa(_pn)} اعمال شد: {_pp['label']}\n\n{_pp['desc']}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.", presets_mod.keyboard(s))
+        send_message(chat_id, f"✅ پریست «{_pp['label']}» اعمال شد.\n\n{_pp['desc']}\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.", presets_mod.keyboard(s))
         return
     if cl.startswith('/preset_save_') or cl.startswith('/preset_reset_'):      # V3.44.70: ذخیره/بازگشت هر کلید جداگانه (فقط ادمین)
         if not is_admin(chat_id):
@@ -19784,25 +20034,25 @@ def process_command(cmd,chat_id,message_id=None):
         _is_save = cl.startswith('/preset_save_')
         _pn = cl[len('/preset_save_' if _is_save else '/preset_reset_'):]
         if _pn not in presets_mod.PRESETS:
-            send_message(chat_id, '⚠️ این کلید شناخته نشد.', presets_mod.keyboard(s)); return
+            send_message(chat_id, '⚠️ این پریست شناخته نشد.', presets_mod.keyboard(s)); return
         if _is_save:
             _n = presets_mod.save_custom(s, _pn)
             if _n is None:
                 send_message(chat_id, '⚠️ ذخیره نشد (مسیر فایل یا دسترسی نوشتن را بررسی کن).', presets_mod.keyboard(s)); return
             save_session(chat_id)
             _ns = _sync_preset_users(_pn, chat_id)
-            send_message(chat_id, f"💾 تنظیمات فعلی در کلید {presets_mod._fa(_pn)} ذخیره شد ({presets_mod._fa(_n)} مورد) و این کلید فعال است. "
-                                  f"کاربرانی که الان روی این کلید هستند ({presets_mod._fa(_ns)} نفر) خودکار نسخه‌ی جدید را گرفتند؛ روی معامله‌های بعدی اثر می‌کند.", presets_mod.keyboard(s)); return
+            send_message(chat_id, f"💾 تنظیمات فعلی در پریست ذخیره شد ({presets_mod._fa(_n)} مورد) و این پریست فعال است. "
+                                  f"کاربرانی که الان روی این پریست هستند ({presets_mod._fa(_ns)} نفر) خودکار نسخه‌ی جدید را گرفتند؛ روی معامله‌های بعدی اثر می‌کند.", presets_mod.keyboard(s)); return
         if presets_mod.reset_custom(_pn):
             _ns = _sync_preset_users(_pn)
             _own = ''
             if s.get('active_preset') == _pn:
                 presets_mod.apply_preset(s, _pn); save_session(chat_id)
                 _own = ' تنظیمات خودت هم به پیش‌فرض برگشت.'
-            send_message(chat_id, f"↩️ نسخه‌ی ذخیره‌شده‌ی کلید {presets_mod._fa(_pn)} پاک شد و پیش‌فرض کد برگشت؛ "
-                                  f"{presets_mod._fa(_ns)} کاربر روی این کلید خودکار به‌روز شدند.{_own}", presets_mod.keyboard(s))
+            send_message(chat_id, f"↩️ نسخه‌ی ذخیره‌شده‌ی پریست پاک شد و پیش‌فرض کد برگشت؛ "
+                                  f"{presets_mod._fa(_ns)} کاربر روی این پریست خودکار به‌روز شدند.{_own}", presets_mod.keyboard(s))
         else:
-            send_message(chat_id, 'این کلید نسخه‌ی ذخیره‌شده ندارد.', presets_mod.keyboard(s))
+            send_message(chat_id, 'این پریست نسخه‌ی ذخیره‌شده ندارد.', presets_mod.keyboard(s))
         return
     if cl == '/binance_health':      # V3.44.121
         if not is_admin(chat_id):
@@ -21269,6 +21519,7 @@ def main():
     Thread(target=lambda: (time.sleep(2), _btc_dyn_k_loop()), daemon=True, name='btc-dynamic-k').start()      # V3.44.145
     Thread(target=lambda: (time.sleep(4), _trade_set_loop()), daemon=True, name='trade-set-corr').start()      # V3.44.152
     Thread(target=lambda: (time.sleep(3), _price_alert_loop()), daemon=True, name='price-alerts').start()      # V3.44.148
+    Thread(target=lambda: (time.sleep(6), _lv_auto_loop()), daemon=True, name='lv-auto-enter').start()      # V3.44.168
     app.run(host='0.0.0.0', port=PORT, threaded=True)
 
 
