@@ -1,4 +1,4 @@
-"""پریست من (کلید ۱) - تنظیمات نهایی برای تایم‌فریم ۱۵ دقیقه.
+"""پریست «معمولی» - تنها پریست ربات (V3.44.169).
 
 پریست یک مجموعه‌ی کامل از تنظیمات است. با لمس کلید، همه‌ی کلیدهای مدیریت‌شده روی مقدار همین پریست
 می‌نشینند (چیزی از تنظیم قبلی باقی نمی‌ماند). هر معامله موقع باز شدن با نام پریست برچسب می‌خورد و در ژورنال
@@ -18,33 +18,29 @@ import time
 
 # ---------------------------------------------------------------- پایه (کلید ۱) ----------
 _GATES_ON = (
+    'gate_touch_dir_fixed_enabled',         # V3.44.166: جهت ثابت از الگوی برخورد (پیش‌فرض روشن)
+    'gate_min_rr_enabled', 'gate_max_sl_atr_enabled',        # کیفیت و ریسک (بدون تغییر)
     # شرایط ورود و رأی‌گیری
-    'gate_4h_close_block_enabled',          # بدون معامله در ۳۰ دقیقه‌ی آخر کندل ۴ ساعته
     'gate_touch_vote_enabled',              # رأی‌گیری فیلترها بعد از برخورد با سطح
-    'gate_touch_pattern_vote_enabled',      # جهت الگوی برخورد هم یک رأی
-    'gate_fc_tf_enabled',                   # هم‌جهتی: رژیم ۵ و ۱۵ دقیقه‌ی نماد
     'gate_fc_level_enabled',                # هم‌جهتی: کندل بسته‌شده سمت درست سطح
-    'gate_fc_ylevel_enabled',               # برخورد/عبور از سقف و کف دیروز
     'gate_btc_candle_enabled',              # ورود وقتی کندل BTC با معامله هم‌جهت است
-    'gate_btc_front_level_enabled',         # ورود وقتی فاصله‌ی BTC تا سطح مقابل معقول است
-    'gate_btc_chop_enabled',                # بدون ورود وقتی BTC دور سطح کلاف است (حالت نامشخص)
-    'gate_pd_level_enabled',                # V3.44.58: سقف/کف دیروز (PDH/PDL) جلوی معامله در مدل نصف‌کردن
     # الگوهای سطح
-    'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
     # کیفیت و ریسک
-    'gate_min_score_enabled', 'gate_min_rr_enabled', 'gate_max_sl_atr_enabled',
-    'gate_fee_ratio_enabled', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled',
     'gate_cooldown_enabled', 'gate_traded_level_enabled', 'gate_risk_guard_enabled',
 )
 _GATES_OFF = (
     'gate_fc_btceth_enabled', 'gate_fc_h4_enabled',
     'gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_adx_enabled',
     'gate_fc_vol_enabled', 'use_edge_proxy_gate',
+    # V3.44.166: پیش‌فرض خاموش (فهرست شماره‌دار کاربر)
+    'gate_touch_pattern_vote_enabled', 'gate_4h_close_block_enabled', 'gate_fc_tf_enabled', 'gate_fc_ylevel_enabled',
+    'gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_pd_level_enabled',
+    'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
+    'gate_min_score_enabled', 'gate_fee_ratio_enabled', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled',
     'gate_btceth_aligned_enabled',          # «فقط وقتی BTC و ETH هم‌جهت‌اند»
     'gate_final_regime_enabled',            # رژیم بازار در مرحله‌ی آخر ورود
     'gate_h4_tier_enabled',                 # رتبه‌ی نرم با رژیم ۴ ساعته
     'gate_inverse_trading_enabled',         # معاملات معکوس (آزمایشی)
-    'gate_touch_dir_fixed_enabled',         # V3.44.47: جهت فقط از الگوی برخورد (در کلید ۱ خاموش = رفتار قبلی)
     'gate_fc_btcpat_enabled',               # V3.44.47: رأی «الگوی BTC روی سطح خودش»
     'gate_fc_btcside_enabled',              # V3.44.102: رأی «سمت BTC نسبت به نزدیک‌ترین سطح»
     'gate_fc_symreg_enabled',               # V3.44.104: رأی «رژیم نماد در تایم‌فریم فعال»
@@ -56,7 +52,7 @@ _GATES_OFF = (
 BASE_CFG = {
     **{k: True for k in _GATES_ON},
     **{k: False for k in _GATES_OFF},
-    'sweep_require_confirmation_candle': True,
+    'sweep_require_confirmation_candle': False,      # V3.44.166: پیش‌فرض خاموش
     # مدل سطوح نصف‌کردن (۱۵ دقیقه: ATR ۴، عمق ۱۰ = پیش‌فرض خود ربات برای این تایم)
     'halving_model_enabled': True,
     'halving_k_atr': 4.0,
@@ -73,6 +69,7 @@ BASE_CFG = {
 BASE_SESSION = {
     # هشدارهای «بله، وارد شو / نه» خاموش‌اند
     'trend_warn_enabled': False,
+    'ref_level_warn_enabled': False,
     'ind_warn_enabled': False,
     'symbol_tf_regime_warn_enabled': False,
     'symbol_h4_regime_warn_enabled': False,
@@ -96,44 +93,15 @@ BASE_SESSION = {
 _FIXED_DIR = {'gate_touch_dir_fixed_enabled': True, 'gate_touch_pattern_vote_enabled': False}
 _MOMENTUM = {'gate_fc_rsi_enabled': True, 'gate_fc_macd_enabled': True, 'gate_fc_adx_enabled': True}
 
+# V3.44.169: فقط یک پریست داریم: «معمولی» (شناسه‌ی داخلی '3' برای سازگاری با ژورنال و نسخه‌های ذخیره‌شده).
+# پریست‌های دیگر (تنظیمات من، جهت ثابت پایه، محافظه‌کار، سخت‌گیر) و انتخاب حالت معامله توسط کاربر حذف شدند.
 PRESETS = {
-    '1': {
-        'label': 'تنظیمات من (۱۵ دقیقه)',
-        'desc': 'مدل نصف‌کردن ATR ۴ و عمق ۱۰ + رأی‌گیری بعد از برخورد با سطح (الگو، رژیم ۵/۱۵، کلوز سمت سطح، سقف/کف دیروز) '
-                'با ورود خودکار اکثریت ساده + صبر برای تایید حرکت (حداقل +0.15R، سقف ۲۰٪ مسیر تا هدف، مهلت ۳۰ دقیقه) + '
-                'دروازه‌های BTC (کندل هم‌جهت و فاصله‌ی معقول تا سطح مقابل) + بلاک ۳۰ دقیقه‌ی آخر کندل ۴ساعته + ۶ حالت معامله '
-                '(حالت ۷ خاموش) + سربه‌سر خودکار + تریلینگ هوشمند.',
-        'cfg': {}, 'session': {},
-    },
-    '2': {
-        'label': 'جهت ثابت — پایه (روند + سطح)',
-        'desc': 'جهت فقط از الگوی برخورد؛ رأی‌دهنده‌ها: روند (رژیم ۵/۱۵) و سطح (کلوز + سقف/کف دیروز). بدون اندیکاتور و بدون الگوی BTC. خط مبنای مقایسه.',
-        'cfg': {**_FIXED_DIR}, 'session': {},
-    },
-    # V3.44.62: کلیدهای ۳ تا ۵ = سه حالت معامله‌ی کاربر (منوی «🎯 حالت معامله»). همه‌ی تنظیمات پایه مثل هم است (۱۵ دقیقه،
-    # ATR ۴، عمق ۱۰، جهت ثابت از الگوی برخورد، دروازه‌های BTC)؛ فقط «چند رأی‌دهنده» و «چند رأی موافق لازم است» و
-    # «حداقل تایید حرکت قبل از ورود» فرق می‌کند. هرچه سخت‌گیرتر، معامله کمتر و (امیدواریم) باکیفیت‌تر.
     '3': {
         'label': 'معمولی',
         'desc': 'رأی‌دهنده‌ها: روند (رژیم ۵/۱۵)، سطح (کلوز + سقف/کف دیروز) و مومنتوم (RSI، MACD، ADX). ورود با اکثریت ساده‌ی رأی‌ها؛ '
                 'صبر برای تایید حرکت: حداقل +0.15R.',
         'cfg': {**_FIXED_DIR, **_MOMENTUM},
         'session': {},
-    },
-    '4': {
-        'label': 'محافظه‌کار',
-        'desc': 'مثل معمولی + دو رأی‌دهنده‌ی جدید: الگوی BTC روی سطح خودش و هم‌جهتی رژیم BTC/ETH. ورود فقط وقتی همه به‌جز یک رأی موافق باشند؛ '
-                'صبر برای تایید حرکت: حداقل +0.25R.',
-        'cfg': {**_FIXED_DIR, **_MOMENTUM, 'gate_fc_btcpat_enabled': True, 'gate_fc_btceth_enabled': True},
-        'session': {'touch_auto_mode': 'minus1', 'fav_confirm_min_r': 0.25, 'fav_confirm_max_r': 0.50},
-    },
-    '5': {
-        'label': 'سخت‌گیر',
-        'desc': 'همه‌ی رأی‌دهنده‌ها (الگوی BTC، BTC/ETH، رژیم ۴ ساعته، ۵/۱۵، مومنتوم، سطح و حجم) + شرط «BTC و ETH هم‌جهت باشند». '
-                'ورود فقط وقتی همه‌ی رأی‌ها موافق باشند؛ صبر برای تایید حرکت: حداقل +0.35R.',
-        'cfg': {**_FIXED_DIR, **_MOMENTUM, 'gate_fc_btcpat_enabled': True, 'gate_fc_btceth_enabled': True,
-                'gate_fc_h4_enabled': True, 'gate_fc_vol_enabled': True, 'gate_btceth_aligned_enabled': True},
-        'session': {'touch_auto_mode': 'all', 'fav_confirm_min_r': 0.35, 'fav_confirm_max_r': 0.60},
     },
 }
 
@@ -295,103 +263,34 @@ def _fa(n):
 
 def menu_text(s):
     act = s.get('active_preset')
-    lines = ['🎚 *پریست‌های آماده*', '',
-             'این کلید یک مجموعه‌ی کامل از تنظیمات است. با لمس آن همه‌ی تنظیماتِ مربوطه یک‌جا عوض می‌شود. '
+    lines = ['🎚 *پریست*', '',
+             'فقط یک پریست داریم: «معمولی». با لمس آن همه‌ی تنظیماتِ مربوطه یک‌جا روی مقدار همین پریست می‌نشیند. '
              'هر معامله با نام پریستِ فعال برچسب می‌خورد.', '']
     _custom_keys = _load_custom()
     for n, p in PRESETS.items():
         mark = '✅ ' if n == act else ''
         cust = ' ✏️ (نسخه‌ی ذخیره‌شده‌ی ادمین)' if n in _custom_keys else ''
-        lines.append(f"{mark}کلید {_fa(n)} — {p['label']}{cust}\n{p['desc']}")
+        lines.append(f"{mark}{p['label']}{cust}\n{p['desc']}")
         lines.append('')
     if act in PRESETS:
         diff = preset_diff(s, act)
         if diff:
-            lines.append(f"⚠️ بعد از اعمال کلید {_fa(act)} این تنظیمات دستی عوض شده: {len(diff)} مورد. "
+            lines.append(f"⚠️ بعد از اعمال پریست این تنظیمات دستی عوض شده: {len(diff)} مورد. "
                          "معامله‌های جدید با علامت «دستی تغییر کرده» ثبت می‌شوند و در مقایسه جدا حساب می‌شوند. "
-                         "برای تمیز ماندن آمار، دوباره همان کلید را بزن.")
+                         "برای تمیز ماندن آمار، دوباره پریست را بزن.")
     else:
-        lines.append('هنوز هیچ پریستی اعمال نشده؛ معامله‌ها بدون برچسب ثبت می‌شوند.')
+        lines.append('هنوز پریستی اعمال نشده؛ معامله‌ها بدون برچسب ثبت می‌شوند.')
     lines.append('')
-    lines.append('💾 «ذخیره» تنظیمات فعلی خودت را در همان کلید می‌نویسد (توضیح بالا دیگر کامل نیست و فقط پیش‌فرض را نشان می‌دهد)؛ '
-                 '«↩️ پیش‌فرض» نسخه‌ی ذخیره‌شده را پاک می‌کند. کلیدهای ۳ تا ۵ همان حالت‌های معاملهٔ کاربران‌اند و تغییرشان برای همه اثر دارد.')
+    lines.append('💾 «ذخیره» تنظیمات فعلی خودت را در همین پریست می‌نویسد (توضیح بالا دیگر کامل نیست و فقط پیش‌فرض را نشان می‌دهد)؛ '
+                 '«↩️ پیش‌فرض» نسخه‌ی ذخیره‌شده را پاک می‌کند. تغییرش برای همه‌ی کاربران اثر دارد.')
     lines.append('')
     lines.append('در پریست نیست و دست‌نخورده می‌ماند: ریسک هر معامله، تایم‌فریم، نمادها، حالت دستیار و تشخیص رژیم دقیق‌تر. '
                  'هشدارهای «بله، وارد شو / نه» خاموش‌اند.')
     return '\n'.join(lines)[:3900]
 
 
-# V3.44.62: منوی «🎯 حالت معامله» (برای همه‌ی کاربران): سه حالت = کلیدهای ۳ تا ۵ پریست
-TRADE_MODES = (
-    ('3', '⚖️', 'معمولی', 'تعادل بین تعداد معامله و کیفیت. پیش‌فرض پیشنهادی.'),
-    ('4', '🛡', 'محافظه‌کار', 'معامله‌ی کمتر؛ ورود فقط با تایید بیشتر.'),
-    ('5', '🔒', 'سخت‌گیر', 'کمترین معامله؛ ورود فقط وقتی همه‌ی تاییدها کامل باشد.'),
-)
-
-
-def mode_menu_text(s):
-    act = s.get('active_preset')
-    cur = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
-    lines = ['🎯 *حالت معامله*', '',
-             f"حالت فعلی: {cur or 'تنظیم پیش‌فرض (هیچ‌کدام انتخاب نشده)'}", '']
-    for k, ic, nm, d in TRADE_MODES:
-        lines.append(f"{'✅ ' if k == act else ''}{ic} *{nm}*: {d}")
-    lines += ['', 'روی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.']
-    return '\n'.join(lines)
-
-
-def mode_keyboard(s):
-    act = s.get('active_preset')
-    rows = [[{'text': f"{'✅ ' if k == act else ''}{ic} {nm}", 'callback_data': f'/trade_mode_set_{k}'}]
-            for k, ic, nm, _ in TRADE_MODES]
-    rows.append([{'text': '⬅️ بازگشت', 'callback_data': '/menu_settings'}])
-    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
-    return {'inline_keyboard': rows}
-
-
-# V3.44.85: مرحله‌ی «حالت معامله» در ویزارد «تنظیمات معامله» (بعد از موجودی، مارجین، اهرم، ... و تایم‌فریم).
-# پیش‌فرض «معمولی» است؛ کاربر می‌تواند عوض کند. دکمه‌ها همان صفحه را ویرایش می‌کنند.
+# V3.44.169: پریست پیش‌فرض همه‌ی کاربران «معمولی» است و انتخاب حالت معامله (منو و ویزارد) حذف شد.
 DEFAULT_MODE = '3'
-
-
-def wizard_mode_text(s):
-    act = s.get('active_preset')
-    cur = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
-    lines = ['🎯 *حالت معامله*', '',
-             f"حالت فعلی: {cur or 'هیچ‌کدام (تنظیم دستی)'}", '']
-    for k, ic, nm, d in TRADE_MODES:
-        lines.append(f"{'✅ ' if k == act else ''}{ic} *{nm}*: {d}")
-    lines += ['', 'پیش‌فرض «معمولی» است. هر وقت خواستی از «تنظیمات ← حالت معامله» هم می‌توانی عوضش کنی.',
-              'روی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند.']
-    return '\n'.join(lines)
-
-
-def wizard_mode_keyboard(s):
-    act = s.get('active_preset')
-    rows = [[{'text': f"{'✅ ' if k == act else ''}{ic} {nm}", 'callback_data': f'/set_wmode_{k}'}]
-            for k, ic, nm, _ in TRADE_MODES]
-    rows.append([{'text': '✔️ پایان و رفتن به پنل', 'callback_data': '/wiz_mode_done'}])
-    rows.append([{'text': '🔙 بازگشت', 'callback_data': '/wiz_tf'}])
-    rows.append([{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}])
-    return {'inline_keyboard': rows}
-
-
-def panel_line(s):
-    """V3.44.102: خط «حالت معامله / پریست فعال» پنل اصلی (یک خط، Markdown)."""
-    act = s.get('active_preset')
-    mode = next((f'{ic} {nm}' for k, ic, nm, _ in TRADE_MODES if k == act), None)
-    mod = ''
-    if act in PRESETS:
-        try:
-            if preset_diff(s, act):
-                mod = ' (دستی تغییر کرده)'
-        except Exception:
-            pass
-    if mode:
-        return f"🎯 حالت معامله: `{mode}`{mod}"
-    if act in PRESETS:
-        return f"🎚 پریست فعال: `کلید {_fa(act)} — {PRESETS[act]['label']}`{mod}"
-    return "🎯 حالت معامله: `بدون پریست (تنظیم دستی)`"
 
 
 def keyboard(s):
@@ -399,10 +298,10 @@ def keyboard(s):
     rows = []
     custom = _load_custom()
     for n, p in PRESETS.items():
-        rows.append([{'text': f"{'✅' if n == act else '⚪'} کلید {_fa(n)} — {p['label']}" + (' ✏️' if n in custom else ''),
+        rows.append([{'text': f"{'✅' if n == act else '⚪'} {p['label']}" + (' ✏️' if n in custom else ''),
                       'callback_data': f'/preset_apply_{n}'}])
-        rows.append([{'text': f'👁 نمایش فعال‌های کلید {_fa(n)}', 'callback_data': f'/preset_show_{n}'}])   # V3.44.87
-        row = [{'text': f'💾 ذخیره‌ی تنظیمات فعلی در کلید {_fa(n)}', 'callback_data': f'/preset_save_{n}'}]
+        rows.append([{'text': '👁 نمایش فعال‌های پریست', 'callback_data': f'/preset_show_{n}'}])   # V3.44.87
+        row = [{'text': '💾 ذخیره‌ی تنظیمات فعلی در پریست', 'callback_data': f'/preset_save_{n}'}]
         if n in custom:
             row.append({'text': '↩️ پیش‌فرض', 'callback_data': f'/preset_reset_{n}'})
         rows.append(row)

@@ -59,8 +59,8 @@ bot.btc_eth_regime_rows = lambda tf: [('BTC', 'BULLISH', 31.0, 62.0), ('ETH', 'B
 sent.clear(); bot.handle_text(USER, '🧭 رژیم BTC/ETH')
 assert sent and 'در دسترس نیست' not in sent[0][1] and 'رژیم BTC و ETH' in sent[0][1] and 'ADX' not in sent[0][1] and 'RSI' not in sent[0][1], sent
 sent.clear(); bot.handle_text(ADMIN, '🧭 رژیم BTC/ETH'); assert 'ADX' in sent[0][1], sent      # ادمین جزئیات کامل را می‌بیند
-sent.clear(); bot.handle_text(USER, '⏳ سیگنال‌های در حال تایید')
-assert sent and 'در دسترس نیست' not in sent[0][1] and 'حداقل تایید' not in sent[0][1] and 'سیگنال‌های در حال تایید' in sent[0][1], sent
+sent.clear(); bot.handle_text(USER, '⏳ سیگنال‌های در حال تایید')      # V3.44.169: از دید کاربر عادی حذف شد
+assert sent and 'در دسترس نیست' in sent[0][1], sent
 sent.clear(); bot.handle_text(ADMIN, '⏳ سیگنال‌های در حال تایید'); assert 'حداقل تایید' in sent[0][1], sent
 # وضعیت انتظار باقی‌مانده پاک می‌شود
 s = bot.get_session(USER); s['user_state'] = 'WAIT_BACKTEST_SYMBOL'

@@ -353,7 +353,6 @@ def get_settings_menu_keyboard():
          {"text": "🧰 قوانین معامله (فیلترها)", "callback_data": "/trade_filter_management"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
-        [{"text": "🎯 حالت معامله (معمولی / محافظه‌کار / سخت‌گیر)", "callback_data": "/trade_mode_menu"}],
         [{"text": "🚪 خروج و حفظ سود", "callback_data": "/profit_menu"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}

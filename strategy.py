@@ -207,11 +207,11 @@ STRATEGY_DEFAULTS = {
     "min_volume_ratio": 1.05,
     "min_body_ratio": 0.45,
     "sweep_min_distance_atr": 0.10,
-    "sweep_require_reclaim": True,
-    "sweep_require_reversal_candle": True,
+    "sweep_require_reclaim": False,
+    "sweep_require_reversal_candle": False,
     "sweep_stop_buffer_atr": 0.40,
     "sweep_risk_reward": 1.8,
-    "sweep_enable_retest_continuation": True,
+    "sweep_enable_retest_continuation": False,
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
     # کدام سطوح کلیدی (ستاپ‌ها) اجازه‌ی تولید سیگنال دارند. حذف یک تگ از این لیست
@@ -238,7 +238,7 @@ STRATEGY_DEFAULTS = {
     # سطح سویپ‌شده) تا سیگنال واقعاً صادر شود. قیمت ورود بدتر می‌شود ولی فیک‌اوت‌های
     # زودهنگام (که در تحلیل معاملات واقعی دیدیم MFE نزدیک صفر داشتند) فیلتر می‌شوند.
     # پیش‌فرض False است تا هیچ رفتار فعلی بی‌اجازه تغییر نکند.
-    "sweep_require_confirmation_candle": True,
+    "sweep_require_confirmation_candle": False,
     # --- ۶ حالت معاملاتی صریح PDH/PDL (طبق تعریف کاربر) ---
     # ۱: برخورد به PDH بدون نفوذ قطعی + برگشت به داخل = Sell
     # ۲: برخورد به PDL بدون نفوذ قطعی + برگشت به داخل = Buy
@@ -308,8 +308,8 @@ STRATEGY_DEFAULTS = {
     # --- V3.42: کلید روشن/خاموش برای همه‌ی گیت‌های رد سیگنال (پیش‌فرض True = رفتار قبلی) ---
     "gate_min_rr_enabled": True,        # حداقل R:R (نزدیک‌ترین سطح و R:R نهایی)
     "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
-    "gate_fee_ratio_enabled": True,     # نسبت ریسک به کارمزد (پلن)
-    "gate_min_score_enabled": True,     # حداقل امتیاز کیفیت
+    "gate_fee_ratio_enabled": False,     # نسبت ریسک به کارمزد (پلن)
+    "gate_min_score_enabled": False,     # حداقل امتیاز کیفیت
     # V3.44.163: تایید FVG/IFVG برای ۶ سناریو (کلید روشن/خاموش، پیش‌فرض خاموش). جزئیات در fvg_ifvg.py
     "fvg_enabled": False,
     "fvg_lookback_candles": 30,
@@ -903,17 +903,22 @@ from fvg_ifvg import fvg_confirm as _fvg_confirm      # V3.44.163
 
 
 def _fvg_apply(d, idx, kind, sig, reason, atr, cfg):
-    """V3.44.163: کلید fvg_enabled. خاموش = reason بدون تغییر. روشن = reason با توضیح تایید، یا None اگر FVG/IFVG تایید نکرد."""
-    if not bool((cfg or {}).get("fvg_enabled", False)):
-        return reason
-    anchor, _t = extract_sweep_anchor_target(reason)
-    ok, note = _fvg_confirm(d, idx, kind, sig, anchor, atr, cfg)
-    if not ok:
+    """V3.44.163/164: همیشه حکم FVG/IFVG را حساب و به‌صورت توکن |FVGV=1 (تایید) / 0 (رد) / 2 (نامشخص) روی reason می‌گذارد تا
+    گزارش قیف بتواند «با و بدون FVG» را مقایسه کند. کلید fvg_enabled فقط تعیین می‌کند سیگنالِ ردشده بلاک شود یا نه:
+    خاموش = هیچ سیگنالی بلاک نمی‌شود؛ روشن = سیگنال بدون تایید None برمی‌گردد."""
+    on = bool((cfg or {}).get("fvg_enabled", False))
+    try:
+        anchor, _t = extract_sweep_anchor_target(reason)
+        ok, note = _fvg_confirm(d, idx, kind, sig, anchor, atr, {**(cfg or {}), "fvg_enabled": True})
+    except Exception:
+        ok, note = True, ""
+    v = 0 if not ok else (1 if note else 2)
+    if on and not ok:
         return None
-    if not note:
-        return reason
     head, sep, tail = str(reason).partition("|")
-    return f"{head} + {note}{sep}{tail}"
+    if on and note:
+        head = f"{head} + {note}"
+    return f"{head}|FVGV={v}" + (f"|{tail}" if sep else "")
 
 
 def _confirm_simple_reject(curr, sig, cfg):
@@ -1631,8 +1636,8 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
         return None, "هنوز یک روز کامل قبلی برای محاسبه سطوح ثبت نشده است"
 
     cfg = {**STRATEGY_DEFAULTS, **(_cfg(strategy_config) or {})}
-    require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
-    require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
+    require_reclaim = bool(cfg.get("sweep_require_reclaim", False))
+    require_reversal = bool(cfg.get("sweep_require_reversal_candle", False))
     enabled_tags = set(cfg.get("enabled_setup_tags") or LEVEL_SETUP_DEFS.keys())
     p4_model = bool(cfg.get("daily_p4_mode", True))
     p4_rev = p4_model and bool(cfg.get("p4_reversal_enabled", False))
@@ -1696,7 +1701,7 @@ def _strategy_liquidity_sweep_5m_impl(df, filters=None, strategy_config=None, li
         atr = _safe_float(d.iloc[idx].get("atr"), 0.0)
         if not np.isfinite(atr) or atr <= 0:
             return None, None, None, None
-        allow_continuation = bool(cfg.get("sweep_enable_retest_continuation", True))
+        allow_continuation = bool(cfg.get("sweep_enable_retest_continuation", False))
         for tag, hi, lo, hi_key, lo_key, hi_label, lo_label in _ordered_candidates_at(idx):
             # ستاپ «برگشت P4»: فقط برگشتی‌ها (بدون ادامه‌دهنده)، فقط حالت ۱ و با فیلتر موقعیت
             p4_rev_tag = bool(p4_model and tag == "4h")
@@ -2288,7 +2293,7 @@ HALVING_DEFAULTS = {
     "halving_dyn_min": 0.7,            # حداقل ضریب (جلوی ریزشدن بیش‌ازحد سطوح در بازار خواب)
     "halving_dyn_max": 1.6,            # حداکثر ضریب (جلوی درشت‌شدن بیش‌ازحد در هیجان)
     # V3.44.58: گارد PDH/PDL در مدل نصف‌کردن (کلید gate_pd_level_enabled). سقف/کف دیروز مثل مانع جلوی قیمت دیده می‌شود.
-    "gate_pd_level_enabled": True,
+    "gate_pd_level_enabled": False,
     "pd_guard_room_atr": 1.5,          # فروش: اگر PDL کمتر از این‌قدر×ATR زیر قیمت است (خرید: PDH بالای قیمت) ورود نگه داشته می‌شود
     "pd_guard_touch_atr": 0.15,        # تلورانس «رسیدن به سطح» = این‌قدر×ATR
     "pd_guard_lookback_candles": 12,   # اگر در این‌تعداد کندل اخیر به PDL/PDH رسیده و برگشته، ورود هم‌جهت با مانع نگه داشته می‌شود
@@ -2611,9 +2616,9 @@ def strategy_halving(df, strategy_config=None, live_price=None):
     if not np.isfinite(atr) or atr <= 0:
         return None, "ATR نامعتبر است"
     cfg_run = {**cfg, "scenario_touch_tolerance_atr": float(cfg.get("halving_zone_atr", 0.30))}
-    require_reclaim = bool(cfg.get("sweep_require_reclaim", True))
-    require_reversal = bool(cfg.get("sweep_require_reversal_candle", True))
-    allow_cont = bool(cfg.get("sweep_enable_retest_continuation", True))
+    require_reclaim = bool(cfg.get("sweep_require_reclaim", False))
+    require_reversal = bool(cfg.get("sweep_require_reversal_candle", False))
+    allow_cont = bool(cfg.get("sweep_enable_retest_continuation", False))
     max_depth_trade = int(cfg.get("halving_max_trade_depth", 0) or 0)
     pd_blocked = None
 
@@ -2687,9 +2692,9 @@ def strategy_halving(df, strategy_config=None, live_price=None):
 def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run):
     """V3.44.157: تشخیص سناریوهای مدل نصف‌کردن روی یک سلول (سقف، کف) در کندل idx از d؛ همان ترتیب strategy_halving
     (ادامه ← شکست کاذب ← برخورد ساده). خروجی (sig, reason) یا (None, None)."""
-    require_reclaim = bool(cfg_run.get("sweep_require_reclaim", True))
-    require_reversal = bool(cfg_run.get("sweep_require_reversal_candle", True))
-    if bool(cfg_run.get("sweep_enable_retest_continuation", True)):
+    require_reclaim = bool(cfg_run.get("sweep_require_reclaim", False))
+    require_reversal = bool(cfg_run.get("sweep_require_reversal_candle", False))
+    if bool(cfg_run.get("sweep_enable_retest_continuation", False)):
         rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
         if rsig and _scenario_enabled("continuation", rsig, cfg_run):
             rreason = _fvg_apply(d, idx, "continuation", rsig, rreason, atr, cfg_run)

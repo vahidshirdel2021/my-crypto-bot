@@ -25,15 +25,6 @@ assert "if 'btcside' in keys and sym_u != 'BTC':" in src            # برای �
 # --- پریست‌ها: کلید مدیریت‌شده و پیش‌فرض خاموش ---
 import presets
 assert presets.BASE_CFG.get('gate_fc_btcside_enabled') is False
-# --- خط حالت معامله ---
-L = presets.panel_line
-assert 'معمولی' in L({'active_preset': '3'}) and 'حالت معامله' in L({'active_preset': '3'})
-assert 'محافظه‌کار' in L({'active_preset': '4'}) and 'سخت‌گیر' in L({'active_preset': '5'})
-l1 = L({'active_preset': '1'}); assert 'پریست فعال' in l1 and 'کلید ۱' in l1, l1
-assert 'بدون پریست' in L({}) and 'بدون پریست' in L({'active_preset': None})
-s = {'strategy_config': {}}; presets.apply_preset(s, '3')
-assert '(دستی تغییر کرده)' not in L(s)
-s['strategy_config']['gate_fc_rsi_enabled'] = not s['strategy_config'].get('gate_fc_rsi_enabled', True)
-assert '(دستی تغییر کرده)' in L(s), L(s)
-assert "mode_line = presets_mod.panel_line(s)" in src and src.count("{mode_line}") == 2
+# --- V3.44.169: خط «حالت معامله» از پنل اصلی حذف شد ---
+assert not hasattr(presets, 'panel_line') and 'panel_line' not in src and '{mode_line}' not in src
 print('btc_side_vote_selftest ALL OK')

@@ -16,7 +16,7 @@ ALLOW = ['/start', '/menu', '/cancel', '/start_scan', '/stop_scan', '/reload_and
          '/qt_buy_BTC', '/qt_sell_ETH', '/qtm_buy_BTC', '/tw_qe_buy_t1', '/fq_qe_buy_f1', '/fq_rej_f1', '/cfm_abc', '/cfmno_abc',
          '/back:/menu', '/back:/menu_settings', '🔴 توقف اسکن', '🟢 شروع اسکن', '🏠 منوی اصلی', '/assist_pending',
          '/fee_menu', '/my_fee_report', '/check_entry_BTC', '/cancel_watch_BTC', '/start ref123',
-         '/fav_queue', '/btc_eth_regime', '/back:/fav_queue']      # V3.44.91
+         '/btc_eth_regime']      # V3.44.169: /fav_queue از دید کاربر عادی حذف شد
 for c in ALLOW:
     assert ap.user_command_allowed(c), ('should be allowed', c)
 
@@ -44,7 +44,7 @@ _PROFIT_USER_OK = {'/toggle_trail', '/toggle_profit_autoclose', '/toggle_total_p
 a = src.index('def process_command(')
 pc = src[a:a + 220000]
 lits = set(re.findall(r"'(/[a-z0-9_]+)'", pc))
-admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c) and c != '/fav_queue' and c not in _PROFIT_USER_OK]   # V3.44.91: /fav_queue عمداً برای کاربر عادی باز است
+admin_like = [c for c in lits if re.match(r'^/(admin_|toggle_|trade_filter|halving_|fav_|preset_|setup_|scenario_|learn_|export_|entry_diag)', c) and c not in _PROFIT_USER_OK]   # V3.44.169: /fav_queue هم بسته است
 assert len(admin_like) > 30, len(admin_like)
 for c in admin_like:
     assert not ap.user_command_allowed(c + 'x' if c.endswith('_') else c), c
@@ -61,7 +61,7 @@ for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list'
     assert hidden not in cbs, hidden
 
 settings = callbacks(ap.filter_markup(ui.get_settings_menu_keyboard()))
-assert settings == ['/check_wizard', '/trade_mode_menu', '/profit_menu', '/menu'], settings      # V3.44.62: «🎯 حالت معامله» اضافه شد
+assert settings == ['/check_wizard', '/profit_menu', '/menu'], settings      # V3.44.169: «🎯 حالت معامله» حذف شد
 
 perf = callbacks(ap.filter_markup(ui.get_performance_keyboard()))
 assert set(perf) == {'/performance_today', '/performance_week', '/performance_month', '/performance', '/today_trades', '/menu'}, perf
@@ -95,19 +95,19 @@ assert "'/edit_sl_" in card_src and "'/close_prompt_" in card_src
 bottom = ap.filter_markup(ui.get_bottom_menu_keyboard(True))
 texts = [b['text'] for r in bottom['keyboard'] for b in r]
 assert '🔄 پوزیشن‌ها' in texts and '💰 سود و زیان امروز' in texts and '🏠 منوی اصلی' in texts
-# V3.44.91: «📋 سیگنال‌های در انتظار» با «⏳ سیگنال‌های در حال تایید» عوض شده (همان جای اول، بدون تکرار) و رژیم دیده می‌شود
-assert '📋 سیگنال‌های در انتظار' not in texts, texts
-assert texts.count('⏳ سیگنال‌های در حال تایید') == 1 and '🧭 رژیم BTC/ETH' in texts, texts
-assert bottom['keyboard'][0][0]['text'] == '⏳ سیگنال‌های در حال تایید', bottom['keyboard'][0]
+# V3.44.169: «📋 سیگنال‌های در انتظار» در کلیدهای ثابت کاربر می‌ماند (جایگزین نمی‌شود) و «⏳ سیگنال‌های در حال تایید» دیده نمی‌شود
+assert texts.count('📋 سیگنال‌های در انتظار') == 1 and '⏳ سیگنال‌های در حال تایید' not in texts and '🧭 رژیم BTC/ETH' in texts, texts
+assert bottom['keyboard'][0][0]['text'] == '📋 سیگنال‌های در انتظار', bottom['keyboard'][0]
+assert not ap.user_command_allowed('/fav_queue') and not ap.user_command_allowed('/back:/fav_queue')
 assert '📊 وضعیت بازار' not in texts
 assert 'تحلیل' not in bottom['input_field_placeholder']
 # ورودی تغییر نکرده (ادمین همان کیبورد قبلی را می‌بیند)
 orig = [b['text'] for r in ui.get_bottom_menu_keyboard(True)['keyboard'] for b in r]
-assert '🧭 رژیم BTC/ETH' in orig and '📋 سیگنال‌های در انتظار' in orig and orig.count('⏳ سیگنال‌های در حال تایید') == 1
+assert '🧭 رژیم BTC/ETH' in orig and '📋 سیگنال‌های در انتظار' in orig and orig.count('⏳ سیگنال‌های در حال تایید') == 1      # ادمین هر دو را می‌بیند
 # دکمه‌های داخل صف تایید: «آمار فیلتر» و «⭐ فقط در محدوده» برای کاربر عادی حذف می‌شوند، بروزرسانی/منو می‌مانند
 fq_kb = {'inline_keyboard': [[{'text': '⭐', 'callback_data': '/fav_star'}], [{'text': '🔄', 'callback_data': '/fav_queue'}, {'text': '📊', 'callback_data': '/fav_stats'}],
                              [{'text': '📋', 'callback_data': '/assist_pending'}, {'text': '🏠', 'callback_data': '/menu'}]]}
-assert callbacks(ap.filter_markup(fq_kb)) == ['/fav_queue', '/assist_pending', '/menu'], callbacks(ap.filter_markup(fq_kb))
+assert callbacks(ap.filter_markup(fq_kb)) == ['/assist_pending', '/menu'], callbacks(ap.filter_markup(fq_kb))      # V3.44.169: «بروزرسانی» صف تایید هم برای کاربر عادی بسته است
 
 # دکمه‌های url / web_app حفظ می‌شوند
 mk = {'inline_keyboard': [[{'text': 'x', 'web_app': {'url': 'https://e.x'}}, {'text': 'y', 'url': 'https://t.v'}, {'text': 'bad', 'callback_data': '/admin_panel'}]]}

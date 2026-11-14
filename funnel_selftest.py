@@ -39,6 +39,7 @@ bot.exchange_latest_price = lambda cid, sym: PX.get(sym, 100.0)
 
 ADMIN = 111
 s = bot.get_session(ADMIN)
+P.BASE_CFG.update({'gate_fc_tf_enabled': True, 'gate_fc_ylevel_enabled': True})      # V3.44.166: این دو رأی‌دهنده دیگر پیش‌فرض روشن نیستند؛ تست ثبت قیف رأی‌دهنده‌های بیشتری می‌خواهد
 P.apply_preset(s, '3')
 s['fav_confirm_enabled'] = True
 s['is_bot_active'] = True
@@ -60,12 +61,10 @@ def events(kind=None):
 
 tv = events('touch'); vv = events('vote')
 check("رویداد touch نوشته شد با کلید و ورژن", len(tv) == 1 and tv[0]['preset'] == '3' and tv[0]['tid'] == tid and tv[0]['v'] == bot.BOT_VERSION, tv[:1])
-check("رویداد vote با cf هر سه کلید", len(vv) >= 1 and set(vv[0]['cf'].keys()) == {'3', '4', '5'} and vv[0]['cf']['3'] is not None, vv[0]['cf'] if vv else None)
+check("رویداد vote با cf پریست معمولی (تنها پریست)", len(vv) >= 1 and set(vv[0]['cf'].keys()) == {'3'} and vv[0]['cf']['3'] is not None, vv[0]['cf'] if vv else None)
 check("cf کلید فعال (۳) با تصمیم واقعی یکی است", vv[0]['cf']['3']['ok'] == bool(vv[0]['auto_ok']) and vv[0]['cf']['3']['a'] == vv[0]['agree'], (vv[0]['cf']['3'], vv[0]['auto_ok'], vv[0]['agree']))
 check("raw همه‌ی رأی‌دهنده‌ها ثبت شد", set(vv[0]['raw'].keys()) == set(bot._TOUCH_KEYS))
-check("کلید ۵ (همه موافق) وقتی گروه مومنتوم مخالف است رد می‌کند", vv[0]['cf']['5']['ok'] is False, vv[0]['cf']['5'])
 check("کلید ۳ (اکثریت) همان برخورد را می‌پذیرد", vv[0]['cf']['3']['ok'] is True, vv[0]['cf']['3'])
-check("تصمیم‌ها قابل مقایسه است (۳ و ۴ و ۵)", all(vv[0]['cf'][n] for n in '345'))
 
 # رأی بدون تغییر = رویداد تکراری نمی‌نویسد
 n0 = len(events('vote'))
@@ -76,7 +75,7 @@ check("رأی بدون تغییر رویداد تکراری نمی‌سازد", 
 VOTE_TABLE['macd'] = 'SELL'; VOTE_TABLE['rsi'] = 'SELL'
 bot._touch_eval_one(ADMIN, rec)
 vv = events('vote')
-check("تغییر رأی ثبت شد و حالا کلید ۵ هم تایید است", len(vv) == n0 + 1 and vv[-1]['cf']['5']['ok'] is True, vv[-1]['cf'])
+check("تغییر رأی ثبت شد و کلید ۳ هنوز تایید است", len(vv) == n0 + 1 and vv[-1]['cf']['3']['ok'] is True, vv[-1]['cf'])
 
 # ورود به صف تایید حرکت / بلاک
 rec['status'] = 'waiting'
@@ -106,7 +105,7 @@ s['touch_wait_seen'] = {}
 bot._touch_register(ADMIN, 'BBB', 'SELL', 'reason HVL=50 [SETUP Daily]', '15min', {'entry': 50.0, 'sl': 51.0, 'tp': 47.0, 'rr': 3.0, 'score': 70})
 recb = [r for r in s['touch_wait'].values() if r['symbol'] == 'BBB'][0]
 vb = [e for e in events('vote') if e['tid'] == recb['id']][0]
-check("برخورد با رأی بد: کلید ۵ و ۴ رد می‌کنند", vb['cf']['5']['ok'] is False and vb['cf']['4']['ok'] is False, vb['cf'])
+check("برخورد با رأی بد: رأی cf ثبت شد", set(vb['cf'].keys()) == {'3'}, vb['cf'])
 recb['expires_at'] = time.time() - 1
 bot._touch_tick(ADMIN)
 tf_ = events('touch_final')
@@ -149,7 +148,7 @@ check("صف سایه بعد از حل خالی شد", not any(x['tid'] == tid an
 # گزارش
 rep = funnel_report.build_report(os.environ['FUNNEL_DIR'], days=1)
 check("گزارش ساخته شد و بخش‌ها را دارد", all(t in rep for t in ('قیف واقعی', 'مقایسهٔ منصفانه', 'کجا متوقف', 'پیش‌بینی')), rep[:200])
-check("گزارش برای هر سه کلید ردیف دارد", all(f'کلید {n}' in rep for n in '۳۴۵'))
+check("گزارش برای پریست معمولی (تنها پریست) ردیف دارد", 'کلید ۳' in rep and 'کلید ۴' not in rep and 'کلید ۵' not in rep)
 print(rep)
 z = funnel_report.export_zip(os.environ['FUNNEL_DIR'], 1)
 check("zip خروجی ساخته شد", z and os.path.getsize(z) > 100)

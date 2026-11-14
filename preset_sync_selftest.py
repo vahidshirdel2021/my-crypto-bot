@@ -32,53 +32,52 @@ def check(name, cond, info=""):
     ok &= bool(cond)
     print(("PASS " if cond else "FAIL ") + name, info)
 
-# کاربران: U1 و U3 حالت محافظه‌کار (کلید ۴)، U2 معمولی (کلید ۳)
-for cid, mode in ((U1, '4'), (U2, '3'), (U3, '4')):
+# کاربران: همه روی «معمولی» (کلید ۳)
+for cid in (U1, U2, U3):
     s = bot.get_session(cid)
-    P.apply_preset(s, mode)
+    P.apply_preset(s, '3')
 check("شروع: کاربران روی پیش‌فرض کد", bot.get_session(U1)['strategy_config']['halving_k_atr'] == 4.0)
 
 # کاربر عادی نمی‌تواند ذخیره کند
-sent.clear(); bot.process_command('/preset_save_4', U1)
-check("کاربر عادی: ذخیره ممنوع و چیزی ذخیره نشد", len(sent) == 1 and not P.has_custom('4'), sent[0][1][:40] if sent else '')
+sent.clear(); bot.process_command('/preset_save_3', U1)
+check("کاربر عادی: ذخیره ممنوع و چیزی ذخیره نشد", len(sent) == 1 and not P.has_custom('3'), sent[0][1][:40] if sent else '')
 
-# ادمین تنظیمات را عوض و در کلید ۴ ذخیره می‌کند
+# ادمین تنظیمات را عوض و در پریست ذخیره می‌کند
 a = bot.get_session(ADMIN)
 a['strategy_config']['halving_k_atr'] = 2.0
 a['strategy_config']['gate_fc_rsi_enabled'] = False
 a['touch_auto_mode'] = 'majority'
-sent.clear(); bot.process_command('/preset_save_4', ADMIN)
-check("ادمین: ذخیره شد", P.has_custom('4') and a['active_preset'] == '4')
-for cid in (U1, U3):
+sent.clear(); bot.process_command('/preset_save_3', ADMIN)
+check("ادمین: ذخیره شد", P.has_custom('3') and a['active_preset'] == '3')
+for cid in (U1, U2, U3):
     s = bot.get_session(cid)
-    check(f"کاربر {cid} روی کلید ۴ خودکار نسخه‌ی جدید را گرفت",
-          s['strategy_config']['halving_k_atr'] == 2.0 and s['strategy_config']['gate_fc_rsi_enabled'] is False and s['touch_auto_mode'] == 'majority' and s['active_preset'] == '4')
-check("کاربر روی کلید ۳ دست‌نخورده", bot.get_session(U2)['strategy_config']['halving_k_atr'] == 4.0 and bot.get_session(U2)['touch_auto_mode'] == 'majority')
-check("پیام ادمین تعداد کاربران همگام‌شده را می‌گوید", any('۲ نفر' in m[1] for m in sent), [m[1][-80:] for m in sent][:1])
+    check(f"کاربر {cid} خودکار نسخه‌ی جدید را گرفت",
+          s['strategy_config']['halving_k_atr'] == 2.0 and s['strategy_config']['gate_fc_rsi_enabled'] is False and s['touch_auto_mode'] == 'majority' and s['active_preset'] == '3')
+check("پیام ادمین تعداد کاربران همگام‌شده را می‌گوید", any('۳ نفر' in m[1] for m in sent), [m[1][-80:] for m in sent][:1])
 
 # ذخیره‌شده در دیتابیس هم نوشته شد (بعد از ریستارت می‌ماند)
 import json, sqlite3
 row = sqlite3.connect(os.environ['BOT_DB_PATH']).execute('SELECT data FROM sessions WHERE chat_id=?', (U1,)).fetchone()
 check("نسخه‌ی جدید در دیتابیس کاربر ذخیره شد", row and json.loads(row[0])['strategy_config']['halving_k_atr'] == 2.0)
 
-# کاربری که قبل از ذخیره حالتش را عوض کرده بود (کلید ۵) تغییری نمی‌کند
-s3 = bot.get_session(U3); P.apply_preset(s3, '5')
-a['strategy_config']['halving_k_atr'] = 3.0
-bot.process_command('/preset_save_4', ADMIN)
-check("کاربر روی کلید ۵ از ذخیره‌ی کلید ۴ تاثیر نگرفت", bot.get_session(U3)['strategy_config']['halving_k_atr'] == 4.0 and bot.get_session(U3)['active_preset'] == '5')
-check("U1 باز هم روی کلید ۴ به‌روز شد", bot.get_session(U1)['strategy_config']['halving_k_atr'] == 3.0)
-
 # ادمین دیگر دست‌نخورده می‌ماند
 bot.ADMIN_CHAT_IDS.add(555)
-a2 = bot.get_session(555); P.apply_preset(a2, '4'); a2['strategy_config']['halving_k_atr'] = 9.0
+a2 = bot.get_session(555); P.apply_preset(a2, '3'); a2['strategy_config']['halving_k_atr'] = 9.0
 a['strategy_config']['halving_k_atr'] = 2.5
-bot.process_command('/preset_save_4', ADMIN)
+bot.process_command('/preset_save_3', ADMIN)
 check("ادمین دوم با تنظیم دستی خودش دست‌نخورده", a2['strategy_config']['halving_k_atr'] == 9.0)
+check("کاربران عادی به‌روز شدند", bot.get_session(U1)['strategy_config']['halving_k_atr'] == 2.5)
 
-# بازگشت به پیش‌فرض: کاربران کلید ۴ هم برمی‌گردند
-sent.clear(); bot.process_command('/preset_reset_4', ADMIN)
-check("بعد از reset کلید ۴ پیش‌فرض کد است", not P.has_custom('4'))
-check("کاربر روی کلید ۴ خودکار به پیش‌فرض برگشت", bot.get_session(U1)['strategy_config']['halving_k_atr'] == 4.0 and bot.get_session(U1)['strategy_config']['gate_fc_rsi_enabled'] is True)
+# بازگشت به پیش‌فرض: کاربران هم برمی‌گردند
+sent.clear(); bot.process_command('/preset_reset_3', ADMIN)
+check("بعد از reset پیش‌فرض کد است", not P.has_custom('3'))
+check("کاربر خودکار به پیش‌فرض برگشت", bot.get_session(U1)['strategy_config']['halving_k_atr'] == 4.0 and bot.get_session(U1)['strategy_config']['gate_fc_rsi_enabled'] is True)
 check("خود ادمین هم برگشت", a['strategy_config']['halving_k_atr'] == 4.0)
+
+# مهاجرت جلسه‌ی قدیمی روی کلید حذف‌شده: کاربر عادی → معمولی؛ ادمین دست‌نخورده
+su = bot.get_session(U1); su['active_preset'] = '5'; su['touch_auto_mode'] = 'all'
+check("کاربر روی کلید حذف‌شده ۵ → معمولی", bot.get_session(U1)['active_preset'] == '3' and bot.get_session(U1)['touch_auto_mode'] == 'majority')
+a['active_preset'] = '4'; a['strategy_config']['halving_k_atr'] = 7.0
+check("ادمین روی کلید حذف‌شده: تنظیمات دست‌نخورده، برچسب پاک", bot.get_session(ADMIN)['active_preset'] is None and bot.get_session(ADMIN)['strategy_config']['halving_k_atr'] == 7.0)
 print("\nALL PASS" if ok else "\nSOME FAILED")
 raise SystemExit(0 if ok else 1)

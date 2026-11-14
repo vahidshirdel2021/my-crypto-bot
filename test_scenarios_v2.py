@@ -107,6 +107,6 @@ sig, scn, _ = run(ev1);                        res.append(ok(f'پایپ‌لای
 ev1t = pre + [(95.0,95.4,94.6,95.1)]*3 + [(99.5,99.96,99.3,99.4)]
 sig, scn, r = run(ev1t);                       res.append(ok(f'پایپ‌لاین: ۱ برخورد-بدون-نفوذ => SELL/SCN=1 (got {sig}/{scn})', sig=='SELL' and scn=='1' and 'بدون نفوذ' in r))
 ev3 = pre + [(99.5,101.6,99.2,101.3)] + [(101.3,102.0,101.1,101.8)]*3 + [(100.2,100.7,99.9,100.6)]
-sig, scn, _ = run(ev3);                        res.append(ok(f'پایپ‌لاین: ۳ => BUY/SCN=3 (got {sig}/{scn})', sig=='BUY' and scn=='3'))
+sig, scn, _ = run(ev3, sweep_enable_retest_continuation=True);                        res.append(ok(f'پایپ‌لاین: ۳ => BUY/SCN=3 (got {sig}/{scn})', sig=='BUY' and scn=='3'))
 print('\n%d/%d passed' % (sum(res), len(res)))
 sys.exit(0 if all(res) else 1)

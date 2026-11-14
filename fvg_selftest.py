@@ -60,14 +60,41 @@ for kind in ("simple", "continuation", "fakeout"):
     assert fvg_confirm(mk(flat(10)), 9, kind, "BUY", 95.0, ATR, OFF) == (True, "")
 assert S.STRATEGY_DEFAULTS["fvg_enabled"] is False
 
-# --- _fvg_apply: توضیح قبل از اولین | و حفظ ANCHOR/TARGET ---------------------------------
+# --- _fvg_apply: توکن حکم همیشه، بلاک فقط وقتی روشن -------------------------------------
 reason = "شکست PDH + پولبک|ANCHOR=101|TARGET=95"
-assert S._fvg_apply(d, len(d) - 1, "continuation", "BUY", reason, ATR, OFF) == reason
+r_off = S._fvg_apply(d, len(d) - 1, "continuation", "BUY", reason, ATR, OFF)
+assert r_off == "شکست PDH + پولبک|FVGV=1|ANCHOR=101|TARGET=95", r_off          # خاموش: بدون بلاک، فقط توکن
+assert S.extract_sweep_anchor_target(r_off) == (101.0, 95.0)
+r_off_no = S._fvg_apply(mk(flat(10)), 9, "continuation", "BUY", reason, ATR, OFF)
+assert r_off_no is not None and "|FVGV=0|" in r_off_no                          # خاموش: رد هم بلاک نمی‌شود
 r2 = S._fvg_apply(d, len(d) - 1, "continuation", "BUY", reason, ATR, ON)
-assert r2 and r2.endswith("|ANCHOR=101|TARGET=95") and "FVG" in r2.split("|")[0], r2
+assert r2 and r2.endswith("|FVGV=1|ANCHOR=101|TARGET=95") and "FVG" in r2.split("|")[0], r2
 assert S.extract_sweep_anchor_target(r2) == (101.0, 95.0)
-assert S._fvg_apply(mk(flat(10)), 9, "continuation", "BUY", reason, ATR, ON) is None
+assert S._fvg_apply(mk(flat(10)), 9, "continuation", "BUY", reason, ATR, ON) is None   # روشن: بلاک
+# بدون ANCHOR = نامشخص (2)، هیچ‌وقت بلاک نمی‌شود
+assert "|FVGV=2" in S._fvg_apply(d, len(d) - 1, "continuation", "BUY", "بدون لنگر", ATR, ON)
 
 # --- سیمی ساده‌شده حذف شده -----------------------------------------------------------------
 assert not hasattr(S, "simple_mode_on") and "simple_scenario_mode" not in S.STRATEGY_DEFAULTS
 print("fvg_selftest OK")
+
+# --- گزارش قیف بخش ۶ -------------------------------------------------------------------
+import json, os, tempfile, time
+import funnel_report as FR
+tmp = tempfile.mkdtemp()
+now = time.time()
+ev = []
+def add(kind, **k):
+    ev.append({'ts': now - 100 + len(ev) * 0.01, 'kind': kind, 'preset': '3', **k})
+specs = [('t1', '3', 1, 'tp', 1.5), ('t2', '3', 1, 'tp', 1.5), ('t3', '3', 0, 'sl', -1.0), ('t4', '3', 0, 'sl', -1.0), ('t5', '5', 1, 'tp', 2.0), ('t6', '5', 0, 'tp', 2.0)]
+for i, (tid, scn, fv, out, rr) in enumerate(specs):
+    add('touch', tid=tid, symbol='BTCUSDT', touch_sig='BUY', scn=scn, fvgv=fv, level_token='HVL', level_value=100 + i, ts=now - 100 + i)
+    add('vote', tid=tid, cf={})
+    add('shadow', tid=tid, sk='touch', outcome=out, r_end=rr)
+with open(os.path.join(tmp, 'funnel_test.jsonl'), 'w', encoding='utf-8') as f:
+    for e in ev:
+        f.write(json.dumps(e, ensure_ascii=False) + '\n')
+rep_txt = FR.build_report(tmp, days=1, now=now + 10)
+assert '۶) تایید FVG' in rep_txt, rep_txt[-600:]
+assert '۳ و ۴' in rep_txt and '۵ و ۶' in rep_txt and 'FVG تایید کرد' in rep_txt and 'FVG تایید نکرد' in rep_txt, rep_txt[-900:]
+print("fvg report OK")

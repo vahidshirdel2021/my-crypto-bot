@@ -2,14 +2,16 @@
 import os, logging
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.py'), encoding='utf-8').read()
 a = src.index("def _entry_warning_tags("); b = src.index("# ===================== V3.43.24: «تایید کامل هم‌جهتی»")
-st = {'syms': ['BTC', 'ETH'], 'ind': True, 'tfr': True, 'h4': True, 'snap': {'BTC': 1, 'ETH': 1}, 'ind_c': False, 'tfr_c': False, 'h4_c': False}
+st = {'syms': ['BTC', 'ETH'], 'ind': True, 'tfr': True, 'h4': True, 'snap': {'BTC': 1, 'ETH': 1}, 'ind_c': False, 'tfr_c': False, 'h4_c': False, 'lv_syms': [], 'lv': {}}
 g = dict(logger=logging.getLogger('t'),
          side_long=lambda s: 'BUY' in str(s).upper() or 'LONG' in str(s).upper(),
          _trend_active_symbols=lambda cid, sym=None: [x for x in st['syms'] if x != sym],
          _ind_warn_active=lambda cid: st['ind'], _tfr_warn_active=lambda cid: st['tfr'], _h4_warn_active=lambda cid: st['h4'],
          _trend_snapshot_cached=lambda sym, tf: {'score': st['snap'][sym]} if st['snap'].get(sym) is not None else None,
          _indicator_conflict=lambda s, side, tf: (st['ind_c'], []), _tfr_conflict=lambda s, side=None: (st['tfr_c'], [], {}),
-         _h4_conflict=lambda s, side: (st['h4_c'], [], None))
+         _h4_conflict=lambda s, side: (st['h4_c'], [], None),
+         _reflevel_active_symbols=lambda cid, sym=None: [x for x in st['lv_syms'] if x != sym],      # V3.44.167
+         _reflevel_check=lambda cid, syms, side, tf: {x: (st['lv'].get(x, 'ok'), {}) for x in syms})
 exec(src[a:b], g)
 tags, line = g['_entry_warning_tags'], g['_entry_warn_line']
 # بدون تضاد
@@ -27,6 +29,13 @@ assert tags(1, 'HNT', 'BUY (Long)', '5min') == []
 # همه‌ی کلیدها خاموش => None (چیزی ثبت/نشان داده نمی‌شود)
 st['syms'] = []; st['ind'] = st['tfr'] = st['h4'] = False
 assert tags(1, 'HNT', 'BUY (Long)', '5min') is None
+# V3.44.167: هشدار موقعیت BTC/ETH/SOL نسبت به سطح (برچسب جدا برای هر ارز)
+st['syms'] = ['BTC', 'ETH']; st['snap'] = {'BTC': -1, 'ETH': -1}; st['ind'] = st['tfr'] = st['h4'] = False
+st['lv_syms'] = ['BTC', 'ETH', 'SOL']; st['lv'] = {'ETH': 'bad', 'SOL': 'na'}
+assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH']
+assert tags(1, 'ETH', 'SELL (Short)', '5min') == []                      # خودِ نمادِ سیگنال بررسی نمی‌شود
+st['syms'] = []; assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH']     # فقط کلید سطح روشن است
+st['lv_syms'] = []; assert tags(1, 'HNT', 'SELL (Short)', '5min') is None
 # خط پیام
 assert line({'entry_warnings': None}) == '' and line({}) == ''
 assert line({'entry_warnings': []}) == '• ✅ هشدار لحظه‌ی ورود: ندارد\n'

@@ -183,7 +183,7 @@ def build_report(dir_path, days=7, now=None):
         lines.append('هنوز برخوردی با رأی ثبت‌شده نداریم.')
     else:
         lines.append(f"برخوردهای مقایسه‌شده: `{_fa(n_eval)}` | نتیجهٔ سایه‌ی تعیین‌شده: `{_fa(sum(1 for t in base if t in sh_by_tid))}`")
-        for n in ('3', '4', '5'):
+        for n in ('3',):
             mn, wait_min, mode = _preset_params(n)
             passed = [tid for tid in base if n in ever_cf.get(tid, set())]
             sh = [sh_by_tid[tid] for tid in passed if tid in sh_by_tid]
@@ -273,6 +273,66 @@ def build_report(dir_path, days=7, now=None):
         lines.append(f"• آنهایی که صف تایید کرد: `{_fa(len(delayed))}` | {_fmt_r(_avg(delayed))}" + (f" (بقیه {_fa(len(imm) - len(delayed))} مورد حذف شدند)" if len(imm) > len(delayed) else ''))
     else:
         lines.append('هنوز نتیجه‌ای تعیین نشده.')
+    # ---------------------------------------------------------------- ۶) FVG/IFVG: همان برخوردها، با و بدون تایید ----------
+    fv = [t for tid, t in base.items() if t.get('fvgv') in (0, 1)]
+    lines.append('')
+    lines.append('*۶) تایید FVG / IFVG روی ۶ سناریو* (ورود فرضی در لحظهٔ برخورد)')
+    if not fv:
+        lines.append('هنوز برخوردی با حکم FVG ثبت نشده است.')
+    else:
+        pairs = (('۱ و ۲ (برخورد و برگشت)', ('1', '2')), ('۳ و ۴ (شکست و ادامه)', ('3', '4')), ('۵ و ۶ (شکست کاذب)', ('5', '6')))
+        any_row = False
+        for title, nums in pairs:
+            row = {}
+            for t in fv:
+                if str(t.get('scn')) in nums:
+                    r = sh_by_tid.get(t.get('tid'))
+                    row.setdefault(t.get('fvgv'), []).append(r if r else {})
+            if not row:
+                continue
+            any_row = True
+            lines.append(f"• *{title}*")
+            for v, nm in ((1, 'FVG تایید کرد'), (0, 'FVG تایید نکرد')):
+                rows = row.get(v) or []
+                if not rows:
+                    continue
+                nres, w, l, av, pend = _shadow_stats(rows)
+                lines.append(f"   {nm}: `{_fa(len(rows))}` برخورد | برد `{_fa(w)}` باخت `{_fa(l)}` میانگین {_fmt_r(av)}" + (f" | نامعلوم `{_fa(pend)}`" if pend else ''))
+        if not any_row:
+            lines.append('هنوز برخوردی برای سناریوهای ۱ تا ۶ ثبت نشده است.')
+        lines.append('_اگر «تایید کرد» از «تایید نکرد» بهتر نباشد، روشن‌کردن کلید FVG کمکی نمی‌کند. وقتی کلید روشن است سیگنال ردشده اصلاً ثبت نمی‌شود، پس برای سنجش آن را خاموش نگه دارید. زیر ۳۰ نمونه قطعی نتیجه نگیرید._')
+    # ---------------------------------------------------------------- ۷) سمت BTC/ETH/SOL نسبت به سطح خودشان ----------
+    c3_by_tid = {e.get('tid'): (e.get('c3') or {}) for e in by.get('core3', [])}
+    lines.append('')
+    lines.append('*۷) سمت BTC / ETH / SOL نسبت به سطح خودشان* (ورود فرضی در لحظهٔ برخورد)')
+    lines.append('_«هم‌جهت» یعنی برای خرید نماد بالای نزدیک‌ترین سطحش و برای فروش پایین آن است._')
+    rows7 = []
+    for tid, t in base.items():
+        c3 = c3_by_tid.get(tid)
+        side = t.get('touch_sig')
+        if not c3 or side not in ('BUY', 'SELL'):
+            continue
+        want, bad = ('U', 'D') if side == 'BUY' else ('D', 'U')
+        st3 = {k: ('ok' if c3.get(k) == want else ('bad' if c3.get(k) == bad else 'neu')) for k in ('BTC', 'ETH', 'SOL')}
+        rows7.append((st3, sh_by_tid.get(tid) or {}))
+    if not rows7:
+        lines.append('هنوز برخوردی با ثبت سمت سه نماد نداریم.')
+    else:
+        def _line(title, items):
+            if not items:
+                return
+            nres, w, l, av, pend = _shadow_stats(items)
+            lines.append(f"• {title}: `{_fa(len(items))}` برخورد | برد `{_fa(w)}` باخت `{_fa(l)}` میانگین {_fmt_r(av)}" + (f" | نامعلوم `{_fa(pend)}`" if pend else ''))
+        lines.append('*الف) چند نماد از ۳ نماد هم‌جهت با معامله‌اند؟*')
+        for n in (3, 2, 1, 0):
+            _line(f"{_fa(n)} از ۳ هم‌جهت", [r for st3, r in rows7 if sum(1 for v in st3.values() if v == 'ok') == n])
+        lines.append('*ب) نقش SOL*')
+        _line('هر سه هم‌جهت', [r for st3, r in rows7 if all(v == 'ok' for v in st3.values())])
+        _line('SOL هم‌جهت ولی BTC یا ETH هم‌جهت نیست', [r for st3, r in rows7 if st3['SOL'] == 'ok' and not all(v == 'ok' for v in st3.values())])
+        _line('SOL هم‌جهت و هر دوی BTC و ETH مخالف', [r for st3, r in rows7 if st3['SOL'] == 'ok' and st3['BTC'] == 'bad' and st3['ETH'] == 'bad'])
+        _line('SOL مخالف', [r for st3, r in rows7 if st3['SOL'] == 'bad'])
+        _line('SOL روی سطح یا نامشخص', [r for st3, r in rows7 if st3['SOL'] == 'neu'])
+        lines.append('_اگر هرچه تعداد هم‌جهت‌ها بیشتر باشد میانگین R بهتر نشود، یا SOL هم‌جهت به‌تنهایی از SOL مخالف بهتر نباشد، نظریه تایید نشده است. زیر ۳۰ نمونه برای هر ردیف قطعی نتیجه نگیرید._')
     return '\n'.join(lines)
 
 

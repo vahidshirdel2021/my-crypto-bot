@@ -1,4 +1,4 @@
-"""V3.44.62: منوی «🎯 حالت معامله» (معمولی/محافظه‌کار/سخت‌گیر = کلیدهای ۳ تا ۵) برای کاربر عادی و ادمین.
+"""V3.44.169: منوی «🎯 حالت معامله» (معمولی/محافظه‌کار/سخت‌گیر) حذف شده؛ فقط یک حالت (معمولی) است.
 اجرا: python3 trade_mode_menu_selftest.py"""
 import sys, types, os, tempfile
 for name in ('aiohttp', 'ccxt', 'ccxt.async_support'):
@@ -13,41 +13,34 @@ os.environ['BOT_DB_PATH'] = os.path.join(tempfile.mkdtemp(), 'bot.sqlite3'); os.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot'); bot.init_db()
-import access_policy as ap, presets as P
+import access_policy as ap, presets as P, ui
 out = []
 bot.send_message = lambda chat_id, text, markup=None, message_id=None, **k: out.append((text, markup)) or True
 bot.edit_page = lambda chat_id, text, markup=None, message_id=None, **k: out.append((text, markup)) or True
 USER, ADMIN = 222, 111
 
-# دسترسی
-for c in ('/trade_mode_menu', '/trade_mode_set_3', '/trade_mode_set_4', '/trade_mode_set_5'):
-    assert ap.user_command_allowed(c), c
-assert not ap.user_command_allowed('/trade_mode_set_2') and not ap.user_command_allowed('/preset_menu') and not ap.user_command_allowed('/preset_apply_4')
-
-# دکمه‌ی منو در تنظیمات برای کاربر عادی دیده می‌شود (بعد از فیلتر نقش)
-import ui
-kb = ap.filter_markup(ui.get_settings_menu_keyboard())
-assert '/trade_mode_menu' in [b['callback_data'] for r in kb['inline_keyboard'] for b in r], kb
-
-for cid in (USER, ADMIN):
-    s = bot.get_session(cid)
-    out.clear(); bot.process_command('/trade_mode_menu', cid)
-    text, mk = out[-1]
-    assert 'حالت معامله' in text and 'معمولی' in text and 'محافظه‌کار' in text and 'سخت‌گیر' in text, text
-    for k, (n, auto, minr) in {'3': ('معمولی', 'majority', 0.15), '4': ('محافظه‌کار', 'minus1', 0.25), '5': ('سخت‌گیر', 'all', 0.35)}.items():
-        out.clear(); bot.process_command(f'/trade_mode_set_{k}', cid)
-        text, mk = out[-1]
-        assert n in text and s['active_preset'] == k, (k, text)
-        assert s['touch_auto_mode'] == auto and s['fav_confirm_min_r'] == minr, (k, s['touch_auto_mode'], s['fav_confirm_min_r'])
-        assert P.preset_diff(s) == [], P.preset_diff(s)
-        assert s['strategy_config']['gate_btceth_aligned_enabled'] is (k == '5')
-        assert any(b['text'].startswith('✅') and b['callback_data'] == f'/trade_mode_set_{k}' for r in mk['inline_keyboard'] for b in r)
-    out.clear(); bot.process_command('/trade_mode_set_9', cid)
-    assert ('شناخته نشد' in out[-1][0]) if cid == ADMIN else ('در دسترس نیست' in out[-1][0]), out[-1][0]
-# کاربر عادی فقط پیام ساده می‌بیند (بدون اصطلاح فنی)
-out.clear(); bot.process_command('/trade_mode_set_4', USER)
-assert 'RSI' not in out[-1][0] and 'کلید ' not in out[-1][0]
-# ادمین هنوز منوی پریست کامل را دارد و کلید ۴ همان محافظه‌کار است
+# دسترسی: هیچ دستور انتخاب حالت برای کاربر عادی باز نیست
+for c in ('/trade_mode_menu', '/trade_mode_set_3', '/trade_mode_set_4', '/trade_mode_set_5', '/set_wmode_3', '/set_wmode_4', '/preset_menu', '/preset_apply_4'):
+    assert not ap.user_command_allowed(c), c
+# دکمه‌ای در منوی تنظیمات نیست
+kb = ui.get_settings_menu_keyboard()
+assert '/trade_mode_menu' not in [b['callback_data'] for r in kb['inline_keyboard'] for b in r]
+assert 'محافظه‌کار' not in str(kb) and 'سخت‌گیر' not in str(kb)
+# دستورهای حذف‌شده برای ادمین هم هندلر ندارند (پیام «شناخته نشد» نمی‌دهند و حالت عوض نمی‌شود)
+sa = bot.get_session(ADMIN); before = sa.get('active_preset')
+out.clear(); bot.process_command('/trade_mode_set_4', ADMIN)
+assert sa.get('active_preset') == before
+# کاربر جدید روی «معمولی» می‌نشیند
+su = bot.get_session(USER)
+assert su['active_preset'] == '3' and P.preset_diff(su) == []
+assert su['touch_auto_mode'] == 'majority' and su['fav_confirm_min_r'] == 0.15
+# منوی ادمین: فقط یک پریست
 out.clear(); bot.process_command('/preset_menu', ADMIN)
-assert 'محافظه‌کار' in out[-1][0]
-print('TRADE MODE MENU OK')
+text, mk = out[-1]
+assert 'معمولی' in text and 'محافظه‌کار' not in text and 'سخت‌گیر' not in text, text
+cbs = [b['callback_data'] for r in mk['inline_keyboard'] for b in r]
+assert '/preset_apply_3' in cbs and not any(f'/preset_apply_{n}' in cbs for n in '1245')
+# پنل اصلی خط «حالت معامله» ندارد
+out.clear(); bot.menu(USER)
+assert 'حالت معامله' not in out[-1][0], out[-1][0]
+print('TRADE MODE MENU REMOVED OK')
