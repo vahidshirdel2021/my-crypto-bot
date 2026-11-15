@@ -315,6 +315,7 @@ def get_main_menu_keyboard(active, entry_diag_enabled=True, is_admin_user=False,
     else:
         buttons.append({"text": "💳 حساب واقعی (REAL)", "callback_data": "/mode_real"})
     if is_admin_user:
+        buttons.append({"text": "🎚 پریست‌ها", "callback_data": "/preset_menu"})   # V3.44.175: میان‌بر ادمین به منوی پریست (نمایش فعال‌ها / ذخیره برای کاربران)
         buttons.append({"text": "👑 پنل مدیریت", "callback_data": "/admin_panel"})
     if restricted:
         import access_policy as _ap
