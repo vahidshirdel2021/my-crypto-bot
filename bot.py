@@ -6521,7 +6521,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.173'
+BOT_VERSION = '3.44.174'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -12099,7 +12099,7 @@ def _reflevel_gate(chat_id, s, symbol, sig, tf, rec=None):
                 logger.debug('reflevel gate: chart url failed symbol=%s', symbol, exc_info=True)
             if _row:
                 rows.append(_row)
-            rows.append([{'text': '🕓 سیگنال‌های منتظر تایید', 'callback_data': '/lv_hold'}])
+            rows.append([{'text': '🕓 سیگنال‌های منتظر تایید', 'callback_data': '/lvhold'}])
             send_message(chat_id, body, {'inline_keyboard': rows})
         except Exception:
             logger.exception('reflevel gate: warn send failed symbol=%s', symbol)
@@ -20534,7 +20534,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/assist_pending':
         assist_pending_list(chat_id, message_id); return
-    if cl=='/lv_hold':
+    if cl=='/lvhold':
         lv_hold_list(chat_id, message_id); return
     if cl.startswith('/lvq_ask_') or cl.startswith('/lvq_yes_'):
         try:
@@ -20738,7 +20738,7 @@ def handle_text(chat_id,text,message_id=None):
         '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
         '⏳ در صف تایید':'/fav_queue', 'صف تایید':'/fav_queue', '⏳ سیگنال‌های در حال تایید':'/fav_queue', 'سیگنال‌های در حال تایید':'/fav_queue', 'آمار فیلتر':'/fav_stats',
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
-'🕓 سیگنال‌های منتظر تایید':'/lv_hold', 'سیگنال‌های منتظر تایید':'/lv_hold',
+'🕓 سیگنال‌های منتظر تایید':'/lvhold', 'سیگنال‌های منتظر تایید':'/lvhold',
         '💰 سود و زیان امروز':'/daily_pnl', 'سود و زیان امروز':'/daily_pnl',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
         # V3.44.67: دکمه‌های ثابت شروع/توقف اسکن؛ قبلاً برای کاربر عادی به شاخه‌ی «ممنوع» می‌افتادند
