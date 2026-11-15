@@ -6521,7 +6521,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.176'
+BOT_VERSION = '3.44.177'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16807,16 +16807,27 @@ FILTER_MAIN_TEXT = (
 )
 
 
-def preset_active_text(name):
-    """V3.44.87: فهرست دسته‌بندی‌شده‌ی کلیدهای روشنِ یک پریست (نسخه‌ی ذخیره‌شده‌ی ادمین اگر باشد، وگرنه پیش‌فرض کد)."""
+def preset_active_text(name, s=None):
+    """V3.44.87: فهرست دسته‌بندی‌شده‌ی کلیدهای روشنِ یک پریست (نسخه‌ی ذخیره‌شده‌ی ادمین اگر باشد، وگرنه پیش‌فرض کد).
+    V3.44.177: اگر سشن (s) داده شود، تایم‌فریم معاملاتی و کلیدهایی که جزو پریست نیستند (FVG، سخت‌گیری حالت‌ها،
+    خروج و حفظ سود، محدودیت‌ها، دستیار، رژیم روزانه/بلاتکلیفی BTC و ...) هم از وضعیت واقعی همان اکانت اضافه می‌شوند."""
     cfg, ses = presets_mod._full(name)
     pr = presets_mod.PRESETS[name]
     lines = [f"👁 *فعال‌های پریست «{pr['label']}»*"]
     if presets_mod.has_custom(name):
         lines.append('(بر اساس نسخه‌ی ذخیره‌شده‌ی خودت)')
+    _sc = (s.get('strategy_config') or {}) if s else {}
+    _fa7 = str.maketrans('1234567', '۱۲۳۴۵۶۷')
+    if s:
+        _tf = s.get('timeframe', '15min')
+        _tf_txt = {'5min': '۵ دقیقه', '15min': '۱۵ دقیقه', '1hour': '۱ ساعت', '4hour': '۴ ساعت', '1day': 'روزانه'}.get(_tf, TF_DISPLAY.get(_tf, _tf))
+        if _sc.get('mtf_mode_enabled'):
+            _tf_txt += ' (چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if _tf == '5min' else '۱۵') + ' دقیقه)'
+        lines += ['', f'⏱ *تایم‌فریم معاملاتی:* {_tf_txt}']
     order = ('level', 'structure', 'momentum', 'btceth', 'regime', 'entry_rules', 'timing', 'quality', 'experimental')
     for sec in order:
-        items = [v[0] for k, v in GATE_REGISTRY.items() if v[2] == sec and cfg.get(k)]
+        items = [v[0] for k, v in GATE_REGISTRY.items()
+                 if v[2] == sec and ((k in presets_mod.BASE_CFG and cfg.get(k)) or (s is not None and k not in presets_mod.BASE_CFG and gate_on(s, k)))]
         if items:
             lines += ['', _FILTER_SECTION_TITLES[sec][0]] + [f'• {x}' for x in items]
     ent = []
@@ -16832,14 +16843,35 @@ def preset_active_text(name):
     lines += ['', '⚠️ *هشدارها*'] + ([f'• {w}' for w in warns] if warns else ['• همه خاموش'])
     mg = []
     if ses.get('be_close_auto_enabled'): mg.append('• بستن خودکار سربه‌سر')
-    if ses.get('trail_enabled'): mg.append('• تریلینگ استاپ هوشمند')
+    if ses.get('trail_enabled'): mg.append('• تریلینگ استاپ هوشمند' + (f" ({TRAIL_PROFILES[_trail_profile_key(s)][0]})" if s else ''))
+    lim = []
+    if s:
+        if s.get('profit_autoclose_enabled'): mg.append(f"• بستن هر معامله با {_profit_thr(s, 'single'):g}$ سود")
+        if s.get('total_profit_autoclose_enabled'): mg.append(f"• بستن همه با مجموع {_profit_thr(s, 'total'):g}$ سود")
+        if s.get('profit_alert_enabled'): mg.append('• هشدار رسیدن به سود')
+        if s.get('profit_fade_alert_enabled'): mg.append('• هشدار کم شدن سود')
+        if s.get('be_close_alert_enabled'): mg.append('• هشدار بستن سر به سر')
+        if s.get('btc_guard_enabled', True): mg.append(f"• محافظ BTC (بستن {int(round(float(s.get('btc_guard_frac', 0.5)) * 100))}٪ + سر به سر)")
+        if s.get('hours_filter_enabled'): lim.append('• فقط در بهترین ساعات معامله: ' + TRADE_HOURS_PROFILES[_hours_profile_key(s)][0])
+        if s.get('manual_block_buy_entries'): lim.append('• ممنوع کردن خرید')
+        if s.get('manual_block_sell_entries'): lim.append('• ممنوع کردن فروش')
+        if s.get('manual_block_all_entries'): lim.append('• توقف ورود به معامله‌ی جدید')
+        _ms = int(s.get('max_same_direction_positions', 0) or 0)
+        if _ms > 0: lim.append(f'• حداکثر معامله‌ی هم‌جهت: {_ms}')
+        if s.get('assist_mode_enabled'): lim.append('• حالت دستیار (ورود فقط با تایید کاربر)')
     if mg: lines += ['', '🚪 *مدیریت معامله*'] + mg
+    if lim: lines += ['', '🚫 *محدودیت‌ها و دستیار*'] + lim
+    _scn_cfg = cfg
+    sc = [n for n in '1234567' if _scn_cfg.get(f'scenario_{n}_enabled')]
+    lines += ['', '🧭 *حالت‌های برخورد با سطح*'] + ([f"• {n.translate(_fa7)}: {_SCENARIO_LABELS_PLAIN[n]}" for n in sc] if sc else ['• هیچ‌کدام'])
+    if s:
+        lines.append(f"• تشخیص FVG / IFVG: {'🟢 روشن' if _sc.get('fvg_enabled') else '🔴 خاموش'}")
+        for _k, _t in (('confirm_simple_reject_enabled', 'سخت‌گیری بیشتر در حالت ۱ و ۲'), ('confirm_continuation_enabled', 'سخت‌گیری بیشتر در حالت ۳ و ۴'), ('confirm_fakeout_enabled', 'سخت‌گیری بیشتر در حالت ۵ و ۶')):
+            if _sc.get(_k): lines.append(f'• {_t}')
     if cfg.get('halving_model_enabled'):
-        sc = [str(n) for n in range(1, 8) if cfg.get(f'scenario_{n}_enabled')]
-        lines += ['', '🧭 *مدل و حالت‌ها*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}",
-                  '• حالت‌های معامله: ' + ('، '.join(sc) if sc else 'هیچ‌کدام')]
-        if cfg.get('mtf_mode_enabled'):
-            lines.append('• حالت چندتایم‌فریمی: روشن (۱ساعته سطح و واکنش ← ورود با ' + ('۵' if s.get('timeframe') == '5min' else '۱۵') + ' دقیقه)')
+        lines += ['', '🪜 *مدل سطوح*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}"]
+        if cfg.get('mtf_mode_enabled') or _sc.get('mtf_mode_enabled'):
+            lines.append('• حالت چندتایم‌فریمی: روشن (۱ساعته سطح و واکنش ← ورود با ' + ('۵' if (s or {}).get('timeframe') == '5min' else '۱۵') + ' دقیقه)')
     return '\n'.join(lines)[:3900]
 
 
@@ -20208,13 +20240,13 @@ def process_command(cmd,chat_id,message_id=None):
         _pn = cl[len('/preset_show_'):]
         if _pn not in presets_mod.PRESETS:
             send_message(chat_id, '⚠️ این پریست شناخته نشد.', presets_mod.keyboard(s)); return
-        send_message(chat_id, preset_active_text(_pn),
+        send_message(chat_id, preset_active_text(_pn, s),
                      {'inline_keyboard': [[{'text': '✅ اعمال پریست', 'callback_data': f'/preset_apply_{_pn}'}],
                                           [{'text': '🔙 پریست‌ها', 'callback_data': '/preset_menu'}],
                                           [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}); return
     if cl == '/pf':      # V3.44.176: دستور مخفی اضطراری (بدون دکمه در هیچ منو) — فهرست فیلترهای روشنِ پریست همین اکانت
         _pn = s.get('active_preset') if s.get('active_preset') in presets_mod.PRESETS else next(iter(presets_mod.PRESETS))
-        _txt = preset_active_text(_pn)
+        _txt = preset_active_text(_pn, s)
         if not is_admin(chat_id):
             _txt = '\n'.join(_l for _l in _txt.split('\n') if 'نسخه‌ی ذخیره‌شده' not in _l)
         send_message(chat_id, _txt); return
