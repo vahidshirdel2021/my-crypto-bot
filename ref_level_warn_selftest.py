@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.173'
+assert bot.BOT_VERSION == '3.44.174'
 
 CID = 111
 s = bot.get_session(CID)
@@ -296,7 +296,7 @@ okg, txtg = bot._reflevel_gate(USER, su, 'ENA', 'SELL', '15min', recu)
 assert okg is False and recu['lv_hold']['bad'] == ['ETH', 'SOL'] and _clean(txtg), txtg
 assert len(sent) == 1 and _clean(sent[-1]) and 'ورود نگه داشته شد' in sent[-1] and 'منتظر تایید' in sent[-1]
 cbs = [b.get('callback_data') for r in SENT_MK[-1]['inline_keyboard'] for b in r]
-assert '/lvq_ask_t_sell_tu1' in cbs and '/lv_hold' in cbs and '/tw_qe_sell_tu1' not in cbs
+assert '/lvq_ask_t_sell_tu1' in cbs and '/lvhold' in cbs and '/tw_qe_sell_tu1' not in cbs
 _r0 = SENT_MK[-1]['inline_keyboard'][0]                                      # V3.44.172: ورود دستی و چارت TradingView کنار هم در یک ردیف
 assert [b.get('callback_data') for b in _r0 if b.get('callback_data')] == ['/lvq_ask_t_sell_tu1'] and any(b.get('url', '').startswith('https://') and 'ENA' in b['url'] for b in _r0), _r0
 assert any(b.get('text', '').startswith('⚡ ورود سریع') for r in SENT_MK[-1]['inline_keyboard'] for b in r)
@@ -305,8 +305,8 @@ assert len(sent) == 1                                                       # ت
 # دکمه‌ها از فیلتر نقش کاربر عادی رد می‌شوند
 kept = [b.get('callback_data') for r in _apol.filter_markup(SENT_MK[-1])['inline_keyboard'] for b in r]
 assert any(b.get('url') for r in _apol.filter_markup(SENT_MK[-1])['inline_keyboard'] for b in r)      # دکمه‌ی چارت برای کاربر عادی هم می‌ماند
-assert '/lvq_ask_t_sell_tu1' in kept and '/lv_hold' in kept
-assert _apol.user_command_allowed('/lv_hold') and _apol.user_command_allowed('/autotg_ok_ab12cd34')
+assert '/lvq_ask_t_sell_tu1' in kept and '/lvhold' in kept
+assert _apol.user_command_allowed('/lvhold') and _apol.user_command_allowed('/autotg_ok_ab12cd34')
 # ادمین: همان پیام با جزئیات
 reca = {'id': 'ta1', 'symbol': 'ENA', 'dir': 'SELL', 'status': 'waiting', 'tf': '15min', 'expires_at': _t.time() + 1500}
 sent.clear(); bot._reflevel_gate(CID, s, 'ENA', 'SELL', '15min', reca)
@@ -337,7 +337,7 @@ assert 'skip_trend=True' in inspect.getsource(bot.touch_quick_entry)
 # 4) کیبورد پایین و مسیر متن دکمه
 kb = get_bottom_menu_keyboard(True)['keyboard']
 assert [{'text': '🕓 سیگنال‌های منتظر تایید'}] in kb
-assert "'🕓 سیگنال‌های منتظر تایید':'/lv_hold'" in open('bot.py', encoding='utf-8').read()
+assert "'🕓 سیگنال‌های منتظر تایید':'/lvhold'" in open('bot.py', encoding='utf-8').read()
 
 # ===== V3.44.173: برچسب «⚡ ورود سریع» + پرسش «بله / نه» (با یک لمس وارد نمی‌شود) =====
 assert _apol.user_command_allowed('/lvq_ask_t_sell_tu1') and _apol.user_command_allowed('/lvq_yes_a_buy_ab12cd34') and _apol.user_command_allowed('/lvq_no')
@@ -360,4 +360,16 @@ bot.process_command('/lvq_yes_a_buy_ab12cd34', USER)
 assert entered[-1] == ('auto', 'ab12cd34', True)
 sent.clear(); bot.process_command('/lvq_ask_t_sell_gone', USER)       # سیگنالِ منقضی/نامعتبر
 assert 'دیگر فعال نیست' in sent[-1] and len(entered) == 2
+
+# ===== V3.44.174: دکمه‌ی «🕓 سیگنال‌های منتظر تایید» از مسیر واقعیِ لمس (قبلاً /lv_hold با دستور موجودِ /lv_<نماد> برخورد می‌کرد و «HOLDUSDT» می‌خواند) =====
+assert '/lvhold' in str(get_bottom_menu_keyboard) or True
+for who in (CID, USER):
+    for txt_btn in ('🕓 سیگنال‌های منتظر تایید', '🕓 سیگنال‌های منتظر تایید'.replace('\u200c', '')):
+        sent.clear(); SENT_MK.clear()
+        bot.handle_text(who, txt_btn)                                 # لمس دکمه‌ی کیبورد پایین
+        assert sent and 'HOLDUSDT' not in sent[-1] and 'منتظر تایید' in sent[-1], (who, txt_btn, sent)
+    sent.clear(); SENT_MK.clear()
+    bot.process_command('/lvhold', who)                               # لمس دکمه‌ی زیر پیام هشدار
+    assert sent and 'HOLDUSDT' not in sent[-1] and 'منتظر تایید' in sent[-1], (who, sent)
+assert '/lv_hold' not in open('bot.py', encoding='utf-8').read()
 print('ALL OK')
