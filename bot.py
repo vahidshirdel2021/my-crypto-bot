@@ -6521,7 +6521,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.170'
+BOT_VERSION = '3.44.173'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -12005,10 +12005,15 @@ def _reflevel_check(chat_id, syms, side, tf):
         return {x: ('na', None) for x in syms}
 
 
-def _reflevel_lines(res, side):
-    """خطوط کارت هشدار: هر ارز یک خط (کلوز، سمتِ سطح، نتیجه)."""
+def _reflevel_lines(res, side, plain=False):
+    """خطوط کارت هشدار: هر ارز یک خط (کلوز، سمتِ سطح، نتیجه).
+    plain=True (کاربر عادی): بدون نام ارز، سطح و قیمت (قابل مهندسی معکوس نباشد)؛ فقط یک جمله‌ی کلی."""
     is_long = (side == 'BUY')
     lines = []
+    if plain:
+        if any(v[0] == 'bad' for v in res.values()):
+            lines.append('• شرایط بازار فعلاً با این معامله هم‌جهت نیست')
+        return lines
     for sym, (st, info) in res.items():
         name = f"{_REF_LEVEL_NAMES.get(sym, sym)} ({sym})"
         if st == 'na' or not info:
@@ -12032,7 +12037,7 @@ REFLEVEL_WARN_TTL = 1800.0
 def _reflevel_diag(chat_id, symbol, sig, tf):
     """یک خط فشرده برای کارت پوزیشن: برای هر ارزِ بررسی‌شده، سطح مرجع و سمتِ کلوز (✅ هم‌جهت / ⚠️ خلاف / ❔ نامشخص). '' اگر کلید خاموش باشد."""
     syms = _reflevel_active_symbols(chat_id, symbol)
-    if not syms:
+    if not syms or is_restricted_user(chat_id):          # جزئیات سطح فقط برای ادمین
         return ''
     parts = []
     for sym, (st, info) in _reflevel_check(chat_id, syms, sig, tf).items():
@@ -12044,33 +12049,142 @@ def _reflevel_diag(chat_id, symbol, sig, tf):
     return ' | '.join(parts)
 
 
-def _reflevel_gate(chat_id, s, symbol, sig, tf):
+def _reflevel_gate(chat_id, s, symbol, sig, tf, rec=None):
     """(ok, توضیح) برای مسیرهای ورود خودکار «لیست انتظار»: اگر موقعیت BTC/ETH/SOL نسبت به نزدیک‌ترین سطح خلاف جهت معامله باشد،
     ورود نگه داشته می‌شود (سیگنال رد نمی‌شود، در لیست می‌ماند و هر تیک دوباره سنجیده می‌شود) و با هم‌جهت شدن خودکار وارد می‌شود.
-    هشدار هر ترکیب (نماد، جهت، ارزهای مخالف) تا REFLEVEL_WARN_TTL ثانیه فقط یک‌بار فرستاده می‌شود. نبود داده = بدون تضاد."""
+    rec: رکورد لیست انتظار؛ علامت rec['lv_hold'] می‌خورد تا در «🕓 سیگنال‌های منتظر تایید» نشان داده شود و دکمه‌ی «✅ ورود دستی» زیر هشدار بیاید.
+    کاربر عادی پیام ساده می‌بیند (بدون نام ارز/سطح/قیمت)؛ ادمین جزئیات. هشدار هر ترکیب تا REFLEVEL_WARN_TTL ثانیه یک‌بار فرستاده می‌شود."""
     syms = _reflevel_active_symbols(chat_id, symbol)
     if not syms:
+        if rec is not None:
+            rec.pop('lv_hold', None)
         return True, ''
     res = _reflevel_check(chat_id, syms, sig, tf)
     bad = [x for x, (st, _i) in res.items() if st == 'bad']
     if not bad:
+        if rec is not None:
+            rec.pop('lv_hold', None)
         return True, ''
-    side_txt = '🟢 خرید (Long)' if sig == 'BUY' else '🔴 فروش (Short)'
-    txt = f"موقعیت {'، '.join(bad)} نسبت به نزدیک‌ترین سطح خلاف جهت معامله است؛ ورود تا هم‌جهت شدن نگه داشته شد"
-    key = (chat_id, symbol, sig, tuple(sorted(bad)))
     now = time.time()
+    if rec is not None:
+        prev = rec.get('lv_hold') or {}
+        rec['lv_hold'] = {'since': prev.get('since') or now, 'bad': list(bad)}
+    plain = is_restricted_user(chat_id)
+    side_txt = '🟢 خرید (Long)' if sig == 'BUY' else '🔴 فروش (Short)'
+    txt = ("شرایط بازار هنوز با این معامله هم‌جهت نیست؛ ورود تا هم‌جهت شدن نگه داشته شد" if plain else
+           f"موقعیت {'، '.join(bad)} نسبت به نزدیک‌ترین سطح خلاف جهت معامله است؛ ورود تا هم‌جهت شدن نگه داشته شد")
+    key = (chat_id, symbol, sig, tuple(sorted(bad)))
     if now - _REFLEVEL_WARNED.get(key, 0.0) >= REFLEVEL_WARN_TTL:
         _REFLEVEL_WARNED[key] = now
         if len(_REFLEVEL_WARNED) > 200:
             _REFLEVEL_WARNED.clear(); _REFLEVEL_WARNED[key] = now
         try:
-            send_message(chat_id,
-                f"⚠️ *هشدار ورود: موقعیت BTC/ETH/SOL نسبت به سطح*\n\nنماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم: `{tf}`\n\n"
-                + '\n'.join(_reflevel_lines(res, sig))
-                + "\n\nسیگنال رد نشد و در لیست انتظار می‌ماند؛ هر تیک دوباره سنجیده می‌شود و با هم‌جهت شدن همه‌ی ارزهای روشن، خودکار وارد می‌شوم.")
+            if plain:
+                body = (f"⏳ *ورود نگه داشته شد*\n\nنماد: `{symbol}` | جهت: {side_txt}\n\n"
+                        "شرایط بازار فعلاً با این معامله هم‌جهت نیست؛ ریسک ورود بالاتر است.\n\n"
+                        "سیگنال حذف نشد و در «🕓 سیگنال‌های منتظر تایید» می‌ماند؛ با هم‌جهت شدن شرایط خودکار وارد می‌شوم. "
+                        "اگر خودت می‌خواهی، می‌توانی همین حالا با «⚡ ورود سریع» وارد شوی (قبل از ورود تایید می‌گیرم).")
+            else:
+                body = (f"⚠️ *هشدار ورود: موقعیت BTC/ETH/SOL نسبت به سطح*\n\nنماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم: `{tf}`\n\n"
+                        + '\n'.join(_reflevel_lines(res, sig))
+                        + "\n\nسیگنال رد نشد و در «🕓 سیگنال‌های منتظر تایید» می‌ماند؛ هر تیک دوباره سنجیده می‌شود و با هم‌جهت شدن همه‌ی ارزهای روشن، خودکار وارد می‌شوم.")
+            rows = []
+            _row = []
+            if rec is not None and rec.get('id'):
+                _row.append({'text': f"⚡ ورود سریع {'🟢 خرید' if sig == 'BUY' else '🔴 فروش'}",
+                             'callback_data': f"/lvq_ask_t_{'buy' if sig == 'BUY' else 'sell'}_{rec['id']}"})
+            try:
+                _row.append({'text': '📈 چارت', 'url': tradingview_chart_url(symbol, tf)})      # V3.44.172: کنار ورود دستی
+            except Exception:
+                logger.debug('reflevel gate: chart url failed symbol=%s', symbol, exc_info=True)
+            if _row:
+                rows.append(_row)
+            rows.append([{'text': '🕓 سیگنال‌های منتظر تایید', 'callback_data': '/lv_hold'}])
+            send_message(chat_id, body, {'inline_keyboard': rows})
         except Exception:
             logger.exception('reflevel gate: warn send failed symbol=%s', symbol)
     return False, f"{_BTC_FRONT_PREFIX}: {txt}"
+
+
+def _lv_hold_items(s):
+    """سیگنال‌هایی که فقط به‌خاطر هشدار «موقعیت BTC/ETH/SOL نسبت به سطح» نگه داشته شده‌اند (مسیر لیست انتظار + مسیر کارت ورود خودکار)."""
+    now = time.time()
+    items = []
+    for r in list((s.get('touch_wait') or {}).values()):
+        if r.get('status') == 'waiting' and r.get('lv_hold') and r.get('dir') in ('BUY', 'SELL') and float(r.get('expires_at', 0) or 0) > now:
+            items.append({'kind': 'touch', 'id': r.get('id'), 'symbol': r.get('symbol'), 'side': r.get('dir'), 'tf': r.get('tf') or '5min',
+                          'exp': float(r.get('expires_at', 0) or 0), 'bad': list((r.get('lv_hold') or {}).get('bad') or [])})
+    for rid, r in list((s.get('auto_trend_pending') or {}).items()):
+        if r.get('status') == 'pending' and r.get('lv_only') and float(r.get('expires_at', 0) or 0) > now:
+            items.append({'kind': 'auto', 'id': rid, 'symbol': r.get('symbol'), 'side': r.get('sig'), 'tf': r.get('tf') or '5min',
+                          'exp': float(r.get('expires_at', 0) or 0), 'bad': []})
+    items.sort(key=lambda x: x['exp'])
+    return items
+
+
+def lv_quick_ask(chat_id, kind, side, rid):
+    """«⚡ ورود سریع» زیر هشدار سطح: با یک لمس وارد نمی‌شود؛ اول پرسش «بله / نه» می‌آید."""
+    s = get_session(chat_id)
+    side = 'BUY' if side == 'buy' else 'SELL'
+    rec = ((s.get('touch_wait') or {}).get(rid) if kind == 't' else (s.get('auto_trend_pending') or {}).get(rid))
+    live = bool(rec) and (rec.get('status') == 'waiting' if kind == 't' else rec.get('status') == 'pending')
+    if not live:
+        send_message(chat_id, 'ℹ️ این سیگنال دیگر فعال نیست.')
+        return
+    side_fa = '🟢 خرید' if side == 'BUY' else '🔴 فروش'
+    tag = f"{kind}_{'buy' if side == 'BUY' else 'sell'}_{rid}"
+    send_message(chat_id,
+        f"⚡ *ورود سریع `{rec.get('symbol')}` {side_fa}*\n\n"
+        "شرایط بازار فعلاً با این معامله هم‌جهت نیست و ریسک ورود بالاتر است. مطمئنی همین حالا وارد شوم؟",
+        {'inline_keyboard': [[{'text': '✅ بله، وارد شو', 'callback_data': f'/lvq_yes_{tag}'},
+                              {'text': '❌ نه', 'callback_data': '/lvq_no'}]]})
+
+
+def lv_quick_yes(chat_id, kind, side, rid, message_id=None):
+    s = get_session(chat_id)
+    side = 'BUY' if side == 'buy' else 'SELL'
+    if kind == 't':
+        rec = (s.get('touch_wait') or {}).get(rid)
+        if not rec or rec.get('status') != 'waiting':
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر فعال نیست.', message_id=message_id); return
+        send_message(chat_id, f"⏳ ورود سریع `{rec.get('symbol')}` در حال انجام است…", message_id=message_id)
+        touch_quick_entry(chat_id, rid, side)
+    else:
+        rec = (s.get('auto_trend_pending') or {}).get(rid)
+        if not rec or rec.get('status') != 'pending':
+            send_message(chat_id, 'ℹ️ این سیگنال دیگر فعال نیست.', message_id=message_id); return
+        send_message(chat_id, f"⏳ ورود سریع `{rec.get('symbol')}` در حال انجام است…", message_id=message_id)
+        auto_trend_decide(chat_id, rid, True)
+
+
+def lv_hold_list(chat_id, message_id=None):
+    """«🕓 سیگنال‌های منتظر تایید»: جای جدای سیگنال‌هایی که به‌خاطر هشدار سطح نگه داشته شده‌اند؛ هر کدام با «✅ ورود دستی»."""
+    s = get_session(chat_id)
+    items = _lv_hold_items(s)
+    if not items:
+        send_message(chat_id, '✅ الان سیگنالی منتظر تایید نیست.', message_id=message_id)
+        return
+    admin = not is_restricted_user(chat_id)
+    now = time.time()
+    lines = [f"🕓 *سیگنال‌های منتظر تایید ({len(items)})*", '',
+             'این سیگنال‌ها آماده‌اند ولی شرایط بازار فعلاً با آن‌ها هم‌جهت نیست. با هم‌جهت شدن خودکار وارد می‌شوند؛ اگر خودت می‌خواهی، «⚡ ورود سریع» را بزن (قبل از ورود تایید می‌گیرم).', '']
+    rows = []
+    for n, it in enumerate(items[:20], 1):
+        rem = max(0, int((it['exp'] - now + 59) // 60))
+        side_fa = '🟢 خرید' if it['side'] == 'BUY' else '🔴 فروش'
+        lines.append(f"{n}) `{it['symbol']}` {side_fa} · ⏳ {rem} دقیقه")
+        if admin and it['bad']:
+            lines.append(f"    مخالف: {'، '.join(it['bad'])}")
+        cb = f"/lvq_ask_{'t' if it['kind'] == 'touch' else 'a'}_{'buy' if it['side'] == 'BUY' else 'sell'}_{it['id']}"
+        _row = [{'text': f"⚡ ورود سریع {it['symbol']} {side_fa}", 'callback_data': cb}]
+        try:
+            _row.append({'text': '📈 چارت', 'url': tradingview_chart_url(it['symbol'], it['tf'])})      # V3.44.172: کنار ورود دستی
+        except Exception:
+            pass
+        rows.append(_row)
+    if len(items) > 20:
+        lines.append(f"… و {len(items) - 20} مورد دیگر")
+    send_message(chat_id, '\n'.join(lines), {'inline_keyboard': rows}, message_id=message_id)
 
 
 def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
@@ -12114,7 +12228,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     h4_conflict, h4_lines = ((_h4_conflict(symbol, side)[:2]) if h4_on else (False, []))
     lv_res = _reflevel_check(chat_id, lv_syms, side, tf) if lv_syms else {}
     lv_conflict = any(v[0] == 'bad' for v in lv_res.values())
-    lv_lines = _reflevel_lines(lv_res, side) if lv_res else []
+    _lv_plain = bool(chat_id is not None and is_restricted_user(chat_id))      # کاربر عادی: بدون نام ارز/سطح/قیمت
+    lv_lines = _reflevel_lines(lv_res, side, plain=_lv_plain) if lv_res else []
     if not conflict and not ind_conflict and not tfr_conflict and not h4_conflict and not lv_conflict:
         return None
     side_txt = '🟢 خرید (Long)' if is_long else '🔴 فروش (Short)'
@@ -12122,7 +12237,7 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     if conflict:
         main_parts.append('روند بازار')
     if lv_conflict:
-        main_parts.append('موقعیت BTC/ETH/SOL نسبت به سطح')
+        main_parts.append('شرایط بازار' if _lv_plain else 'موقعیت BTC/ETH/SOL نسبت به سطح')
     if ind_conflict:
         main_parts.append('اجماع اندیکاتورها')
     if h4_conflict:
@@ -12137,7 +12252,7 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     if lines:
         sections.append(('*روند بازار (BTC/ETH):*', lines, True))
     if lv_lines:
-        sections.append((f'*موقعیت نسبت به نزدیک‌ترین سطح ({tf}):*', lv_lines, False))
+        sections.append(('*شرایط بازار:*' if _lv_plain else f'*موقعیت نسبت به نزدیک‌ترین سطح ({tf}):*', lv_lines, False))
     if ind_lines:
         sections.append(('*اندیکاتورها:*', ind_lines, False))
     if h4_lines:
@@ -12155,7 +12270,8 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     if conflict:
         tail.append('روند نماد شما با روند بازار (BTC/ETH) هم‌جهت نیست و ریسک ورود بالاتر است.')
     if lv_conflict:
-        tail.append('کلوز آخرین کندل بسته‌شده‌ی دست‌کم یکی از ارزهای شاخص سمتِ خلافِ نزدیک‌ترین سطحش است (خرید باید بالای سطح و فروش پایین سطح باشد)؛ ریسک ورود بالاتر است.')
+        tail.append('شرایط بازار فعلاً با این معامله هم‌جهت نیست؛ ریسک ورود بالاتر است.' if _lv_plain else
+                    'کلوز آخرین کندل بسته‌شده‌ی دست‌کم یکی از ارزهای شاخص سمتِ خلافِ نزدیک‌ترین سطحش است (خرید باید بالای سطح و فروش پایین سطح باشد)؛ ریسک ورود بالاتر است.')
     if ind_conflict:
         tail.append('اندیکاتورها (RSI/MACD/ADX) یا خلاف این معامله‌اند یا هیچ‌کدام از آن پشتیبانی نمی‌کنند؛ شاید بهتر باشد صبر کنید.')
     if h4_conflict:
@@ -12191,9 +12307,12 @@ def _entry_warning_tags(chat_id, symbol, side, tf):
         if (sc > 0 and not is_long) or (sc < 0 and is_long):
             tags.append(f'روند {sym}')
     try:
-        for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, sig, tf).items():
-            if _lst == 'bad':
-                tags.append(f'سطح {_lsym}')
+        _lv_bad = [_lsym for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, sig, tf).items() if _lst == 'bad']
+        if _lv_bad:
+            if is_restricted_user(chat_id):
+                tags.append('شرایط بازار')          # کاربر عادی: بدون نام ارز
+            else:
+                tags.extend(f'سطح {_x}' for _x in _lv_bad)
     except Exception:
         logger.debug('entry warn: ref level check failed %s', symbol)
     try:
@@ -12338,7 +12457,7 @@ _TF_SECONDS = {'1min': 60, '5min': 300, '15min': 900, '30min': 1800, '1hour': 36
 TGREF_COOLDOWN_SECONDS = 10
 TGREF_MAX_AGE_SECONDS = 3600
 _TGREF_NAMES = {'BTC': 'بیت‌کوین', 'ETH': 'اتریوم', 'IND': 'اندیکاتورها', 'TFR': 'رژیم نماد ۵/۱۵ دقیقه', 'H4': 'رژیم ۴ ساعته‌ی نماد',
-                'LV_BTC': 'سطح BTC', 'LV_ETH': 'سطح ETH', 'LV_SOL': 'سطح SOL'}
+                'LV_BTC': 'سطح BTC', 'LV_ETH': 'سطح ETH', 'LV_SOL': 'سطح SOL', 'LV_ALL': 'شرایط بازار'}
 _TGREF_DIV = '━━━━━━━━━━━━━━━━━━━━'
 
 
@@ -12379,9 +12498,15 @@ def _entry_refresh_check(chat_id, symbol, side, tf, fresh=True):
         no_data = bool(lines) and 'داده‌ی کافی نیست' in lines[0]
         out['items']['IND'] = ('na' if no_data else ('bad' if conflict else 'ok'), None)
         out['ind_lines'] = lines
-    for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, side, tf).items():
-        out['items'][f'LV_{_lsym}'] = (_lst, None)
-        out['lv'][_lsym] = _li
+    _lv_chk = _reflevel_check(chat_id, lv_syms, side, tf) if lv_syms else {}
+    if _lv_chk and is_restricted_user(chat_id):
+        # کاربر عادی: فقط یک خط کلی (بدون نام ارز/سطح)
+        _sts = [v[0] for v in _lv_chk.values()]
+        out['items']['LV_ALL'] = ('bad' if 'bad' in _sts else ('na' if 'na' in _sts else 'ok'), None)
+    else:
+        for _lsym, (_lst, _li) in _lv_chk.items():
+            out['items'][f'LV_{_lsym}'] = (_lst, None)
+            out['lv'][_lsym] = _li
     if _h4_warn_active(chat_id):
         h4_bad, _hl, h4_reg = _h4_conflict(symbol, side)
         out['h4'] = h4_reg
@@ -12417,12 +12542,15 @@ def _entry_refresh_block(rec, res, now):
         created_boundary = (float(rec.get('created_at', now)) // tf_s) * tf_s
         new_candle = cc > created_boundary + 1
         lines.append(f"• آخرین کندل بسته‌شده: `{_hm(cc)}` " + ("(بعد از ارسال هشدار بسته شده)" if new_candle else "(از زمان هشدار تغییری نکرده)"))
-    for key in ('BTC', 'ETH', 'LV_BTC', 'LV_ETH', 'LV_SOL', 'IND', 'H4', 'TFR'):
+    for key in ('BTC', 'ETH', 'LV_BTC', 'LV_ETH', 'LV_SOL', 'LV_ALL', 'IND', 'H4', 'TFR'):
         if key not in items:
             continue
         st, sc = items[key]
         name = _TGREF_NAMES[key]
         back = ' — برطرف شد ✅' if (base.get(key) == 'bad' and st == 'ok') else (' — تازه به تضاد رسید ⚠️' if (base.get(key) == 'ok' and st == 'bad') else '')
+        if key == 'LV_ALL':
+            lines.append(f"• {name}: " + ('⚠️ هنوز هم‌جهت نیست' if st == 'bad' else ('⚪ نامشخص' if st == 'na' else 'هم‌جهت ✅')) + back)
+            continue
         if key.startswith('LV_'):
             li = (res.get('lv') or {}).get(key[3:]) or {}
             if st == 'na' or not li:
@@ -13636,7 +13764,9 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     head = (f"🤖 *ورود خودکار نگه داشته شد*\n"
             f"• `{symbol}` | ورود: `{fmt(float(entry))}` | SL: `{fmt(float(sl))}` | TP: `{fmt(float(tp))}`{rr_txt}\n"
             f"• مهلت تایید: `{expiry // 60}` دقیقه\n"
-            + ("• فقط موقعیت BTC/ETH/SOL نسبت به سطح مانع است؛ تا پایان مهلت هر چند ثانیه دوباره چک می‌شود و با هم‌جهت شدن، خودکار وارد می‌شوم (یا همین حالا دستی تایید کن).\n" if lv_only else "")
+            + (("• فقط شرایط بازار مانع است؛ تا پایان مهلت هر چند ثانیه دوباره چک می‌شود و با هم‌جهت شدن، خودکار وارد می‌شوم (یا همین حالا دستی تایید کن).\n"
+                if is_restricted_user(chat_id) else
+                "• فقط موقعیت BTC/ETH/SOL نسبت به سطح مانع است؛ تا پایان مهلت هر چند ثانیه دوباره چک می‌شود و با هم‌جهت شدن، خودکار وارد می‌شوم (یا همین حالا دستی تایید کن).\n") if lv_only else "")
             + "\n")
     rec['tf'] = tf
     res = tg('sendMessage', {'chat_id': chat_id, 'text': head + text, 'parse_mode': 'Markdown',
@@ -13704,7 +13834,8 @@ def lv_auto_enter_tick():
                 if int(rec.get('lv_tries', 0) or 0) >= LV_AUTO_MAX_TRIES:
                     continue
                 rec['lv_tries'] = int(rec.get('lv_tries', 0) or 0) + 1
-                send_message(chat_id, f"✅ موقعیت BTC/ETH/SOL نسبت به سطح با ورود `{rec['symbol']}` هم‌جهت شد؛ ورود خودکار انجام می‌شود.", keep=False)
+                send_message(chat_id, (f"✅ شرایط بازار با ورود `{rec['symbol']}` هم‌جهت شد؛ ورود خودکار انجام می‌شود." if is_restricted_user(chat_id) else
+                                       f"✅ موقعیت BTC/ETH/SOL نسبت به سطح با ورود `{rec['symbol']}` هم‌جهت شد؛ ورود خودکار انجام می‌شود."), keep=False)
                 auto_trend_decide(chat_id, rid, True)
                 save_session(chat_id)
         except Exception:
@@ -14889,7 +15020,7 @@ def _touch_auto_enter_core(chat_id, rec):
         return _finish('card_sent')
     # V3.44.170: ورود خودکار از لیست انتظار هم از هشدار «موقعیت BTC/ETH/SOL نسبت به سطح» می‌گذرد (قبلاً فقط برچسب کارت پوزیشن می‌شد).
     try:
-        _lv_ok, _lv_txt = _reflevel_gate(chat_id, s, symbol, side, tf)
+        _lv_ok, _lv_txt = _reflevel_gate(chat_id, s, symbol, side, tf, rec)
     except Exception:
         logger.exception('touch: ref level gate failed symbol=%s', symbol)
         _lv_ok, _lv_txt = True, ''
@@ -15422,7 +15553,7 @@ def assist_pending_list(chat_id, message_id=None):
     """V3.42: لیست همه‌ی نمادهای در انتظار بدون زمان؛ هر ردیف با یک لمس کارت سیگنال را دوباره پایین چت می‌آورد."""
     s = get_session(chat_id)
     recs = _assist_pending_recs(s)
-    t_all = _touch_waiting_recs(s)
+    t_all = [r for r in _touch_waiting_recs(s) if not r.get('lv_hold')]       # V3.44.171: نگه‌داشته‌شده‌های هشدار سطح در «🕓 سیگنال‌های منتظر تایید» نشان داده می‌شوند
     if not recs and not t_all:
         try:
             _bl0 = [] if is_restricted_user(chat_id) else _dir_board_lines(s)
@@ -20403,6 +20534,22 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/assist_pending':
         assist_pending_list(chat_id, message_id); return
+    if cl=='/lv_hold':
+        lv_hold_list(chat_id, message_id); return
+    if cl.startswith('/lvq_ask_') or cl.startswith('/lvq_yes_'):
+        try:
+            _lq_act, _lq_rest = cl[len('/lvq_'):].split('_', 1)
+            _lq_kind, _lq_side, _lq_id = _lq_rest.split('_', 2)
+        except ValueError:
+            return
+        if _lq_kind in ('t', 'a') and _lq_side in ('buy', 'sell'):
+            if _lq_act == 'ask':
+                lv_quick_ask(chat_id, _lq_kind, _lq_side, _lq_id)
+            else:
+                lv_quick_yes(chat_id, _lq_kind, _lq_side, _lq_id, message_id)
+        return
+    if cl=='/lvq_no':
+        send_message(chat_id, '❌ لغو شد؛ سیگنال همچنان منتظر می‌ماند.', message_id=message_id); return
     if cl=='/pending_vote_filter':
         pending_vote_filter_cycle(chat_id, message_id); return
     if cl in ('/review_list', '/review_list_buy', '/review_list_sell'):
@@ -20591,6 +20738,7 @@ def handle_text(chat_id,text,message_id=None):
         '📋 بررسی‌های آتی':'/review_list', 'بررسی‌های آتی':'/review_list', '🧭 رژیم BTC/ETH':'/btc_eth_regime', 'رژیم BTC/ETH':'/btc_eth_regime',
         '⏳ در صف تایید':'/fav_queue', 'صف تایید':'/fav_queue', '⏳ سیگنال‌های در حال تایید':'/fav_queue', 'سیگنال‌های در حال تایید':'/fav_queue', 'آمار فیلتر':'/fav_stats',
         '📋 سیگنال‌های در انتظار':'/assist_pending', 'سیگنال‌های در انتظار':'/assist_pending', '📋 سیگنال‌ها':'/assist_pending',
+'🕓 سیگنال‌های منتظر تایید':'/lv_hold', 'سیگنال‌های منتظر تایید':'/lv_hold',
         '💰 سود و زیان امروز':'/daily_pnl', 'سود و زیان امروز':'/daily_pnl',
         '🧾 ثبت اوردر معاملاتی':'/pending_order_start', '📋 اوردرهای معاملاتی':'/list_pending_orders',
         # V3.44.67: دکمه‌های ثابت شروع/توقف اسکن؛ قبلاً برای کاربر عادی به شاخه‌ی «ممنوع» می‌افتادند

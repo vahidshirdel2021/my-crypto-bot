@@ -35,6 +35,8 @@ USER_EXACT = frozenset({
     '/fee_menu', '/fee_today', '/fee_week', '/fee_month', '/fee_all', '/my_fee_report', '/my_fees',
     # لیست سیگنال‌های در انتظار خود کاربر (کارت‌ها)
     '/assist_pending',
+    # V3.44.171: «🕓 سیگنال‌های منتظر تایید» (سیگنال‌های نگه‌داشته‌شده با هشدار سطح + ورود دستی) برای کاربر عادی هم باز است
+    '/lv_hold', '/lvq_no',
     # V3.44.169: «⏳ سیگنال‌های در حال تایید» (صف تایید حرکت) از دید کاربر عادی حذف شد؛ «🧭 رژیم BTC/ETH» باز است
     '/btc_eth_regime',
     # V3.44.75: کلید حالت دستیار در منوی اصلی
@@ -80,6 +82,7 @@ _USER_PATTERNS = tuple(re.compile(p) for p in (
     r'^/assist_(ok|no|rev|revok|man|alert|open|save|saved|cd|ext|farok|farno|tgok|trendcancel)_?[a-z0-9_.:\-]*$',
     r'^/(autotg_(ok|no)|tgref|keep_channel_msg|del_channel_msg|check_entry|cancel_watch)_[a-z0-9_.:\-]*$',
     r'^/(qt|qtm)_(buy|sell|tgok)_[a-z0-9_.:\-]*$', r'^/quick_manual_trade_[a-z0-9_.:\-]*$',
+    r'^/lvq_(ask|yes)_(t|a)_(buy|sell)_[a-z0-9]+$',
     r'^/tw_(qe|open|ref)_[a-z0-9_.:\-]*$', r'^/fq_(qe|ref|rej|ext)_[a-z0-9_.:\-]*$',
     r'^/becl_[a-z0-9_.:\-]*$', r'^/(rvshow|rvdel)_[a-z0-9_.:\-]*$',
     r'^/(manual_entry_tgok|confirm_manual_entry|confirm_manual_trade)([a-z0-9_.:\-]*)$',
