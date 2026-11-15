@@ -61,7 +61,7 @@ for hidden in ('/menu_reports', '/menu_trading', '/manual_trade', '/review_list'
     assert hidden not in cbs, hidden
 
 settings = callbacks(ap.filter_markup(ui.get_settings_menu_keyboard()))
-assert settings == ['/check_wizard', '/profit_menu', '/wiz_tf', '/menu'], settings      # V3.44.179: میان‌بر «تایم‌فریم ورود»      # V3.44.169: «🎯 حالت معامله» حذف شد
+assert settings == ['/check_wizard', '/profit_menu', '/wiz_tf', '/refresh_settings', '/menu'], settings      # V3.44.179: میان‌بر «تایم‌فریم ورود»      # V3.44.169: «🎯 حالت معامله» حذف شد
 
 perf = callbacks(ap.filter_markup(ui.get_performance_keyboard()))
 assert set(perf) == {'/performance_today', '/performance_week', '/performance_month', '/performance', '/today_trades', '/menu'}, perf

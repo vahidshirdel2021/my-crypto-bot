@@ -6529,7 +6529,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.182'
+BOT_VERSION = '3.44.183'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16882,7 +16882,7 @@ def preset_active_text(name, s=None, actual=False):
         _warn_lines.append(f'• {w}')
         if w.startswith('هشدار موقعیت BTC/ETH/SOL'):      # V3.44.182: وضعیت کلید جدای هر ارز (پیش‌فرض روشن)
             for _rk in ('btc', 'eth', 'sol'):
-                _on = bool((s or {}).get(f'ref_level_warn_{_rk}', True))
+                _on = bool(ses.get(f'ref_level_warn_{_rk}', True))
                 _warn_lines.append(f"   ◦ {_rk.upper()}: {'🟢 روشن' if _on else '🔴 خاموش'}")
     lines += ['', '⚠️ *هشدارها*'] + (_warn_lines if warns else ['• همه خاموش'])
     mg = []
@@ -20308,6 +20308,12 @@ def process_command(cmd,chat_id,message_id=None):
         if not is_admin(chat_id):
             _txt = '\n'.join(_l for _l in _txt.split('\n') if 'نسخه‌ی ذخیره‌شده' not in _l)
         send_message(chat_id, _txt); return
+    if cl == '/refresh_settings':      # V3.44.183: «🔄 بروزرسانی تنظیمات» برای کاربر؛ آخرین نسخه‌ی تنظیمات ادمین را می‌گیرد (بدون واژه‌ی پریست)
+        _pn = s.get('active_preset') if s.get('active_preset') in presets_mod.PRESETS else presets_mod.DEFAULT_MODE
+        presets_mod.apply_preset(s, _pn)
+        save_session(chat_id)
+        edit_page(chat_id, '✅ *تنظیمات به آخرین نسخه بروزرسانی شد.*\n\nروی معامله‌های بعدی اثر می‌کند؛ معامله‌های باز دست‌نخورده می‌مانند. تایم‌فریم، مقدار معامله و اهرم شما تغییر نکرد.',
+                  {'inline_keyboard': [[{'text': '🔙 تنظیمات', 'callback_data': '/menu_settings'}], [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}, message_id); return
     if cl == '/preset_menu':
         send_message(chat_id, presets_mod.menu_text(s), presets_mod.keyboard(s))
         return

@@ -355,6 +355,7 @@ def get_settings_menu_keyboard():
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
         [{"text": "🚪 خروج و حفظ سود", "callback_data": "/profit_menu"},
          {"text": "⏱ تایم‌فریم ورود (۱۵/۵ دقیقه)", "callback_data": "/wiz_tf"}],
+        [{"text": "🔄 بروزرسانی تنظیمات", "callback_data": "/refresh_settings"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 

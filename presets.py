@@ -75,6 +75,10 @@ BASE_SESSION = {
     # هشدارهای «بله، وارد شو / نه» خاموش‌اند
     'trend_warn_enabled': False,
     'ref_level_warn_enabled': False,
+    # V3.44.183: کلید جدای هر ارز (پیش‌فرض روشن)؛ جزو پریست است تا با «ذخیره در پریست» ادمین به کاربران برسد
+    'ref_level_warn_btc': True,
+    'ref_level_warn_eth': True,
+    'ref_level_warn_sol': True,
     'ind_warn_enabled': False,
     'symbol_tf_regime_warn_enabled': False,
     'symbol_h4_regime_warn_enabled': False,
