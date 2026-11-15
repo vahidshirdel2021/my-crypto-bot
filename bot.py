@@ -1437,7 +1437,9 @@ def get_session(chat_id):
             created = True
         else: created = False
         s = USER_SESSIONS[chat_id]
-        if created: _apply_default_mode(chat_id, s)
+        if created:
+            _apply_default_mode(chat_id, s)
+            _apply_default_mtf(s)      # V3.44.179: پیش‌فرض نشست جدید = چندتایم‌فریمی ۱س ← ورود ۱۵د
         _migrated = (not created) and _migrate_old_preset(chat_id, s)
     if created or _migrated: save_session(chat_id)
     return s
@@ -6527,7 +6529,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.178'
+BOT_VERSION = '3.44.181'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7934,6 +7936,15 @@ def _mtf_set(chat_id, s, on, entry_tf=None):
         cfg['mtf_mode_enabled'] = False
         _halving_tf_apply(cfg, s.get('timeframe', '15min'))
     _p4_sync_tags(s)
+
+
+def _apply_default_mtf(s):
+    """V3.44.179: حالت چندتایم‌فریمی (سطح و واکنش ۱ ساعته ← ورود ۱۵ دقیقه) پیش‌فرض نشست جدید است."""
+    try:
+        if not (s.get('strategy_config') or {}).get('mtf_mode_enabled'):
+            _mtf_set(None, s, True, entry_tf='15min')
+    except Exception:
+        logger.exception('default mtf failed')
 
 
 def build_quick_plan_with_fallback(symbol, side, strategy_config, live, tf, df_ind=None):
@@ -12017,13 +12028,13 @@ def _reflevel_lines(res, side, plain=False):
     is_long = (side == 'BUY')
     lines = []
     if plain:
-        if any(v[0] == 'bad' for v in res.values()):
+        if any(v[0] in ('bad', 'na') for v in res.values()):      # V3.44.181: نامشخص هم مانع است
             lines.append('• شرایط بازار فعلاً با این معامله هم‌جهت نیست')
         return lines
     for sym, (st, info) in res.items():
         name = f"{_REF_LEVEL_NAMES.get(sym, sym)} ({sym})"
         if st == 'na' or not info:
-            lines.append(f"• {name}: ⚪ داده یا سطح در دسترس نیست — بدون تضاد")
+            lines.append(f"• {name}: ❓ داده یا سطح در دسترس نیست — ورود نگه داشته می‌شود")      # V3.44.181: نامشخص = مانع ورود
             continue
         pos_fa = 'پایین' if info.get('ref_above') else 'بالای'
         lbl = f" {info['ref_label']}" if info.get('ref_label') else ''
@@ -12066,7 +12077,8 @@ def _reflevel_gate(chat_id, s, symbol, sig, tf, rec=None):
             rec.pop('lv_hold', None)
         return True, ''
     res = _reflevel_check(chat_id, syms, sig, tf)
-    bad = [x for x, (st, _i) in res.items() if st == 'bad']
+    bad = [x for x, (st, _i) in res.items() if st in ('bad', 'na')]      # V3.44.181: سطح/داده‌ی نامشخص ('na') هم مانع ورود است
+    unk = [x for x, (st, _i) in res.items() if st == 'na']
     if not bad:
         if rec is not None:
             rec.pop('lv_hold', None)
@@ -12078,7 +12090,8 @@ def _reflevel_gate(chat_id, s, symbol, sig, tf, rec=None):
     plain = is_restricted_user(chat_id)
     side_txt = '🟢 خرید (Long)' if sig == 'BUY' else '🔴 فروش (Short)'
     txt = ("شرایط بازار هنوز با این معامله هم‌جهت نیست؛ ورود تا هم‌جهت شدن نگه داشته شد" if plain else
-           f"موقعیت {'، '.join(bad)} نسبت به نزدیک‌ترین سطح خلاف جهت معامله است؛ ورود تا هم‌جهت شدن نگه داشته شد")
+           (f"سطح {'، '.join(unk)} در دسترس/نامشخص است؛ ورود تا معلوم شدن سطح نگه داشته شد" if len(unk) == len(bad) else
+            f"موقعیت {'، '.join(bad)} نسبت به نزدیک‌ترین سطح خلاف جهت یا نامشخص است؛ ورود تا هم‌جهت شدن نگه داشته شد"))
     key = (chat_id, symbol, sig, tuple(sorted(bad)))
     if now - _REFLEVEL_WARNED.get(key, 0.0) >= REFLEVEL_WARN_TTL:
         _REFLEVEL_WARNED[key] = now
@@ -12233,7 +12246,7 @@ def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     tfr_conflict, tfr_lines = ((_tfr_conflict(symbol, side)[:2]) if tfr_on else (False, []))
     h4_conflict, h4_lines = ((_h4_conflict(symbol, side)[:2]) if h4_on else (False, []))
     lv_res = _reflevel_check(chat_id, lv_syms, side, tf) if lv_syms else {}
-    lv_conflict = any(v[0] == 'bad' for v in lv_res.values())
+    lv_conflict = any(v[0] in ('bad', 'na') for v in lv_res.values())      # V3.44.181
     _lv_plain = bool(chat_id is not None and is_restricted_user(chat_id))      # کاربر عادی: بدون نام ارز/سطح/قیمت
     lv_lines = _reflevel_lines(lv_res, side, plain=_lv_plain) if lv_res else []
     if not conflict and not ind_conflict and not tfr_conflict and not h4_conflict and not lv_conflict:
@@ -12313,7 +12326,7 @@ def _entry_warning_tags(chat_id, symbol, side, tf):
         if (sc > 0 and not is_long) or (sc < 0 and is_long):
             tags.append(f'روند {sym}')
     try:
-        _lv_bad = [_lsym for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, sig, tf).items() if _lst == 'bad']
+        _lv_bad = [_lsym for _lsym, (_lst, _li) in _reflevel_check(chat_id, lv_syms, sig, tf).items() if _lst in ('bad', 'na')]      # V3.44.181
         if _lv_bad:
             if is_restricted_user(chat_id):
                 tags.append('شرایط بازار')          # کاربر عادی: بدون نام ارز
@@ -13754,7 +13767,7 @@ def _auto_trend_gate(chat_id, symbol, sig, plan, entry, sl, tp, full_reason):
     lv_only = False
     try:
         _it = _entry_refresh_check(chat_id, symbol, sig, tf, fresh=False)['items']
-        lv_only = (any(k.startswith('LV_') and v[0] == 'bad' for k, v in _it.items())
+        lv_only = (any(k.startswith('LV_') and v[0] in ('bad', 'na') for k, v in _it.items())      # V3.44.181
                    and not any((not k.startswith('LV_')) and v[0] == 'bad' for k, v in _it.items()))
     except Exception:
         logger.exception('auto gate: lv_only check failed symbol=%s', symbol)
@@ -15029,7 +15042,7 @@ def _touch_auto_enter_core(chat_id, rec):
         _lv_ok, _lv_txt = _reflevel_gate(chat_id, s, symbol, side, tf, rec)
     except Exception:
         logger.exception('touch: ref level gate failed symbol=%s', symbol)
-        _lv_ok, _lv_txt = True, ''
+        _lv_ok, _lv_txt = False, f'{_BTC_FRONT_PREFIX}: خطا در بررسی سطح؛ ورود نگه داشته شد'      # V3.44.181: خطا = نامشخص = مانع
     if not _lv_ok:
         rec['block_note'] = _lv_txt[:120]
         return False
@@ -16348,7 +16361,7 @@ async def scan_symbol(http,chat_id,symbol):
         _held = await asyncio.to_thread(_auto_trend_gate, chat_id, symbol, sig, plan, entry, sl, tp, full_reason)
     except Exception:
         logger.exception('auto trend gate failed symbol=%s', symbol)
-        _held = False
+        _held = bool(_reflevel_active_symbols(chat_id, symbol))      # V3.44.181: خطا در بررسی سطح BTC/ETH/SOL = نامشخص = ورود نگه داشته شود
     if _held:
         return _entry_diag_result(chat_id, symbol, 'trend_hold', 'تضاد با روند BTC/ETH یا اجماع اندیکاتورها؛ منتظر تایید کاربر', 'trend_warn', sig)
     ok=execute_trade(chat_id,symbol,'BUY (Long)' if sig=='BUY' else 'SELL (Short)',entry,sl,tp,full_reason,structural_tp=bool(plan.get('structural_target', False)),plan_score=plan.get('score'),plan_rr=plan.get('rr'),plan_quality_label=plan.get('quality_label'),tp_level_name=plan.get('tp_level_name'),tp_stages=plan.get('tp_stages'))
@@ -17059,6 +17072,16 @@ def trade_filter_management_keyboard(chat_id, section=None):
     ]}
 
 
+def _wizard_tf_text(s):
+    """V3.44.179: متن مرحله‌ی تایم‌فریم ویزارد (فقط چندتایم‌فریمی؛ ورود ۱۵ دقیقه پیش‌فرض، ۵ دقیقه با دکمه)."""
+    cfg = (s or {}).get('strategy_config') or {}
+    on5 = bool(cfg.get('mtf_mode_enabled')) and (s or {}).get('timeframe') == '5min'
+    return ("⏱ *تایم‌فریم ورود*\n\n"
+            "🧭 سطوح و واکنش قیمت از کندل ۱ ساعته بررسی می‌شود و فقط نقطه‌ی ورود با کندل کوچک‌تر انتخاب می‌شود.\n"
+            f"ورودِ فعلی: {'۵ دقیقه' if on5 else '۱۵ دقیقه (پیش‌فرض)'}\n"
+            "هر وقت خواستید می‌توانید ورود را به ۵ دقیقه تغییر دهید یا دوباره به ۱۵ دقیقه برگردید.")
+
+
 def wizard_same_dir_keyboard(chat_id):
     """V3.44.62: مرحله‌ی «حداکثر پوزیشن هم‌جهت» در ویزارد تنظیمات معامله (بین «حداکثر پوزیشن» و «تایم‌فریم»).
     callback جدا (/set_wsame_N) دارد تا بعد از انتخاب، ویزارد ادامه پیدا کند (نه برگشت به منوی محدودیت‌ها)."""
@@ -17212,6 +17235,7 @@ def full_reset(chat_id):
     with STATE_LOCK:
         USER_SESSIONS[chat_id] = default_session()
         _apply_default_mode(chat_id, USER_SESSIONS[chat_id])
+        _apply_default_mtf(USER_SESSIONS[chat_id])      # V3.44.179
     save_session(chat_id)
     return True, '✅ *همه‌چیز پاک شد.*\nحالا از صفر شروع می‌کنیم؛ لطفاً تنظیمات را قدم‌به‌قدم دوباره انتخاب کنید.'
 
@@ -19541,12 +19565,12 @@ def process_command(cmd,chat_id,message_id=None):
         send_message(chat_id, f"✅ فاصله حداقل بین ورودهای هم‌جهت: `{s['same_direction_entry_cooldown_seconds']:.0f} ثانیه`"); menu(chat_id); return
     if cl.startswith('/set_wsame_'):          # V3.44.62: مرحله‌ی هم‌جهت ویزارد
         s['max_same_direction_positions']=max(0,int(cl.replace('/set_wsame_',''))); save_session(chat_id)
-        edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
+        edit_page(chat_id, _wizard_tf_text(s), get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
     if cl.startswith('/set_max_'):
         s['max_open_positions']=int(cl.replace('/set_max_','')); save_session(chat_id)
         edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
     if cl == '/set_tf_mtf':          # V3.44.157: ویزارد: حالت چندتایم‌فریمی (۱س سطح/واکنش ← ۱۵د ورود)
-        _mtf_set(chat_id, s, True)
+        _mtf_set(chat_id, s, True, entry_tf='15min')      # V3.44.179: همیشه ورود ۱۵ دقیقه (قبلاً اگر ۵ دقیقه فعال بود همان می‌ماند)
         save_session(chat_id)
         wizard_mode_page(chat_id, message_id); return
     if cl == '/set_tf_mtf5':         # V3.44.158: ویزارد: چندتایم‌فریمی با ورود ۵ دقیقه
@@ -19578,12 +19602,15 @@ def process_command(cmd,chat_id,message_id=None):
     if cl=='/market_report':
         send_message(chat_id, '⏳ در حال بررسی بازار روی همه‌ی تایم‌فریم‌ها...', message_id=message_id)
         send_message(chat_id, market_dashboard_all_timeframes(chat_id), message_id=message_id); return
+    if cl in ('/check_wizard', '/wiz_lev', '/wiz_max', '/wiz_same', '/wiz_tf') and s.get('is_bot_active'):      # V3.44.180: تنظیمات معامله فقط وقتی اسکن متوقف است
+        edit_page(chat_id, '⚠️ *تنظیمات معامله در حال اسکن قابل تغییر نیست.*\n\nبرای تغییر اهرم، حداکثر پوزیشن، تایم‌فریم ورود و ...، ابتدا اسکن را متوقف کنید و بعد دوباره «⚙️ تنظیمات معامله» را بزنید.',
+                  {'inline_keyboard': [[{'text': '🔴 توقف اسکن', 'callback_data': '/stop_scan'}], [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}, message_id); return
     if cl=='/check_wizard': edit_page(chat_id,'⚙️ *تنظیمات معامله*',get_margin_keyboard(),message_id); return
     # V3.44.84: دکمه‌ی «برگشت» مراحل ویزارد (اهرم ← حداکثر پوزیشن ← هم‌جهت ← تایم‌فریم)
     if cl=='/wiz_lev': edit_page(chat_id,'⚙️ اهرم:',get_leverage_keyboard(),message_id); return
     if cl=='/wiz_max': edit_page(chat_id,'⚙️ حداکثر پوزیشن:',get_max_positions_keyboard(s.get('max_open_positions', 3)),message_id); return
     if cl=='/wiz_same': edit_page(chat_id, wizard_same_dir_text(chat_id), wizard_same_dir_keyboard(chat_id), message_id); return
-    if cl=='/wiz_tf': edit_page(chat_id, "⏱ تایم‌فریم و استراتژی موردنظر را انتخاب کنید:", get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
+    if cl=='/wiz_tf': edit_page(chat_id, _wizard_tf_text(s), get_timeframe_keyboard(s.get('timeframe', '15min'), bool((s.get('strategy_config') or {}).get('mtf_mode_enabled'))), message_id); return
     if cl=='/wiz_mode_done': menu(chat_id, message_id); return
     if cl=='/entry_diag':
         enabled = s.get('entry_diag_enabled', True)

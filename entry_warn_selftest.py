@@ -33,9 +33,9 @@ assert tags(1, 'HNT', 'BUY (Long)', '5min') is None
 # V3.44.167: هشدار موقعیت BTC/ETH/SOL نسبت به سطح (برچسب جدا برای هر ارز)
 st['syms'] = ['BTC', 'ETH']; st['snap'] = {'BTC': -1, 'ETH': -1}; st['ind'] = st['tfr'] = st['h4'] = False
 st['lv_syms'] = ['BTC', 'ETH', 'SOL']; st['lv'] = {'ETH': 'bad', 'SOL': 'na'}
-assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH']
-assert tags(1, 'ETH', 'SELL (Short)', '5min') == []                      # خودِ نمادِ سیگنال بررسی نمی‌شود
-st['syms'] = []; assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH']     # فقط کلید سطح روشن است
+assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH', 'سطح SOL']      # V3.44.181: سطح نامشخص (na) هم برچسب مانع می‌گیرد
+assert tags(1, 'ETH', 'SELL (Short)', '5min') == ['سطح SOL']             # خودِ نمادِ سیگنال بررسی نمی‌شود؛ SOL نامشخص مانع است
+st['syms'] = []; assert tags(1, 'HNT', 'SELL (Short)', '5min') == ['سطح ETH', 'سطح SOL']     # فقط کلید سطح روشن است
 st['lv_syms'] = []; assert tags(1, 'HNT', 'SELL (Short)', '5min') is None
 # خط پیام
 assert line({'entry_warnings': None}) == '' and line({}) == ''

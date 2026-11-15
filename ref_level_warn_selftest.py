@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.178'
+assert bot.BOT_VERSION == '3.44.181'
 
 CID = 111
 s = bot.get_session(CID)
@@ -73,15 +73,17 @@ s['ref_level_warn_btc'] = True; s['ref_level_warn_eth'] = False
 assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID) is None
 s['ref_level_warn_eth'] = s['ref_level_warn_sol'] = True
 
-# نبود داده یا سطح = بدون تضاد
+# V3.44.181: نبود داده یا سطح = نامشخص = مانع ورود (هشدار/نگه‌داشتن)
 FAKE.clear()
-assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID) is None
+assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID)
 FAKE.update({'BTC': (100.0, 90.0), 'ETH': (50.0, 60.0), 'SOL': (20.0, 10.0)})
 _orig = fake_info
 bot.btc_front_level_info = lambda *a, **k: {'ok': True, 'close': 1.0, 'ref_price': None, 'side_ok': True}
-assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID) is None
+assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID)
+_okg, _tg = bot._reflevel_gate(CID, s, 'HNT', 'BUY', '15min', {})
+assert not _okg and 'نامشخص' in _tg, (_okg, _tg)      # گیت ورود: سطح نامشخص = ورود نگه داشته می‌شود
 bot.btc_front_level_info = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom'))
-assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID) is None   # خطا = بدون تضاد
+assert bot._assist_trend_conflict_text('HNT', 'BUY', '15min', CID)   # خطا = نامشخص = مانع
 bot.btc_front_level_info = fake_info
 
 # نمادِ سیگنال بررسی نمی‌شود (سیگنال ETH: فقط BTC و SOL)

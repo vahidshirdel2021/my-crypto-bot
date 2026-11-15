@@ -33,9 +33,9 @@ for name, f in inspect.getmembers(ui, inspect.isfunction):
     n += 1
 assert n >= 20, n
 
-# 2) تایم‌فریم: ۵ و ۱۵ دقیقه و ۱ ساعته (V3.44.101)
+# 2) تایم‌فریم (V3.44.179): فقط چندتایم‌فریمی ۱س ← ورود ۱۵د + دکمه‌ی تغییر به ورود ۵د
 tf = [c for c in cbs(ui.get_timeframe_keyboard()) if c != '/dummy']
-assert [c for c in tf if c.startswith('/set_tf_')] == ['/set_tf_5m', '/set_tf_15m', '/set_tf_1h', '/set_tf_mtf', '/set_tf_mtf5'], tf
+assert [c for c in tf if c.startswith('/set_tf_')] == ['/set_tf_mtf', '/set_tf_mtf5'], tf
 txt = ' '.join(b['text'] for r in ui.get_timeframe_keyboard()['inline_keyboard'] for b in r)
 assert 'روندی' not in txt and '۴ ساعت' not in txt, txt
 

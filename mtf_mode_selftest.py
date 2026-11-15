@@ -176,6 +176,14 @@ try:
     check("کاربر عادی می‌تواند در ویزارد گزینه‌ی چندتایم‌فریمی را بزند", any(p.match('/set_tf_mtf') for p in pats))
     check("تاگل منوی ستاپ فقط برای ادمین است", not any(p.match('/toggle_mtf_mode') or p.match('/toggle_mtf_entry_tf') for p in pats))
     check("کاربر عادی گزینه‌ی ویزارد ۵ دقیقه را هم می‌تواند بزند", any(p.match('/set_tf_mtf5') for p in pats))
+    # V3.44.179: ویزارد فقط چندتایم‌فریمی ۱س←۱۵د + دکمه‌ی تغییر به ۵د؛ پیش‌فرض نشست جدید = چندتایم‌فریمی ۱۵د
+    wcb = [b['callback_data'] for r in ui.get_timeframe_keyboard('15min', True)['inline_keyboard'] for b in r]
+    check("ویزارد: گزینه‌های ۵د/۱۵د ساده، ۱ساعته و ۴ساعته حذف شده‌اند", not any(c in wcb for c in ('/set_tf_5m', '/set_tf_15m', '/set_tf_1h', '/set_tf_4h')) and '/set_tf_mtf' in wcb and '/set_tf_mtf5' in wcb)
+    _ns = bot.default_session(); bot._apply_default_mtf(_ns)
+    check("نشست جدید: چندتایم‌فریمی روشن و ورود ۱۵ دقیقه", _ns['timeframe'] == '15min' and _ns['strategy_config']['mtf_mode_enabled'] and not _ns['strategy_config']['gate_h4_tier_enabled'])
+    bot._mtf_set(1, _ns, True, entry_tf='5min'); bot._mtf_set(1, _ns, True, entry_tf='15min')
+    check("برگشت از ورود ۵د به ۱۵د", _ns['timeframe'] == '15min' and _ns['strategy_config']['mtf_mode_enabled'])
+    check("منوی تنظیمات کاربر میان‌بر تایم‌فریم ورود دارد و برای کاربر عادی باز است", any(b['callback_data'] == '/wiz_tf' for r in ui.get_settings_menu_keyboard()['inline_keyboard'] for b in r) and access_policy.user_command_allowed('/wiz_tf'))
 except ImportError as e:
     print("SKIP bot-level checks (import error):", e)
 

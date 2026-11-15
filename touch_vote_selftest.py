@@ -54,6 +54,8 @@ g = dict(re=re, time=time, hashlib=hashlib, pd=pd, RLock=RLock, logger=logging.g
          build_quick_plan_with_fallback=lambda sym, side, cfg, live, tf: ({'sl': 101.0, 'tp': 98.0, 'rr': 2.0, 'reason': 'q', 'tp_level_name': 'x'}, None),
          execute_trade=lambda *a, **k: (calls.append((a, k)) or st['exec_ok']),
          quick_channel_trade=lambda *a, **k: calls.append(('quick', a, k)), is_allowed=lambda c: True, _fav_confirm_hold=lambda *a: (favc.append(a) or bool(S.get('fav_confirm_enabled'))), _assist_queue_signal=lambda *a, **k: (astc.append((a, k)) or 'card'), tg=lambda m, p=None, t=10: (tgc.append((m, p)) or {'ok': True, 'result': {'message_id': 1000 + len(tgc)}}), _CB_CTX=type('X', (), {})(), send_message=lambda c, t, *a, **k: sent.append(t), USER_SESSIONS={})
+g['_reflevel_gate'] = lambda *a, **k: (True, '')      # V3.44.181: گیت سطح BTC/ETH/SOL در این تست جدا بررسی می‌شود؛ اینجا همیشه باز
+g['_BTC_FRONT_PREFIX'] = 'x'
 exec(block, g)
 V, SM = g['_touch_votes'], g['_touch_summarize']
 

@@ -139,17 +139,15 @@ def get_max_positions_keyboard(cur=3):
 
 
 def get_timeframe_keyboard(cur='15min', mtf=False):
-    """cur = تایم‌فریم فعلی (پیش‌فرض ۱۵ دقیقه)؛ گزینه‌ی فعلی تیک ✅ می‌خورد.
-    mtf=True (V3.44.157): حالت چندتایم‌فریمی روشن است؛ تیک روی همان گزینه می‌خورد، نه ۱۵ دقیقه‌ی عادی."""
-    def t(tf, label, cb):
-        return {"text": f"{'✅ ' if (cur == tf and not mtf) else ''}{label}", "callback_data": cb}
-
+    """V3.44.179: مرحله‌ی تایم‌فریمِ ویزارد فقط یک استراتژی دارد: چندتایم‌فریمی (سطح و واکنش از ۱ ساعته).
+    پیش‌فرض ورود ۱۵ دقیقه است؛ دکمه‌ی دوم ورود را به ۵ دقیقه می‌برد (و وقتی ۵ دقیقه فعال است، برگشت به ۱۵ دقیقه همان دکمه‌ی اول).
+    گزینه‌های ۵ دقیقه‌ی ساده، ۱۵ دقیقه‌ی ساده، ۱ ساعته و ۴ ساعته از ویزارد حذف شدند.
+    cur = تایم‌فریم ورودِ فعلی؛ mtf = حالت چندتایم‌فریمی روشن است؟"""
+    is15 = bool(mtf and cur != '5min')
+    is5 = bool(mtf and cur == '5min')
     return {"inline_keyboard": [
-        [{"text": "⚡ دسته ۱: اسکالپینگ (شکار نقدینگی ۵ و ۱۵ دقیقه)", "callback_data": "/dummy"}],
-        [t("5min", "⏱ ۵ دقیقه", "/set_tf_5m"), t("15min", "⏱ ۱۵ دقیقه", "/set_tf_15m")],
-        [t("1hour", "⏱ ۱ ساعت (سطوح با کندل ۱ ساعته، تایید با کلوز ۱۵ دقیقه)", "/set_tf_1h")],
-        [{"text": f"{'✅ ' if (mtf and cur != '5min') else ''}🧭 چندتایم‌فریمی: سطح و واکنش ۱س ← ورود ۱۵د", "callback_data": "/set_tf_mtf"}],
-        [{"text": f"{'✅ ' if (mtf and cur == '5min') else ''}🧭 چندتایم‌فریمی: سطح و واکنش ۱س ← ورود ۵د", "callback_data": "/set_tf_mtf5"}],
+        [{"text": f"{'✅ ' if is15 else ''}🧭 چندتایم‌فریمی: سطح و واکنش ۱س ← ورود ۱۵د", "callback_data": "/set_tf_mtf"}],
+        [{"text": ("✅ ⏱ ورود ۵ دقیقه فعال است" if is5 else "⏱ تغییر به ورود ۵ دقیقه"), "callback_data": "/set_tf_mtf5"}],
         [{"text": "🔙 بازگشت", "callback_data": "/wiz_same"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}]
     ]}
@@ -355,7 +353,8 @@ def get_settings_menu_keyboard():
          {"text": "🧰 قوانین معامله (فیلترها)", "callback_data": "/trade_filter_management"}],
         [{"text": "⚙️ تنظیمات معامله", "callback_data": "/check_wizard"},
          {"text": "📋 واچ‌لیست", "callback_data": "/manage_watchlist"}],
-        [{"text": "🚪 خروج و حفظ سود", "callback_data": "/profit_menu"}],
+        [{"text": "🚪 خروج و حفظ سود", "callback_data": "/profit_menu"},
+         {"text": "⏱ تایم‌فریم ورود (۱۵/۵ دقیقه)", "callback_data": "/wiz_tf"}],
         [{"text": "🏠 منوی اصلی", "callback_data": "/menu"}],
     ]}
 
