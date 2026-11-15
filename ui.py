@@ -13,6 +13,7 @@ def get_bottom_menu_keyboard(is_active=False, is_open=True):
             [{"text": "🏠 منوی اصلی"}, scan_button],
             [{"text": "🆘 بستن اضطراری"}, {"text": "🔄 پوزیشن‌ها"}],
             [{"text": "⏳ سیگنال‌های در حال تایید"}, {"text": "🧭 رژیم BTC/ETH"}],
+            [{"text": "🕓 سیگنال‌های منتظر تایید"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,

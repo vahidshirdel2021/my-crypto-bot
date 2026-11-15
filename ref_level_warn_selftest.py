@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.170'
+assert bot.BOT_VERSION == '3.44.173'
 
 CID = 111
 s = bot.get_session(CID)
@@ -252,4 +252,112 @@ assert res1 is False and opened == [] and 'نگه داشته' in rec.get('block_
 FAKE['BTC'] = (66000.0, 66830.6)
 res2 = bot._touch_auto_enter_core(CID, rec)
 assert opened == ['ONT'], (res2, opened, rec.get('block_note'))
+
+# ===== V3.44.171: متن ساده برای کاربر عادی + «✅ ورود دستی» + جای جدای «🕓 سیگنال‌های منتظر تایید» =====
+import access_policy as _apol
+from ui import get_bottom_menu_keyboard
+bot.ROLE_LOCK_ENABLED = True
+USER = 222
+assert bot.is_restricted_user(USER) and not bot.is_restricted_user(CID)
+su = bot.get_session(USER)
+su.update(ref_level_warn_enabled=True, timeframe='15min', trend_warn_enabled=False, ind_warn_enabled=False,
+          symbol_tf_regime_warn_enabled=False, symbol_h4_regime_warn_enabled=False)
+for _x in ('btc', 'eth', 'sol'):
+    su[f'ref_level_warn_{_x}'] = True
+    s[f'ref_level_warn_{_x}'] = True
+s['ref_level_warn_enabled'] = True
+FAKE.clear(); FAKE.update({'BTC': (64870.1, 64915.2), 'ETH': (1814.59, 1797.55), 'SOL': (71.29, 71.2502)})   # فروش: ETH و SOL بالای سطح = مخالف، BTC پایین سطح = موافق
+SECRET = ('BTC', 'ETH', 'SOL', 'بیت‌کوین', 'اتریوم', 'سولانا', 'نصف‌کردن', '64915', '1797', '71.25', 'عمق')
+
+def _clean(text):
+    return not any(w in text for w in SECRET)
+
+# 1) کارت هشدار (مسیر ورود خودکار/دستیار): کاربر عادی بدون نام ارز و سطح، ادمین با جزئیات
+t_user = bot._assist_trend_conflict_text('ENA', 'SELL', '15min', USER)
+assert t_user and 'شرایط بازار' in t_user and _clean(t_user), t_user
+t_admin = bot._assist_trend_conflict_text('ENA', 'SELL', '15min', CID)
+assert 'اتریوم (ETH)' in t_admin and 'سولانا (SOL)' in t_admin
+# برچسب کارت پوزیشن و خط شفاف
+assert bot._entry_warning_tags(USER, 'ENA', 'SELL (Short)', '15min') == ['شرایط بازار']
+assert bot._entry_warning_tags(CID, 'ENA', 'SELL (Short)', '15min') == ['سطح ETH', 'سطح SOL']
+assert bot._reflevel_diag(USER, 'ENA', 'SELL', '15min') == '' and bot._reflevel_diag(CID, 'ENA', 'SELL', '15min') != ''
+# بروزرسانی کارت (🔄) برای کاربر عادی: یک خط کلی
+res_u = bot._entry_refresh_check(USER, 'ENA', 'SELL', '15min', fresh=False)
+assert res_u['items'].get('LV_ALL', ('',))[0] == 'bad' and not any(k in res_u['items'] for k in ('LV_BTC', 'LV_ETH', 'LV_SOL'))
+blk = bot._entry_refresh_block({'base': {'LV_ALL': 'ok'}, 'tf': '15min', 'created_at': 0}, res_u, 1e10)
+assert 'شرایط بازار' in blk and _clean(blk), blk
+
+# 2) هشدار لیست انتظار: پیام ساده + دکمه‌ی ورود دستی + علامت lv_hold
+sent.clear(); SENT_MK = []
+bot.send_message = lambda chat_id, text, markup=None, *a, **k: (sent.append(text), SENT_MK.append(markup))
+bot._REFLEVEL_WARNED.clear()
+recu = {'id': 'tu1', 'symbol': 'ENA', 'dir': 'SELL', 'status': 'waiting', 'tf': '15min', 'expires_at': _t.time() + 1500}
+okg, txtg = bot._reflevel_gate(USER, su, 'ENA', 'SELL', '15min', recu)
+assert okg is False and recu['lv_hold']['bad'] == ['ETH', 'SOL'] and _clean(txtg), txtg
+assert len(sent) == 1 and _clean(sent[-1]) and 'ورود نگه داشته شد' in sent[-1] and 'منتظر تایید' in sent[-1]
+cbs = [b.get('callback_data') for r in SENT_MK[-1]['inline_keyboard'] for b in r]
+assert '/lvq_ask_t_sell_tu1' in cbs and '/lv_hold' in cbs and '/tw_qe_sell_tu1' not in cbs
+_r0 = SENT_MK[-1]['inline_keyboard'][0]                                      # V3.44.172: ورود دستی و چارت TradingView کنار هم در یک ردیف
+assert [b.get('callback_data') for b in _r0 if b.get('callback_data')] == ['/lvq_ask_t_sell_tu1'] and any(b.get('url', '').startswith('https://') and 'ENA' in b['url'] for b in _r0), _r0
+assert any(b.get('text', '').startswith('⚡ ورود سریع') for r in SENT_MK[-1]['inline_keyboard'] for b in r)
+bot._reflevel_gate(USER, su, 'ENA', 'SELL', '15min', recu)
+assert len(sent) == 1                                                       # تکراری نمی‌فرستد
+# دکمه‌ها از فیلتر نقش کاربر عادی رد می‌شوند
+kept = [b.get('callback_data') for r in _apol.filter_markup(SENT_MK[-1])['inline_keyboard'] for b in r]
+assert any(b.get('url') for r in _apol.filter_markup(SENT_MK[-1])['inline_keyboard'] for b in r)      # دکمه‌ی چارت برای کاربر عادی هم می‌ماند
+assert '/lvq_ask_t_sell_tu1' in kept and '/lv_hold' in kept
+assert _apol.user_command_allowed('/lv_hold') and _apol.user_command_allowed('/autotg_ok_ab12cd34')
+# ادمین: همان پیام با جزئیات
+reca = {'id': 'ta1', 'symbol': 'ENA', 'dir': 'SELL', 'status': 'waiting', 'tf': '15min', 'expires_at': _t.time() + 1500}
+sent.clear(); bot._reflevel_gate(CID, s, 'ENA', 'SELL', '15min', reca)
+assert 'اتریوم (ETH)' in sent[-1] and 'سولانا (SOL)' in sent[-1] and '/lvq_ask_t_sell_ta1' in str(SENT_MK[-1])
+
+# 3) جای جدا: «🕓 سیگنال‌های منتظر تایید» (کاربر عادی بدون جزئیات، ادمین با ارز مخالف) و حذف از «📋 سیگنال‌های در انتظار»
+su['touch_wait'] = {'tu1': recu}; s['touch_wait'] = {'ta1': reca}
+su['auto_trend_pending'] = {'ab12cd34': {'id': 'ab12cd34', 'symbol': 'ONT', 'sig': 'BUY', 'tf': '15min', 'status': 'pending', 'lv_only': True, 'expires_at': _t.time() + 900}}
+sent.clear(); bot.lv_hold_list(USER)
+assert 'سیگنال‌های منتظر تایید (2)' in sent[-1] and 'ENA' in sent[-1] and 'ONT' in sent[-1] and _clean(sent[-1]) and 'مخالف' not in sent[-1], sent[-1]
+cbs = [b.get('callback_data') for r in SENT_MK[-1]['inline_keyboard'] for b in r if b.get('callback_data')]
+assert '/lvq_ask_t_sell_tu1' in cbs and '/lvq_ask_a_buy_ab12cd34' in cbs
+for _row in SENT_MK[-1]['inline_keyboard']:
+    assert len(_row) == 2 and _row[0].get('callback_data') and _row[1].get('url'), _row           # هر مورد: ورود دستی + چارت در یک ردیف
+sent.clear(); bot.lv_hold_list(CID)
+assert 'مخالف: ETH، SOL' in sent[-1]
+sent.clear(); bot.assist_pending_list(CID)
+assert sent and '`ENA`' not in sent[-1] and '(3)' in sent[-1]               # نگه‌داشته‌شده‌ها از لیست عادی جدا شدند (فقط ۳ کارتِ دستیارِ قبلیِ تست باقی است)
+# با هم‌جهت شدن علامت برداشته می‌شود و از لیست جدا می‌رود
+FAKE['ETH'] = (1790.0, 1797.55); FAKE['SOL'] = (70.0, 71.2502)
+assert bot._reflevel_gate(CID, s, 'ENA', 'SELL', '15min', reca) == (True, '') and 'lv_hold' not in reca
+sent.clear(); bot.lv_hold_list(CID)
+assert 'الان سیگنالی منتظر تایید نیست' in sent[-1]
+# کارت دکمه‌ی ورود دستی لیست انتظار همان «⚡ ورود سریع» موجود است (بدون هشدار)
+import inspect
+assert 'skip_trend=True' in inspect.getsource(bot.touch_quick_entry)
+
+# 4) کیبورد پایین و مسیر متن دکمه
+kb = get_bottom_menu_keyboard(True)['keyboard']
+assert [{'text': '🕓 سیگنال‌های منتظر تایید'}] in kb
+assert "'🕓 سیگنال‌های منتظر تایید':'/lv_hold'" in open('bot.py', encoding='utf-8').read()
+
+# ===== V3.44.173: برچسب «⚡ ورود سریع» + پرسش «بله / نه» (با یک لمس وارد نمی‌شود) =====
+assert _apol.user_command_allowed('/lvq_ask_t_sell_tu1') and _apol.user_command_allowed('/lvq_yes_a_buy_ab12cd34') and _apol.user_command_allowed('/lvq_no')
+assert not _apol.user_command_allowed('/lvq_yes_x_buy_ab12') and not _apol.user_command_allowed('/lvq_yes_t_hold_ab12')
+su['touch_wait'] = {'tu1': recu}; su['auto_trend_pending'] = {'ab12cd34': {'id': 'ab12cd34', 'symbol': 'ONT', 'sig': 'BUY', 'tf': '15min', 'status': 'pending', 'lv_only': True, 'expires_at': _t.time() + 900}}
+entered = []
+bot.touch_quick_entry = lambda chat_id, tid, side: entered.append(('touch', tid, side))
+bot.auto_trend_decide = lambda chat_id, rid, approve: entered.append(('auto', rid, approve))
+sent.clear(); SENT_MK.clear()
+bot.process_command('/lvq_ask_t_sell_tu1', USER)                      # لمس اول: فقط پرسش، بدون ورود
+assert entered == [] and 'مطمئنی' in sent[-1] and 'ENA' in sent[-1] and _clean(sent[-1].replace('ENA', '')), sent[-1]
+_cb = [b['callback_data'] for r in SENT_MK[-1]['inline_keyboard'] for b in r]
+assert _cb == ['/lvq_yes_t_sell_tu1', '/lvq_no'], _cb
+bot.process_command('/lvq_no', USER)
+assert entered == [] and 'لغو شد' in sent[-1]
+bot.process_command('/lvq_yes_t_sell_tu1', USER)                      # «بله»: ورود سریع همان دکمه‌ی موجود
+assert entered == [('touch', 'tu1', 'SELL')]
+bot.process_command('/lvq_ask_a_buy_ab12cd34', USER); assert len(entered) == 1 and 'ONT' in sent[-1]
+bot.process_command('/lvq_yes_a_buy_ab12cd34', USER)
+assert entered[-1] == ('auto', 'ab12cd34', True)
+sent.clear(); bot.process_command('/lvq_ask_t_sell_gone', USER)       # سیگنالِ منقضی/نامعتبر
+assert 'دیگر فعال نیست' in sent[-1] and len(entered) == 2
 print('ALL OK')

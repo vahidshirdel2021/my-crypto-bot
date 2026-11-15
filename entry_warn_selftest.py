@@ -10,6 +10,7 @@ g = dict(logger=logging.getLogger('t'),
          _trend_snapshot_cached=lambda sym, tf: {'score': st['snap'][sym]} if st['snap'].get(sym) is not None else None,
          _indicator_conflict=lambda s, side, tf: (st['ind_c'], []), _tfr_conflict=lambda s, side=None: (st['tfr_c'], [], {}),
          _h4_conflict=lambda s, side: (st['h4_c'], [], None),
+         is_restricted_user=lambda cid: False,                                                          # V3.44.171
          _reflevel_active_symbols=lambda cid, sym=None: [x for x in st['lv_syms'] if x != sym],      # V3.44.167
          _reflevel_check=lambda cid, syms, side, tf: {x: (st['lv'].get(x, 'ok'), {}) for x in syms})
 exec(src[a:b], g)
