@@ -18,6 +18,8 @@ import re
 USER_EXACT = frozenset({
     # ناوبری
     '/start', '/menu', '/cancel', '/noop', '/dummy',
+    # V3.44.176: دستور مخفی اضطراری (بدون دکمه): فهرست فیلترهای روشن پریست
+    '/pf',
     '☰ منو', '🏠 منوی اصلی', '🏠 منو', 'منوی اصلی',
     # اسکن
     '/start_scan', '/stop_scan', '/reload_and_start',
