@@ -310,8 +310,8 @@ STRATEGY_DEFAULTS = {
     "gate_max_sl_atr_enabled": True,    # سقف فاصله‌ی SL بر حسب ATR
     "gate_fee_ratio_enabled": False,     # نسبت ریسک به کارمزد (پلن)
     "gate_min_score_enabled": False,     # حداقل امتیاز کیفیت
-    # V3.44.163: تایید FVG/IFVG برای ۶ سناریو (کلید روشن/خاموش، پیش‌فرض خاموش). جزئیات در fvg_ifvg.py
-    "fvg_enabled": False,
+    # V3.44.163: تایید FVG/IFVG برای ۶ سناریو (کلید روشن/خاموش؛ از V3.44.178 پیش‌فرض روشن). جزئیات در fvg_ifvg.py
+    "fvg_enabled": True,
     "fvg_lookback_candles": 30,
     "fvg_min_size_atr": 0.15,
     "fvg_level_tol_atr": 1.0,
@@ -906,7 +906,7 @@ def _fvg_apply(d, idx, kind, sig, reason, atr, cfg):
     """V3.44.163/164: همیشه حکم FVG/IFVG را حساب و به‌صورت توکن |FVGV=1 (تایید) / 0 (رد) / 2 (نامشخص) روی reason می‌گذارد تا
     گزارش قیف بتواند «با و بدون FVG» را مقایسه کند. کلید fvg_enabled فقط تعیین می‌کند سیگنالِ ردشده بلاک شود یا نه:
     خاموش = هیچ سیگنالی بلاک نمی‌شود؛ روشن = سیگنال بدون تایید None برمی‌گردد."""
-    on = bool((cfg or {}).get("fvg_enabled", False))
+    on = bool((cfg or {}).get("fvg_enabled", True))
     try:
         anchor, _t = extract_sweep_anchor_target(reason)
         ok, note = _fvg_confirm(d, idx, kind, sig, anchor, atr, {**(cfg or {}), "fvg_enabled": True})

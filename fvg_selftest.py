@@ -58,7 +58,7 @@ assert fvg_confirm(old, len(old) - 1, "simple", "SELL", 99.0, ATR, {**ON, "fvg_l
 OFF = {**ON, "fvg_enabled": False}
 for kind in ("simple", "continuation", "fakeout"):
     assert fvg_confirm(mk(flat(10)), 9, kind, "BUY", 95.0, ATR, OFF) == (True, "")
-assert S.STRATEGY_DEFAULTS["fvg_enabled"] is False
+assert S.STRATEGY_DEFAULTS["fvg_enabled"] is True
 
 # --- _fvg_apply: توکن حکم همیشه، بلاک فقط وقتی روشن -------------------------------------
 reason = "شکست PDH + پولبک|ANCHOR=101|TARGET=95"

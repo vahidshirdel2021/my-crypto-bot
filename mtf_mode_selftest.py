@@ -56,7 +56,7 @@ def build(trigger_bull=True, with_trigger=True):
 
 CFG = {'halving_model_enabled': True, 'halving_high': 200.0, 'halving_low': 100.0, 'halving_k_atr': 4.0,
        'halving_min_depth': 3, 'halving_max_depth': 12, 'halving_atr_override': 2.0, 'halving_depth_freeze': False,
-       'mtf_mode_enabled': True, 'gate_pd_level_enabled': False}
+       'mtf_mode_enabled': True, 'gate_pd_level_enabled': False, 'fvg_enabled': False}
 
 # ---- ۱) override ATR و کلید قفل عمق
 d15, d1 = build()

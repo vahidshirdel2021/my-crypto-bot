@@ -57,7 +57,7 @@ def _near(z, level, tol):
 def fvg_confirm(d, idx, kind, sig, level, atr, cfg):
     """(ok, توضیح). kind: simple | continuation | fakeout. sig: BUY | SELL. level: سطح مرجع (ANCHOR)."""
     try:
-        if not bool((cfg or {}).get("fvg_enabled", False)):
+        if not bool((cfg or {}).get("fvg_enabled", True)):
             return True, ""
         if level is None or not np.isfinite(level) or not atr or not np.isfinite(atr) or atr <= 0:
             return True, ""

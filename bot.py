@@ -1420,7 +1420,13 @@ def load_sessions():
         finally: conn.close()
     with STATE_LOCK:
         for chat_id, raw in rows:
-            try: USER_SESSIONS[int(chat_id)] = normalize_session(json.loads(raw))
+            try:
+                _ss = normalize_session(json.loads(raw))
+                if not _ss.get('fvg_default_v178'):      # V3.44.178: FVG پیش‌فرض روشن شد؛ مقدار خاموشِ ذخیره‌شده‌ی کاربران عادی یک‌بار روشن می‌شود (ادمین‌ها دست‌نخورده)
+                    if int(chat_id) not in ADMIN_CHAT_IDS:
+                        _ss.setdefault('strategy_config', {})['fvg_enabled'] = True
+                    _ss['fvg_default_v178'] = True
+                USER_SESSIONS[int(chat_id)] = _ss
             except Exception: logger.exception('Failed loading session %s', chat_id)
 
 
@@ -6521,7 +6527,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.177'
+BOT_VERSION = '3.44.178'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16807,13 +16813,21 @@ FILTER_MAIN_TEXT = (
 )
 
 
-def preset_active_text(name, s=None):
+def preset_active_text(name, s=None, actual=False):
     """V3.44.87: فهرست دسته‌بندی‌شده‌ی کلیدهای روشنِ یک پریست (نسخه‌ی ذخیره‌شده‌ی ادمین اگر باشد، وگرنه پیش‌فرض کد).
     V3.44.177: اگر سشن (s) داده شود، تایم‌فریم معاملاتی و کلیدهایی که جزو پریست نیستند (FVG، سخت‌گیری حالت‌ها،
-    خروج و حفظ سود، محدودیت‌ها، دستیار، رژیم روزانه/بلاتکلیفی BTC و ...) هم از وضعیت واقعی همان اکانت اضافه می‌شوند."""
+    خروج و حفظ سود، محدودیت‌ها، دستیار، رژیم روزانه/بلاتکلیفی BTC و ...) هم از وضعیت واقعی همان اکانت اضافه می‌شوند.
+    actual=True (دستور /pf): حتی کلیدهای خود پریست هم از وضعیت واقعیِ همان اکانت خوانده می‌شوند، و اگر با پریست فرق داشته باشند اعلام می‌شود."""
     cfg, ses = presets_mod._full(name)
     pr = presets_mod.PRESETS[name]
-    lines = [f"👁 *فعال‌های پریست «{pr['label']}»*"]
+    _act = bool(actual and s is not None)
+    if _act:
+        _scfg0 = s.get('strategy_config') or {}
+        cfg = {**cfg, **{k: _scfg0[k] for k in presets_mod.BASE_CFG if k in _scfg0}}
+        ses = {**ses, **{k: s[k] for k in presets_mod.BASE_SESSION if k in s}}
+        lines = [f"👁 *فعال‌های این اکانت* (پریست «{pr['label']}»)"]
+    else:
+        lines = [f"👁 *فعال‌های پریست «{pr['label']}»*"]
     if presets_mod.has_custom(name):
         lines.append('(بر اساس نسخه‌ی ذخیره‌شده‌ی خودت)')
     _sc = (s.get('strategy_config') or {}) if s else {}
@@ -16823,7 +16837,17 @@ def preset_active_text(name, s=None):
         _tf_txt = {'5min': '۵ دقیقه', '15min': '۱۵ دقیقه', '1hour': '۱ ساعت', '4hour': '۴ ساعت', '1day': 'روزانه'}.get(_tf, TF_DISPLAY.get(_tf, _tf))
         if _sc.get('mtf_mode_enabled'):
             _tf_txt += ' (چندتایم‌فریمی: سطح و واکنش ۱ ساعته ← ورود با ' + ('۵' if _tf == '5min' else '۱۵') + ' دقیقه)'
+        else:
+            _tf_txt += ' | چندتایم‌فریمی: 🔴 خاموش'
         lines += ['', f'⏱ *تایم‌فریم معاملاتی:* {_tf_txt}']
+        if _act:
+            _d = presets_mod.preset_diff(s, name)
+            if _d:
+                _fn = {'trail_enabled': 'تریلینگ', 'be_close_auto_enabled': 'بستن خودکار سربه‌سر', 'btc_guard_enabled': 'محافظ BTC', 'btc_guard_frac': 'سهم محافظ BTC',
+                       'fvg_enabled': 'FVG/IFVG', 'touch_auto_mode': 'ورود خودکار رأی‌گیری', 'fav_confirm_enabled': 'صبر برای تایید حرکت',
+                       'halving_k_atr': 'ATR مدل نصف‌کردن', 'halving_max_depth': 'عمق مدل نصف‌کردن', 'halving_model_enabled': 'مدل نصف‌کردن'}
+                _nm = [(GATE_REGISTRY[k][0] if k in GATE_REGISTRY else _fn.get(k, k)) for k in _d[:8]]
+                lines += ['', f"⚠️ *{len(_d)} مورد با پریست فرق دارد:* " + '، '.join(_nm) + (' ...' if len(_d) > 8 else '')]
     order = ('level', 'structure', 'momentum', 'btceth', 'regime', 'entry_rules', 'timing', 'quality', 'experimental')
     for sec in order:
         items = [v[0] for k, v in GATE_REGISTRY.items()
@@ -16851,7 +16875,6 @@ def preset_active_text(name, s=None):
         if s.get('profit_alert_enabled'): mg.append('• هشدار رسیدن به سود')
         if s.get('profit_fade_alert_enabled'): mg.append('• هشدار کم شدن سود')
         if s.get('be_close_alert_enabled'): mg.append('• هشدار بستن سر به سر')
-        if s.get('btc_guard_enabled', True): mg.append(f"• محافظ BTC (بستن {int(round(float(s.get('btc_guard_frac', 0.5)) * 100))}٪ + سر به سر)")
         if s.get('hours_filter_enabled'): lim.append('• فقط در بهترین ساعات معامله: ' + TRADE_HOURS_PROFILES[_hours_profile_key(s)][0])
         if s.get('manual_block_buy_entries'): lim.append('• ممنوع کردن خرید')
         if s.get('manual_block_sell_entries'): lim.append('• ممنوع کردن فروش')
@@ -16859,15 +16882,16 @@ def preset_active_text(name, s=None):
         _ms = int(s.get('max_same_direction_positions', 0) or 0)
         if _ms > 0: lim.append(f'• حداکثر معامله‌ی هم‌جهت: {_ms}')
         if s.get('assist_mode_enabled'): lim.append('• حالت دستیار (ورود فقط با تایید کاربر)')
+    mg.append(f"• محافظ BTC: {'🟢 روشن (بستن ' + str(int(round(float(ses.get('btc_guard_frac', 0.5)) * 100))) + '٪ + سر به سر)' if ses.get('btc_guard_enabled', True) else '🔴 خاموش'}")
     if mg: lines += ['', '🚪 *مدیریت معامله*'] + mg
     if lim: lines += ['', '🚫 *محدودیت‌ها و دستیار*'] + lim
     _scn_cfg = cfg
     sc = [n for n in '1234567' if _scn_cfg.get(f'scenario_{n}_enabled')]
     lines += ['', '🧭 *حالت‌های برخورد با سطح*'] + ([f"• {n.translate(_fa7)}: {_SCENARIO_LABELS_PLAIN[n]}" for n in sc] if sc else ['• هیچ‌کدام'])
-    if s:
-        lines.append(f"• تشخیص FVG / IFVG: {'🟢 روشن' if _sc.get('fvg_enabled') else '🔴 خاموش'}")
+    lines.append(f"• تشخیص FVG / IFVG: {'🟢 روشن' if cfg.get('fvg_enabled', True) else '🔴 خاموش'}")
+    if True:
         for _k, _t in (('confirm_simple_reject_enabled', 'سخت‌گیری بیشتر در حالت ۱ و ۲'), ('confirm_continuation_enabled', 'سخت‌گیری بیشتر در حالت ۳ و ۴'), ('confirm_fakeout_enabled', 'سخت‌گیری بیشتر در حالت ۵ و ۶')):
-            if _sc.get(_k): lines.append(f'• {_t}')
+            if cfg.get(_k): lines.append(f'• {_t}')
     if cfg.get('halving_model_enabled'):
         lines += ['', '🪜 *مدل سطوح*', f"• مدل نصف‌کردن: ATR {halving_k_effective(cfg)[0]:g}{' (پویا از BTC)' if halving_k_effective(cfg)[1] == 'btc' else ''}، عمق {cfg.get('halving_max_depth', 0)}"]
         if cfg.get('mtf_mode_enabled') or _sc.get('mtf_mode_enabled'):
@@ -20246,7 +20270,7 @@ def process_command(cmd,chat_id,message_id=None):
                                           [{'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]]}); return
     if cl == '/pf':      # V3.44.176: دستور مخفی اضطراری (بدون دکمه در هیچ منو) — فهرست فیلترهای روشنِ پریست همین اکانت
         _pn = s.get('active_preset') if s.get('active_preset') in presets_mod.PRESETS else next(iter(presets_mod.PRESETS))
-        _txt = preset_active_text(_pn, s)
+        _txt = preset_active_text(_pn, s, actual=True)
         if not is_admin(chat_id):
             _txt = '\n'.join(_l for _l in _txt.split('\n') if 'نسخه‌ی ذخیره‌شده' not in _l)
         send_message(chat_id, _txt); return
@@ -20383,7 +20407,7 @@ def process_command(cmd,chat_id,message_id=None):
         return
     if cl=='/toggle_fvg':      # V3.44.163: تشخیص FVG/IFVG برای ۶ سناریو (پیش‌فرض خاموش)
         s.setdefault('strategy_config', {})
-        cur = bool(s['strategy_config'].get('fvg_enabled', False))
+        cur = bool(s['strategy_config'].get('fvg_enabled', True))
         s['strategy_config']['fvg_enabled'] = not cur
         save_session(chat_id)
         if not cur:

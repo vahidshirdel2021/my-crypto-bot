@@ -35,7 +35,7 @@ TRIG_IDX = len(df) - 2
 
 BASE = {'halving_model_enabled': True, 'halving_high': 200.0, 'halving_low': 100.0, 'halving_k_atr': 6.0,
         'halving_min_depth': 3, 'halving_max_depth': 12, 'halving_depth_freeze': False,
-        'gate_pd_level_enabled': False}
+        'gate_pd_level_enabled': False, 'fvg_enabled': False}
 
 # --- جاسوس: ببینیم موتور چه به استراتژی می‌دهد (بدون نشت آینده)
 seen = []
