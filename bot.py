@@ -6521,7 +6521,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.169'
+BOT_VERSION = '3.44.170'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -7226,9 +7226,13 @@ def _execute_trade_unlocked(chat_id,symbol,side,signal_price,sl,tp,reason='',gen
         _entry_warns = _entry_warning_tags(chat_id, symbol, side, s['timeframe'])
     except Exception:
         logger.exception('entry warnings failed symbol=%s', symbol); _entry_warns = None
+    try:      # V3.44.170: خط شفاف «سطح مرجع و سمتِ کلوز هر ارز» تا معلوم باشد هشدار سطح واقعاً چه دیده است
+        _entry_lv_diag = _reflevel_diag(chat_id, symbol, 'BUY' if side_long(side) else 'SELL', s['timeframe'])
+    except Exception:
+        logger.exception('entry level diag failed symbol=%s', symbol); _entry_lv_diag = ''
     _und_shadow = _btc_undecided_shadow(chat_id, s)      # V3.44.124
     _entry_snap = _entry_snapshot(symbol, side, s['timeframe'], reason, price, sl, s.get('strategy_config'))
-    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'undecided_shadow':_und_shadow,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
+    trade={'trade_id':trade_id,'setup_id':setup_id,'symbol':symbol,'side':side,'entry_price':price,'sl':sl,'tp':tp,'margin':margin,'leverage':leverage,'amount':0,'timeframe':s['timeframe'],'strategy':s['active_strategy'],'is_real':False,'paper_slippage_bps':PAPER_SLIPPAGE_BPS,'paper_funding_rate_pct_8h':PAPER_FUNDING_RATE_PCT_8H,'opened_at':time.time(),'signal_reason':reason[:900],'entry_reason':reason[:900],'risk_pct':float(s['risk_per_trade_pct']),'risk_usdt':risk_usdt,'quality_score':quality_score,'quality_label':quality_label,'planned_rr':planned_rr,'regime_filter_exempt':regime_filter_exempt,'sl_slippage_r':None,'market_adx_at_entry':_regime_snap['market_adx'],'timeframe_bull_pct_at_entry':_regime_snap['timeframe_bull_pct'],'timeframe_bear_pct_at_entry':_regime_snap['timeframe_bear_pct'],'symbol_adx_at_entry':_regime_snap['symbol_adx'],'mfe_usdt':0.0,'mae_usdt':0.0,'mfe_r':0.0,'mae_r':0.0,'peak_favorable_price':None,'peak_adverse_price':None,'last_price':price,'duration_seconds':0.0,'realized_r':None,'risk_distance':gap_sl,'entry_snapshot':_entry_snap,'entry_warnings':_entry_warns,'entry_level_diag':_entry_lv_diag,'undecided_shadow':_und_shadow,'inverse_trade':inverse_applied,**presets_mod.trade_tag(s)}
     if paper_stage_rows:
         trade['tp_stages']=paper_stage_rows; trade['orig_margin']=float(margin)
     if inverse_applied and _shadow_spec:
@@ -12021,6 +12025,54 @@ def _reflevel_lines(res, side):
     return lines
 
 
+_REFLEVEL_WARNED = {}
+REFLEVEL_WARN_TTL = 1800.0
+
+
+def _reflevel_diag(chat_id, symbol, sig, tf):
+    """یک خط فشرده برای کارت پوزیشن: برای هر ارزِ بررسی‌شده، سطح مرجع و سمتِ کلوز (✅ هم‌جهت / ⚠️ خلاف / ❔ نامشخص). '' اگر کلید خاموش باشد."""
+    syms = _reflevel_active_symbols(chat_id, symbol)
+    if not syms:
+        return ''
+    parts = []
+    for sym, (st, info) in _reflevel_check(chat_id, syms, sig, tf).items():
+        if st == 'na' or not info or info.get('ref_price') is None:
+            parts.append(f"{sym} ❔نامشخص")
+            continue
+        pos = 'پایین' if info.get('ref_above') else 'بالای'
+        parts.append(f"{sym} {pos} {fmt(info['ref_price'])} " + ('⚠️' if st == 'bad' else '✅'))
+    return ' | '.join(parts)
+
+
+def _reflevel_gate(chat_id, s, symbol, sig, tf):
+    """(ok, توضیح) برای مسیرهای ورود خودکار «لیست انتظار»: اگر موقعیت BTC/ETH/SOL نسبت به نزدیک‌ترین سطح خلاف جهت معامله باشد،
+    ورود نگه داشته می‌شود (سیگنال رد نمی‌شود، در لیست می‌ماند و هر تیک دوباره سنجیده می‌شود) و با هم‌جهت شدن خودکار وارد می‌شود.
+    هشدار هر ترکیب (نماد، جهت، ارزهای مخالف) تا REFLEVEL_WARN_TTL ثانیه فقط یک‌بار فرستاده می‌شود. نبود داده = بدون تضاد."""
+    syms = _reflevel_active_symbols(chat_id, symbol)
+    if not syms:
+        return True, ''
+    res = _reflevel_check(chat_id, syms, sig, tf)
+    bad = [x for x, (st, _i) in res.items() if st == 'bad']
+    if not bad:
+        return True, ''
+    side_txt = '🟢 خرید (Long)' if sig == 'BUY' else '🔴 فروش (Short)'
+    txt = f"موقعیت {'، '.join(bad)} نسبت به نزدیک‌ترین سطح خلاف جهت معامله است؛ ورود تا هم‌جهت شدن نگه داشته شد"
+    key = (chat_id, symbol, sig, tuple(sorted(bad)))
+    now = time.time()
+    if now - _REFLEVEL_WARNED.get(key, 0.0) >= REFLEVEL_WARN_TTL:
+        _REFLEVEL_WARNED[key] = now
+        if len(_REFLEVEL_WARNED) > 200:
+            _REFLEVEL_WARNED.clear(); _REFLEVEL_WARNED[key] = now
+        try:
+            send_message(chat_id,
+                f"⚠️ *هشدار ورود: موقعیت BTC/ETH/SOL نسبت به سطح*\n\nنماد: `{symbol}` | جهت: {side_txt} | تایم‌فریم: `{tf}`\n\n"
+                + '\n'.join(_reflevel_lines(res, sig))
+                + "\n\nسیگنال رد نشد و در لیست انتظار می‌ماند؛ هر تیک دوباره سنجیده می‌شود و با هم‌جهت شدن همه‌ی ارزهای روشن، خودکار وارد می‌شوم.")
+        except Exception:
+            logger.exception('reflevel gate: warn send failed symbol=%s', symbol)
+    return False, f"{_BTC_FRONT_PREFIX}: {txt}"
+
+
 def _assist_trend_conflict_text(symbol, side, tf, chat_id=None):
     """اگر جهت side با روند BTC یا ETH (کلیدهای trend_warn_*) و/یا اجماع اندیکاتورها (کلید ind_warn_enabled) در تضاد باشد
     متن هشدار، وگرنه None (بدون تضاد یا داده ناکافی). هر دو بررسی در یک کارت تایید می‌آیند."""
@@ -12167,7 +12219,11 @@ def _entry_warn_line(trade):
     w = trade.get('entry_warnings') if isinstance(trade, dict) else None
     if w is None:
         return ''
-    return ('• ⚠️ هشدار لحظه‌ی ورود: ' + '، '.join(w) + '\n') if w else '• ✅ هشدار لحظه‌ی ورود: ندارد\n'
+    out = ('• ⚠️ هشدار لحظه‌ی ورود: ' + '، '.join(w) + '\n') if w else '• ✅ هشدار لحظه‌ی ورود: ندارد\n'
+    d = trade.get('entry_level_diag') if isinstance(trade, dict) else None
+    if d:
+        out += f'• 📍 سطح (کلوز بسته‌شده): {d}\n'      # V3.44.170: ارزهای بررسی‌شده، سطح مرجع و سمت کلوز
+    return out
 
 
 # ===================== V3.43.24: «تایید کامل هم‌جهتی» (کلیدهای gate_fc_*_enabled، هرکدام مستقل) =====================
@@ -14831,6 +14887,15 @@ def _touch_auto_enter_core(chat_id, rec):
         _assist_queue_signal(chat_id, symbol, side, dict(p_stub, rr=None), live, sl, tp, full_reason,
                              df=(df_card if (df_card is not None and len(df_card)) else None))
         return _finish('card_sent')
+    # V3.44.170: ورود خودکار از لیست انتظار هم از هشدار «موقعیت BTC/ETH/SOL نسبت به سطح» می‌گذرد (قبلاً فقط برچسب کارت پوزیشن می‌شد).
+    try:
+        _lv_ok, _lv_txt = _reflevel_gate(chat_id, s, symbol, side, tf)
+    except Exception:
+        logger.exception('touch: ref level gate failed symbol=%s', symbol)
+        _lv_ok, _lv_txt = True, ''
+    if not _lv_ok:
+        rec['block_note'] = _lv_txt[:120]
+        return False
     if gate_on(s, 'gate_btc_candle_enabled'):
         # V3.44.42: ورود خودکار از لیست انتظار: کندل در حال تشکیل BTC باید هم‌جهت باشد؛ وگرنه مورد در لیست می‌ماند و تیک بعدی دوباره سنجیده می‌شود.
         try:
