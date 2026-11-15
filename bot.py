@@ -6529,7 +6529,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.181'
+BOT_VERSION = '3.44.182'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16877,7 +16877,14 @@ def preset_active_text(name, s=None, actual=False):
     warns = [lbl for key, lbl in (('trend_warn_enabled', 'هشدار روند بیت‌کوین/اتریوم'), ('ref_level_warn_enabled', 'هشدار موقعیت BTC/ETH/SOL نسبت به سطح'), ('ind_warn_enabled', 'هشدار تضاد با اندیکاتورها'),
                                   ('symbol_tf_regime_warn_enabled', 'هشدار ناهم‌جهتی رژیم ۵ و ۱۵ دقیقه'), ('symbol_h4_regime_warn_enabled', 'هشدار خلاف رژیم ۴ ساعته'))
              if ses.get(key)]
-    lines += ['', '⚠️ *هشدارها*'] + ([f'• {w}' for w in warns] if warns else ['• همه خاموش'])
+    _warn_lines = []
+    for w in warns:
+        _warn_lines.append(f'• {w}')
+        if w.startswith('هشدار موقعیت BTC/ETH/SOL'):      # V3.44.182: وضعیت کلید جدای هر ارز (پیش‌فرض روشن)
+            for _rk in ('btc', 'eth', 'sol'):
+                _on = bool((s or {}).get(f'ref_level_warn_{_rk}', True))
+                _warn_lines.append(f"   ◦ {_rk.upper()}: {'🟢 روشن' if _on else '🔴 خاموش'}")
+    lines += ['', '⚠️ *هشدارها*'] + (_warn_lines if warns else ['• همه خاموش'])
     mg = []
     if ses.get('be_close_auto_enabled'): mg.append('• بستن خودکار سربه‌سر')
     if ses.get('trail_enabled'): mg.append('• تریلینگ استاپ هوشمند' + (f" ({TRAIL_PROFILES[_trail_profile_key(s)][0]})" if s else ''))

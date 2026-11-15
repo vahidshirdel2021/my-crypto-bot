@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.181'
+assert bot.BOT_VERSION == '3.44.182'
 
 CID = 111
 s = bot.get_session(CID)
@@ -375,3 +375,11 @@ for who in (CID, USER):
     assert sent and 'HOLDUSDT' not in sent[-1] and 'منتظر تایید' in sent[-1], (who, sent)
 assert '/lv_hold' not in open('bot.py', encoding='utf-8').read()
 print('ALL OK')
+
+# V3.44.182: گزارش «فعال‌های این اکانت» وضعیت کلید جدای BTC/ETH/SOL را جدا اعلام می‌کند
+s['ref_level_warn_enabled'] = True; s['ref_level_warn_btc'] = True; s['ref_level_warn_eth'] = False; s['ref_level_warn_sol'] = True
+_rep = bot.preset_active_text('3', s, actual=True)
+assert 'BTC: 🟢 روشن' in _rep and 'ETH: 🔴 خاموش' in _rep and 'SOL: 🟢 روشن' in _rep, _rep
+s['ref_level_warn_enabled'] = False
+assert 'ETH: 🔴 خاموش' not in bot.preset_active_text('3', s, actual=True)
+print('REPORT PER-SYMBOL OK')
