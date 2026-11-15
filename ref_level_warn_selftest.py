@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib
 bot = importlib.import_module('bot')
 bot.init_db()
-assert bot.BOT_VERSION == '3.44.169'
+assert bot.BOT_VERSION == '3.44.170'
 
 CID = 111
 s = bot.get_session(CID)
@@ -202,4 +202,54 @@ assert decided == []
 s['ref_level_warn_enabled'] = True; rec3['expires_at'] = _t.time() - 1; rec3['lv_last_check'] = 0
 bot.lv_auto_enter_tick()
 assert decided == []
+
+# ===== V3.44.170: مسیر «لیست انتظار» (touch) هم از هشدار سطح می‌گذرد + خط شفاف کارت پوزیشن =====
+s = bot.get_session(CID)
+s['ref_level_warn_enabled'] = True
+for _x in ('btc', 'eth', 'sol'):
+    s[f'ref_level_warn_{_x}'] = True
+s['timeframe'] = '15min'; s['is_bot_active'] = True; s['daily_stopped'] = False
+s['assist_mode_enabled'] = False
+s['trend_warn_enabled'] = s['ind_warn_enabled'] = False
+FAKE.clear(); FAKE.update({'BTC': (67231.0, 66830.6), 'ETH': (50.0, 60.0), 'SOL': (5.0, 10.0)})   # فروش: BTC بالای سطح = مخالف، ETH و SOL پایین سطح = موافق
+bot._REFLEVEL_WARNED.clear()
+sent.clear()
+
+ok, txt = bot._reflevel_gate(CID, s, 'ONT', 'SELL', '15min')
+assert ok is False and 'BTC' in txt and 'خلاف جهت' in txt
+assert len(sent) == 1 and 'هشدار ورود' in sent[-1] and 'بیت‌کوین (BTC)' in sent[-1] and '66830.6' in sent[-1].replace(',', '')
+ok, txt = bot._reflevel_gate(CID, s, 'ONT', 'SELL', '15min')
+assert ok is False and len(sent) == 1                                    # هشدار تکراری فرستاده نمی‌شود
+FAKE['BTC'] = (66000.0, 66830.6)                                          # BTC پایین سطح = موافق فروش
+ok, txt = bot._reflevel_gate(CID, s, 'ONT', 'SELL', '15min')
+assert ok is True and txt == ''
+FAKE['BTC'] = (67231.0, 66830.6)
+s['ref_level_warn_btc'] = False
+assert bot._reflevel_gate(CID, s, 'ONT', 'SELL', '15min')[0] is True       # کلید BTC خاموش = بررسی نمی‌شود
+s['ref_level_warn_btc'] = True
+
+# خط شفاف کارت پوزیشن
+d = bot._reflevel_diag(CID, 'ONT', 'SELL', '15min')
+assert 'BTC بالای' in d and '⚠️' in d and 'ETH' in d and 'SOL' in d and '✅' in d
+FAKE.pop('SOL'); d = bot._reflevel_diag(CID, 'ONT', 'SELL', '15min')
+assert 'SOL ❔نامشخص' in d
+FAKE['SOL'] = (5.0, 10.0)
+line = bot._entry_warn_line({'entry_warnings': [], 'entry_level_diag': d})
+assert 'ندارد' in line and '📍 سطح (کلوز بسته‌شده):' in line and 'نامشخص' in line
+assert bot._entry_warn_line({'entry_warnings': None, 'entry_level_diag': d}) == ''      # بدون کلید هشدار: همان رفتار قبلی
+
+# مسیر «لیست انتظار»: ورود نگه داشته می‌شود و با هم‌جهت شدن باز می‌شود
+import time as _t2
+opened = []
+bot.latest_price = lambda sym: 0.039842
+bot.execute_trade = lambda *a, **k: (opened.append(a[1]), True)[1]
+bot.exchange_latest_price = bot.latest_price
+rec = {'symbol': 'ONT', 'dir': 'SELL', 'touch_sig': 'SELL', 'tf': '15min', 'reason': '[SETUP Halving]', 'status': 'waiting',
+       'plan': {'entry': 0.039842, 'sl': 0.040649, 'tp': 0.037516, 'rr': 2.88, 'reason': 'x'}}
+bot._REFLEVEL_WARNED.clear()
+res1 = bot._touch_auto_enter_core(CID, rec)
+assert res1 is False and opened == [] and 'نگه داشته' in rec.get('block_note', ''), (res1, opened, rec.get('block_note'))
+FAKE['BTC'] = (66000.0, 66830.6)
+res2 = bot._touch_auto_enter_core(CID, rec)
+assert opened == ['ONT'], (res2, opened, rec.get('block_note'))
 print('ALL OK')
