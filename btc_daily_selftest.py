@@ -88,11 +88,12 @@ def reset_cache():
 
 # ---- ۱) رجیستری / پریست / پیش‌فرض ----
 row = bot.GATE_REGISTRY[KEY]
-check('رجیستری: پیش‌فرض خاموش (V3.44.132)، بخش btceth', row[1] is False and row[2] == 'btceth')
-check('کلید جزو پریست‌ها نیست (مستقل)', KEY not in presets.managed_keys())
+check('رجیستری: پیش‌فرض روشن (V3.44.184)، بخش btceth', row[1] is True and row[2] == 'btceth')
+check('کلید جزو پریست‌هاست و پیش‌فرض پریست روشن است (V3.44.184)', KEY in presets.managed_keys() and presets.BASE_CFG[KEY] is True)
 a = bot.get_session(ADMIN); u = bot.get_session(USER)
 a['timeframe'] = u['timeframe'] = '15min'
-check('پیش‌فرض سشن تازه: خاموش', not bot.btc_daily_enabled(a) and not bot.btc_daily_enabled(u))
+check('پیش‌فرض سشن تازه: روشن (V3.44.184؛ جزو پریست)', bot.btc_daily_enabled(a) and bot.btc_daily_enabled(u))
+a['strategy_config'][KEY] = u['strategy_config'][KEY] = False      # بقیه‌ی تست از حالت خاموش شروع می‌کند
 # مهاجرت یک‌باره: مقدار روشنِ قبلی خاموش می‌شود، بعدش انتخاب دستی حفظ می‌شود
 _m1 = bot.normalize_session({'strategy_config': {KEY: True}})
 check('مهاجرت V3.44.132: مقدار روشنِ قدیمی یک‌بار خاموش می‌شود', bot.gate_on(_m1, KEY) is False and _m1.get('btc_daily_default_off_v132') is True)

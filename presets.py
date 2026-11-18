@@ -27,6 +27,7 @@ _GATES_ON = (
     # الگوهای سطح
     # کیفیت و ریسک
     'gate_cooldown_enabled', 'gate_traded_level_enabled', 'gate_risk_guard_enabled',
+    'gate_btc_daily_regime_enabled',        # V3.44.184: رژیم روزانه BTC (نزولی=فقط فروش، صعودی=فقط خرید، رنج=آزاد) جزو پریست شد؛ با «ذخیره در پریست» ادمین به همه‌ی کاربران می‌رسد
 )
 _GATES_OFF = (
     'gate_fc_btceth_enabled', 'gate_fc_h4_enabled',

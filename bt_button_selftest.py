@@ -55,12 +55,13 @@ check('فایل روی دیسک ماند', os.path.exists(m['path']) and m['base
 check('بازه‌ی دانلود = ۹۰ روز + گرم‌شدن', calls[-1][3] - calls[-1][2] == (90 + bot._BACKTEST_WARMUP_DAYS) * 86_400_000, calls[-1])
 check('قفل آزاد شد', ADMIN not in bot._BACKTEST_RUNNING)
 # 3) خروجی
+bot.get_session(ADMIN).setdefault('strategy_config', {})['gate_btc_daily_regime_enabled'] = False      # V3.44.184: پیش‌فرض پریست روشن شد؛ این بلوک حالت «خاموش» را می‌سنجد
 sent.clear(); fetch_n = len(calls); bot.process_command('/bt_run', ADMIN, 1)
 check('خروجی اجرا شد', wait(lambda: any(t.startswith(('🧪', '❌')) for _, t, _ in sent)), sent)
 out = sent[-1][1]
 check('نتیجه چهارسطری', out.startswith('🧪 ETH') and out.count('\n') == 3, out)
 check('سطر گیت BTC (پیش‌فرض: سطح جلویی/کلاف روشن)', out.split('\n')[2].startswith('₿ گیت‌های BTC فعال') and 'سطح جلویی BTC' in out.split('\n')[2], out.split('\n')[2])
-check('رژیم روزانه‌ی BTC پیش‌فرض خاموش (V3.44.132): نه در سطر گیت، نه دانلود داده‌ی روزانه', 'رژیم روزانه BTC' not in out.split('\n')[2] and not any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (out.split('\n')[2], calls[fetch_n:]))
+check('رژیم روزانه‌ی BTC وقتی خاموش است (V3.44.132): نه در سطر گیت، نه دانلود داده‌ی روزانه', 'رژیم روزانه BTC' not in out.split('\n')[2] and not any(c[:2] == ('BTCUSDT', '1day') for c in calls[fetch_n:]), (out.split('\n')[2], calls[fetch_n:]))
 check('BTC برای گیت‌ها دانلود شد (نه ETH چون هم‌جهتی خاموش)', any(c[0] == 'BTCUSDT' for c in calls[fetch_n:]) and not any(c[0] == 'ETHUSDT' for c in calls[fetch_n:]), calls[fetch_n:])
 check('بدون Markdown', sent[-1][2] is not None and True)
 check('پریست در سطر دوم', 'پریست' in out.split('\n')[1], out)
