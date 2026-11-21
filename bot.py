@@ -1093,6 +1093,8 @@ def default_session():
         'be_close_auto_enabled': False,
         'be_close_profit_r': 1.0,
         'be_close_loss_r': 0.5,
+        # V3.44.185: «خروج زودهنگام» (کلید ۱: کلوز کندل ۵ دقیقه روی -X R؛ کلید ۲: باطل‌شدن سطح ورود در N دقیقه‌ی اول)
+        'early_cut_enabled': True, 'early_cut_r': 0.5, 'early_invalid_enabled': False, 'early_invalid_minutes': 30,
         # V3.44.53: محافظ BTC برای معامله‌های باز (PAPER و REAL از V3.44.54): با واکنش تاییدشده‌ی BTC به سطح روبه‌رو، معامله‌ی در سود بخشی بسته و استاپ باقی‌مانده سر به سر می‌شود.
         'btc_guard_enabled': True,
         'btc_guard_frac': 0.5,
@@ -6529,13 +6531,13 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.184'
+BOT_VERSION = '3.44.185'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
                   'total_profit_autoclose_enabled', 'fav_confirm_enabled', 'fav_confirm_min_r', 'fav_confirm_max_r',
                   'fav_confirm_max_mode', 'fav_confirm_max_tp_pct', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled', 'touch_auto_mode', 'timeframe', 'active_strategy',
-                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
+                  'be_close_alert_enabled', 'be_close_auto_enabled', 'be_close_profit_r', 'be_close_loss_r', 'early_cut_enabled', 'early_cut_r', 'early_invalid_enabled', 'early_invalid_minutes', 'btc_guard_enabled', 'btc_guard_frac', 'trail_enabled', 'trail_profile', 'hours_filter_enabled', 'hours_profile',
                   'enabled_setup_tags', 'trading_mode', 'active_preset', 'daily_loss_limit_pct', 'max_margin_usage_pct',
                   'manual_block_buy_entries', 'manual_block_sell_entries', 'manual_block_all_entries')
 _SETTINGS_LOCK = RLock()
@@ -8110,7 +8112,7 @@ ADMIN_TESTS_TIMEOUT_SEC = 180
 ADMIN_TESTS_CORE = ('touch_vote_selftest.py', 'touch_fixed_dir_selftest.py', 'ylevel_vote_selftest.py', 'preset_selftest.py',
                     'entry_menu_selftest.py', 'touch_card_order_selftest.py', 'fav_confirm_selftest.py', 'fav_max_selftest.py',
                     'keep_closed_cards_selftest.py', 'btc_guard_selftest.py', 'pd_level_guard_selftest.py', 'role_lock_selftest.py',
-                    'daily_fee_selftest.py', 'preset_custom_selftest.py', 'preset_sync_selftest.py', 'btc_daily_preset_selftest.py', 'funnel_selftest.py')
+                    'daily_fee_selftest.py', 'preset_custom_selftest.py', 'preset_sync_selftest.py', 'btc_daily_preset_selftest.py', 'early_exit_selftest.py', 'funnel_selftest.py')
 _ADMIN_TESTS_STATE = {'running': False}
 
 
@@ -9143,7 +9145,7 @@ _FN_REG_LETTER = {'BULLISH': 'B', 'BEARISH': 'S', 'RANGE': 'R'}
 _FN_TOG_KEYS = ('profit_autoclose_enabled', 'total_profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt', 'fav_confirm_enabled', 'fav_confirm_min_r',
                 'fav_confirm_max_r', 'fav_confirm_max_mode', 'fav_confirm_wait_sec', 'fav_close_5m_enabled', 'fav_close_15m_enabled', 'core_symbols_only',
                 'touch_auto_mode', 'assist_mode_enabled', 'symbol_tf_regime_warn_enabled', 'symbol_h4_regime_warn_enabled',
-                'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'max_open_positions', 'max_same_direction_positions',
+                'trail_enabled', 'trail_profile', 'be_close_auto_enabled', 'early_cut_enabled', 'early_cut_r', 'early_invalid_enabled', 'early_invalid_minutes', 'max_open_positions', 'max_same_direction_positions',
                 'risk_per_trade_pct', 'active_strategy', 'timeframe', 'enabled_setup_tags', 'hours_filter_enabled', 'hours_profile')
 _FN_TOG_DEFAULTS = {'symbol_tf_regime_warn_enabled': False, 'symbol_h4_regime_warn_enabled': False}
 _FN_SC_KEYS = ('halving_model_enabled', 'min_rr', 'min_target_r', 'max_target_r')
@@ -10513,6 +10515,133 @@ def be_close_scan_once():
 
 
 
+# ===================== V3.44.185: «خروج زودهنگام» =====================
+# داده‌ی ۱۵ روزه‌ی قیف: نیمی از معامله‌های SL هرگز +۰.۲R هم نرفتند و برنده‌ها کم برمی‌گردند (۷۵٪ برنده‌ها کمتر از ۰.۴۲R-). پس معامله‌ی «از اول اشتباه» را زودتر ببند.
+#   کلید ۱ (پیش‌فرض روشن): کلوز کندل ۵ دقیقه‌ی بعد از ورود روی -X R یا بدتر (پیش‌فرض ۰.۵) → بستن با قیمت بازار. با کلوز کندل است نه قیمت لحظه‌ای تا سایه‌ی کوتاه برنده‌ها را نکشد.
+#   کلید ۲ (پیش‌فرض خاموش): در N دقیقه‌ی اول، کلوز کندل ۵ دقیقه سمتِ اشتباهِ سطح ورود (حدود ۰.۱R فراتر) → بستن. برای معاملات معکوس اعمال نمی‌شود.
+# اگر استاپ سر به سر یا در سود باشد اعمال نمی‌شود. فقط کندلی حساب می‌شود که کاملاً بعد از ورود باز شده باشد.
+EARLY_CUT_R_CHOICES = (0.3, 0.4, 0.5, 0.6, 0.7)
+EARLY_INVALID_MIN_CHOICES = (15, 30, 45, 60)
+EARLY_EXIT_TF = '5min'
+EARLY_EXIT_TF_SEC = 300
+EARLY_INVALID_BUFFER_R = max(0.0, float(os.environ.get('EARLY_INVALID_BUFFER_R', '0.1') or 0.1))
+
+
+def _early_cfg(s):
+    """(کلید ۱ روشن؟, آستانه‌ی R, کلید ۲ روشن؟, مهلت دقیقه)."""
+    try:
+        cut_r = float(s.get('early_cut_r', 0.5))
+    except Exception:
+        cut_r = 0.5
+    try:
+        mins = float(s.get('early_invalid_minutes', 30))
+    except Exception:
+        mins = 30.0
+    return (bool(s.get('early_cut_enabled', True)), min(0.9, max(0.2, cut_r)),
+            bool(s.get('early_invalid_enabled', False)), min(240.0, max(5.0, mins)))
+
+
+def _early_entry_level(p):
+    """سطحی که معامله از آن شروع شد (از عکس‌فوری ورود یا HVL=/ANCHOR= داخل دلیل ورود) یا None."""
+    try:
+        lv = ((p.get('entry_snapshot') or {}).get('level') or {}).get('level')
+        if lv:
+            return float(lv)
+    except Exception:
+        pass
+    _r = p.get('entry_reason') or ''
+    m = re.search(r'HVL=([0-9.]+)', _r) or re.search(r'ANCHOR=([0-9.]+)', _r)
+    try:
+        return float(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def early_exit_decision(s, p, candle_open_ts, candle_close):
+    """None یا (نوع 'cut'|'invalid'، متن دلیل، حرکت کلوز بر حسب R). فقط برای کندل ۵ دقیقه‌ی بسته‌شده."""
+    cut_on, cut_r, inv_on, inv_min = _early_cfg(s)
+    if not (cut_on or inv_on):
+        return None
+    opened = float(p.get('opened_at') or 0)
+    if opened <= 0 or float(candle_open_ts) < opened - 1.0:
+        return None                      # کندل پیش از ورود (یا هم‌زمان با ورود) باز شده
+    entry = float(p.get('entry_price') or 0)
+    rd = float(p.get('risk_distance') or 0)
+    if rd <= 0:
+        rd = abs(entry - float(p.get('sl') or entry))
+    if entry <= 0 or rd <= 0:
+        return None
+    long_side = side_long(p.get('side', 'BUY'))
+    sl = float(p.get('sl') or 0)
+    if sl and ((long_side and sl >= entry) or ((not long_side) and sl <= entry)):
+        return None                      # استاپ سر به سر یا در سود است
+    c = float(candle_close)
+    mv = ((c - entry) if long_side else (entry - c)) / rd
+    if cut_on and mv <= -cut_r + 1e-12:
+        return ('cut', f"خروج زودهنگام: کلوز کندل ۵ دقیقه روی {mv:.2f}R (آستانه -{cut_r:g}R)", mv)
+    if inv_on and not p.get('inverse_trade'):
+        age_min = (float(candle_open_ts) + EARLY_EXIT_TF_SEC - opened) / 60.0
+        if age_min <= inv_min + 1e-9:
+            lvl = _early_entry_level(p)
+            if lvl:
+                buf = EARLY_INVALID_BUFFER_R * rd
+                wrong = (c < lvl - buf) if long_side else (c > lvl + buf)
+                if wrong:
+                    return ('invalid', f"خروج زودهنگام: کلوز کندل ۵ دقیقه سمتِ اشتباهِ سطح ورود ({fmt(lvl)}) در {age_min:.0f} دقیقه‌ی اول", mv)
+    return None
+
+
+def _early_exit_closed_candle(symbol):
+    """(زمان باز شدن، کلوز) آخرین کندل ۵ دقیقه‌ی بسته‌شده یا None."""
+    df = get_klines(symbol, EARLY_EXIT_TF, 8)
+    if df is None or df.empty or len(df) < 3:
+        return None
+    row = df.iloc[-2]
+    ts = float(row['timestamp'])
+    if ts > 1e11:
+        ts /= 1000.0
+    return ts, float(row['close'])
+
+
+def early_exit_scan_once():
+    now = time.time()
+    exp_ts = (int(now // EARLY_EXIT_TF_SEC) - 1) * EARLY_EXIT_TF_SEC        # زمان باز شدن آخرین کندل ۵ دقیقه‌ی بسته‌شده
+    for chat_id, s in list(USER_SESSIONS.items()):
+        try:
+            cut_on, _cr, inv_on, _im = _early_cfg(s)
+            if not (cut_on or inv_on):
+                continue
+            for p in list(s.get('paper_positions') or []):
+                try:
+                    if s.get('trading_mode') == 'REAL' and not p.get('is_real'):
+                        continue
+                    if now - float(p.get('early_fail_ts') or 0) < BE_CLOSE_RETRY_SECONDS:
+                        continue
+                    if float(p.get('early_chk_ts') or 0) >= exp_ts:
+                        continue                                       # این کندل قبلاً سنجیده شده
+                    if exp_ts < float(p.get('opened_at') or 0) - 1.0:
+                        continue                                       # هنوز کندل کاملِ بعد از ورود بسته نشده
+                    cc = _early_exit_closed_candle(p['symbol'])
+                    if not cc:
+                        continue
+                    c_ts, c_close = cc
+                    p['early_chk_ts'] = c_ts
+                    dec = early_exit_decision(s, p, c_ts, c_close)
+                    if not dec:
+                        continue
+                    price = exchange_latest_price(chat_id, p['symbol']) if p.get('is_real') else latest_price(p['symbol'])
+                    if not price:
+                        continue
+                    logger.info('early exit chat=%s symbol=%s kind=%s mv=%.2f', chat_id, p.get('symbol'), dec[0], dec[2])
+                    close_position(chat_id, p, float(price), reason=dec[1])
+                    if p in (s.get('paper_positions') or []):
+                        p['early_fail_ts'] = time.time()               # بسته نشد؛ بعد از چند ثانیه دوباره تلاش می‌شود
+                except Exception:
+                    logger.exception('early exit failed chat=%s symbol=%s', chat_id, p.get('symbol'))
+        except Exception:
+            logger.exception('V3.42.13 per-user failure isolated: %s chat=%s', 'early_exit_scan_once', chat_id)
+
+
 def handle_be_close(chat_id, symbol):
     """دکمه‌ی «🔒 بستن سر به سر» زیر هشدار: پوزیشن را با قیمت بازار می‌بندد."""
     s = get_session(chat_id)
@@ -10992,6 +11121,10 @@ def _background_scan_loop():
             be_close_scan_once()
         except Exception:
             logger.exception('breakeven close loop failed')
+        try:
+            early_exit_scan_once()
+        except Exception:
+            logger.exception('early exit loop failed')
         try:
             btc_guard_scan_once()
         except Exception:
@@ -16719,6 +16852,10 @@ def _filter_info(key, s=None):
             'اگر معامله به آستانه‌ی سود (مثلاً +1R) رسید و دوباره به نقطه‌ی ورود برگشت، یا تا آستانه‌ی ضرر (مثلاً -0.5R) منفی رفت و دوباره به نقطه‌ی ورود برگشت، یک پیام با دکمه‌ی «بستن سر به سر» می‌گیری. معامله بسته نمی‌شود. R یعنی فاصله‌ی ورود تا SL. هر حالت برای هر پوزیشن یک‌بار. پیش‌فرض: خاموش.'),
         'be_auto': ('بستن خودکار سر به سر',
             'همان شرط هشدار بالا، ولی معامله خودکار با قیمت بازار بسته می‌شود (نتیجه حدوداً صفر منهای کارمزد). سود/ضرر آستانه با دو دکمه‌ی زیرش تنظیم می‌شود. پیش‌فرض: خاموش.'),
+        'early_cut': ('خروج زودهنگام (کلوز ۵ دقیقه)',
+            'اگر یک کندل ۵ دقیقه‌ای بعد از ورود بسته شود و کلوزش روی -X R یا بدتر باشد (X با دکمه‌ی آستانه تنظیم می‌شود؛ پیش‌فرض ۰.۵)، معامله با قیمت بازار بسته می‌شود تا SL کامل نخورد. بستن با کلوز کندل است نه قیمت لحظه‌ای، پس سایه‌ی کوتاه معامله را نمی‌کشد. اگر استاپ سر به سر یا در سود باشد اعمال نمی‌شود. فقط ادمین. پیش‌فرض: روشن.'),
+        'early_invalid': ('خروج با باطل‌شدن سطح ورود',
+            'در N دقیقه‌ی اول بعد از ورود، اگر یک کندل ۵ دقیقه‌ای سمتِ اشتباهِ همان سطحی که معامله از آن شروع شد (حدود ۰.۱R فراتر) بسته شود، یعنی فرضِ ورود شکسته و معامله با قیمت بازار بسته می‌شود. برای معاملات معکوس اعمال نمی‌شود. فقط ادمین. پیش‌فرض: خاموش (آزمایشی).'),
         'block_buy': ('ممنوع کردن خرید',
             'ربات هیچ معامله‌ی خریدِ جدیدی باز نمی‌کند. معامله‌های باز فعلی دست‌نخورده می‌مانند.'),
         'block_sell': ('ممنوع کردن فروش',
@@ -16887,6 +17024,8 @@ def preset_active_text(name, s=None, actual=False):
     lines += ['', '⚠️ *هشدارها*'] + (_warn_lines if warns else ['• همه خاموش'])
     mg = []
     if ses.get('be_close_auto_enabled'): mg.append('• بستن خودکار سربه‌سر')
+    if ses.get('early_cut_enabled'): mg.append(f"• خروج زودهنگام: کلوز ۵ دقیقه روی -{float(ses.get('early_cut_r', 0.5)):g}R")
+    if ses.get('early_invalid_enabled'): mg.append(f"• خروج با باطل‌شدن سطح ورود (تا {int(ses.get('early_invalid_minutes', 30))} دقیقه)")
     if ses.get('trail_enabled'): mg.append('• تریلینگ استاپ هوشمند' + (f" ({TRAIL_PROFILES[_trail_profile_key(s)][0]})" if s else ''))
     lim = []
     if s:
@@ -17025,6 +17164,10 @@ def trade_filter_management_keyboard(chat_id, section=None):
             [fcell(bool(s.get('be_close_auto_enabled', False)), 'be_auto', '/toggle_be_auto')],
             [{'text': f"📈 آستانه‌ی سود: +{_be_cfg(s)[0]:g}R (تغییر)", 'callback_data': '/be_profit_next'},
              {'text': f"📉 آستانه‌ی ضرر: -{_be_cfg(s)[1]:g}R (تغییر)", 'callback_data': '/be_loss_next'}],
+            [fcell(bool(s.get('early_cut_enabled', True)), 'early_cut', '/toggle_early_cut'),
+             {'text': f"✂️ آستانه: -{_early_cfg(s)[1]:g}R (تغییر)", 'callback_data': '/early_cut_r_next'}],
+            [fcell(bool(s.get('early_invalid_enabled', False)), 'early_invalid', '/toggle_early_invalid'),
+             {'text': f"⏱ مهلت: {int(_early_cfg(s)[3])} دقیقه (تغییر)", 'callback_data': '/early_invalid_min_next'}],
             [cell(bool(s.get('btc_guard_enabled', True)), '🛡 محافظ BTC (بستن بخشی + سر به سر)', '/toggle_btc_guard')],
             [{'text': f"✂️ سهم بستن محافظ BTC: {int(round(float(s.get('btc_guard_frac', 0.5)) * 100))}٪ (تغییر)", 'callback_data': '/btc_guard_frac_next'}],
             ([{'text': '🔙 بازگشت', 'callback_data': '/menu_settings'}, {'text': '🏠 منوی اصلی', 'callback_data': '/menu'}]
@@ -20130,6 +20273,23 @@ def process_command(cmd,chat_id,message_id=None):
         _pr, _lr = _be_cfg(s)
         _note = (f"{_filter_info(_bi)[1]}\n\nآستانه‌ها: سود `+{_pr:g}R` | ضرر `-{_lr:g}R`" if s[_bk] else 'خاموش شد.')
         send_message(chat_id, f"🔒 {_filter_info(_bi)[0]}: {'🟢 روشن' if s[_bk] else '🔴 خاموش'}\n\n{_note}", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl in ('/toggle_early_cut', '/toggle_early_invalid'):      # V3.44.185: خروج زودهنگام (فقط ادمین؛ ورودی کاربر عادی با لیست مجاز بسته است)
+        _ek, _ei, _ed = (('early_cut_enabled', 'early_cut', True) if cl == '/toggle_early_cut' else ('early_invalid_enabled', 'early_invalid', False))
+        s[_ek] = not bool(s.get(_ek, _ed))
+        save_session(chat_id)
+        _ec = _early_cfg(s)
+        _en = (f"{_filter_info(_ei)[1]}\n\nآستانه: `-{_ec[1]:g}R` | مهلت باطل‌شدن سطح: `{int(_ec[3])}` دقیقه" if s[_ek] else 'خاموش شد.')
+        send_message(chat_id, f"✂️ {_filter_info(_ei)[0]}: {'🟢 روشن' if s[_ek] else '🔴 خاموش'}\n\n{_en}\n\nروی پوزیشن‌های باز و بعدی اثر می‌کند. برای رساندن به همه‌ی کاربران «💾 ذخیره‌ی تنظیمات فعلی در پریست» را بزن.", trade_filter_management_keyboard(chat_id, 'exit'))
+        return
+    if cl in ('/early_cut_r_next', '/early_invalid_min_next'):
+        _ek, _ch = (('early_cut_r', EARLY_CUT_R_CHOICES) if cl == '/early_cut_r_next' else ('early_invalid_minutes', EARLY_INVALID_MIN_CHOICES))
+        _cur = _early_cfg(s)[1 if cl == '/early_cut_r_next' else 3]
+        _i = min(range(len(_ch)), key=lambda k: abs(float(_ch[k]) - _cur))
+        s[_ek] = _ch[(_i + 1) % len(_ch)]
+        save_session(chat_id)
+        _ec = _early_cfg(s)
+        send_message(chat_id, f"✂️ خروج زودهنگام: آستانه `-{_ec[1]:g}R` | مهلت باطل‌شدن سطح `{int(_ec[3])}` دقیقه\n\nروی پوزیشن‌های باز و بعدی اثر می‌کند.", trade_filter_management_keyboard(chat_id, 'exit'))
         return
     if cl == '/toggle_btc_guard':
         s['btc_guard_enabled'] = not bool(s.get('btc_guard_enabled', True))
