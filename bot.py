@@ -4869,15 +4869,126 @@ def btc_daily_enabled(s):
     return bool(gate_on(s if isinstance(s, dict) else {}, BTC_DAILY_KEY))
 
 
-def btc_daily_verdict(sig):
-    """(ok, توضیح, info). sig = جهت نهایی معامله ('BUY'/'SELL'). خرید فقط وقتی رژیم روزانه‌ی BTC نزولی نیست، فروش فقط وقتی صعودی نیست."""
+# ===================== V3.44.186: باز شدن موقتِ جهتِ مخالفِ رژیم روزانه‌ی BTC در حرکت «قطعی» تایم‌فریم پایین =====================
+# رژیم روزانه نزولی => فقط فروش؛ ولی اگر BTC در ۱۵ دقیقه «به‌شدت و قطعی» صعودی شد، ورود خرید تا زمانی که شرط‌های سخت برقرارند موقتاً مجاز می‌شود
+# (و برعکس در رژیم روزانه‌ی صعودی). شرط ورود (همه با هم، روی کندل‌های «بسته‌شده»):
+#   ۱) رژیم دقیق ۱۵م هم‌جهت (EMA20/50 + ADX≥۱۸ + DI + شیب EMA50 + فاصله)   ۲) ADX ≥ BTC_DAILY_OVR_ADX_ENTER و در حال قوی‌شدن
+#   ۳) فاصله‌ی DI+/DI- ≥ BTC_DAILY_OVR_DI_GAP   ۴) چند کندل پیاپی close>EMA20>EMA50 (یا برعکس)   ۵) شیب EMA50 ≥ ضریبی از ATR
+#   ۶) فاصله‌ی close از EMA50 ≥ ضریبی از ATR   ۷) تایید تایم‌فریم ۱ ساعته (رژیم دقیق ۱س هم‌جهت).
+# خروج (هیسترزیس برای جلوگیری از چشمک‌زدن): رژیم ۱۵م هم‌جهت نماند / ADX زیر BTC_DAILY_OVR_ADX_STAY / DI نزدیک شد / ۱س به جهت رژیم روزانه برگشت.
+# نبود داده یا خطا = بدون باز شدن (fail-closed: همان رژیم روزانه اعمال می‌شود). فقط کلید gate_btc_daily_override_enabled و فقط وقتی رژیم روزانه روشن است.
+BTC_DAILY_OVR_KEY = 'gate_btc_daily_override_enabled'
+BTC_OVR_TF = os.environ.get('BTC_DAILY_OVR_TF', '15min').strip() or '15min'
+BTC_OVR_CONFIRM_TF = os.environ.get('BTC_DAILY_OVR_CONFIRM_TF', '1hour').strip()     # خالی = بدون تایید تایم‌فریم بالاتر
+BTC_OVR_ADX_ENTER = float(os.environ.get('BTC_DAILY_OVR_ADX_ENTER', '28'))
+BTC_OVR_ADX_STAY = float(os.environ.get('BTC_DAILY_OVR_ADX_STAY', '22'))
+BTC_OVR_DI_GAP = float(os.environ.get('BTC_DAILY_OVR_DI_GAP', '10'))
+BTC_OVR_BARS = max(2, int(os.environ.get('BTC_DAILY_OVR_BARS', '3')))
+BTC_OVR_SLOPE_BARS = max(2, int(os.environ.get('BTC_DAILY_OVR_SLOPE_BARS', '6')))
+BTC_OVR_SLOPE_ATR = float(os.environ.get('BTC_DAILY_OVR_SLOPE_ATR', '0.5'))
+BTC_OVR_DIST_ATR = float(os.environ.get('BTC_DAILY_OVR_DIST_ATR', '1.0'))
+BTC_OVR_TTL = 45.0
+_BTC_OVR_CACHE = {}
+_BTC_OVR_LOCK = _threading.RLock()
+
+
+def _btc_ovr_eval(ind, want, active):
+    """True = حرکت «قطعی» به سمت want ('BULLISH'/'BEARISH') روی دیتافریم اندیکاتور. active=True یعنی الان باز است (شرط خروج، نرم‌تر از ورود)."""
+    try:
+        if ind is None or len(ind) < max(60, BTC_OVR_SLOPE_BARS + BTC_OVR_BARS + 5):
+            return False
+        if regime_from_ind_df(ind, advanced=True) != want:
+            return False
+        sgn = 1.0 if want == 'BULLISH' else -1.0
+        c = ind.iloc[-2]
+        close, e50, atr = _rg_num(c.get('close')), _rg_num(c.get('ema50')), _rg_num(c.get('atr'))
+        adx, pdi, mdi = _rg_num(c.get('adx')), _rg_num(c.get('plus_di')), _rg_num(c.get('minus_di'))
+        if None in (close, e50, atr, adx, pdi, mdi) or atr <= 0:
+            return False
+        if adx < (BTC_OVR_ADX_STAY if active else BTC_OVR_ADX_ENTER):
+            return False
+        if sgn * (pdi - mdi) < (BTC_OVR_DI_GAP * 0.5 if active else BTC_OVR_DI_GAP):
+            return False
+        if active:
+            return True
+        adx_prev = _rg_num(ind['adx'].iloc[-5])
+        if adx_prev is None or adx < adx_prev:                       # ADX باید در حال قوی‌شدن (یا ثابت) باشد، نه ضعیف‌شدن
+            return False
+        for k in range(BTC_OVR_BARS):                                # چند کندل بسته‌شده‌ی پیاپی در ساختار هم‌جهت
+            r = ind.iloc[-2 - k]
+            rc, r20, r50 = _rg_num(r.get('close')), _rg_num(r.get('ema20')), _rg_num(r.get('ema50'))
+            if None in (rc, r20, r50) or not (sgn * (rc - r20) > 0 and sgn * (r20 - r50) > 0):
+                return False
+        prev50 = _rg_num(ind['ema50'].iloc[-2 - BTC_OVR_SLOPE_BARS])
+        if prev50 is None or sgn * (e50 - prev50) < BTC_OVR_SLOPE_ATR * atr:
+            return False
+        if sgn * (close - e50) < BTC_OVR_DIST_ATR * atr:
+            return False
+        return True
+    except Exception:
+        logger.exception('btc daily override eval failed')
+        return False
+
+
+def _btc_ovr_ind(tf):
+    df = get_klines('BTC', tf, 200)
+    if df is None or df.empty or len(df) < 60:
+        return None
+    return calculate_indicators(df)
+
+
+def btc_daily_override_dir():
+    """'BULLISH' / 'BEARISH' / None: جهتی که الان (خلاف رژیم روزانه) به‌خاطر حرکت قطعیِ تایم‌فریم پایین موقتاً باز است. هر خطا/نبود داده = None."""
+    now = time.time()
+    key = _venue()
+    with _BTC_OVR_LOCK:
+        c = _BTC_OVR_CACHE.get(key)
+    if c and now - c['ts'] < BTC_OVR_TTL:
+        return c['dir']
+    prev = (c or {}).get('dir')
+    new = None
+    try:
+        dreg = (daily_regime_info('BTC') or {}).get('regime')
+        if dreg in ('BULLISH', 'BEARISH'):
+            want = 'BULLISH' if dreg == 'BEARISH' else 'BEARISH'
+            active = (prev == want)
+            conf_ok = True
+            if BTC_OVR_CONFIRM_TF:
+                creg = regime_from_ind_df(_btc_ovr_ind(BTC_OVR_CONFIRM_TF), advanced=True)
+                conf_ok = (creg != dreg) if active else (creg == want)
+            if conf_ok and _btc_ovr_eval(_btc_ovr_ind(BTC_OVR_TF), want, active):
+                new = want
+    except Exception:
+        logger.exception('btc daily override failed')
+        new = None
+    if new != prev:
+        logger.info('btc daily override: %s -> %s', prev, new)
+    with _BTC_OVR_LOCK:
+        _BTC_OVR_CACHE[key] = {'ts': now, 'dir': new}
+    return new
+
+
+def btc_daily_verdict(sig, override_on=False):
+    """(ok, توضیح, info). sig = جهت نهایی معامله ('BUY'/'SELL'). خرید فقط وقتی رژیم روزانه‌ی BTC نزولی نیست، فروش فقط وقتی صعودی نیست.
+    V3.44.186: با override_on و حرکت قطعیِ تایم‌فریم پایین به سمت sig، جهتِ مخالفِ رژیم روزانه موقتاً مجاز می‌شود (info['override'])."""
     info = daily_regime_info('BTC')
     reg = (info or {}).get('regime')
+    blocked_txt = None
     if reg == 'BEARISH' and sig == 'BUY':
-        return False, f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز نزولی است و فقط دنبال فروش هستیم؛ ورود خرید انجام نمی‌شود' + _btc_gate_key_line(BTC_DAILY_KEY), info
-    if reg == 'BULLISH' and sig == 'SELL':
-        return False, f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز صعودی است و فقط دنبال خرید هستیم؛ ورود فروش انجام نمی‌شود' + _btc_gate_key_line(BTC_DAILY_KEY), info
-    return True, '', info
+        blocked_txt = f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز نزولی است و فقط دنبال فروش هستیم؛ ورود خرید انجام نمی‌شود'
+    elif reg == 'BULLISH' and sig == 'SELL':
+        blocked_txt = f'{_BTC_DAILY_PREFIX}: بیت‌کوین امروز صعودی است و فقط دنبال خرید هستیم؛ ورود فروش انجام نمی‌شود'
+    if blocked_txt is None:
+        return True, '', info
+    if override_on:
+        try:
+            od = btc_daily_override_dir()
+        except Exception:
+            logger.exception('btc daily override dir failed')
+            od = None
+        if od and ((od == 'BULLISH' and sig == 'BUY') or (od == 'BEARISH' and sig == 'SELL')):
+            return True, '', dict(info or {}, override=od)
+    return False, blocked_txt + _btc_gate_key_line(BTC_DAILY_KEY), info
 
 
 def _btc_daily_gate(chat_id, s, symbol, sig, allow_inverse=True):
@@ -4888,7 +4999,7 @@ def _btc_daily_gate(chat_id, s, symbol, sig, allow_inverse=True):
     if allow_inverse and gate_on(s, 'gate_inverse_trading_enabled'):
         eff = 'SELL' if sig == 'BUY' else 'BUY'
     try:
-        ok, txt, _info = btc_daily_verdict(eff)
+        ok, txt, _info = btc_daily_verdict(eff, override_on=gate_on(s, BTC_DAILY_OVR_KEY))
     except Exception:
         logger.exception('btc daily gate failed symbol=%s', symbol)
         return True, ''
@@ -16770,6 +16881,7 @@ GATE_REGISTRY = {
     'gate_btc_undecided_enabled': ('⛔ توقف معاملات در بلاتکلیفی جهت BTC', False, 'btceth', 'پیش‌فرض خاموش (مستقل از پریست‌ها). حتی وقتی خاموش است، هر معامله‌ای که باز می‌شود در ژورنال برچسب می‌خورد که «اگر این کلید روشن بود، این معامله بسته می‌شد یا نه» و گزارش مقایسه‌ی نتیجه با /undecided_report ساخته می‌شود. روشن: اگر BTC وسطِ راهروی دو سطح خودش باشد، یعنی کلوز آخرین کندل بسته‌شده‌ی BTC روی تایم‌فریم فعال هم بیش از ۵×ATR و هم بیش از ۴۰٪ فاصله‌ی دو سطح (بالا و پایین) از نزدیک‌ترین سطح دور باشد، جهت BTC مشخص نیست؛ ورود همه‌ی معاملات خرید و فروش در همه‌ی مسیرها (خودکار، صف، دستی، ⚡ ورود سریع، تایید کارت دستیار، اوردر معلق) بسته می‌شود تا BTC به یکی از سطوح نزدیک شود. سیگنال رد نمی‌شود و در صف می‌ماند. یک پیام هشدار با دکمه‌ی چارت TradingView بیتکوین و همین کلید فرستاده می‌شود و تا باز شدن یک معامله حذف نمی‌شود. حدها با متغیرهای BTC_UNDECIDED_FAR_ATR و BTC_UNDECIDED_FAR_GAP (یا کلیدهای btc_undecided_far_atr / btc_undecided_far_gap) عوض می‌شوند. در منوی اصلی فقط ادمین کلید را می‌بیند؛ کاربر عادی فقط زیر پیام هشدار آن را دارد.'),
     'gate_pd_level_enabled': ('🧱 سقف/کف دیروز (PDH/PDL) جلوی معامله', False, 'level', 'پیش‌فرض روشن؛ فقط در مدل نصف‌کردن اثر دارد. مدل نصف‌کردن فقط سطوح درخت را می‌بیند؛ برای همین فروشی که بعد از شکست یک سطح نصف‌کردن صادر می‌شد می‌توانست درست روی کف دیروز (PDL) باز شود، جایی که قیمت معمولاً واکنش نشان می‌دهد و برمی‌گردد (برای خرید و سقف دیروز PDH هم همین‌طور). روشن: (۱) اگر PDL کمتر از ۱٫۵×ATR زیر قیمت باشد (برای خرید: PDH بالای قیمت) یا قیمت روی خود سطح نشسته باشد، ورود نگه داشته می‌شود؛ (۲) اگر در ۱۲ کندل اخیر قیمت به PDL/PDH رسیده و از آن برگشته باشد، ورود هم‌جهت با همان مانع (فروش پس از برگشت از PDL، خرید پس از برگشت از PDH) نگه داشته می‌شود. سیگنال رد نمی‌شود؛ در «⏳ صف تایید حرکت» یا لیست انتظار می‌ماند و دوباره سنجیده می‌شود. اگر قیمت PDL را (برای فروش) واقعاً شکسته و پایین رفته باشد فروش آزاد است. «⚡ ورود سریع» و تایید دستی خودت از این شرط عبور می‌کند.'),
     'gate_btc_daily_regime_enabled': ('🌅 رژیم روزانه BTC (جهت مجاز امروز)', True, 'btceth', 'پیش‌فرض روشن (از V3.44.184؛ جزو پریست است). روشن: رژیم روزانه‌ی بیت‌کوین از آخرین کندل بسته‌شده‌ی روزانه با معیار دقیق (EMA20/50 هم‌جهت + ADX ≥ ۱۸ + DI هم‌جهت + شیب EMA50 + فاصله از EMA50) سنجیده می‌شود و در طول روز ثابت می‌ماند (کندل روزانه ساعت ۰۳:۳۰ به وقت ایران عوض می‌شود). اگر نزولی باشد، ورود همه‌ی معاملات خرید در همه‌ی مسیرها (خودکار، صف، لیست انتظار، دستی، ⚡ ورود سریع، کارت دستیار، اوردر معلق) متوقف است و فقط فروش مجاز است؛ اگر صعودی باشد برعکس؛ در رنج، خرید و فروش آزاد است. با «معاملات معکوس» روشن، جهتِ نهایی معامله سنجیده می‌شود. سیگنال رد نمی‌شود و در صف/لیست انتظار می‌ماند. اگر داده‌ی روزانه در دسترس نباشد ورود آزاد است. اول هر روز یک پیام اعلام می‌شود («امروز بیتکوین نزولیه و ما فقط دنبال موقعیت‌های فروش می‌گردیم»). معامله‌های باز دست‌نخورده می‌مانند. جزو پریست است: خاموش/روشن‌کردنش توسط ادمین با «💾 ذخیره‌ی تنظیمات فعلی در پریست» به همه‌ی کاربران می‌رسد؛ کاربر عادی دکمه‌ی آن را ندارد.'),
+    'gate_btc_daily_override_enabled': ('⚡ باز شدن موقت جهت در حرکت قطعی BTC (۱۵ دقیقه)', True, 'btceth', 'پیش‌فرض روشن؛ فقط وقتی «رژیم روزانه BTC» روشن باشد اثر دارد. وقتی رژیم روزانه نزولی است ولی بیت‌کوین در ۱۵ دقیقه «به‌شدت و قطعی» صعودی شود، ورود خرید تا زمانی که شرط‌های سخت برقرار است موقتاً مجاز می‌شود (در رژیم روزانه‌ی صعودی و ریزش قطعی، برعکس)، تا از حرکت‌های قطعی جا نمانی. تشخیص سخت‌گیرانه است و همه‌ی شرط‌ها باید با هم برقرار باشند (روی کندل‌های بسته‌شده): رژیم دقیق ۱۵م هم‌جهت، ADX ۱۵م حداقل ۲۸ و در حال قوی‌شدن، فاصله‌ی DI+ و DI- حداقل ۱۰، ۳ کندل پیاپی با ساختار هم‌جهت (close>EMA20>EMA50)، شیب EMA50 و فاصله‌ی قیمت از EMA50 به اندازه‌ی کافی (ضریب ATR)، و تایید رژیم دقیق ۱ ساعته. خروج: وقتی رژیم ۱۵م هم‌جهت نماند، ADX زیر ۲۲ برود، DI نزدیک شود یا ۱ ساعته به جهت رژیم روزانه برگردد؛ همان لحظه ورودهای خلاف رژیم دوباره بسته می‌شوند. اگر داده‌ی ۱۵ دقیقه یا ۱ ساعته در دسترس نباشد باز نمی‌شود (همان رژیم روزانه اعمال می‌شود). معامله‌های باز دست‌نخورده می‌مانند. با «معاملات معکوس» روشن، جهتِ نهایی معامله سنجیده می‌شود.'),
     'gate_btceth_aligned_enabled': ('فقط وقتی BTC و ETH هم‌جهت‌اند', False, 'btceth', 'سیگنال فقط وقتی صادر می‌شود که رژیم BTC و ETH روی تایم‌فریم فعال هر دو صعودی یا هر دو نزولی باشند. اگر هر دو رنج باشند یا هم‌جهت نباشند هیچ سیگنالی (ورود خودکار، کارت دستیار، کانال) صادر نمی‌شود. جهت معامله بررسی نمی‌شود؛ برای هم‌جهت بودن با معامله از کلید «هم‌جهتی: رژیم BTC و ETH» استفاده کن. پیش‌فرض: خاموش.'),
     'gate_fc_btceth_enabled':     ('هم‌جهتی: رژیم BTC و ETH', False, 'btceth', 'هر دو باید هم‌جهت با معامله باشند (خرید: هر دو صعودی، فروش: هر دو نزولی).'),
     'gate_fc_btcpat_enabled':     ('هم‌جهتی: الگوی BTC روی سطح خودش', False, 'btceth', 'همان تشخیص الگوی برخورد (برگشت، شکست کاذب، نفوذ و پولبک) روی BTC و سطوح خودِ BTC اجرا می‌شود؛ اگر جهت الگوی BTC با جهت معامله یکی باشد رأی موافق، اگر مخالف باشد رأی مخالف، و اگر BTC الگویی ندارد یا بلاتکلیف است بدون رأی. فقط در رأی‌گیری بعد از برخورد با سطح کار می‌کند. نکته: الگوی BTC باید هم‌زمان با برخورد نماد وجود داشته باشد؛ با حالت «همه موافق» تعداد ورودها کم می‌شود. پیش‌فرض: خاموش.'),
