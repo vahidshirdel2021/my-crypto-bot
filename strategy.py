@@ -211,7 +211,7 @@ STRATEGY_DEFAULTS = {
     "sweep_require_reversal_candle": False,
     "sweep_stop_buffer_atr": 0.40,
     "sweep_risk_reward": 1.8,
-    "sweep_enable_retest_continuation": False,
+    "sweep_enable_retest_continuation": True,      # V3.44.187: کلید اصلی حالت ۳/۴ (نفوذ+پولبک+ادامه)؛ خاموش بودنش باعث می‌شد ۳ و ۴ هرگز تشخیص داده نشوند
     "retest_lookback_candles": 48,
     "retest_tolerance_atr": 0.25,
     # کدام سطوح کلیدی (ستاپ‌ها) اجازه‌ی تولید سیگنال دارند. حذف یک تگ از این لیست
@@ -2689,17 +2689,22 @@ def strategy_halving(df, strategy_config=None, live_price=None):
                   f"فاصله‌ی سطوح {ctx['step']:.6g})")
 
 
-def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run):
+def _hv_detect_cell(d, idx, hi, lo, hi_label, lo_label, atr, cfg_run, diag=None, only=None):
     """V3.44.157: تشخیص سناریوهای مدل نصف‌کردن روی یک سلول (سقف، کف) در کندل idx از d؛ همان ترتیب strategy_halving
     (ادامه ← شکست کاذب ← برخورد ساده). خروجی (sig, reason) یا (None, None)."""
     require_reclaim = bool(cfg_run.get("sweep_require_reclaim", False))
     require_reversal = bool(cfg_run.get("sweep_require_reversal_candle", False))
-    if bool(cfg_run.get("sweep_enable_retest_continuation", False)):
+    # V3.44.187: only="cont" = فقط ۳/۴؛ only="rest" = فقط ۱/۲/۵/۶؛ None = همه (ترتیب قدیمی: ادامه ← شکست کاذب ← برخورد ساده)
+    if only != "rest" and bool(cfg_run.get("sweep_enable_retest_continuation", False)):
         rsig, rreason = _detect_retest_continuation(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
         if rsig and _scenario_enabled("continuation", rsig, cfg_run):
             rreason = _fvg_apply(d, idx, "continuation", rsig, rreason, atr, cfg_run)
             if rreason:
                 return rsig, _tag_scenario(rreason, "continuation", rsig)
+            if diag is not None:      # V3.44.187: حالت ۳/۴ دیده شد ولی FVG سالم نبود (برای گزارش قیف)
+                diag["cont_fvg_blocked"] = diag.get("cont_fvg_blocked", 0) + 1
+    if only == "cont":
+        return None, None
     fsig, freason = _detect_failed_retest_reversal(d, idx, hi, lo, "HVH", "HVL", hi_label, lo_label, atr, cfg_run)
     if fsig and _scenario_enabled("fakeout", fsig, cfg_run):
         freason = _fvg_apply(d, idx, "fakeout", fsig, freason, atr, cfg_run)
@@ -2802,42 +2807,51 @@ def strategy_halving_mtf(df15, df1h, strategy_config=None, live_price=None):
     pd_blocked = None
     trig_blocked = None
     found_reaction = False
+    diag = {}
 
-    for cell in ctx["cells"]:
-        hi, lo = float(cell["hi"]["price"]), float(cell["lo"]["price"])
-        hi_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['hi']['depth'])})"
-        lo_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['lo']['depth'])})"
-        for age in range(n_lb):
-            i1 = last1 - age
-            if i1 < 3:
-                break
-            atr1 = _safe_float(d1.iloc[i1].get("atr"), 0.0)
-            if not np.isfinite(atr1) or atr1 <= 0:
-                continue
-            sig, reason = _hv_detect_cell(d1, i1, hi, lo, hi_label, lo_label, atr1, cfg_run)
-            if not sig:
-                continue
-            found_reaction = True
-            anchor, _tgt = extract_sweep_anchor_target(reason)
-            a_depth = _halving_depth_of(ctx, anchor) if anchor is not None else None
-            if max_depth_trade > 0 and a_depth is not None and a_depth > max_depth_trade:
-                continue
-            ok, why = _mtf_entry_trigger(d15, i15, d1, i1, sig, anchor, lp, cfg, atr15, atr1)
-            if not ok:
-                trig_blocked = why
-                continue
-            _pd_ok, _pd_txt = pd_level_guard(d15, i15, sig, lp, cfg)
-            if not _pd_ok:
-                pd_blocked = _pd_txt
-                continue
-            extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}|MTF=1H|MTFAGE={age}"
-            _em2 = int(round((_hv_tf_seconds(d15) or 900) / 60.0))
-            return sig, tag_setup_reason("Halving", f"واکنش کندل ۱ ساعته + ورود با کلوز {_em2} دقیقه | {reason}{extra}")
+    # V3.44.187: دو مرحله - اول فقط ۳/۴ روی همه‌ی سلول‌ها، بعد بقیه. چون هر سطح درخت هم سقفِ یک سلول و هم کفِ سلول بالایی است،
+    # «شکست بالای L و پولبک به L» از دید سلول بالایی همان «برخورد به کف + برگشت صعودی» (سناریو ۲) هم هست و چون آن سلول زودتر
+    # بررسی می‌شد، برچسب ۲ همیشه جلوتر از ۳ می‌افتاد (برای ۴ و ۱ هم همین‌طور). حالا اگر ۳/۴ با همه‌ی شرط‌هایش (FVG هم) برقرار باشد،
+    # همان برچسب می‌گیرد؛ وگرنه مثل قبل ۱/۲/۵/۶ - هیچ سیگنالی از دست نمی‌رود.
+    for _phase in ("cont", "rest"):
+        for cell in ctx["cells"]:
+            hi, lo = float(cell["hi"]["price"]), float(cell["lo"]["price"])
+            hi_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['hi']['depth'])})"
+            lo_label = f"سطح نصف‌کردن ({_hv_depth_label(cell['lo']['depth'])})"
+            for age in range(n_lb):
+                i1 = last1 - age
+                if i1 < 3:
+                    break
+                atr1 = _safe_float(d1.iloc[i1].get("atr"), 0.0)
+                if not np.isfinite(atr1) or atr1 <= 0:
+                    continue
+                sig, reason = _hv_detect_cell(d1, i1, hi, lo, hi_label, lo_label, atr1, cfg_run, diag, only=_phase)
+                if not sig:
+                    continue
+                found_reaction = True
+                anchor, _tgt = extract_sweep_anchor_target(reason)
+                a_depth = _halving_depth_of(ctx, anchor) if anchor is not None else None
+                if max_depth_trade > 0 and a_depth is not None and a_depth > max_depth_trade:
+                    continue
+                ok, why = _mtf_entry_trigger(d15, i15, d1, i1, sig, anchor, lp, cfg, atr15, atr1)
+                if not ok:
+                    trig_blocked = why
+                    continue
+                _pd_ok, _pd_txt = pd_level_guard(d15, i15, sig, lp, cfg)
+                if not _pd_ok:
+                    pd_blocked = _pd_txt
+                    continue
+                extra = f"|HVDEPTH={a_depth if a_depth is not None else '?'}|HVSTEP={ctx['step']:.6g}|HVTREE={ctx['depth']}|MTF=1H|MTFAGE={age}"
+                _em2 = int(round((_hv_tf_seconds(d15) or 900) / 60.0))
+                return sig, tag_setup_reason("Halving", f"واکنش کندل ۱ ساعته + ورود با کلوز {_em2} دقیقه | {reason}{extra}")
 
     if pd_blocked:
         return None, f"گارد سقف/کف دیروز: {pd_blocked}"
     if trig_blocked:
         return None, f"چندتایم‌فریمی: واکنش ۱ ساعته هست ولی ورود تأیید نشد ({trig_blocked})"
+    if not found_reaction and diag.get("cont_fvg_blocked"):
+        return None, (f"چندتایم‌فریمی: شکست + پولبک (حالت ۳/۴) دیده شد ولی FVG سالم نبود (عمق درخت {ctx['depth']}، "
+                      f"فاصله‌ی سطوح {ctx['step']:.6g})")
     if not found_reaction:
         return None, (f"چندتایم‌فریمی: کندل ۱ ساعته به سطوح واکنشی نشان نداد (عمق درخت {ctx['depth']}، "
                       f"فاصله‌ی سطوح {ctx['step']:.6g})")

@@ -28,6 +28,7 @@ _GATES_ON = (
     # کیفیت و ریسک
     'gate_cooldown_enabled', 'gate_traded_level_enabled', 'gate_risk_guard_enabled',
     'gate_btc_daily_regime_enabled',        # V3.44.184: رژیم روزانه BTC (نزولی=فقط فروش، صعودی=فقط خرید، رنج=آزاد) جزو پریست شد؛ با «ذخیره در پریست» ادمین به همه‌ی کاربران می‌رسد
+    'sweep_enable_retest_continuation',     # V3.44.187: کلید اصلی حالت ۳/۴ (نفوذ + پولبک + ادامه) - بدون آن ۳ و ۴ هرگز تشخیص داده نمی‌شوند
     'gate_btc_daily_override_enabled',      # V3.44.186: باز شدن موقت جهت در حرکت قطعی ۱۵م BTC خلاف رژیم روزانه (سخت‌گیرانه؛ همراه کلید رژیم روزانه)
 )
 _GATES_OFF = (
@@ -37,7 +38,7 @@ _GATES_OFF = (
     # V3.44.166: پیش‌فرض خاموش (فهرست شماره‌دار کاربر)
     'gate_touch_pattern_vote_enabled', 'gate_4h_close_block_enabled', 'gate_fc_tf_enabled', 'gate_fc_ylevel_enabled',
     'gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_pd_level_enabled',
-    'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
+    'sweep_require_reclaim', 'sweep_require_reversal_candle',
     'gate_min_score_enabled', 'gate_fee_ratio_enabled', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled',
     'gate_btceth_aligned_enabled',          # «فقط وقتی BTC و ETH هم‌جهت‌اند»
     'gate_final_regime_enabled',            # رژیم بازار در مرحله‌ی آخر ورود

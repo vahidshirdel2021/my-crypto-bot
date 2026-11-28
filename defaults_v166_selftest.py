@@ -17,7 +17,7 @@ import presets as P
 import strategy as S
 bot.init_db()
 
-OFF = ['gate_touch_pattern_vote_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
+OFF = ['gate_touch_pattern_vote_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle',
        'gate_4h_close_block_enabled', 'gate_fc_tf_enabled', 'gate_btc_front_level_enabled', 'gate_btc_chop_enabled', 'gate_pd_level_enabled',
        'gate_fc_ylevel_enabled', 'gate_fc_rsi_enabled', 'gate_fc_macd_enabled', 'gate_fc_vol_enabled', 'gate_fc_adx_enabled',
        'gate_min_score_enabled', 'gate_fee_ratio_enabled', 'use_edge_proxy_gate', 'gate_open_fee_ratio_enabled', 'gate_total_risk_cap_enabled']
@@ -42,8 +42,11 @@ assert P.BASE_CFG['gate_touch_dir_fixed_enabled'] is True
 for k in KEPT_ON:
     if k in P.BASE_CFG:
         assert P.BASE_CFG[k] is True, ('preset should stay on', k)
-for k in ('gate_fee_ratio_enabled', 'gate_min_score_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation'):
+for k in ('gate_fee_ratio_enabled', 'gate_min_score_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle'):
     assert S.STRATEGY_DEFAULTS[k] is False, ('strategy default', k)
+# V3.44.187: کلید «ادامه روند» (حالت ۳/۴) از این فهرست خارج و پیش‌فرضش روشن شد (بدون آن ۳ و ۴ هرگز تشخیص داده نمی‌شدند)
+assert S.STRATEGY_DEFAULTS['sweep_enable_retest_continuation'] is True and P.BASE_CFG['sweep_enable_retest_continuation'] is True
+assert bot.GATE_REGISTRY['sweep_enable_retest_continuation'][1] is True
 assert S.HALVING_DEFAULTS['gate_pd_level_enabled'] is False
 assert bot.SWEEP_REQUIRE_CONFIRMATION_CANDLE_DEFAULT is False
 

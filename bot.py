@@ -1271,7 +1271,7 @@ def _setup_mgmt_text(s):
 
 
 _FILTER_DEFAULTS_V166_OFF = (
-    'gate_touch_pattern_vote_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle', 'sweep_enable_retest_continuation',
+    'gate_touch_pattern_vote_enabled', 'sweep_require_reclaim', 'sweep_require_reversal_candle',
     'sweep_require_confirmation_candle', 'gate_4h_close_block_enabled', 'gate_fc_tf_enabled', 'gate_btc_front_level_enabled',
     'gate_btc_chop_enabled', 'gate_pd_level_enabled', 'gate_fc_ylevel_enabled', 'gate_fc_rsi_enabled', 'gate_fc_macd_enabled',
     'gate_fc_vol_enabled', 'gate_fc_adx_enabled', 'gate_min_score_enabled', 'gate_fee_ratio_enabled', 'use_edge_proxy_gate',
@@ -1424,6 +1424,7 @@ def load_sessions():
         for chat_id, raw in rows:
             try:
                 _ss = normalize_session(json.loads(raw))
+                _migrate_retest_cont_v187(_ss)      # V3.44.187: کلید «ادامه روند» (حالت ۳/۴) یک‌بار روی همه‌ی نشست‌های ذخیره‌شده روشن می‌شود
                 if not _ss.get('fvg_default_v178'):      # V3.44.178: FVG پیش‌فرض روشن شد؛ مقدار خاموشِ ذخیره‌شده‌ی کاربران عادی یک‌بار روشن می‌شود (ادمین‌ها دست‌نخورده)
                     if int(chat_id) not in ADMIN_CHAT_IDS:
                         _ss.setdefault('strategy_config', {})['fvg_enabled'] = True
@@ -1445,6 +1446,18 @@ def get_session(chat_id):
         _migrated = (not created) and _migrate_old_preset(chat_id, s)
     if created or _migrated: save_session(chat_id)
     return s
+
+
+def _migrate_retest_cont_v187(ss):
+    """V3.44.187: کلید sweep_enable_retest_continuation (ورود بعد از شکست و بازگشت = حالت ۳/۴) تا قبل از این نسخه همه‌جا خاموش بود
+    (مهاجرتِ V3.44.166 آن را در نشست‌های ذخیره‌شده False کرده بود)، پس سناریو ۳ و ۴ هرگز تشخیص داده نمی‌شد. حالا پیش‌فرض روشن است و
+    مقدار خاموشِ ذخیره‌شده‌ی همه‌ی نشست‌ها (ادمین و کاربر عادی) یک‌بار روشن می‌شود؛ بعدش انتخاب دستی حفظ می‌شود."""
+    try:
+        if not ss.get('retest_cont_default_v187'):
+            ss.setdefault('strategy_config', {})['sweep_enable_retest_continuation'] = True
+            ss['retest_cont_default_v187'] = True
+    except Exception:
+        logger.exception('retest continuation migration failed')
 
 
 def _migrate_old_preset(chat_id, s):
@@ -6642,7 +6655,7 @@ def chart(chat_id, symbol, df, trade, entry_card=False):
         logger.exception('chart error')
 
 
-BOT_VERSION = '3.44.185'
+BOT_VERSION = '3.44.187'
 H4_TIER_REDUCED_RISK_MULT = min(1.0, max(0.1, float(os.environ.get('H4_TIER_REDUCED_RISK_MULT', '0.5'))))   # V3.44.13: ضریب حجم/ریسک برای سیگنال‌های خلاف رژیم ۴ ساعته (کلید رتبه‌ی نرم)
 _SETTINGS_KEYS = ('leverage', 'risk_per_trade_pct', 'max_open_positions', 'max_same_direction_positions',
                   'same_direction_entry_cooldown_seconds', 'max_total_open_risk_pct', 'profit_autoclose_enabled', 'profit_autoclose_usdt', 'total_profit_autoclose_usdt',
@@ -16900,7 +16913,7 @@ GATE_REGISTRY = {
     # --- شناسایی فرصت (الگوی قیمت) ---
     'sweep_require_reclaim':      ('قیمت باید واقعاً به داخل محدوده برگردد', False, 'structure', 'وقتی قیمت یک سقف یا کف مهم را لحظه‌ای می‌شکند (دام قیمتی)، فقط اگر دوباره به داخل محدوده برگردد فرصت معتبر است.'),
     'sweep_require_reversal_candle': ('کندلِ برگشتِ واضح لازم است', False, 'structure', 'کندلی که قیمت را به داخل محدوده برمی‌گرداند باید جهت برگشت را به‌وضوح نشان دهد.'),
-    'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', False, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
+    'sweep_enable_retest_continuation': ('ورود بعد از شکست و بازگشت (ادامه روند)', True, 'structure', 'ورود مجاز است وقتی قیمت یک سطح مهم را می‌شکند، به آن برمی‌گردد و دوباره در همان جهت شکست ادامه می‌دهد.'),
     # --- کیفیت و کنترل ریسک ---
     'gate_min_score_enabled':     ('حداقل امتیاز کیفیت سیگنال', False, 'quality', 'هر سیگنال از ۱۰۰ امتیاز می‌گیرد؛ سیگنال‌هایی که امتیازشان از حداقل تنظیم‌شده کمتر باشد رد می‌شوند.'),
     'gate_min_rr_enabled':        ('حداقل نسبت سود به ضرر', True, 'quality', 'اگر سودِ مورد انتظار نسبت به ضررِ احتمالی به‌اندازه‌ی کافی بزرگ نباشد (یا هدف سود خیلی نزدیک باشد)، وارد نمی‌شود.'),
